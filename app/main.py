@@ -16,9 +16,19 @@ frontend_origins = [
     if origin.strip()
 ]
 
+# Vercel gives every deployment a new hash-suffixed URL (e.g.
+# a360-assistant-frontend-<hash>-a360-assistant.vercel.app), so a fixed
+# FRONTEND_ORIGINS entry breaks on each redeploy. Allow any deployment of
+# this Vercel project via regex instead of chasing the hash by hand.
+frontend_origin_regex = os.getenv(
+    "FRONTEND_ORIGIN_REGEX",
+    r"https://a360-assistant-frontend-.*-a360-assistant\.vercel\.app",
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=frontend_origins,
+    allow_origin_regex=frontend_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
