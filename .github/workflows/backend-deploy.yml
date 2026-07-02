@@ -79,4 +79,5 @@ jobs:
               ContainerImage="${{ needs.build.outputs.image_uri }}" \
               FrontendOrigins="${{ secrets.FRONTEND_ORIGINS }}" \
               OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
+              GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
               EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}"
