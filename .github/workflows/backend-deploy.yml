@@ -24,7 +24,6 @@ permissions:
 env:
   AWS_REGION: ap-northeast-2
   STACK_NAME: a360-assistant-dev
-  IMAGE_NAME: ghcr.io/${{ github.repository }}/backend
 
 jobs:
   build:
@@ -44,7 +43,9 @@ jobs:
 
       - id: meta
         run: |
+          IMAGE_NAME="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/backend"
           IMAGE_URI="${IMAGE_NAME}:${GITHUB_SHA}"
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
           echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
@@ -53,7 +54,7 @@ jobs:
           push: true
           tags: |
             ${{ steps.meta.outputs.image_uri }}
-            ${{ env.IMAGE_NAME }}:latest
+            ${{ steps.meta.outputs.image_name }}:latest
 
   deploy:
     needs: build
