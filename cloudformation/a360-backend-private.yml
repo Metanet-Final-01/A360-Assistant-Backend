@@ -530,6 +530,12 @@ Resources:
             Action: "es:ESHttp*"
             Resource: !Sub "arn:${AWS::Partition}:es:${AWS::Region}:${AWS::AccountId}:domain/${ProjectName}-${Environment}-search/*"
 
+  AppUserDataLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${ProjectName}/${Environment}/user-data"
+      RetentionInDays: 14
+
   AppInstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -631,6 +637,42 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref BackendTargetGroup
 
+  AppCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${ProjectName}-${Environment} backend HTTPS proxy"
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        Origins:
+          - Id: backend-alb
+            DomainName: !GetAtt ApplicationLoadBalancer.DNSName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginSSLProtocols:
+                - TLSv1.2
+        DefaultCacheBehavior:
+          TargetOriginId: backend-alb
+          ViewerProtocolPolicy: https-only
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-cf"
+
   AppLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Metadata:
@@ -657,6 +699,31 @@ Resources:
             - |
               #!/bin/bash -eux
               exec > /var/log/user-data.log 2>&1
+
+              dnf install -y amazon-cloudwatch-agent
+              mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+              cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWEOF'
+              {
+                "agent": { "run_as_user": "root", "force_flush_interval": 5 },
+                "logs": {
+                  "logs_collected": {
+                    "files": {
+                      "collect_list": [
+                        {
+                          "file_path": "/var/log/user-data.log",
+                          "log_group_name": "${AppUserDataLogGroup}",
+                          "log_stream_name": "{instance_id}",
+                          "retention_in_days": 14
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+              CWEOF
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                -a fetch-config -m ec2 \
+                -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
 
               dnf update -y
               dnf install -y docker git python3 python3-pip awscli aws-cfn-bootstrap || dnf install -y docker git python3 python3-pip awscli
@@ -771,6 +838,10 @@ Outputs:
   BackendHttpUrl:
     Description: Backend HTTP URL
     Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+
+  BackendCloudFrontUrl:
+    Description: Backend HTTPS URL via CloudFront (use this from the Vercel frontend)
+    Value: !Sub "https://${AppCloudFrontDistribution.DomainName}"
 
   BackendHttpsUrl:
     Condition: HasCertificate
