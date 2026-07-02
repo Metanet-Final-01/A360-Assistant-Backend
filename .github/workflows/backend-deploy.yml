@@ -72,7 +72,7 @@ jobs:
         run: |
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
-            --template-file cloudformation/a360-backend-private.yml \
+            --template-file infra/a360-backend-private.yml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
               Environment="${{ inputs.environment }}" \

@@ -16,7 +16,10 @@ docker-compose.override.yml
 *.log
 
 # Local deployment parameters
-cloudformation/params.local.json
+infra/params.local.json
+
+# Internal deployment notes (not for shared repo)
+docs/aws-backend-deployment.md
 
 # VS Code
 .vscode/
