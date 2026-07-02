@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.python-version
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+venv/
+.venv/
+
+# Docker
+docker-compose.override.yml
+*.log
+
+# Local deployment parameters
+cloudformation/params.local.json
+
+# VS Code
+.vscode/
+
+# Byte-compiled files
+*.pyc
+
+# MacOS
+.DS_Store

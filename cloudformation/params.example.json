@@ -1,0 +1,34 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "a360-assistant"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "ContainerImage",
+    "ParameterValue": "ghcr.io/OWNER/REPO/backend:latest"
+  },
+  {
+    "ParameterKey": "FrontendOrigins",
+    "ParameterValue": "http://localhost:5173,http://127.0.0.1:5173,https://your-vue-domain.example.com"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.medium"
+  },
+  {
+    "ParameterKey": "DesiredCapacity",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "MaxCapacity",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "EnableOpenSearch",
+    "ParameterValue": "false"
+  }
+]

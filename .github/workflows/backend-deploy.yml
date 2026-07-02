@@ -1,0 +1,81 @@
+name: backend-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "CloudFormation environment"
+        required: true
+        default: dev
+      deploy_stack:
+        description: "Deploy CloudFormation stack after image push"
+        required: true
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  AWS_REGION: ap-northeast-2
+  STACK_NAME: a360-assistant-dev
+  IMAGE_NAME: ghcr.io/${{ github.repository }}/backend
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        run: |
+          IMAGE_URI="${IMAGE_NAME}:${GITHUB_SHA}"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image_uri }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy CloudFormation
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${STACK_NAME}" \
+            --template-file cloudformation/a360-backend-private.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              Environment="${{ inputs.environment }}" \
+              ContainerImage="${{ needs.build.outputs.image_uri }}" \
+              FrontendOrigins="${{ secrets.FRONTEND_ORIGINS }}" \
+              OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
+              EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}"

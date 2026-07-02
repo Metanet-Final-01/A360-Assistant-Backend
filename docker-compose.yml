@@ -1,0 +1,12 @@
+services:
+  backend:
+    build: .
+    container_name: a360-backend
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
