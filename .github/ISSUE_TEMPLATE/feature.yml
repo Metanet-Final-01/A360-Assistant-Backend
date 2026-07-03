@@ -1,0 +1,39 @@
+name: "✨ 기능 개발"
+description: "새 기능 또는 개선 작업"
+title: "[feat] "
+labels: ["type:feat"]
+body:
+  - type: input
+    id: jira
+    attributes:
+      label: Jira 키
+      placeholder: "RPA-12"
+    validations:
+      required: false
+  - type: textarea
+    id: what
+    attributes:
+      label: 무엇을 만들려고 하나요?
+      description: 기능 요구사항 ID(FR-xx)가 있으면 함께 적어주세요.
+      placeholder: "FR-07 의미 검색 — 업무 단계별 관련 A360 액션 벡터 검색 API"
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 완료 조건 (Definition of Done)
+      placeholder: |
+        - [ ] GET /api/search?query= 로 top-k 액션 반환
+        - [ ] 골드셋 샘플 3건에서 정답 액션이 top-5 안에 포함
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 우선순위
+      options:
+        - P0 (필수 기능과 한몸)
+        - P1 (가점 효율)
+        - P2 (차별화)
+    validations:
+      required: true

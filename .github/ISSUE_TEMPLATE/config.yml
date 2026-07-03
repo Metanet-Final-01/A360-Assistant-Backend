@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: "📋 Jira 보드 (이슈 원본)"
+    url: "https://metanetfinal.atlassian.net/jira/software/c/projects/RPA/boards/3"
+    about: "작업 계획·트래킹은 Jira에서 합니다. GitHub 이슈는 Jira와 동기화됩니다."

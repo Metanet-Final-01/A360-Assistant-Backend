@@ -1,0 +1,31 @@
+# PR 제목이 커밋 컨벤션(type(scope): 제목)을 따르는지 검사
+# Squash merge 시 PR 제목이 main 커밋 메시지가 되므로, 여기서 main 히스토리 품질을 보장한다
+name: PR Title Lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            refactor
+            docs
+            test
+            chore
+            ci
+            perf
+            style
+          # 한글 제목 허용 (기본 subject 패턴은 그대로 통과)
+          requireScope: false
