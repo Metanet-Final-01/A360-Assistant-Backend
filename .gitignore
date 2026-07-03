@@ -29,3 +29,10 @@ docs/aws-backend-deployment.md
 
 # MacOS
 .DS_Store
+
+# RAG ingest artifacts (crawled docs, parsed schemas, embeddings input)
+data/
+tmp/
+
+# RAG seed dump (용량 큼 — LFS/S3로 공유)
+infra/seed/*.dump
