@@ -1,5 +1,5 @@
 # PR 제목이 커밋 컨벤션(type(scope): 제목)을 따르는지 검사
-# Squash merge 시 PR 제목이 main 커밋 메시지가 되므로, 여기서 main 히스토리 품질을 보장한다
+# PR 제목은 이력 조회·머지 커밋의 단위이므로 컨벤션을 강제한다
 name: PR Title Lint
 
 on:

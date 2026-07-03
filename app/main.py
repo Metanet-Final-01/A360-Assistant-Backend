@@ -1,6 +1,6 @@
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -69,3 +69,25 @@ def echo(payload: EchoRequest) -> dict[str, str]:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "healthy"}
+
+
+@app.get("/api/rag/search")
+def rag_search(q: str, limit: int = 5) -> dict:
+    """A360 패키지/액션 지식 벡터 검색. app/ingest 파이프라인으로 적재된 데이터를 사용한다."""
+    from app.ingest import db
+    from app.ingest.embed import embed_query
+
+    try:
+        query_embedding = embed_query(q)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"임베딩 설정 오류: {e}")
+
+    try:
+        conn = db.connect()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"DB 연결 실패: {e}")
+    try:
+        results = db.search(conn, query_embedding, limit=limit)
+    finally:
+        conn.close()
+    return {"query": q, "results": results}

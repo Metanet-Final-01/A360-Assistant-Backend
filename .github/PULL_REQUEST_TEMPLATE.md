@@ -1,4 +1,4 @@
-<!-- PR 제목: type(scope): 한글 제목 (RPA-키) — Squash merge 시 main 커밋 메시지가 됩니다 -->
+<!-- PR 제목: type(scope): 한글 제목 (RPA-키) -->
 
 ## 관련 이슈
 

@@ -1,0 +1,95 @@
+"""pgvector 저장소. docker-compose의 pgvector/pgvector:pg16 컨테이너를 그대로 사용한다."""
+
+import json
+
+import psycopg
+
+from . import config
+
+_DDL = f"""
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS rag_documents (
+    id            text PRIMARY KEY,
+    source_type   text NOT NULL,
+    package_name  text,
+    action_name   text,
+    locale        text,
+    title         text NOT NULL,
+    url           text,
+    content       text NOT NULL,
+    metadata      jsonb NOT NULL DEFAULT '{{}}',
+    embedding     vector({config.EMBEDDING_DIM}),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_rag_documents_package ON rag_documents (package_name);
+CREATE INDEX IF NOT EXISTS idx_rag_documents_source ON rag_documents (source_type);
+"""
+
+
+def connect() -> psycopg.Connection:
+    return psycopg.connect(config.database_dsn())
+
+
+def ensure_schema(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_DDL)
+    conn.commit()
+
+
+def upsert_documents(conn: psycopg.Connection, documents: list[dict], embeddings: list | None) -> int:
+    sql = """
+        INSERT INTO rag_documents
+            (id, source_type, package_name, action_name, locale, title, url, content, metadata, embedding, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, now())
+        ON CONFLICT (id) DO UPDATE SET
+            source_type = EXCLUDED.source_type,
+            package_name = EXCLUDED.package_name,
+            action_name = EXCLUDED.action_name,
+            locale = EXCLUDED.locale,
+            title = EXCLUDED.title,
+            url = EXCLUDED.url,
+            content = EXCLUDED.content,
+            metadata = EXCLUDED.metadata,
+            embedding = COALESCE(EXCLUDED.embedding, rag_documents.embedding),
+            updated_at = now()
+    """
+    with conn.cursor() as cur:
+        for i, doc in enumerate(documents):
+            vector = None
+            if embeddings is not None:
+                vector = "[" + ",".join(f"{x:.7f}" for x in embeddings[i]) + "]"
+            cur.execute(
+                sql,
+                (
+                    doc["id"],
+                    doc["source_type"],
+                    doc.get("package_name"),
+                    doc.get("action_name"),
+                    doc.get("locale"),
+                    doc["title"],
+                    doc.get("url"),
+                    doc["content"],
+                    json.dumps(doc.get("metadata", {}), ensure_ascii=False),
+                    vector,
+                ),
+            )
+    conn.commit()
+    return len(documents)
+
+
+def search(conn: psycopg.Connection, query_embedding: list[float], limit: int = 5) -> list[dict]:
+    vector = "[" + ",".join(f"{x:.7f}" for x in query_embedding) + "]"
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, source_type, package_name, action_name, title, url, content,
+                   1 - (embedding <=> %s::vector) AS score
+            FROM rag_documents
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (vector, vector, limit),
+        )
+        columns = [d.name for d in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
