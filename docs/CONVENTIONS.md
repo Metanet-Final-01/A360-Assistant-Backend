@@ -4,12 +4,16 @@
 
 ## 1. 브랜치 전략
 
-4주 단기 프로젝트이므로 **GitHub Flow** (main + 작업 브랜치)를 사용한다. develop 브랜치는 두지 않는다.
+**main + dev 2단 구조**를 사용한다.
 
 ```
-main ← 항상 배포 가능한 상태 (브랜치 보호, 직접 push 금지)
- └── feat/RPA-12-rag-summary-chunking   ← 작업 브랜치 (PR로만 머지)
+main ← 배포(릴리스) 브랜치. dev에서 검증된 것만 머지 (직접 push 금지)
+ └── dev ← 통합 브랜치. 모든 작업 PR의 대상 (직접 push 금지)
+      └── feat/RPA-12-rag-summary-chunking ← 작업 브랜치 (dev에서 분기)
 ```
+
+- 작업 브랜치는 **dev에서 분기**하고, PR도 **dev로** 보낸다.
+- `dev → main` 머지는 배포 시점에 DevOps 담당과 협의하여 진행한다.
 
 ### 브랜치 네이밍
 
@@ -106,7 +110,7 @@ feat(rag): 액션 요약본 동시 청킹 저장 추가 (RPA-12)
 
 ## 6. 금지 사항
 
-- `main` 직접 push
+- `main`·`dev` 직접 push
 - 시크릿(API 키, 비밀번호) 커밋 — `.env`는 절대 커밋하지 않고 `.env.example`만 갱신
 - `--force` push (본인 작업 브랜치에서 rebase 후는 `--force-with-lease` 허용)
 - 리뷰 없는 머지
