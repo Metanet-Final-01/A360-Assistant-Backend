@@ -9,6 +9,7 @@
 실제 구현도 같은 스키마로 반환하면 그대로 호환된다.
 """
 
+import os
 from typing import Protocol
 
 
@@ -129,9 +130,19 @@ class FakeRetriever:
         return scored[:limit]
 
 
-_retriever: Retriever = FakeRetriever()
+_fake_retriever: Retriever = FakeRetriever()
 
 
 def get_retriever() -> Retriever:
-    """graph가 쓰는 검색기. 실제 RAG 모듈이 완성되면 이 반환값만 교체한다."""
-    return _retriever
+    """graph가 쓰는 검색기.
+
+    AGENT_RETRIEVER=hybrid이면 실제 RAG 하이브리드 검색기(app.services.agent_retriever)를,
+    아니면 FakeRetriever(스텁)를 반환한다. 기본은 fake라 인프라(pgvector·OpenSearch)가
+    없는 CI·로컬에서도 그래프가 동작한다 — 실제 KB를 쓰려면 RAG 인프라를 띄우고
+    AGENT_RETRIEVER=hybrid로 설정한다.
+    """
+    if os.getenv("AGENT_RETRIEVER", "fake").lower() == "hybrid":
+        from app.services.agent_retriever import get_hybrid_retriever
+
+        return get_hybrid_retriever()
+    return _fake_retriever
