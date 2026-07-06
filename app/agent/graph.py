@@ -12,9 +12,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from app.schemas import RagSource
+
 from . import config
 from .retrieval import get_retriever
-from .schemas import AgentResult, Source
+from .schemas import AgentResult
 
 _SYSTEM_PROMPT = """\
 당신은 Automation Anywhere Automation 360(A360) 작업 추천 어시스턴트다.
@@ -87,13 +89,11 @@ def _require_api_key() -> None:
         raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
 
 
-def _to_sources(docs: list[dict]) -> list[Source]:
+def _to_sources(docs: list[dict]) -> list[RagSource]:
     return [
-        Source(
-            id=doc["id"],
+        RagSource(
+            source_type=doc["source_type"],
             title=doc["title"],
-            package_name=doc.get("package_name"),
-            action_name=doc.get("action_name"),
             url=doc.get("url"),
             score=doc["score"],
         )
