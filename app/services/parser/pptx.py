@@ -4,8 +4,18 @@ import io
 import logging
 
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 logger = logging.getLogger(__name__)
+
+
+def iter_shapes(shapes):
+    """그룹 도형 내부까지 재귀 순회한다 — 그룹으로 묶인 텍스트/그림 누락 방지."""
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            yield from iter_shapes(shape.shapes)
+        else:
+            yield shape
 
 
 def parse_pptx(content: bytes) -> dict:
@@ -16,7 +26,7 @@ def parse_pptx(content: bytes) -> dict:
 
     for i, slide in enumerate(prs.slides, start=1):
         positioned: list[tuple[int, int, dict]] = []
-        for shape in slide.shapes:
+        for shape in iter_shapes(slide.shapes):
             top = int(shape.top or 0)
             left = int(shape.left or 0)
             if getattr(shape, "has_table", False):
