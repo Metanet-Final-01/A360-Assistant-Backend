@@ -1,0 +1,52 @@
+# CodeRabbit AI 리뷰 설정 — https://docs.coderabbit.ai/reference/configuration
+language: "ko-KR"
+
+tone_instructions: "간결하고 실용적으로. 실제 버그·보안·계약 위반을 우선하고, 스타일 지적은 중요한 것만."
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false # 사람 리뷰어(승인 1인 규칙)가 최종 결정 — 봇은 조언만
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "dev"
+      - "main"
+  path_filters:
+    - "!data/**"
+    - "!infra/seed/**"
+    - "!docs/RAG_CATALOG.md" # 자동 생성 문서
+  path_instructions:
+    - path: "app/schemas/**"
+      instructions: >-
+        백엔드·Agent·프론트가 공유하는 데이터 계약입니다. 필드 추가/변경/삭제가
+        docs/INTERFACES.md와 일치하는지, 기존 소비자(app/agent, 프론트 SSE)를
+        깨지 않는지 확인하세요. 계약 변경인데 INTERFACES.md 갱신이 없으면 지적하세요.
+    - path: "app/api/**"
+      instructions: >-
+        라우터는 얇게 유지합니다 — 비즈니스 로직이 라우터에 들어오면 app/services로
+        분리를 제안하세요. 에러 응답은 {code, message} 형식, 오래 걸리는 작업은
+        SSE(ProgressEvent 규약)가 원칙입니다. SSE 스트림 안에서 요청 스코프 DB 세션을
+        쓰면 안 됩니다 (FastAPI가 스트리밍 전에 세션을 닫음 — 새 SessionLocal 필요).
+    - path: "app/agent/**"
+      instructions: >-
+        Agent 담당 영역입니다. app/schemas 계약(RagSource·ProgressEvent) 준수,
+        DB 직접 접근 금지(app/services 경유), 엔드포인트 생성 금지(백엔드 소유)
+        원칙을 확인하세요.
+    - path: "app/rag/**"
+      instructions: >-
+        RAG 파이프라인·검색입니다. 외부 서비스(OpenSearch·Voyage·OpenAI) 호출의
+        타임아웃·예외 처리, 그리고 services/rag.py의 search_actions 계약
+        (반환 필드 id/source_type/title/content/score)이 유지되는지 확인하세요.
+    - path: "**/*.py"
+      instructions: >-
+        시크릿 하드코딩 금지(.env 경유). 백엔드의 직접 LLM 호출은 app/core/llm.py
+        래퍼 경유가 원칙입니다(사용량 기록). 외부 입력(업로드 파일·URL·쿼리)을
+        신뢰하지 않는지 확인하세요.
+
+chat:
+  auto_reply: true
