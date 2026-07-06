@@ -4,7 +4,7 @@
 `Retriever` 인터페이스에만 의존하므로, RAG 담당 모듈이 완성되면 `get_retriever()`가
 그 구현을 반환하도록 이 파일만 교체한다 — graph.py 등 나머지는 수정하지 않는다.
 
-검색 결과 dict는 백엔드 `/api/rag/search`(`app.ingest.db.search`)의 행 스키마를
+검색 결과 dict는 백엔드 `/api/rag/search`(`app.rag.store.db.search`)의 행 스키마를
 따른다: id, source_type, package_name, action_name, title, url, content, score.
 실제 구현도 같은 스키마로 반환하면 그대로 호환된다.
 """

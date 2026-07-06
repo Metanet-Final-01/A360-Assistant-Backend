@@ -34,7 +34,7 @@ docker compose up -d db
 #    ⚠️ 로컬 5432 포트가 사용 중이면: .env에 DATABASE_PORT=5433 설정 후 다시 실행
 
 # 4) RAG 지식베이스 복원 (임베딩 포함 덤프 — 팀 공유 채널에서 수령)
-#    절차: app/ingest/TEAM_SETUP.md 의 "경로 A"
+#    절차: app/rag/TEAM_SETUP.md 의 "경로 A"
 
 # 5) 서버 실행 (기동 시 테이블 자동 생성)
 uvicorn app.main:app --reload
@@ -90,7 +90,7 @@ app/
 ├── db.py, models.py DB 세션·ORM (세션/문서/분석/추천 버전/대화/피드백/사용량/평가)
 ├── schemas/         도메인 JSON 계약: AnalysisResult·Recommendation·ProgressEvent
 ├── agent/           LangGraph 오케스트레이터 (Agent 담당 영역)
-└── ingest/          RAG 수집 파이프라인 (A360 문서·패키지 스키마·봇 예제)
+└── rag/             RAG 수집·검색 (sources 수집, build 정규화, store 저장, retrieval 하이브리드 검색)
 ```
 
 ## 문서
@@ -101,7 +101,7 @@ app/
 | [docs/INTERFACES.md](docs/INTERFACES.md) | 백엔드↔Agent 함수 계약, 산출물 JSON 스키마 가이드, SSE 규약 |
 | [docs/RAG_CATALOG.md](docs/RAG_CATALOG.md) | 수집된 A360 패키지 57개·액션 368개 카탈로그 |
 | [docs/JIRA_GITHUB.md](docs/JIRA_GITHUB.md) | Jira↔GitHub 자동화 연동 (이슈 미러·상태 전환) |
-| [app/ingest/README.md](app/ingest/README.md) | RAG 수집 파이프라인 사용법 |
+| [app/rag/README.md](app/rag/README.md) | RAG 수집·하이브리드 검색 사용법 |
 | [AGENTS.md](AGENTS.md) | AI 코딩 도구용 작업 규칙 |
 
 ## 환경변수

@@ -5,7 +5,7 @@
 FR-15(맥락 유지)와 undo를 자연스럽게 지원한다. AI 산출물 본문(JSONB)의 구조는
 app/schemas 의 Pydantic 모델이 정의한다.
 
-RAG 지식베이스(rag_documents)는 app/ingest 가 원시 SQL로 관리하므로 여기 없다.
+RAG 지식베이스(rag_documents)는 app/rag 가 원시 SQL로 관리하므로 여기 없다.
 """
 
 import uuid

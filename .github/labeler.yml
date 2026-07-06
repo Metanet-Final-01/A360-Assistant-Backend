@@ -9,7 +9,8 @@
 RAG:
   - changed-files:
       - any-glob-to-any-file:
-          - "app/ingest/**"
+          - "app/rag/**"
+          - "app/services/rag.py"
 
 에이전트:
   - changed-files:

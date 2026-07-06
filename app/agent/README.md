@@ -153,7 +153,7 @@ class Retriever(Protocol):
     def search(self, query: str, limit: int = 4) -> list[dict]: ...
 ```
 
-반환 dict 스키마는 `/api/rag/search`(`app.ingest.db.search`)의 행과 동일하다:
+반환 dict 스키마는 `/api/rag/search`(`app.rag.store.db.search`)의 행과 동일하다:
 `id, source_type, package_name, action_name, title, url, content, score`.
 
 실제 검색 모듈(pgvector·하이브리드)이 완성되면 `retrieval.py`의 `get_retriever()`가
