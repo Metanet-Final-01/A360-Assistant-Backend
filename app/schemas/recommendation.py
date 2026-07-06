@@ -31,13 +31,24 @@ class RagSource(BaseModel):
 
 
 class RecommendedAction(BaseModel):
-    """추천된 A360 액션 하나."""
+    """추천된 A360 액션 하나 — A360 봇 JSON의 노드와 동일한 재귀 트리 구조.
+
+    Loop·If·Else If·Else·Step·Error handler 같은 컨테이너 액션은 본문을
+    children에 담는다. A360에는 임의의 병합점이 없다: 분기(If/Else) 블록이
+    끝나면 실행은 "다음 형제 액션"으로 이어진다 — 그것이 병합이다.
+
+    예) If(조건) [children: 참일 때 액션들] → Else [children: ...] → 다음 형제 = 병합 지점
+    예) Loop(3일치 반복) [children: 반복 본문]
+    """
 
     order: int
     package: str = Field(description="예: 'Excel_MS'")
     action: str = Field(description="예: 'GoToCell'")
     label: str | None = Field(None, description="사람용 라벨, 예: '셀로 이동'")
     parameters: list[ActionParameter] = Field(default_factory=list)
+    children: list["RecommendedAction"] = Field(
+        default_factory=list, description="컨테이너 액션(Loop/If/Step 등)의 본문"
+    )
     rationale: str | None = Field(None, description="왜 이 액션인지 (FR-11)")
     sources: list[RagSource] = Field(default_factory=list)
     confidence: float | None = Field(None, ge=0.0, le=1.0, description="FR-12 신뢰도")
@@ -66,3 +77,17 @@ class Recommendation(BaseModel):
     steps: list[StepRecommendation]
     variables: list[BotVariable] = Field(default_factory=list)
     notes: str | None = Field(None, description="전제·주의사항, 예: 'Knox 메일은 Email 패키지 기준'")
+
+    def iter_actions(self):
+        """트리를 평탄화해 모든 액션을 순회 (골드셋 채점·검증용)."""
+
+        def walk(actions: list[RecommendedAction]):
+            for a in actions:
+                yield a
+                yield from walk(a.children)
+
+        for step in self.steps:
+            yield from walk(step.actions)
+
+
+RecommendedAction.model_rebuild()
