@@ -1,10 +1,14 @@
+import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -156,14 +160,49 @@ def health() -> dict[str, str]:
     return {"status": "healthy"}
 
 
+async def _resolve_validated_ip(host: str) -> tuple[str | None, str | None]:
+    """호스트를 해석하고 모든 IP가 공인망이면 (첫 IP, None), 아니면 (None, 사유)를 반환한다.
+
+    반환된 IP를 실제 연결에 그대로 사용해야(핀 고정) DNS 리바인딩을 막을 수 있다 —
+    검증 시점과 요청 시점에 호스트를 각각 해석하면 그 사이에 응답이 바뀌어 우회된다.
+    조회는 blocking이라 스레드로 넘겨 이벤트 루프를 막지 않는다.
+    """
+    try:
+        # getaddrinfo는 동기 함수 → to_thread로 async 경로를 막지 않게 한다
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
+    except OSError:
+        return None, f"호스트를 해석할 수 없습니다: {host}"
+    addrs = {info[4][0] for info in infos}
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr.split("%")[0])
+        if not ip.is_global:
+            return None, f"내부망 주소({addr})로의 요청은 허용되지 않습니다."
+    return next(iter(addrs)), None
+
+
+def _pin_url_to_ip(url: str, ip: str) -> tuple[str, str]:
+    """URL의 호스트를 검증된 IP로 치환하고 (핀 URL, 원래 호스트[:포트])를 반환한다.
+
+    치환된 URL로 연결하되 Host 헤더/SNI는 원래 호스트로 유지해 재해석을 막는다.
+    """
+    parsed = urlparse(url)
+    netloc_host = f"[{ip}]" if ":" in ip else ip
+    if parsed.port:
+        netloc_host += f":{parsed.port}"
+    original_host = parsed.netloc.split("@")[-1]  # userinfo 제거
+    return parsed._replace(netloc=netloc_host).geturl(), original_host
+
+
 @app.post("/api/debug/http-request")
 async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dict:
     """Debug page helper: send an arbitrary HTTP request from the backend process."""
     import httpx
 
+    # 명시적 opt-in만 허용한다. 이전에는 APP_ENV가 development(기본값)면 열렸는데,
+    # 배포 환경에서 APP_ENV를 설정하지 않으면 프로덕션에 SSRF 프록시가 열리는
+    # 구조였다. 로컬 개발은 .env의 DEBUG_HTTP_CLIENT_ENABLED=true로 켠다.
     debug_enabled = os.getenv("DEBUG_HTTP_CLIENT_ENABLED", "").lower() == "true"
-    local_env = os.getenv("APP_ENV", "development").lower() in {"development", "local", "test"}
-    if not (debug_enabled or local_env):
+    if not debug_enabled:
         raise HTTPException(status_code=403, detail="Debug HTTP client is disabled for this environment.")
 
     method = payload.method.upper()
@@ -171,26 +210,47 @@ async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dic
         raise HTTPException(status_code=400, detail=f"Unsupported method: {payload.method}")
 
     url = payload.url.strip()
-    if url.startswith("/"):
-        url = str(request.base_url).rstrip("/") + url
-    if not (url.startswith("http://") or url.startswith("https://")):
+    request_url = url
+    extensions: dict = {}
+    is_self_call = url.startswith("/")
+    if is_self_call:
+        # 자기 자신(이 백엔드)으로의 상대경로 호출 — 디버그 콘솔의 주 용도라 허용
+        url = request_url = str(request.base_url).rstrip("/") + url
+    elif url.startswith("http://") or url.startswith("https://"):
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            raise HTTPException(status_code=400, detail="URL에서 호스트를 파싱할 수 없습니다.")
+        ip, reason = await _resolve_validated_ip(parsed.hostname)
+        if reason:
+            raise HTTPException(status_code=400, detail=reason)
+        # 검증된 IP로 연결을 고정(핀)해 DNS 리바인딩을 차단한다. Host 헤더와 SNI는
+        # 원래 호스트로 유지해 라우팅·인증서 검증이 정상 동작하게 한다.
+        request_url, original_host = _pin_url_to_ip(url, ip)
+        payload.headers.setdefault("Host", original_host.split(":")[0])
+        if parsed.scheme == "https":
+            extensions["sni_hostname"] = parsed.hostname
+    else:
         raise HTTPException(status_code=400, detail="URL must be absolute or start with '/'.")
 
     headers = {
         str(key): str(value)
         for key, value in payload.headers.items()
-        if key.lower() not in {"host", "content-length"}
+        if key.lower() not in {"content-length"}
     }
     timeout = max(1.0, min(payload.timeout_seconds, 60.0))
     started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=payload.follow_redirects) as client:
-            response = await client.request(
+        # 리다이렉트는 따라가지 않는다 — 검증을 우회해 내부망으로 재유도될 수 있어
+        # (공인 URL → 169.254.169.254 리다이렉트) 응답만 그대로 돌려준다.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            req = client.build_request(
                 method,
-                url,
+                request_url,
                 headers=headers,
                 content=payload.body if payload.body and method not in {"GET", "HEAD"} else None,
+                extensions=extensions or None,
             )
+            response = await client.send(req)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"HTTP request failed: {exc}")
 
