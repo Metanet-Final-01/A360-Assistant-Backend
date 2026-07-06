@@ -224,8 +224,10 @@ async function runContractCheck() {
       const fieldRow = CONTRACT_FIELDS.map(f => {
         const has = r[f] !== undefined && r[f] !== null;
         const bad = missing.includes(f);
-        const color = bad ? "#ff8080" : has ? "#7ee8a0" : "#6b7280";
-        return `<span style="color:${color}; margin-right:8px;">${bad ? "✗" : "✓"} ${f}</span>`;
+        // bad(실제 누락) / has(정상 존재) / 그 외(이 source_type엔 원래 없는 선택 필드 — 예: doc_page의 package_name)
+        if (bad) return `<span style="color:#ff8080; margin-right:8px;">✗ ${f}</span>`;
+        if (has) return `<span style="color:#7ee8a0; margin-right:8px;">✓ ${f}</span>`;
+        return `<span style="color:#6b7280; margin-right:8px;">– ${f}</span>`;
       }).join("");
       return `
         <div class="card">

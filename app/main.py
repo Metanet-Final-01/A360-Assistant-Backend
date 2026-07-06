@@ -313,7 +313,15 @@ def debug_rerank(payload: RerankDebugRequest) -> dict:
     }
 
 
-_CONTRACT_FIELDS = ["id", "source_type", "package_name", "action_name", "title", "url", "content", "score"]
+# 공통 필수 필드 + source_type별로만 의미 있는 필드 — doc_page/bot_example은
+# 특정 패키지·액션 하나에 매인 문서가 아니라서 package_name/action_name이
+# 원래부터 NULL이다(DB 컬럼 자체가 nullable, normalize.py가 그렇게 만듦).
+# 그걸 "누락"으로 잘못 표시하지 않도록 source_type별 필수 필드를 따로 둔다.
+_COMMON_REQUIRED_FIELDS = ["id", "source_type", "title", "content", "score"]
+_REQUIRED_FIELDS_BY_SOURCE_TYPE = {
+    "action_schema": ["package_name", "action_name"],
+    "package_overview": ["package_name"],
+}
 
 
 @app.get("/api/rag/debug/search-actions")
@@ -321,8 +329,8 @@ def debug_search_actions(q: str, k: int = 5, source_types: str | None = None) ->
     """docs/INTERFACES.md 계약 함수 app.services.rag.search_actions()를 그대로 호출한다.
 
     Agent 담당의 app/agent/retrieval.py가 FakeRetriever를 이걸로 교체했을 때 받게 될
-    결과와 100% 동일하다. 계약 필드(id/source_type/package_name/action_name/title/
-    url/content/score)가 매 항목에 다 있는지 missing_fields로 같이 알려준다.
+    결과와 100% 동일하다. source_type별 필수 필드가 실제로 채워졌는지
+    _missing_contract_fields로 같이 알려준다 (url은 어느 source_type이든 선택 필드).
     """
     from app.services.rag import search_actions
 
@@ -332,10 +340,10 @@ def debug_search_actions(q: str, k: int = 5, source_types: str | None = None) ->
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    checked = [
-        {**r, "_missing_contract_fields": [f for f in _CONTRACT_FIELDS if r.get(f) is None and f != "url"]}
-        for r in results
-    ]
+    checked = []
+    for r in results:
+        required = _COMMON_REQUIRED_FIELDS + _REQUIRED_FIELDS_BY_SOURCE_TYPE.get(r.get("source_type"), [])
+        checked.append({**r, "_missing_contract_fields": [f for f in required if r.get(f) is None]})
     return {"query": q, "k": k, "source_types": types, "results": checked}
 
 
