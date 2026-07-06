@@ -338,6 +338,49 @@ def rag_logs_recent(limit: int = 100) -> dict:
     return {"logs": records}
 
 
+@app.get("/api/rag/debug/status")
+def rag_debug_status() -> dict:
+    """DB/OpenSearch/임베딩/리랭커 실시간 연결 상태 — 로컬 개발 중 코드가 실제로 각 서비스에
+    잘 붙어 있는지 한눈에 점검하기 위한 디버그 전용 엔드포인트."""
+    from app.rag import config
+    from app.rag.store import db, opensearch_client
+
+    status: dict = {}
+
+    try:
+        conn = db.connect()
+        conn.close()
+        status["database"] = {"reachable": True}
+    except Exception as e:
+        status["database"] = {"reachable": False, "error": str(e)}
+
+    try:
+        client = opensearch_client.connect()
+        health = client.cluster.health(request_timeout=3)
+        status["opensearch"] = {
+            "reachable": True,
+            "host": config.OPENSEARCH_HOST,
+            "cluster_status": health.get("status"),
+        }
+    except Exception as e:
+        status["opensearch"] = {
+            "reachable": False,
+            "host": config.OPENSEARCH_HOST,
+            "error": str(e),
+        }
+
+    status["embedding"] = {
+        "provider": config.EMBEDDING_PROVIDER,
+        "model": config.EMBEDDING_MODEL,
+        "api_key_configured": bool(config.VOYAGE_API_KEY if config.EMBEDDING_PROVIDER == "voyage" else config.OPENAI_API_KEY),
+    }
+    status["reranker"] = {
+        "model": config.RERANK_MODEL,
+        "api_key_configured": bool(config.VOYAGE_API_KEY),
+    }
+    return status
+
+
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.exists():
     app.mount("/debug", StaticFiles(directory=_STATIC_DIR, html=True), name="debug")

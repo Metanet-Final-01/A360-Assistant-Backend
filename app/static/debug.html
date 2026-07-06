@@ -45,6 +45,13 @@
   .http-lab textarea { min-height: 88px; resize: vertical; font-family: "Cascadia Code", monospace; }
   .http-status { font-size: 12px; color: #9aa4b2; margin: 8px 0; }
   .http-result { min-height: 180px; max-height: 420px; overflow: auto; white-space: pre-wrap; background: #05070a; border: 1px solid #2a2f3a; border-radius: 6px; padding: 10px; font-family: "Cascadia Code", monospace; font-size: 11px; color: #d5f3e5; }
+  .status-grid { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .status-pill { display: flex; align-items: center; gap: 6px; background: #1b1f27; border: 1px solid #2a2f3a; border-radius: 20px; padding: 5px 12px; font-size: 12px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.up { background: #4ade80; box-shadow: 0 0 5px #4ade80; }
+  .status-dot.down { background: #f87171; box-shadow: 0 0 5px #f87171; }
+  .status-dot.na { background: #6b7280; }
+  .status-note { font-size: 11px; color: #e8c67e; margin-top: 4px; width: 100%; }
   @media (max-width: 900px) {
     .columns { grid-template-columns: 1fr; }
     .preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -54,6 +61,11 @@
 </head>
 <body>
   <h1>A360 RAG 디버그 콘솔 — vector / hybrid / hybrid_rerank 동시 비교 + 실시간 로그</h1>
+
+  <div class="section">
+    <h2>서비스 상태 (5초마다 갱신) — DB/OpenSearch/임베딩/리랭커가 실제로 붙어있는지 점검</h2>
+    <div class="status-grid" id="statusGrid">불러오는 중...</div>
+  </div>
 
   <div class="search-bar">
     <input id="query" type="text" placeholder="예: 엑셀 시트 활성화 어떻게 해?" value="구글시트에서 시트 활성화 어떻게 해?" />
@@ -303,11 +315,37 @@ async function pollLogs() {
   } catch (e) { /* 백엔드 아직 안 떴을 수 있음 — 누적된 로그는 그대로 유지, 조용히 재시도 */ }
 }
 
+function statusDot(ok) {
+  return `<span class="status-dot ${ok === true ? "up" : ok === false ? "down" : "na"}"></span>`;
+}
+
+async function pollStatus() {
+  const grid = document.getElementById("statusGrid");
+  try {
+    const s = await fetch("/api/rag/debug/status").then(r => r.json());
+    const pills = [
+      `<div class="status-pill">${statusDot(s.database?.reachable)} DB</div>`,
+      `<div class="status-pill">${statusDot(s.opensearch?.reachable)} OpenSearch${s.opensearch?.cluster_status ? " (" + s.opensearch.cluster_status + ")" : ""}</div>`,
+      `<div class="status-pill">${statusDot(s.embedding?.api_key_configured)} Embedding: ${s.embedding?.provider ?? "?"}/${s.embedding?.model ?? "?"}</div>`,
+      `<div class="status-pill">${statusDot(s.reranker?.api_key_configured)} Reranker: ${s.reranker?.model ?? "?"}</div>`,
+    ];
+    let extra = "";
+    if (s.opensearch?.reachable === false) {
+      extra = `<div class="status-note">OpenSearch 연결 안 됨 — hybrid/hybrid_rerank는 vector 단독(hybrid_dense_only)으로 저하되어 동작합니다. (${s.opensearch.error ?? ""})</div>`;
+    }
+    grid.innerHTML = pills.join("") + extra;
+  } catch (e) {
+    grid.innerHTML = `<div class="status-pill">${statusDot(false)} 백엔드에 연결할 수 없음</div>`;
+  }
+}
+
 document.getElementById("query").addEventListener("keydown", e => { if (e.key === "Enter") runSearch(); });
 renderHttpPresets();
 renderFilterButtons();
 setInterval(pollLogs, 1500);
+setInterval(pollStatus, 5000);
 pollLogs();
+pollStatus();
 </script>
 </body>
 </html>
