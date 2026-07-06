@@ -91,12 +91,14 @@ feat(rag): 액션 요약본 동시 청킹 저장 추가 (RPA-12)
 - 이슈 트래킹의 원본(source of truth)은 **Jira**. GitHub 이슈는 Jira Automation으로 동기화된다 (`docs/JIRA_GITHUB.md` 참고).
 - 라벨 세트:
 
-| 라벨 | 용도 |
-|---|---|
-| `area:backend` `area:rag` `area:agent` `area:frontend` `area:infra` | 담당 영역 |
-| `priority:P0` `priority:P1` `priority:P2` | 우선순위 (P0=필수 연계, P1=가점 효율, P2=차별화) |
-| `type:feat` `type:bug` `type:docs` | 성격 |
-| `from-jira` | Jira Automation이 생성한 이슈 |
+| 라벨 | 용도 | 부여 방식 |
+|---|---|---|
+| `area:backend` `area:rag` `area:agent` `area:db` `area:infra` `area:ci` `area:docs` `area:frontend` | 담당 영역 | **PR은 자동** — labeler가 변경 파일 경로 기준 부여 (`.github/labeler.yml`) |
+| `priority:P0` `priority:P1` `priority:P2` | 우선순위 (P0=필수 연계, P1=가점 효율, P2=차별화) | 수동 (필요 시) |
+| `type:feat` `type:bug` `type:docs` | 성격 | 이슈 템플릿이 자동 부여 |
+| `from-jira` | Jira Automation이 생성한 이슈 | 자동 |
+
+- **PR에 area 라벨을 수동으로 붙이지 않는다** — 여러 영역을 건드리면 여러 개가 붙는 것이 정상이며, 오히려 PR 분리를 고민할 신호다.
 
 ## 5. 담당 영역
 
