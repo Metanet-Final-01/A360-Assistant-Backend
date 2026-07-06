@@ -1,3 +1,4 @@
+import asyncio
 import ipaddress
 import json
 import logging
@@ -159,26 +160,37 @@ def health() -> dict[str, str]:
     return {"status": "healthy"}
 
 
-def _blocked_target_reason(url: str) -> str | None:
-    """절대 URL의 대상이 내부망이면 차단 사유를 반환한다 (SSRF 방어).
+async def _resolve_validated_ip(host: str) -> tuple[str | None, str | None]:
+    """호스트를 해석하고 모든 IP가 공인망이면 (첫 IP, None), 아니면 (None, 사유)를 반환한다.
 
-    이 엔드포인트는 백엔드가 대신 HTTP 요청을 보내주는 프록시라, 열리면
-    EC2 메타데이터(169.254.169.254)로 IAM 자격증명을 조회하는 등 내부망
-    접근에 악용될 수 있다. 사설망·루프백·링크로컬 등 비공인 IP는 전부 막고,
-    호스트를 해석할 수 없으면 보수적으로 차단한다.
+    반환된 IP를 실제 연결에 그대로 사용해야(핀 고정) DNS 리바인딩을 막을 수 있다 —
+    검증 시점과 요청 시점에 호스트를 각각 해석하면 그 사이에 응답이 바뀌어 우회된다.
+    조회는 blocking이라 스레드로 넘겨 이벤트 루프를 막지 않는다.
     """
-    host = urlparse(url).hostname
-    if not host:
-        return "URL에서 호스트를 파싱할 수 없습니다."
     try:
-        addrs = {info[4][0] for info in socket.getaddrinfo(host, None)}
+        # getaddrinfo는 동기 함수 → to_thread로 async 경로를 막지 않게 한다
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
     except OSError:
-        return f"호스트를 해석할 수 없습니다: {host}"
+        return None, f"호스트를 해석할 수 없습니다: {host}"
+    addrs = {info[4][0] for info in infos}
     for addr in addrs:
         ip = ipaddress.ip_address(addr.split("%")[0])
         if not ip.is_global:
-            return f"내부망 주소({addr})로의 요청은 허용되지 않습니다."
-    return None
+            return None, f"내부망 주소({addr})로의 요청은 허용되지 않습니다."
+    return next(iter(addrs)), None
+
+
+def _pin_url_to_ip(url: str, ip: str) -> tuple[str, str]:
+    """URL의 호스트를 검증된 IP로 치환하고 (핀 URL, 원래 호스트[:포트])를 반환한다.
+
+    치환된 URL로 연결하되 Host 헤더/SNI는 원래 호스트로 유지해 재해석을 막는다.
+    """
+    parsed = urlparse(url)
+    netloc_host = f"[{ip}]" if ":" in ip else ip
+    if parsed.port:
+        netloc_host += f":{parsed.port}"
+    original_host = parsed.netloc.split("@")[-1]  # userinfo 제거
+    return parsed._replace(netloc=netloc_host).geturl(), original_host
 
 
 @app.post("/api/debug/http-request")
@@ -198,31 +210,47 @@ async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dic
         raise HTTPException(status_code=400, detail=f"Unsupported method: {payload.method}")
 
     url = payload.url.strip()
-    if url.startswith("/"):
+    request_url = url
+    extensions: dict = {}
+    is_self_call = url.startswith("/")
+    if is_self_call:
         # 자기 자신(이 백엔드)으로의 상대경로 호출 — 디버그 콘솔의 주 용도라 허용
-        url = str(request.base_url).rstrip("/") + url
+        url = request_url = str(request.base_url).rstrip("/") + url
     elif url.startswith("http://") or url.startswith("https://"):
-        reason = _blocked_target_reason(url)
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            raise HTTPException(status_code=400, detail="URL에서 호스트를 파싱할 수 없습니다.")
+        ip, reason = await _resolve_validated_ip(parsed.hostname)
         if reason:
             raise HTTPException(status_code=400, detail=reason)
+        # 검증된 IP로 연결을 고정(핀)해 DNS 리바인딩을 차단한다. Host 헤더와 SNI는
+        # 원래 호스트로 유지해 라우팅·인증서 검증이 정상 동작하게 한다.
+        request_url, original_host = _pin_url_to_ip(url, ip)
+        payload.headers.setdefault("Host", original_host.split(":")[0])
+        if parsed.scheme == "https":
+            extensions["sni_hostname"] = parsed.hostname
     else:
         raise HTTPException(status_code=400, detail="URL must be absolute or start with '/'.")
 
     headers = {
         str(key): str(value)
         for key, value in payload.headers.items()
-        if key.lower() not in {"host", "content-length"}
+        if key.lower() not in {"content-length"}
     }
     timeout = max(1.0, min(payload.timeout_seconds, 60.0))
     started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=payload.follow_redirects) as client:
-            response = await client.request(
+        # 리다이렉트는 따라가지 않는다 — 검증을 우회해 내부망으로 재유도될 수 있어
+        # (공인 URL → 169.254.169.254 리다이렉트) 응답만 그대로 돌려준다.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            req = client.build_request(
                 method,
-                url,
+                request_url,
                 headers=headers,
                 content=payload.body if payload.body and method not in {"GET", "HEAD"} else None,
+                extensions=extensions or None,
             )
+            response = await client.send(req)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"HTTP request failed: {exc}")
 
