@@ -114,3 +114,31 @@ feat(rag): 액션 요약본 동시 청킹 저장 추가 (RPA-12)
 - 시크릿(API 키, 비밀번호) 커밋 — `.env`는 절대 커밋하지 않고 `.env.example`만 갱신
 - `--force` push (본인 작업 브랜치에서 rebase 후는 `--force-with-lease` 허용)
 - 리뷰 없는 머지
+
+## 7. 작업 흐름 — 트랙 A(AI 자동) / 트랙 B(수동)
+
+팀원마다 Claude Code 사용 여부가 다르므로 두 트랙을 모두 지원한다.
+**결과물 규칙(브랜치명·커밋·PR·리뷰)과 Jira Automation(미러 생성·상태 전환)은 두 트랙에서 완전히 동일하다.**
+
+### 트랙 A: Claude Code 사용 (Atlassian MCP 연동)
+
+1. Claude에게 자연어로 작업을 요청한다 (예: "RAG 검색에 하이브리드 검색 추가해줘")
+2. Claude가 Jira 이슈 생성 → dev에서 브랜치 분기 → 구현·커밋 → PR 생성까지 수행한다
+3. 사람은 **PR 리뷰와 머지만** 담당한다 (승인 1인 규칙 동일)
+
+최초 1회 설정: `claude mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp` 등록 후, 대화형 세션에서 `/mcp` → atlassian → 본인 Atlassian 계정으로 인증.
+
+### 트랙 B: 수동 작업 (Claude Code 없이)
+
+1. Jira에서 **"작업" 이슈 생성** (담당자 본인 지정)
+2. 이슈 화면 오른쪽 **개발 패널 → "브랜치 만들기"** (또는 로컬: `git checkout dev && git pull && git checkout -b feat/RPA-N-영문요약`)
+3. 작업·커밋 (2장 커밋 컨벤션 준수) → push
+4. GitHub에서 PR 생성 — **base: `dev`**, 템플릿 작성, 본문에 `Closes #미러이슈번호` (미러 번호는 GitHub Issues에서 `[RPA-N]`으로 검색)
+5. 리뷰 승인 후 **Create a merge commit**으로 머지
+
+Jira 상태는 손대지 않아도 된다 — 브랜치 생성 시 "진행 중", PR 머지 시 "완료"로 자동 전환된다.
+
+### 공통 주의
+
+- **GitHub 이슈를 직접 만들지 않는다** — Jira에서 이슈를 만들면 Automation이 GitHub 미러(`[RPA-N] ...`, `from-jira` 라벨)를 자동 생성한다
+- GitHub 미러 이슈를 직접 수정·닫지 않는다 (PR의 `Closes #`로 닫히는 것은 예외)
