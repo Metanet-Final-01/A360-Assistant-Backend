@@ -33,9 +33,37 @@ python -m app.rag.pipeline ingest                        # VOYAGE_API_KEY 필요
 python -m app.rag.pipeline ingest --skip-embedding       # 임베딩 없이 텍스트만 적재
 
 # 5. 검색 (CLI 또는 API)
-python -m app.rag.pipeline search "구글시트에서 시트 활성화 어떻게 해?"
-# GET /api/rag/search?q=...&limit=5
+python -m app.rag.pipeline search "구글시트에서 시트 활성화 어떻게 해?" --mode hybrid_rerank
+# GET /api/rag/search?q=...&limit=5&mode=hybrid_rerank
 ```
+
+## 하이브리드 검색 + Reranker (RPA-9)
+
+`app/rag/retrieval/hybrid_search.py`가 pgvector 코사인 유사도 + OpenSearch BM25를
+RRF(k=60)로 융합하고, Voyage `rerank-2.5-lite`로 최종 재정렬한다. `mode` 파라미터로
+`vector`(기존 방식) / `hybrid`(RRF만) / `hybrid_rerank`(기본) 선택 가능.
+
+- OpenSearch 로컬 컨테이너: `docker compose up -d opensearch`
+- Graceful degradation: OpenSearch 장애 시 벡터 단독으로, `VOYAGE_API_KEY` 미설정 시
+  RRF 순서 그대로 반환 — 절대 API가 죽지 않는다. 결과에 `reranked`/`rerank_fallback_reason`/
+  `bm25_available` 필드로 실제 어느 단계까지 됐는지 표시됨.
+- 청킹: `app/rag/build/chunk.py` (LangChain `RecursiveCharacterTextSplitter`,
+  `CHUNK_SIZE=1200`/`CHUNK_OVERLAP=200` — 실제 데이터 EDA로 검증됨, `pipeline.py eda` 참고)
+
+## Agent 연동
+
+`app/services/rag.py::search_actions(query, k=5, source_types=None)` —
+`docs/INTERFACES.md` 계약대로 Agent 담당(`app/agent/retrieval.py`)이 쓸 진입점.
+반환 필드: `id/source_type/package_name/action_name/title/url/content/score`
+(단, `doc_page`/`bot_example`은 특정 패키지에 매인 문서가 아니라 `package_name`/
+`action_name`이 원래부터 `null` — 정상 동작).
+
+## 디버그 콘솔
+
+`GET /debug` (백엔드 기동 후 `http://localhost:8000/debug/debug.html`) —
+vector/hybrid/hybrid_rerank 3단 비교, 서비스 상태(DB/OpenSearch/임베딩/리랭커) 점검,
+`search_actions()` Agent 계약 필드 확인, 임의 HTTP 요청 전송, 파이프라인 실시간 로그를
+한 화면에서 확인 가능. 로그 원본은 `app/rag/logs/*.jsonl` (날짜별, gitignore).
 
 ## 패키지 JAR 수동으로 얻는 법 (API 대신 UI로 할 때)
 
@@ -54,6 +82,10 @@ python -m app.rag.pipeline search "구글시트에서 시트 활성화 어떻게
 | `DATABASE_HOST/PORT/NAME/USERNAME/PASSWORD` | docker-compose 기본값 | pgvector Postgres 접속 정보 |
 | `CR_URL` | — | Control Room URL (예: https://xxx.cloud.automationanywhere.digital) |
 | `CR_USERNAME`, `CR_API_KEY`(또는 `CR_PASSWORD`) | — | Control Room 인증 (`bots`, `export-packages`에만 필요) |
+| `OPENSEARCH_HOST` | `http://localhost:9200` | BM25 검색용 OpenSearch |
+| `VOYAGE_API_KEY` | — | Reranker용 (없으면 RRF 순서 그대로 반환, graceful degradation) |
+| `RRF_K` / `HYBRID_CANDIDATE_POOL_SIZE` / `HYBRID_RERANK_CANDIDATES` | `60` / `50` / `20` | 하이브리드 검색 튜닝값 |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `200` | 청킹 크기 (EDA로 검증된 기본값) |
 
 ## RAG 문서 유형
 
