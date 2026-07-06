@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# 실행 방식(pytest vs python -m pytest)과 무관하게 리포 루트를 import 경로에 포함
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -7,6 +7,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from app.api.documents import router as documents_router
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
+
+app.include_router(documents_router)
 
 frontend_origins = [
     origin.strip()
