@@ -138,27 +138,35 @@ def enrich_vision(document_id: str, db: Session = Depends(get_db)) -> StreamingR
 
     file_content = storage.load(doc.storage_path)
 
+    doc_id, filename, parsed_content, sess_id = doc.id, doc.filename, doc.parsed_content, doc.session_id
+
     def sse():
         try:
             for event in vision.enrich_document_stream(
-                doc.filename, file_content, doc.parsed_content, session_id=doc.session_id
+                filename, file_content, parsed_content, session_id=sess_id
             ):
                 if event.event == "done":
-                    # 보강 결과를 먼저 저장하고, 클라이언트에는 요약만 보낸다
-                    doc.parsed_content = event.data["parsed"]
-                    db.commit()
+                    # 요청 스코프의 db 세션은 스트리밍 시작 전에 닫히므로(FastAPI 0.106+
+                    # yield 의존성 동작) 저장은 반드시 새 세션으로 한다
+                    from app.db import SessionLocal
+
+                    with SessionLocal() as s:
+                        fresh = s.get(models.Document, doc_id)
+                        fresh.parsed_content = event.data["parsed"]
+                        s.commit()
+                        summary = _document_out(fresh)
                     yield ProgressEvent(
                         event="done",
                         stage="vision",
                         message=event.message,
-                        data={**_document_out(doc), "enriched_pages": event.data["enriched_pages"]},
+                        data={**summary, "enriched_pages": event.data["enriched_pages"]},
                     ).to_sse()
                 else:
                     yield event.to_sse()
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
             yield ProgressEvent(event="error", stage="vision", message=f"LLM 구성 오류: {e}").to_sse()
         except Exception:  # noqa: BLE001
-            logger.exception("비전 보강 실패: document=%s", doc.id)
+            logger.exception("비전 보강 실패: document=%s", doc_id)
             yield ProgressEvent(
                 event="error", stage="vision", message="비전 보강 중 오류가 발생했습니다"
             ).to_sse()
