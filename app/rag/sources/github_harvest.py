@@ -18,7 +18,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config
+from .. import config
 
 ORG = "AutomationAnywhere"
 GH_API = "https://api.github.com"

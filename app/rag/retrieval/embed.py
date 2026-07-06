@@ -4,7 +4,7 @@ import time
 
 import httpx
 
-from . import config
+from .. import config
 
 # 한국어는 문자당 토큰 수가 많아(최대 ~2토큰/자) 보수적으로 자른다: 4000자 ≈ 최대 8k 토큰
 _BATCH_SIZE = 16

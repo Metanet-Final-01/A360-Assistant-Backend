@@ -1,14 +1,15 @@
 """수집 파이프라인 CLI.
 
 사용 예:
-  python -m app.ingest.pipeline crawl --contains "Google Sheets"   # 문서 크롤링 (필터)
-  python -m app.ingest.pipeline crawl                               # 명령 패널(패키지 문서) 전체
-  python -m app.ingest.pipeline parse-jars path/to/export.zip jars_dir/
-  python -m app.ingest.pipeline bots                                # Control Room 봇 목록+JSON 수집
-  python -m app.ingest.pipeline export-packages --file-ids 123 456  # BLM export → JAR 스키마 자동 추출
-  python -m app.ingest.pipeline build                               # 문서+스키마+봇 → rag_documents.jsonl
-  python -m app.ingest.pipeline ingest [--skip-embedding]           # pgvector 적재
-  python -m app.ingest.pipeline search "구글시트에서 시트 활성화 어떻게 해?"
+  python -m app.rag.pipeline crawl --contains "Google Sheets"   # 문서 크롤링 (필터)
+  python -m app.rag.pipeline crawl                               # 명령 패널(패키지 문서) 전체
+  python -m app.rag.pipeline parse-jars path/to/export.zip jars_dir/
+  python -m app.rag.pipeline bots                                # Control Room 봇 목록+JSON 수집
+  python -m app.rag.pipeline export-packages --file-ids 123 456  # BLM export → JAR 스키마 자동 추출
+  python -m app.rag.pipeline build                               # 문서+스키마+봇 → rag_documents.jsonl (청킹 포함)
+  python -m app.rag.pipeline eda                                  # 문서 길이 분포 분석 (청크 크기 결정용)
+  python -m app.rag.pipeline ingest [--skip-embedding]           # pgvector 적재
+  python -m app.rag.pipeline search "구글시트에서 시트 활성화 어떻게 해?"
 """
 
 import argparse
@@ -20,7 +21,7 @@ from . import config
 
 
 def cmd_crawl(args: argparse.Namespace) -> None:
-    from . import fluid_topics as ft
+    from .sources import fluid_topics as ft
 
     m = ft.find_map(locale=args.locale, title="Automation 360")
     print(f"map: {m['title']} ({args.locale}) id={m['id']}")
@@ -47,7 +48,7 @@ def cmd_crawl(args: argparse.Namespace) -> None:
 
 
 def cmd_parse_jars(args: argparse.Namespace) -> None:
-    from .jar_parser import parse_packages
+    from .sources.jar_parser import parse_packages
 
     packages = parse_packages([Path(p) for p in args.paths], preferred_locale=args.jar_locale)
     config.PACKAGES_JSON.parent.mkdir(parents=True, exist_ok=True)
@@ -70,8 +71,8 @@ def cmd_parse_jars(args: argparse.Namespace) -> None:
 def cmd_harvest_github(args: argparse.Namespace) -> None:
     import os
 
-    from .github_harvest import harvest
-    from .jar_parser import parse_packages
+    from .sources.github_harvest import harvest
+    from .sources.jar_parser import parse_packages
 
     token = os.getenv("GITHUB_TOKEN") or None
     stats = harvest(token=token, max_repos=args.max_repos)
@@ -97,7 +98,7 @@ def cmd_harvest_github(args: argparse.Namespace) -> None:
 
 
 def cmd_bots(args: argparse.Namespace) -> None:
-    from .control_room import ControlRoomClient
+    from .sources.control_room import ControlRoomClient
 
     client = ControlRoomClient()
     try:
@@ -125,8 +126,8 @@ def cmd_bots(args: argparse.Namespace) -> None:
 
 
 def cmd_export_packages(args: argparse.Namespace) -> None:
-    from .control_room import ControlRoomClient
-    from .jar_parser import parse_packages
+    from .sources.control_room import ControlRoomClient
+    from .sources.jar_parser import parse_packages
 
     client = ControlRoomClient()
     try:
@@ -145,17 +146,37 @@ def cmd_export_packages(args: argparse.Namespace) -> None:
     cmd_parse_jars(args)
 
 
-def cmd_build(args: argparse.Namespace) -> None:
-    from .normalize import build_rag_documents, load_bots, load_docs
+def _load_source_inputs(source: str) -> tuple[list[dict], list[dict], list[dict]]:
+    """--source 선택에 따라 (packages, docs, bots) 중 해당 소스만 채워서 반환한다.
 
-    docs = load_docs(config.DOCS_JSONL)
-    bots = load_bots(config.BOTS_JSONL)
+    "docs"(공식문서, Fluid Topics)와 "github"(패키지 JAR + 공개 봇)는 서로 독립적으로
+    build/ingest할 수 있다 — 같은 rag_documents 테이블에 upsert되므로 나중에 합쳐도
+    검색은 항상 통합된 하나의 인덱스로 유지된다.
+    """
+    from .build.normalize import load_bots, load_docs
+
+    docs = load_docs(config.DOCS_JSONL) if source in ("all", "docs") else []
+    bots = load_bots(config.BOTS_JSONL) if source in ("all", "github") else []
     packages = (
         json.loads(config.PACKAGES_JSON.read_text(encoding="utf-8"))
-        if config.PACKAGES_JSON.exists()
+        if source in ("all", "github") and config.PACKAGES_JSON.exists()
         else []
     )
-    rag_docs = build_rag_documents(packages, docs, locale=args.locale, bots=bots)
+    return packages, docs, bots
+
+
+def cmd_build(args: argparse.Namespace) -> None:
+    from .build.normalize import build_rag_documents
+
+    packages, docs, bots = _load_source_inputs(args.source)
+    rag_docs = build_rag_documents(
+        packages,
+        docs,
+        locale=args.locale,
+        bots=bots,
+        chunk_size=config.CHUNK_SIZE,
+        chunk_overlap=config.CHUNK_OVERLAP,
+    )
 
     config.RAG_DOCUMENTS_JSONL.parent.mkdir(parents=True, exist_ok=True)
     with open(config.RAG_DOCUMENTS_JSONL, "w", encoding="utf-8") as f:
@@ -171,7 +192,7 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
-    from . import db
+    from .store import db
 
     if not config.RAG_DOCUMENTS_JSONL.exists():
         sys.exit("rag_documents.jsonl이 없습니다. 먼저 build를 실행하세요.")
@@ -181,7 +202,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
     embeddings = None
     if not args.skip_embedding:
-        from .embed import embed_texts
+        from .retrieval.embed import embed_texts
 
         print(f"임베딩 생성 중 ({config.EMBEDDING_PROVIDER}/{config.EMBEDDING_MODEL}, {len(documents)}개)...")
         embeddings = embed_texts(
@@ -198,9 +219,25 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         conn.close()
 
 
+def cmd_eda(args: argparse.Namespace) -> None:
+    from .build.eda import compute_length_stats, print_report
+    from .build.normalize import build_rag_documents
+
+    packages, docs, bots = _load_source_inputs(args.source)
+    # chunk_size=None: 청킹 전 원본 길이를 분석해야 청크 크기를 순환 오류 없이 정할 수 있다
+    rag_docs = build_rag_documents(packages, docs, locale=args.locale, bots=bots, chunk_size=None)
+
+    stats = compute_length_stats(rag_docs)
+    print_report(stats)
+
+    config.EDA_REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
+    config.EDA_REPORT_JSON.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n리포트 저장: {config.EDA_REPORT_JSON}")
+
+
 def cmd_search(args: argparse.Namespace) -> None:
-    from . import db
-    from .embed import embed_query
+    from .store import db
+    from .retrieval.embed import embed_query
 
     conn = db.connect()
     try:
@@ -213,7 +250,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="python -m app.ingest.pipeline")
+    parser = argparse.ArgumentParser(prog="python -m app.rag.pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_crawl = sub.add_parser("crawl", help="Fluid Topics API로 문서 크롤링")
@@ -241,9 +278,20 @@ def main() -> None:
     p_export.add_argument("--jar-locale", default="ko_KR")
     p_export.set_defaults(func=cmd_export_packages)
 
-    p_build = sub.add_parser("build", help="문서+스키마+봇을 RAG 문서로 병합")
+    p_build = sub.add_parser("build", help="문서+스키마+봇을 RAG 문서로 병합 (청킹 포함)")
     p_build.add_argument("--locale", default="ko-KR")
+    p_build.add_argument(
+        "--source",
+        default="all",
+        choices=["all", "docs", "github"],
+        help="all(기본)/docs(공식문서만)/github(패키지+봇만) — docs와 github은 독립적으로 build+ingest 가능 (같은 테이블에 upsert됨)",
+    )
     p_build.set_defaults(func=cmd_build)
+
+    p_eda = sub.add_parser("eda", help="청킹 전 원본 문서의 source_type별 길이 분포 분석 (청크 크기 결정용)")
+    p_eda.add_argument("--locale", default="ko-KR")
+    p_eda.add_argument("--source", default="all", choices=["all", "docs", "github"])
+    p_eda.set_defaults(func=cmd_eda)
 
     p_ingest = sub.add_parser("ingest", help="임베딩 생성 후 pgvector 적재")
     p_ingest.add_argument("--skip-embedding", action="store_true")

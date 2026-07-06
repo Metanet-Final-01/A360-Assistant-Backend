@@ -2,7 +2,7 @@
 
 > 자동 생성 문서 (2026-07-03) — 원천: `data/ingest/packages.json` (패키지 JAR `package.json` 파싱 결과)
 > 지식베이스 전체는 pgvector `rag_documents` 테이블에 임베딩과 함께 적재되어 있으며,
-> 팀원 복원 방법은 [app/ingest/TEAM_SETUP.md](../app/ingest/TEAM_SETUP.md) 참고.
+> 팀원 복원 방법은 [app/rag/TEAM_SETUP.md](../app/rag/TEAM_SETUP.md) 참고.
 
 ## 개요
 

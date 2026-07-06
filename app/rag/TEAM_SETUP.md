@@ -46,20 +46,20 @@ pip install -r requirements.txt
 docker compose up -d db
 
 # 1) 공식 문서 크롤링 (계정 불필요)
-python -m app.ingest.pipeline crawl
+python -m app.rag.pipeline crawl
 
 # 2) 공개 봇/패키지 수집 (계정 불필요, GITHUB_TOKEN 있으면 빠름)
-python -m app.ingest.pipeline harvest-github
+python -m app.rag.pipeline harvest-github
 
 # 3) (선택) 회사 Control Room 봇도 수집하려면 .env에 CR_* 채우고
-python -m app.ingest.pipeline bots --workspace private
+python -m app.rag.pipeline bots --workspace private
 
 # 4) 병합 → 임베딩 → 적재
-python -m app.ingest.pipeline build
-python -m app.ingest.pipeline ingest
+python -m app.rag.pipeline build
+python -m app.rag.pipeline ingest
 
 # 5) 확인
-python -m app.ingest.pipeline search "엑셀에서 셀 값 읽는 법"
+python -m app.rag.pipeline search "엑셀에서 셀 값 읽는 법"
 ```
 
 ---

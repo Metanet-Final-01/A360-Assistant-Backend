@@ -17,6 +17,12 @@ PACKAGES_JSON = DATA_DIR / "packages.json"
 BOTS_JSONL = DATA_DIR / "bots.jsonl"
 EXPORTS_DIR = DATA_DIR / "exports"
 RAG_DOCUMENTS_JSONL = DATA_DIR / "rag_documents.jsonl"
+EDA_REPORT_JSON = DATA_DIR / "eda_report.json"
+
+# 청킹: chunk_size 초과 문서만 분할한다. 기본값은 NongSabu DocumentChunker 프라이어(1200/200) —
+# `pipeline.py eda`로 실제 문서 길이 분포를 확인한 뒤 필요시 .env에서 조정한다.
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 
 # voyage(기본) 또는 openai. Anthropic은 임베딩 API가 없어 Voyage AI를 공식 권장함.
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "voyage")

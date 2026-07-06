@@ -4,7 +4,7 @@ import json
 
 import psycopg
 
-from . import config
+from .. import config
 
 _DDL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -21,8 +21,12 @@ CREATE TABLE IF NOT EXISTS rag_documents (
     embedding     vector({config.EMBEDDING_DIM}),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
+-- 이미 존재하는 테이블에도 청킹 컬럼이 반영되도록 ADD COLUMN IF NOT EXISTS로 추가 (별도 마이그레이션 도구 없이)
+ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS parent_id text;
+ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS chunk_index integer NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_rag_documents_package ON rag_documents (package_name);
 CREATE INDEX IF NOT EXISTS idx_rag_documents_source ON rag_documents (source_type);
+CREATE INDEX IF NOT EXISTS idx_rag_documents_parent ON rag_documents (parent_id);
 """
 
 
@@ -39,8 +43,9 @@ def ensure_schema(conn: psycopg.Connection) -> None:
 def upsert_documents(conn: psycopg.Connection, documents: list[dict], embeddings: list | None) -> int:
     sql = """
         INSERT INTO rag_documents
-            (id, source_type, package_name, action_name, locale, title, url, content, metadata, embedding, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, now())
+            (id, source_type, package_name, action_name, locale, title, url, content, metadata,
+             parent_id, chunk_index, embedding, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector, now())
         ON CONFLICT (id) DO UPDATE SET
             source_type = EXCLUDED.source_type,
             package_name = EXCLUDED.package_name,
@@ -50,6 +55,8 @@ def upsert_documents(conn: psycopg.Connection, documents: list[dict], embeddings
             url = EXCLUDED.url,
             content = EXCLUDED.content,
             metadata = EXCLUDED.metadata,
+            parent_id = EXCLUDED.parent_id,
+            chunk_index = EXCLUDED.chunk_index,
             embedding = COALESCE(EXCLUDED.embedding, rag_documents.embedding),
             updated_at = now()
     """
@@ -70,6 +77,8 @@ def upsert_documents(conn: psycopg.Connection, documents: list[dict], embeddings
                     doc.get("url"),
                     doc["content"],
                     json.dumps(doc.get("metadata", {}), ensure_ascii=False),
+                    doc.get("parent_id", doc["id"]),
+                    doc.get("chunk_index", 0),
                     vector,
                 ),
             )

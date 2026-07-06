@@ -4,3 +4,4 @@ httpx==0.27.2
 beautifulsoup4==4.12.3
 psycopg[binary]==3.2.3
 python-dotenv==1.0.1
+langchain-text-splitters==1.1.2

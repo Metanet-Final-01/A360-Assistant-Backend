@@ -14,26 +14,26 @@ Automation 360 패키지/액션 지식을 수집해 pgvector에 적재하는 파
 
 ```bash
 # 1. 문서 크롤링 (기본: 명령 패널 전체 ~1300페이지. --contains로 부분 수집 가능)
-python -m app.ingest.pipeline crawl                        # 재시작 안전 (이어받기)
-python -m app.ingest.pipeline crawl --contains "Google Sheets"
+python -m app.rag.pipeline crawl                        # 재시작 안전 (이어받기)
+python -m app.rag.pipeline crawl --contains "Google Sheets"
 
 # 2a. 패키지 스키마 추출 — 수동으로 받은 zip/jar
-python -m app.ingest.pipeline parse-jars path/to/export.zip
+python -m app.rag.pipeline parse-jars path/to/export.zip
 
 # 2b. 또는 Control Room API로 자동 (CR_URL/CR_USERNAME/CR_API_KEY 필요)
-python -m app.ingest.pipeline bots                          # 봇 목록+JSON 수집
-python -m app.ingest.pipeline export-packages --file-ids 123 456   # BLM export → JAR 스키마 자동 추출
+python -m app.rag.pipeline bots                          # 봇 목록+JSON 수집
+python -m app.rag.pipeline export-packages --file-ids 123 456   # BLM export → JAR 스키마 자동 추출
 
 # 3. 병합 → RAG 문서 생성 (data/ingest/rag_documents.jsonl)
-python -m app.ingest.pipeline build
+python -m app.rag.pipeline build
 
 # 4. 임베딩 + pgvector 적재
 docker compose up -d db                                     # 5432 사용 중이면 DATABASE_PORT=5433
-python -m app.ingest.pipeline ingest                        # VOYAGE_API_KEY 필요
-python -m app.ingest.pipeline ingest --skip-embedding       # 임베딩 없이 텍스트만 적재
+python -m app.rag.pipeline ingest                        # VOYAGE_API_KEY 필요
+python -m app.rag.pipeline ingest --skip-embedding       # 임베딩 없이 텍스트만 적재
 
 # 5. 검색 (CLI 또는 API)
-python -m app.ingest.pipeline search "구글시트에서 시트 활성화 어떻게 해?"
+python -m app.rag.pipeline search "구글시트에서 시트 활성화 어떻게 해?"
 # GET /api/rag/search?q=...&limit=5
 ```
 
