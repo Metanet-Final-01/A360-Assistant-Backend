@@ -49,11 +49,13 @@ def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_r
         return [{**h, "retrieval_source": "vector"} for h in vector_hits[:limit]]
 
     bm25_hits: list[dict] = []
+    bm25_error: str | None = None
     try:
         bm25_hits = opensearch_client.keyword_search(os_client, query, size=pool)
-    except Exception:
+    except Exception as e:
         # BM25는 보강 신호이므로, OpenSearch가 응답하지 않으면 벡터 단독 검색으로 저하시킨다.
-        bm25_hits = []
+        # 단, 저하 여부를 결과에 남겨야 "BM25가 원래 안 잡힌 건지 장애로 빠진 건지" 구분 가능하다.
+        bm25_error = str(e)
 
     vector_ids = [h["id"] for h in vector_hits]
     bm25_ids = [h["id"] for h in bm25_hits]
@@ -82,17 +84,25 @@ def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_r
             "bm25_rank": bm25_rank.get(doc_id),
             "rrf_score": rrf_scores[doc_id],
             "retrieval_source": _retrieval_source(doc_id),
+            "bm25_available": bm25_error is None,
+            **({"bm25_error": bm25_error} if bm25_error else {}),
         }
         for doc_id in fused_ids
     ]
 
     if mode == "hybrid" or not candidates:
-        return candidates[:limit]
+        return [{**c, "reranked": False} for c in candidates[:limit]]
 
+    # title을 같이 넣어야 reranker가 문맥(어느 문서 소속인지)을 보고 판단한다 —
+    # 청킹 안 된 문서는 content에 title이 없어서 이걸 빼면 reranker가 맥락 없이 본문만 본다.
+    rerank_inputs = [f"{c['title']}\n\n{c['content']}" for c in candidates]
     try:
-        reranked = voyage_rerank(query, [c["content"] for c in candidates], top_k=min(limit, len(candidates)))
-    except RuntimeError:
-        # VOYAGE_API_KEY 미설정 등 — 재정렬 없이 RRF 순서 그대로 상위 limit개 반환
-        return candidates[:limit]
+        reranked = voyage_rerank(query, rerank_inputs, top_k=min(limit, len(candidates)))
+    except RuntimeError as e:
+        # VOYAGE_API_KEY 미설정 등 — 재정렬 없이 RRF 순서 그대로 반환하되, 폴백 여부와 사유를 명시한다
+        return [{**c, "reranked": False, "rerank_fallback_reason": str(e)} for c in candidates[:limit]]
 
-    return [{**candidates[item["index"]], "rerank_score": item["relevance_score"]} for item in reranked]
+    return [
+        {**candidates[item["index"]], "rerank_score": item["relevance_score"], "reranked": True}
+        for item in reranked
+    ]

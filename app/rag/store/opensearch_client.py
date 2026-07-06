@@ -34,6 +34,8 @@ _INDEX_BODY = {
             "title": {"type": "text", "analyzer": "korean_cjk", "fields": {"raw": {"type": "keyword"}}},
             "url": {"type": "keyword", "index": False},
             "content": {"type": "text", "analyzer": "korean_cjk"},
+            "parent_id": {"type": "keyword"},
+            "chunk_index": {"type": "integer"},
         }
     },
 }
@@ -69,6 +71,8 @@ def bulk_index(client: OpenSearch, documents: list[dict]) -> int:
                     "title": doc["title"],
                     "url": doc.get("url"),
                     "content": doc["content"],
+                    "parent_id": doc.get("parent_id", doc["id"]),
+                    "chunk_index": doc.get("chunk_index", 0),
                 },
             }
 

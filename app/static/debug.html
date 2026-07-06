@@ -30,6 +30,26 @@
   .log-line.http { color: #7eb8e8; font-weight: 600; }
   .log-line .ts { color: #6b7280; }
   .status { font-size: 12px; color: #9aa4b2; margin-bottom: 8px; }
+  .section { margin: 18px 0; }
+  .section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4b2; border-bottom: 1px solid #333; padding-bottom: 6px; }
+  .http-lab { background: #141821; border: 1px solid #2a2f3a; border-radius: 6px; padding: 12px; }
+  .preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .preset-grid button, .http-lab button { padding: 7px 10px; font-size: 12px; background: #263244; color: #e6e6e6; border: 1px solid #3a4558; border-radius: 4px; cursor: pointer; }
+  .preset-grid button:hover, .http-lab button:hover { background: #33415a; }
+  .http-lab button.primary { background: #3b6ee0; border-color: #3b6ee0; color: #fff; }
+  .http-lab button:disabled { background: #555; cursor: wait; }
+  .http-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; }
+  .http-grid { display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: center; margin: 8px 0; }
+  .http-grid label { font-size: 12px; color: #b9c0cc; }
+  .http-lab input, .http-lab select, .http-lab textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; font-size: 13px; background: #1b1f27; color: #eee; border: 1px solid #333; border-radius: 4px; }
+  .http-lab textarea { min-height: 88px; resize: vertical; font-family: "Cascadia Code", monospace; }
+  .http-status { font-size: 12px; color: #9aa4b2; margin: 8px 0; }
+  .http-result { min-height: 180px; max-height: 420px; overflow: auto; white-space: pre-wrap; background: #05070a; border: 1px solid #2a2f3a; border-radius: 6px; padding: 10px; font-family: "Cascadia Code", monospace; font-size: 11px; color: #d5f3e5; }
+  @media (max-width: 900px) {
+    .columns { grid-template-columns: 1fr; }
+    .preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .http-row, .http-grid { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -48,11 +68,63 @@
     <div class="column"><h2>hybrid_rerank (RRF + Voyage)</h2><div id="col-hybrid_rerank"></div></div>
   </div>
 
-  <h2 style="font-size:13px;color:#9aa4b2;">실시간 파이프라인 로그 (1.5초마다 갱신)</h2>
+  <div class="section http-lab">
+    <h2>HTTP API Lab (backend sender)</h2>
+    <div class="preset-grid" id="httpPresets"></div>
+    <div class="http-row">
+      <select id="httpMethod">
+        <option>GET</option>
+        <option>POST</option>
+        <option>PUT</option>
+        <option>PATCH</option>
+        <option>DELETE</option>
+        <option>HEAD</option>
+        <option>OPTIONS</option>
+      </select>
+      <input id="httpUrl" value="/api/health" placeholder="/api/health or https://example.com/api" />
+    </div>
+    <div class="http-grid">
+      <label for="httpHeaders">Headers JSON</label>
+      <textarea id="httpHeaders">{
+  "Content-Type": "application/json"
+}</textarea>
+      <label for="httpBody">Body</label>
+      <textarea id="httpBody"></textarea>
+    </div>
+    <button id="httpSendBtn" class="primary" onclick="sendHttpRequest()">Send from backend</button>
+    <div class="http-status" id="httpStatus">No request sent yet.</div>
+    <pre class="http-result" id="httpResult"></pre>
+  </div>
+
+  <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+    <h2 style="font-size:13px;color:#9aa4b2; margin:0;">실시간 파이프라인 로그 (1.5초마다 갱신)</h2>
+    <div id="logFilters" style="font-size:11px; display:flex; gap:6px;"></div>
+    <button onclick="logStore.clear(); renderFiltered();" style="font-size:11px; padding:2px 8px; margin-left:auto;">지우기</button>
+  </div>
   <div class="log-panel" id="logPanel"></div>
 
 <script>
 const MODES = ["vector", "hybrid", "hybrid_rerank"];
+const HTTP_PRESETS = [
+  { label: "GET /", method: "GET", url: "/", body: "" },
+  { label: "GET /health", method: "GET", url: "/health", body: "" },
+  { label: "GET /api/message", method: "GET", url: "/api/message", body: "" },
+  { label: "POST /api/echo", method: "POST", url: "/api/echo", body: JSON.stringify({ message: "hello from backend debug" }, null, 2) },
+  { label: "RAG search", method: "GET", url: "/api/rag/search?q=구글시트에서 시트 활성화 어떻게 해?&limit=5&mode=hybrid_rerank", body: "" },
+  { label: "Debug embed", method: "GET", url: "/api/rag/debug/embed?text=구글시트에서 시트 활성화", body: "" },
+  { label: "Vector search", method: "GET", url: "/api/rag/debug/vector-search?q=구글시트&limit=5", body: "" },
+  { label: "BM25 search", method: "GET", url: "/api/rag/debug/bm25-search?q=구글시트&size=5", body: "" },
+  {
+    label: "Rerank",
+    method: "POST",
+    url: "/api/rag/debug/rerank",
+    body: JSON.stringify({
+      query: "구글시트에서 시트 활성화",
+      documents: ["Google Sheets activate sheet action", "Excel row read action", "Send Slack message"],
+      top_k: 3,
+    }, null, 2),
+  },
+];
 
 function scoreOf(item) {
   if (item.rerank_score !== undefined) return `rerank=${item.rerank_score.toFixed(3)}`;
@@ -108,8 +180,75 @@ async function runSearch() {
   }
 }
 
+function renderHttpPresets() {
+  const el = document.getElementById("httpPresets");
+  el.innerHTML = HTTP_PRESETS.map((preset, index) =>
+    `<button type="button" onclick="applyHttpPreset(${index})">${preset.label}</button>`
+  ).join("");
+}
+
+function applyHttpPreset(index) {
+  const preset = HTTP_PRESETS[index];
+  document.getElementById("httpMethod").value = preset.method;
+  document.getElementById("httpUrl").value = preset.url;
+  document.getElementById("httpBody").value = preset.body;
+  sendHttpRequest();
+}
+
+function parseJsonInput(id) {
+  const raw = document.getElementById(id).value.trim();
+  if (!raw) return {};
+  return JSON.parse(raw);
+}
+
+async function sendHttpRequest() {
+  const btn = document.getElementById("httpSendBtn");
+  const status = document.getElementById("httpStatus");
+  const result = document.getElementById("httpResult");
+  btn.disabled = true;
+  status.textContent = "Sending from backend...";
+  result.textContent = "";
+
+  try {
+    const payload = {
+      method: document.getElementById("httpMethod").value,
+      url: document.getElementById("httpUrl").value,
+      headers: parseJsonInput("httpHeaders"),
+      body: document.getElementById("httpBody").value || null,
+      timeout_seconds: 20,
+      follow_redirects: false,
+    };
+    const response = await fetch("/api/debug/http-request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    status.textContent = `Debug endpoint status ${response.status} (${new Date().toLocaleTimeString()})`;
+    result.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    status.textContent = `Error: ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 폴링 결과를 누적 저장(request_id+event+started_at로 dedup)한다 — 한 번의 폴링 실패/부분
+// 응답 때문에 화면에서 이전 로그가 사라져 보이는 일이 없도록, 매번 통째로 교체하지 않고 병합한다.
+const logStore = new Map();
+const EVENT_TYPES = ["http_request", "external_api_attempt", "embed_query", "vector_search", "bm25_search", "voyage_rerank", "hybrid_search"];
+const activeFilters = new Set(EVENT_TYPES);
+
+function logKey(l) { return `${l.request_id}|${l.event}|${l.started_at}`; }
+
+function mergeLogs(newLogs) {
+  for (const l of newLogs) logStore.set(logKey(l), l);
+}
+
 function renderLogLine(l) {
-  const errSuffix = l.status === "error" ? ` ${l.error_type}: ${l.error_message}` : "";
+  const errSuffix = l.status === "error" && (l.error_type || l.error_message)
+    ? ` ${l.error_type ?? "error"}: ${l.error_message ?? ""}`
+    : "";
 
   if (l.event === "http_request") {
     const cls = l.status === "error" ? "error" : "http";
@@ -118,26 +257,55 @@ function renderLogLine(l) {
       + `(${l.duration_ms}ms) req=${l.request_id ?? "-"}${errSuffix}</div>`;
   }
 
+  if (l.event === "external_api_attempt") {
+    const cls = l.status === "ok" ? "ok" : "error";
+    const preview = l.response_preview ? ` body=${String(l.response_preview).slice(0, 180)}` : "";
+    const wait = l.wait_seconds !== undefined ? ` wait=${l.wait_seconds}s` : "";
+    return `<div class="log-line ${cls}"><span class="ts">[${l.started_at ?? ""}]</span> `
+      + `↳ external_api ${l.status} ${l.status_code ?? ""} attempt=${l.attempt}/${l.retries} `
+      + `${l.url} (${l.duration_ms}ms) req=${l.request_id ?? "-"}${wait}${preview}${errSuffix}</div>`;
+  }
+
   const cls = l.status === "error" ? "error" : "ok";
   const extra = l.status === "error" ? errSuffix : (l.result ? ` ${JSON.stringify(l.result)}` : "");
   return `<div class="log-line ${cls}"><span class="ts">[${l.started_at}]</span> &nbsp;&nbsp;↳ ${l.event} (${l.duration_ms}ms) req=${l.request_id ?? "-"}${extra}</div>`;
 }
 
-function renderLogs(logs) {
+function renderFiltered() {
   const panel = document.getElementById("logPanel");
   const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 10;
-  panel.innerHTML = logs.map(renderLogLine).join("");
+  const sorted = [...logStore.values()]
+    .filter(l => activeFilters.has(l.event))
+    .sort((a, b) => a.started_at.localeCompare(b.started_at));
+  panel.innerHTML = sorted.map(renderLogLine).join("") || "<div style='color:#666'>(로그 없음)</div>";
   if (atBottom) panel.scrollTop = panel.scrollHeight;
+}
+
+function renderFilterButtons() {
+  const el = document.getElementById("logFilters");
+  el.innerHTML = EVENT_TYPES.map(t => `
+    <label style="cursor:pointer; user-select:none;">
+      <input type="checkbox" checked data-type="${t}" onchange="toggleFilter('${t}', this.checked)" /> ${t}
+    </label>
+  `).join("");
+}
+
+function toggleFilter(type, checked) {
+  if (checked) activeFilters.add(type); else activeFilters.delete(type);
+  renderFiltered();
 }
 
 async function pollLogs() {
   try {
     const data = await fetch("/api/rag/logs/recent?limit=200").then(r => r.json());
-    renderLogs([...data.logs].reverse());
-  } catch (e) { /* 백엔드 아직 안 떴을 수 있음 — 조용히 재시도 */ }
+    mergeLogs(data.logs || []);
+    renderFiltered();
+  } catch (e) { /* 백엔드 아직 안 떴을 수 있음 — 누적된 로그는 그대로 유지, 조용히 재시도 */ }
 }
 
 document.getElementById("query").addEventListener("keydown", e => { if (e.key === "Enter") runSearch(); });
+renderHttpPresets();
+renderFilterButtons();
 setInterval(pollLogs, 1500);
 pollLogs();
 </script>

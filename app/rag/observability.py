@@ -11,6 +11,7 @@ import contextvars
 import functools
 import inspect
 import json
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from datetime import datetime, timezone
 from . import config
 
 _request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
+_write_lock = threading.Lock()  # 동시 요청(3개 모드 동시 검색 등)이 같은 로그 파일에 겹쳐 쓰지 않도록
 
 
 def new_request_id() -> str:
@@ -34,8 +36,10 @@ def get_request_id() -> str | None:
 def _write_log(record: dict) -> None:
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOG_DIR / f"rag-{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+    with _write_lock:  # 여러 스레드(동시 검색 요청)가 같은 파일에 append할 때 줄이 섞이지 않게
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
 
 
 def log_event(event: str, **fields) -> None:

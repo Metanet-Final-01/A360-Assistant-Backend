@@ -91,6 +91,15 @@ class EchoRequest(BaseModel):
     message: str
 
 
+class HttpDebugRequest(BaseModel):
+    method: str = "GET"
+    url: str
+    headers: dict[str, str] = {}
+    body: str | None = None
+    timeout_seconds: float = 20.0
+    follow_redirects: bool = False
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {
@@ -123,6 +132,67 @@ def health() -> dict[str, str]:
     return {"status": "healthy"}
 
 
+@app.post("/api/debug/http-request")
+async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dict:
+    """Debug page helper: send an arbitrary HTTP request from the backend process."""
+    import httpx
+
+    debug_enabled = os.getenv("DEBUG_HTTP_CLIENT_ENABLED", "").lower() == "true"
+    local_env = os.getenv("APP_ENV", "development").lower() in {"development", "local", "test"}
+    if not (debug_enabled or local_env):
+        raise HTTPException(status_code=403, detail="Debug HTTP client is disabled for this environment.")
+
+    method = payload.method.upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported method: {payload.method}")
+
+    url = payload.url.strip()
+    if url.startswith("/"):
+        url = str(request.base_url).rstrip("/") + url
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="URL must be absolute or start with '/'.")
+
+    headers = {
+        str(key): str(value)
+        for key, value in payload.headers.items()
+        if key.lower() not in {"host", "content-length"}
+    }
+    timeout = max(1.0, min(payload.timeout_seconds, 60.0))
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=payload.follow_redirects) as client:
+            response = await client.request(
+                method,
+                url,
+                headers=headers,
+                content=payload.body if payload.body and method not in {"GET", "HEAD"} else None,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"HTTP request failed: {exc}")
+
+    content_type = response.headers.get("content-type", "")
+    try:
+        response_body = response.json() if "application/json" in content_type else response.text
+    except Exception:
+        response_body = response.text
+
+    return {
+        "request": {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "body": payload.body if method not in {"GET", "HEAD"} else None,
+        },
+        "response": {
+            "status_code": response.status_code,
+            "reason_phrase": response.reason_phrase,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            "headers": dict(response.headers),
+            "body": response_body,
+        },
+    }
+
+
 @app.get("/api/rag/search")
 def rag_search(q: str, limit: int = 5, mode: str = "hybrid_rerank") -> dict:
     """A360 패키지/액션 지식 하이브리드(RRF) + Voyage Reranker 검색.
@@ -149,6 +219,76 @@ def rag_search(q: str, limit: int = 5, mode: str = "hybrid_rerank") -> dict:
     return {"query": q, "results": results}
 
 
+class RerankDebugRequest(BaseModel):
+    query: str
+    documents: list[str]
+    top_k: int = 5
+
+
+@app.get("/api/rag/debug/embed")
+def debug_embed(text: str) -> dict:
+    """임베딩 단계만 단독 실행 (벡터 전체는 너무 커서 차원 수 + 앞부분만 반환)."""
+    from app.rag.retrieval.embed import embed_query
+
+    try:
+        vector = embed_query(text)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"text": text, "dim": len(vector), "preview": vector[:8]}
+
+
+@app.get("/api/rag/debug/vector-search")
+def debug_vector_search(q: str, limit: int = 5) -> dict:
+    """pgvector 코사인 유사도 검색 단계만 단독 실행 (RRF/rerank 없음)."""
+    from app.rag.retrieval.embed import embed_query
+    from app.rag.store import db
+
+    try:
+        query_embedding = embed_query(q)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    try:
+        conn = db.connect()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"DB 연결 실패: {e}")
+    try:
+        results = db.search(conn, query_embedding, limit=limit)
+    finally:
+        conn.close()
+    return {"query": q, "results": results}
+
+
+@app.get("/api/rag/debug/bm25-search")
+def debug_bm25_search(q: str, size: int = 5) -> dict:
+    """OpenSearch BM25 검색 단계만 단독 실행 (RRF/rerank 없음)."""
+    from app.rag.store import opensearch_client
+
+    try:
+        client = opensearch_client.connect()
+        results = opensearch_client.keyword_search(client, q, size=size)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"OpenSearch 오류: {e}")
+    return {"query": q, "results": results}
+
+
+@app.post("/api/rag/debug/rerank")
+def debug_rerank(payload: RerankDebugRequest) -> dict:
+    """Voyage Reranker 단계만 단독 실행 — 임의의 문서 목록을 직접 넣어 재정렬 결과를 확인."""
+    from app.rag.retrieval.rerank import rerank
+
+    try:
+        reranked = rerank(payload.query, payload.documents, top_k=payload.top_k)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {
+        "query": payload.query,
+        "results": [
+            {"index": item["index"], "relevance_score": item["relevance_score"], "document": payload.documents[item["index"]]}
+            for item in reranked
+        ],
+    }
+
+
 @app.get("/api/rag/logs/recent")
 def rag_logs_recent(limit: int = 100) -> dict:
     """검색/리랭커 파이프라인 최근 로그 — /debug 페이지가 폴링해서 실시간처럼 보여준다."""
@@ -164,7 +304,12 @@ def rag_logs_recent(limit: int = 100) -> dict:
         if len(lines) >= limit:
             break
 
-    records = [json.loads(line) for line in lines[-limit:]]
+    records = []
+    for line in lines[-limit:]:
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # 쓰는 도중 읽어서 잘린 마지막 줄 등 — 건너뛰고 계속 (요청 전체를 실패시키지 않음)
     records.reverse()  # 최신 순
     return {"logs": records}
 
