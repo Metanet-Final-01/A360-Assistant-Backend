@@ -1,8 +1,10 @@
 import json
 import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -36,6 +38,53 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 요청을 가로채 모든 HTTP 호출을 AOP 스타일로 기록한다 (각 라우트 코드는 손대지 않음).
+# /debug, /api/rag/logs/recent는 디버그 콘솔이 1.5초마다 스스로 폴링하는 경로라 제외한다
+# (그러지 않으면 로그가 자기 자신의 폴링 기록으로 도배된다).
+_SKIP_HTTP_LOG_PREFIXES = ("/api/rag/logs/recent", "/debug")
+
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    from app.rag.observability import log_event, new_request_id
+
+    if request.url.path.startswith(_SKIP_HTTP_LOG_PREFIXES):
+        return await call_next(request)
+
+    new_request_id()  # 이 HTTP 요청 안의 모든 파이프라인 로그(embed_query 등)를 이 id로 묶는다
+    started_at = datetime.now(timezone.utc)
+    start = time.perf_counter()
+    common = {
+        "method": request.method,
+        "path": request.url.path,
+        "query": str(request.url.query),
+        "client": request.client.host if request.client else None,
+        "started_at": started_at.isoformat(),
+    }
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        log_event(
+            "http_request",
+            **common,
+            status="error",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            duration_ms=round((time.perf_counter() - start) * 1000, 2),
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
+        raise
+
+    log_event(
+        "http_request",
+        **common,
+        status_code=response.status_code,
+        status="ok" if response.status_code < 400 else "error",
+        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+        ended_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return response
 
 
 class EchoRequest(BaseModel):
@@ -81,11 +130,10 @@ def rag_search(q: str, limit: int = 5, mode: str = "hybrid_rerank") -> dict:
     app/rag 파이프라인으로 적재된 데이터를 사용한다.
     mode: vector(기존 방식) / hybrid(RRF만) / hybrid_rerank(기본, RRF+Voyage Reranker)
     """
-    from app.rag.observability import new_request_id
     from app.rag.store import db, opensearch_client
     from app.rag.retrieval.hybrid_search import search as hybrid_search
 
-    new_request_id()  # 이 요청의 embed_query/vector_search/bm25_search/rerank 로그를 하나로 묶는다
+    # request_id는 log_http_requests 미들웨어가 이미 생성해둠 — 여기서 다시 만들지 않는다
     try:
         conn = db.connect()
     except Exception as e:

@@ -27,6 +27,7 @@
   .log-line { padding: 2px 0; border-bottom: 1px solid #161a20; white-space: pre-wrap; }
   .log-line.ok { color: #7ee8a0; }
   .log-line.error { color: #ff8080; }
+  .log-line.http { color: #7eb8e8; font-weight: 600; }
   .log-line .ts { color: #6b7280; }
   .status { font-size: 12px; color: #9aa4b2; margin-bottom: 8px; }
 </style>
@@ -107,14 +108,25 @@ async function runSearch() {
   }
 }
 
+function renderLogLine(l) {
+  const errSuffix = l.status === "error" ? ` ${l.error_type}: ${l.error_message}` : "";
+
+  if (l.event === "http_request") {
+    const cls = l.status === "error" ? "error" : "http";
+    return `<div class="log-line ${cls}"><span class="ts">[${l.started_at}]</span> `
+      + `<b>HTTP ${l.method} ${l.path}${l.query ? "?" + l.query : ""}</b> -> ${l.status_code ?? "-"} `
+      + `(${l.duration_ms}ms) req=${l.request_id ?? "-"}${errSuffix}</div>`;
+  }
+
+  const cls = l.status === "error" ? "error" : "ok";
+  const extra = l.status === "error" ? errSuffix : (l.result ? ` ${JSON.stringify(l.result)}` : "");
+  return `<div class="log-line ${cls}"><span class="ts">[${l.started_at}]</span> &nbsp;&nbsp;↳ ${l.event} (${l.duration_ms}ms) req=${l.request_id ?? "-"}${extra}</div>`;
+}
+
 function renderLogs(logs) {
   const panel = document.getElementById("logPanel");
   const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 10;
-  panel.innerHTML = logs.map(l => {
-    const cls = l.status === "error" ? "error" : "ok";
-    const extra = l.status === "error" ? ` ${l.error_type}: ${l.error_message}` : (l.result ? ` ${JSON.stringify(l.result)}` : "");
-    return `<div class="log-line ${cls}"><span class="ts">[${l.started_at}]</span> ${l.event} (${l.duration_ms}ms) req=${l.request_id ?? "-"}${extra}</div>`;
-  }).join("");
+  panel.innerHTML = logs.map(renderLogLine).join("");
   if (atBottom) panel.scrollTop = panel.scrollHeight;
 }
 

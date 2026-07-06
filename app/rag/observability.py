@@ -38,6 +38,15 @@ def _write_log(record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
+def log_event(event: str, **fields) -> None:
+    """@log_call 데코레이터를 씌울 수 없는 곳(FastAPI 미들웨어 등)에서 직접 레코드를 남긴다.
+
+    파일 기록 방식은 log_call과 완전히 동일해서(_write_log 공유), 검색 파이프라인
+    로그와 HTTP 요청 로그가 같은 파일·같은 request_id 체계 안에 섞여 들어간다.
+    """
+    _write_log({"request_id": get_request_id(), "event": event, **fields})
+
+
 def _summarize(value):
     if isinstance(value, str):
         return {"len": len(value), "preview": value[:80]}
