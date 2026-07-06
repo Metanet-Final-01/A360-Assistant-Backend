@@ -7,6 +7,7 @@ PDFBox는 Docker 이미지에 내장되어 있고(PDFBOX_JAR_PATH), 로컬에 Ja
 import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -48,7 +49,21 @@ def parse_pdf(content: bytes) -> dict:
 
 def _with_pypdf(content: bytes) -> tuple[str, list[str]]:
     reader = PdfReader(io.BytesIO(content))
-    return "pypdf", [(page.extract_text() or "") for page in reader.pages]
+    return "pypdf", [_extract_page_text(page) for page in reader.pages]
+
+
+def _extract_page_text(page) -> str:
+    """layout 모드 우선 추출 — 표·다단 구성의 공간 배치를 보존한다.
+
+    layout 모드는 정렬을 위해 공백을 대량 패딩하므로(실측: 179자 문서가 1,021자로 부풀음)
+    3칸 이상 연속 공백은 2칸으로 압축한다 — 열 구분 신호는 남기고 토큰 낭비는 제거.
+    """
+    try:
+        text = page.extract_text(extraction_mode="layout") or ""
+    except Exception:  # noqa: BLE001 — 문서에 따라 layout 모드가 실패하면 기본 모드로
+        text = page.extract_text() or ""
+    lines = (re.sub(r" {3,}", "  ", line.rstrip()) for line in text.split("\n"))
+    return "\n".join(lines)
 
 
 def _try_pdfbox(content: bytes) -> str | None:

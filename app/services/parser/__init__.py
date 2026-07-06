@@ -2,14 +2,15 @@
 
 산출 형식 (documents.parsed_content):
 {
-  "parser": "pypdf" | "pdfbox" | "python-pptx",
+  "parser": "pypdf" | "pdfbox" | "python-pptx" (+"+vision" 보강 시),
   "page_count": int,
-  "pages": [{"page": 1, "blocks": [{"type": "text"|"table"|"notes", ...}]}],
+  "pages": [{"page": 1, "blocks": [{"type": "text"|"table"|"notes"|"vision_text", ...}]}],
   "full_text": str,          # LLM 분석 입력용 전체 텍스트
   "warnings": [str],         # 예: 텍스트 없는 페이지(이미지 페이지 가능성)
+  "vision": {"enriched_pages": [int]},   # 비전 보강 수행 시
 }
 
-이미지/도식 내 텍스트(OCR·멀티모달, FR-03)는 후속 이슈 범위다.
+이미지 중심 페이지는 vision.enrich_document()가 비전 LLM으로 보강한다 (FR-03).
 """
 
 from app.services.parser.pdf import parse_pdf

@@ -26,3 +26,14 @@ def save(session_id: str, doc_id: str, filename: str, content: bytes) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     return str(path)
+
+
+def load(storage_path: str) -> bytes:
+    """save()가 반환한 storage_path에서 파일 원본을 읽는다."""
+    if storage_path.startswith("s3://"):
+        import boto3
+
+        bucket, _, key = storage_path.removeprefix("s3://").partition("/")
+        obj = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+        return obj["Body"].read()
+    return Path(storage_path).read_bytes()
