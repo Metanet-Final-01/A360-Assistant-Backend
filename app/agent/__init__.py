@@ -8,6 +8,6 @@
 """
 
 from .graph import run_agent, stream_agent
-from .schemas import AgentResult
+from .schemas import AgentResult, Source
 
-__all__ = ["AgentResult", "run_agent", "stream_agent"]
+__all__ = ["AgentResult", "Source", "run_agent", "stream_agent"]
