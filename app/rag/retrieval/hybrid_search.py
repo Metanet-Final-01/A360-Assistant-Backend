@@ -7,6 +7,7 @@ mode:
 """
 
 from .. import config
+from ..observability import log_call
 from ..store import db, opensearch_client
 from .embed import embed_query
 from .rerank import rerank as voyage_rerank
@@ -26,6 +27,15 @@ def reciprocal_rank_fusion(rank_lists: list[list[str]], k: int) -> dict[str, flo
     return scores
 
 
+@log_call(
+    "hybrid_search",
+    capture_args=("query", "limit", "mode"),
+    capture_result=lambda r: {
+        "count": len(r),
+        "retrieval_sources": [item.get("retrieval_source") for item in r],
+        "reranked": any("rerank_score" in item for item in r),
+    },
+)
 def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank") -> list[dict]:
     try:
         query_embedding = embed_query(query)

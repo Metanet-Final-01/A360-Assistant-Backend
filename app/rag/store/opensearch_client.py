@@ -4,6 +4,7 @@ from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 
 from .. import config
+from ..observability import log_call
 
 _INDEX_BODY = {
     "settings": {
@@ -75,6 +76,7 @@ def bulk_index(client: OpenSearch, documents: list[dict]) -> int:
     return success
 
 
+@log_call("bm25_search", capture_args=("query", "size"), capture_result=lambda r: {"count": len(r)})
 def keyword_search(client: OpenSearch, query: str, size: int) -> list[dict]:
     body = {
         "size": size,

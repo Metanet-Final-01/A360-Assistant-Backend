@@ -5,6 +5,7 @@ import time
 import httpx
 
 from .. import config
+from ..observability import log_call
 
 # 한국어는 문자당 토큰 수가 많아(최대 ~2토큰/자) 보수적으로 자른다: 4000자 ≈ 최대 8k 토큰
 _BATCH_SIZE = 16
@@ -57,6 +58,11 @@ def embed_texts(texts: list[str], on_progress=None) -> list[list[float]]:
     return vectors
 
 
+@log_call(
+    "embed_query",
+    capture_args=("text",),
+    capture_result=lambda r: {"provider": config.EMBEDDING_PROVIDER, "dim": len(r)},
+)
 def embed_query(text: str) -> list[float]:
     """검색 시 질의 임베딩 (Voyage는 query/document input_type을 구분)."""
     if config.EMBEDDING_PROVIDER == "voyage":

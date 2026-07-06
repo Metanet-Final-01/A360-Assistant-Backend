@@ -5,6 +5,7 @@ import json
 import psycopg
 
 from .. import config
+from ..observability import log_call
 
 _DDL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -86,6 +87,7 @@ def upsert_documents(conn: psycopg.Connection, documents: list[dict], embeddings
     return len(documents)
 
 
+@log_call("vector_search", capture_args=("limit",), capture_result=lambda r: {"count": len(r)})
 def search(conn: psycopg.Connection, query_embedding: list[float], limit: int = 5) -> list[dict]:
     vector = "[" + ",".join(f"{x:.7f}" for x in query_embedding) + "]"
     with conn.cursor() as cur:

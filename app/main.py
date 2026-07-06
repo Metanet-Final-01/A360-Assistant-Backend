@@ -78,9 +78,11 @@ def rag_search(q: str, limit: int = 5, mode: str = "hybrid_rerank") -> dict:
     app/rag 파이프라인으로 적재된 데이터를 사용한다.
     mode: vector(기존 방식) / hybrid(RRF만) / hybrid_rerank(기본, RRF+Voyage Reranker)
     """
+    from app.rag.observability import new_request_id
     from app.rag.store import db, opensearch_client
     from app.rag.retrieval.hybrid_search import search as hybrid_search
 
+    new_request_id()  # 이 요청의 embed_query/vector_search/bm25_search/rerank 로그를 하나로 묶는다
     try:
         conn = db.connect()
     except Exception as e:

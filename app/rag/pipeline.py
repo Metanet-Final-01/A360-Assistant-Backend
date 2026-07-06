@@ -244,9 +244,11 @@ def cmd_eda(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
+    from .observability import new_request_id
     from .store import db, opensearch_client
     from .retrieval.hybrid_search import search as hybrid_search
 
+    new_request_id()
     conn = db.connect()
     try:
         os_client = opensearch_client.connect()

@@ -1,11 +1,17 @@
 """Voyage Rerank API 클라이언트 (rerank-2.5-lite). RRF 융합 후 최종 재정렬에 사용."""
 
 from .. import config
+from ..observability import log_call
 from .embed import post_with_retry
 
 _RERANK_URL = "https://api.voyageai.com/v1/rerank"
 
 
+@log_call(
+    "voyage_rerank",
+    capture_args=("query", "documents", "top_k"),
+    capture_result=lambda r: {"model": config.RERANK_MODEL, "count": len(r)},
+)
 def rerank(query: str, documents: list[str], top_k: int) -> list[dict]:
     """documents 리스트를 query에 대해 재정렬한다.
 

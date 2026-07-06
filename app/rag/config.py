@@ -19,6 +19,9 @@ EXPORTS_DIR = DATA_DIR / "exports"
 RAG_DOCUMENTS_JSONL = DATA_DIR / "rag_documents.jsonl"
 EDA_REPORT_JSON = DATA_DIR / "eda_report.json"
 
+# 검색/리랭커 파이프라인 각 단계 로그 (JSON Lines, 날짜별 파일) — observability.py가 씀
+LOG_DIR = Path(os.getenv("RAG_LOG_DIR") or "app/rag/logs")
+
 # 청킹: chunk_size 초과 문서만 분할한다. 기본값은 NongSabu DocumentChunker 프라이어(1200/200) —
 # `pipeline.py eda`로 실제 문서 길이 분포를 확인한 뒤 필요시 .env에서 조정한다.
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
