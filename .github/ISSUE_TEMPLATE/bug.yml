@@ -1,7 +1,7 @@
 name: "🐛 버그 리포트"
 description: "동작하지 않거나 예상과 다른 동작"
 title: "[bug] "
-labels: ["type:bug"]
+labels: ["버그"]
 body:
   - type: textarea
     id: what
