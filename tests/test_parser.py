@@ -54,6 +54,20 @@ def test_pptx_extracts_text_and_table_in_order():
     assert "시세 조회 | Edge" in result["full_text"]
 
 
+def test_pptx_extracts_text_inside_group_shapes():
+    """그룹으로 묶인 도형 내부의 텍스트도 추출된다."""
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # 빈 레이아웃
+    group = slide.shapes.add_group_shape()
+    box = group.shapes.add_textbox(Inches(1), Inches(1), Inches(3), Inches(1))
+    box.text_frame.text = "그룹 안의 업무 설명"
+    buf = io.BytesIO()
+    prs.save(buf)
+
+    result = parse_document("grouped.pptx", buf.getvalue())
+    assert "그룹 안의 업무 설명" in result["full_text"]
+
+
 def test_pdf_blank_page_warns_image_possibility():
     result = parse_document("blank.pdf", _make_blank_pdf())
 
