@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>A360 RAG 디버그 콘솔</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 16px; background: #0f1115; color: #e6e6e6; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+  .search-bar input { flex: 1; padding: 8px 10px; font-size: 14px; background: #1b1f27; color: #eee; border: 1px solid #333; border-radius: 4px; }
+  .search-bar button { padding: 8px 16px; font-size: 14px; background: #3b6ee0; color: white; border: none; border-radius: 4px; cursor: pointer; }
+  .search-bar button:disabled { background: #555; cursor: wait; }
+  .columns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  .column h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4b2; border-bottom: 1px solid #333; padding-bottom: 6px; }
+  .card { background: #1b1f27; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; }
+  .card .title { font-weight: 600; color: #fff; margin-bottom: 4px; }
+  .card .meta { color: #9aa4b2; font-size: 11px; margin-bottom: 4px; }
+  .card .meta span { margin-right: 8px; }
+  .card .content { color: #b9c0cc; max-height: 60px; overflow: hidden; text-overflow: ellipsis; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; }
+  .badge.both { background: #1e5f3e; color: #7ee8a0; }
+  .badge.dense { background: #1e3a5f; color: #7eb8e8; }
+  .badge.bm25 { background: #5f4a1e; color: #e8c67e; }
+  .badge.vector { background: #3a1e5f; color: #c67ee8; }
+  .log-panel { background: #05070a; border: 1px solid #2a2f3a; border-radius: 6px; padding: 10px; height: 320px; overflow-y: auto; font-family: "Cascadia Code", monospace; font-size: 11px; }
+  .log-line { padding: 2px 0; border-bottom: 1px solid #161a20; white-space: pre-wrap; }
+  .log-line.ok { color: #7ee8a0; }
+  .log-line.error { color: #ff8080; }
+  .log-line.http { color: #7eb8e8; font-weight: 600; }
+  .log-line .ts { color: #6b7280; }
+  .status { font-size: 12px; color: #9aa4b2; margin-bottom: 8px; }
+  .section { margin: 18px 0; }
+  .section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4b2; border-bottom: 1px solid #333; padding-bottom: 6px; }
+  .http-lab { background: #141821; border: 1px solid #2a2f3a; border-radius: 6px; padding: 12px; }
+  .preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .preset-grid button, .http-lab button { padding: 7px 10px; font-size: 12px; background: #263244; color: #e6e6e6; border: 1px solid #3a4558; border-radius: 4px; cursor: pointer; }
+  .preset-grid button:hover, .http-lab button:hover { background: #33415a; }
+  .http-lab button.primary { background: #3b6ee0; border-color: #3b6ee0; color: #fff; }
+  .http-lab button:disabled { background: #555; cursor: wait; }
+  .http-row { display: grid; grid-template-columns: 120px 1fr; gap: 8px; }
+  .http-grid { display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: center; margin: 8px 0; }
+  .http-grid label { font-size: 12px; color: #b9c0cc; }
+  .http-lab input, .http-lab select, .http-lab textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; font-size: 13px; background: #1b1f27; color: #eee; border: 1px solid #333; border-radius: 4px; }
+  .http-lab textarea { min-height: 88px; resize: vertical; font-family: "Cascadia Code", monospace; }
+  .http-status { font-size: 12px; color: #9aa4b2; margin: 8px 0; }
+  .http-result { min-height: 180px; max-height: 420px; overflow: auto; white-space: pre-wrap; background: #05070a; border: 1px solid #2a2f3a; border-radius: 6px; padding: 10px; font-family: "Cascadia Code", monospace; font-size: 11px; color: #d5f3e5; }
+  .status-grid { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .status-pill { display: flex; align-items: center; gap: 6px; background: #1b1f27; border: 1px solid #2a2f3a; border-radius: 20px; padding: 5px 12px; font-size: 12px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.up { background: #4ade80; box-shadow: 0 0 5px #4ade80; }
+  .status-dot.down { background: #f87171; box-shadow: 0 0 5px #f87171; }
+  .status-dot.na { background: #6b7280; }
+  .status-note { font-size: 11px; color: #e8c67e; margin-top: 4px; width: 100%; }
+  @media (max-width: 900px) {
+    .columns { grid-template-columns: 1fr; }
+    .preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .http-row, .http-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+  <h1>A360 RAG 디버그 콘솔 — vector / hybrid / hybrid_rerank 동시 비교 + 실시간 로그</h1>
+
+  <div class="section">
+    <h2>서비스 상태 (5초마다 갱신) — DB/OpenSearch/임베딩/리랭커가 실제로 붙어있는지 점검</h2>
+    <div class="status-grid" id="statusGrid">불러오는 중...</div>
+  </div>
+
+  <div class="search-bar">
+    <input id="query" type="text" placeholder="예: 엑셀 시트 활성화 어떻게 해?" value="구글시트에서 시트 활성화 어떻게 해?" />
+    <input id="limit" type="number" value="5" min="1" max="20" style="width:60px" />
+    <button id="searchBtn" onclick="runSearch()">검색</button>
+  </div>
+  <div class="status" id="status"></div>
+
+  <div class="columns">
+    <div class="column"><h2>vector (기존 방식)</h2><div id="col-vector"></div></div>
+    <div class="column"><h2>hybrid (RRF)</h2><div id="col-hybrid"></div></div>
+    <div class="column"><h2>hybrid_rerank (RRF + Voyage)</h2><div id="col-hybrid_rerank"></div></div>
+  </div>
+
+  <div class="section">
+    <h2>Agent 계약 확인 — app.services.rag.search_actions() (docs/INTERFACES.md)</h2>
+    <div class="search-bar">
+      <input id="contractQuery" type="text" placeholder="질의" value="엑셀 시트 활성화" style="flex:2" />
+      <input id="contractK" type="number" value="5" min="1" max="20" style="width:60px" />
+      <input id="contractSourceTypes" type="text" placeholder="source_types (콤마, 비우면 전체) 예: action_schema,package_overview" style="flex:2" />
+      <button onclick="runContractCheck()">계약 확인</button>
+    </div>
+    <div id="contractResult"></div>
+  </div>
+
+  <div class="section http-lab">
+    <h2>HTTP API Lab (backend sender)</h2>
+    <div class="preset-grid" id="httpPresets"></div>
+    <div class="http-row">
+      <select id="httpMethod">
+        <option>GET</option>
+        <option>POST</option>
+        <option>PUT</option>
+        <option>PATCH</option>
+        <option>DELETE</option>
+        <option>HEAD</option>
+        <option>OPTIONS</option>
+      </select>
+      <input id="httpUrl" value="/api/health" placeholder="/api/health or https://example.com/api" />
+    </div>
+    <div class="http-grid">
+      <label for="httpHeaders">Headers JSON</label>
+      <textarea id="httpHeaders">{
+  "Content-Type": "application/json"
+}</textarea>
+      <label for="httpBody">Body</label>
+      <textarea id="httpBody"></textarea>
+    </div>
+    <button id="httpSendBtn" class="primary" onclick="sendHttpRequest()">Send from backend</button>
+    <div class="http-status" id="httpStatus">No request sent yet.</div>
+    <pre class="http-result" id="httpResult"></pre>
+  </div>
+
+  <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+    <h2 style="font-size:13px;color:#9aa4b2; margin:0;">실시간 파이프라인 로그 (1.5초마다 갱신)</h2>
+    <div id="logFilters" style="font-size:11px; display:flex; gap:6px;"></div>
+    <button onclick="logStore.clear(); renderFiltered();" style="font-size:11px; padding:2px 8px; margin-left:auto;">지우기</button>
+  </div>
+  <div class="log-panel" id="logPanel"></div>
+
+<script>
+const MODES = ["vector", "hybrid", "hybrid_rerank"];
+const HTTP_PRESETS = [
+  { label: "GET /", method: "GET", url: "/", body: "" },
+  { label: "GET /health", method: "GET", url: "/health", body: "" },
+  { label: "GET /api/message", method: "GET", url: "/api/message", body: "" },
+  { label: "POST /api/echo", method: "POST", url: "/api/echo", body: JSON.stringify({ message: "hello from backend debug" }, null, 2) },
+  { label: "RAG search", method: "GET", url: "/api/rag/search?q=구글시트에서 시트 활성화 어떻게 해?&limit=5&mode=hybrid_rerank", body: "" },
+  { label: "Debug embed", method: "GET", url: "/api/rag/debug/embed?text=구글시트에서 시트 활성화", body: "" },
+  { label: "Vector search", method: "GET", url: "/api/rag/debug/vector-search?q=구글시트&limit=5", body: "" },
+  { label: "BM25 search", method: "GET", url: "/api/rag/debug/bm25-search?q=구글시트&size=5", body: "" },
+  {
+    label: "Rerank",
+    method: "POST",
+    url: "/api/rag/debug/rerank",
+    body: JSON.stringify({
+      query: "구글시트에서 시트 활성화",
+      documents: ["Google Sheets activate sheet action", "Excel row read action", "Send Slack message"],
+      top_k: 3,
+    }, null, 2),
+  },
+];
+
+function scoreOf(item) {
+  if (item.rerank_score !== undefined) return `rerank=${item.rerank_score.toFixed(3)}`;
+  if (item.rrf_score !== undefined) return `rrf=${item.rrf_score.toFixed(4)}`;
+  if (item.score !== undefined) return `cos=${item.score.toFixed(3)}`;
+  return "";
+}
+
+function badgeFor(source) {
+  if (!source) return "";
+  const cls = source.includes("both") ? "both" : source.includes("dense") ? "dense" : source.includes("bm25") ? "bm25" : "vector";
+  return `<span class="badge ${cls}">${source}</span>`;
+}
+
+function renderColumn(elId, results) {
+  const el = document.getElementById(elId);
+  if (!results || !results.length) { el.innerHTML = "<div class='card'>결과 없음</div>"; return; }
+  el.innerHTML = results.map(r => `
+    <div class="card">
+      <div class="title">${r.title ?? "(제목 없음)"}</div>
+      <div class="meta">
+        <span>${r.source_type ?? ""}</span>
+        <span>${scoreOf(r)}</span>
+        ${r.dense_rank ? `<span>dense#${r.dense_rank}</span>` : ""}
+        ${r.bm25_rank ? `<span>bm25#${r.bm25_rank}</span>` : ""}
+        ${badgeFor(r.retrieval_source)}
+      </div>
+      <div class="content">${(r.content ?? "").slice(0, 140)}...</div>
+    </div>
+  `).join("");
+}
+
+async function runSearch() {
+  const q = document.getElementById("query").value.trim();
+  const limit = document.getElementById("limit").value || 5;
+  if (!q) return;
+  const btn = document.getElementById("searchBtn");
+  const status = document.getElementById("status");
+  btn.disabled = true;
+  status.textContent = "검색 중...";
+  try {
+    const results = await Promise.all(MODES.map(mode =>
+      fetch(`/api/rag/search?q=${encodeURIComponent(q)}&limit=${limit}&mode=${mode}`)
+        .then(r => r.json())
+        .catch(e => ({ results: [], error: String(e) }))
+    ));
+    MODES.forEach((mode, i) => renderColumn(`col-${mode}`, results[i].results));
+    status.textContent = `완료 (${new Date().toLocaleTimeString()})`;
+  } catch (e) {
+    status.textContent = `오류: ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+const CONTRACT_FIELDS = ["id", "source_type", "package_name", "action_name", "title", "url", "content", "score"];
+
+async function runContractCheck() {
+  const q = document.getElementById("contractQuery").value.trim();
+  const k = document.getElementById("contractK").value || 5;
+  const sourceTypes = document.getElementById("contractSourceTypes").value.trim();
+  const el = document.getElementById("contractResult");
+  if (!q) return;
+  el.innerHTML = "확인 중...";
+  try {
+    const params = new URLSearchParams({ q, k });
+    if (sourceTypes) params.set("source_types", sourceTypes);
+    const data = await fetch(`/api/rag/debug/search-actions?${params}`).then(r => r.json());
+    if (!data.results) { el.innerHTML = `<div class="card">오류: ${data.detail ?? JSON.stringify(data)}</div>`; return; }
+    if (!data.results.length) { el.innerHTML = "<div class='card'>결과 없음</div>"; return; }
+
+    el.innerHTML = data.results.map(r => {
+      const missing = r._missing_contract_fields ?? [];
+      const fieldRow = CONTRACT_FIELDS.map(f => {
+        const has = r[f] !== undefined && r[f] !== null;
+        const bad = missing.includes(f);
+        // bad(실제 누락) / has(정상 존재) / 그 외(이 source_type엔 원래 없는 선택 필드 — 예: doc_page의 package_name)
+        if (bad) return `<span style="color:#ff8080; margin-right:8px;">✗ ${f}</span>`;
+        if (has) return `<span style="color:#7ee8a0; margin-right:8px;">✓ ${f}</span>`;
+        return `<span style="color:#6b7280; margin-right:8px;">– ${f}</span>`;
+      }).join("");
+      return `
+        <div class="card">
+          <div class="title">${r.title ?? "(제목 없음)"}</div>
+          <div class="meta"><span>${r.source_type}</span><span>score=${(r.score ?? 0).toFixed(3)}</span></div>
+          <div style="font-size:10px; margin-top:4px;">${fieldRow}</div>
+          ${missing.length ? `<div style="color:#ff8080; font-size:11px; margin-top:4px;">누락된 계약 필드: ${missing.join(", ")}</div>` : ""}
+        </div>`;
+    }).join("");
+  } catch (e) {
+    el.innerHTML = `<div class="card">오류: ${e}</div>`;
+  }
+}
+
+function renderHttpPresets() {
+  const el = document.getElementById("httpPresets");
+  el.innerHTML = HTTP_PRESETS.map((preset, index) =>
+    `<button type="button" onclick="applyHttpPreset(${index})">${preset.label}</button>`
+  ).join("");
+}
+
+function applyHttpPreset(index) {
+  const preset = HTTP_PRESETS[index];
+  document.getElementById("httpMethod").value = preset.method;
+  document.getElementById("httpUrl").value = preset.url;
+  document.getElementById("httpBody").value = preset.body;
+  sendHttpRequest();
+}
+
+function parseJsonInput(id) {
+  const raw = document.getElementById(id).value.trim();
+  if (!raw) return {};
+  return JSON.parse(raw);
+}
+
+async function sendHttpRequest() {
+  const btn = document.getElementById("httpSendBtn");
+  const status = document.getElementById("httpStatus");
+  const result = document.getElementById("httpResult");
+  btn.disabled = true;
+  status.textContent = "Sending from backend...";
+  result.textContent = "";
+
+  try {
+    const payload = {
+      method: document.getElementById("httpMethod").value,
+      url: document.getElementById("httpUrl").value,
+      headers: parseJsonInput("httpHeaders"),
+      body: document.getElementById("httpBody").value || null,
+      timeout_seconds: 20,
+      follow_redirects: false,
+    };
+    const response = await fetch("/api/debug/http-request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    status.textContent = `Debug endpoint status ${response.status} (${new Date().toLocaleTimeString()})`;
+    result.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    status.textContent = `Error: ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 폴링 결과를 누적 저장(request_id+event+started_at로 dedup)한다 — 한 번의 폴링 실패/부분
+// 응답 때문에 화면에서 이전 로그가 사라져 보이는 일이 없도록, 매번 통째로 교체하지 않고 병합한다.
+const logStore = new Map();
+const EVENT_TYPES = ["http_request", "external_api_attempt", "embed_query", "vector_search", "bm25_search", "voyage_rerank", "hybrid_search"];
+const activeFilters = new Set(EVENT_TYPES);
+
+function logKey(l) { return `${l.request_id}|${l.event}|${l.started_at}`; }
+
+function mergeLogs(newLogs) {
+  for (const l of newLogs) logStore.set(logKey(l), l);
+}
+
+function renderLogLine(l) {
+  const errSuffix = l.status === "error" && (l.error_type || l.error_message)
+    ? ` ${l.error_type ?? "error"}: ${l.error_message ?? ""}`
+    : "";
+
+  if (l.event === "http_request") {
+    const cls = l.status === "error" ? "error" : "http";
+    return `<div class="log-line ${cls}"><span class="ts">[${l.started_at}]</span> `
+      + `<b>HTTP ${l.method} ${l.path}${l.query ? "?" + l.query : ""}</b> -> ${l.status_code ?? "-"} `
+      + `(${l.duration_ms}ms) req=${l.request_id ?? "-"}${errSuffix}</div>`;
+  }
+
+  if (l.event === "external_api_attempt") {
+    const cls = l.status === "ok" ? "ok" : "error";
+    const preview = l.response_preview ? ` body=${String(l.response_preview).slice(0, 180)}` : "";
+    const wait = l.wait_seconds !== undefined ? ` wait=${l.wait_seconds}s` : "";
+    return `<div class="log-line ${cls}"><span class="ts">[${l.started_at ?? ""}]</span> `
+      + `↳ external_api ${l.status} ${l.status_code ?? ""} attempt=${l.attempt}/${l.retries} `
+      + `${l.url} (${l.duration_ms}ms) req=${l.request_id ?? "-"}${wait}${preview}${errSuffix}</div>`;
+  }
+
+  const cls = l.status === "error" ? "error" : "ok";
+  const extra = l.status === "error" ? errSuffix : (l.result ? ` ${JSON.stringify(l.result)}` : "");
+  return `<div class="log-line ${cls}"><span class="ts">[${l.started_at}]</span> &nbsp;&nbsp;↳ ${l.event} (${l.duration_ms}ms) req=${l.request_id ?? "-"}${extra}</div>`;
+}
+
+function renderFiltered() {
+  const panel = document.getElementById("logPanel");
+  const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 10;
+  const sorted = [...logStore.values()]
+    .filter(l => activeFilters.has(l.event))
+    .sort((a, b) => a.started_at.localeCompare(b.started_at));
+  panel.innerHTML = sorted.map(renderLogLine).join("") || "<div style='color:#666'>(로그 없음)</div>";
+  if (atBottom) panel.scrollTop = panel.scrollHeight;
+}
+
+function renderFilterButtons() {
+  const el = document.getElementById("logFilters");
+  el.innerHTML = EVENT_TYPES.map(t => `
+    <label style="cursor:pointer; user-select:none;">
+      <input type="checkbox" checked data-type="${t}" onchange="toggleFilter('${t}', this.checked)" /> ${t}
+    </label>
+  `).join("");
+}
+
+function toggleFilter(type, checked) {
+  if (checked) activeFilters.add(type); else activeFilters.delete(type);
+  renderFiltered();
+}
+
+async function pollLogs() {
+  try {
+    const data = await fetch("/api/rag/logs/recent?limit=200").then(r => r.json());
+    mergeLogs(data.logs || []);
+    renderFiltered();
+  } catch (e) { /* 백엔드 아직 안 떴을 수 있음 — 누적된 로그는 그대로 유지, 조용히 재시도 */ }
+}
+
+function statusDot(ok) {
+  return `<span class="status-dot ${ok === true ? "up" : ok === false ? "down" : "na"}"></span>`;
+}
+
+async function pollStatus() {
+  const grid = document.getElementById("statusGrid");
+  try {
+    const s = await fetch("/api/rag/debug/status").then(r => r.json());
+    const pills = [
+      `<div class="status-pill">${statusDot(s.database?.reachable)} DB</div>`,
+      `<div class="status-pill">${statusDot(s.opensearch?.reachable)} OpenSearch${s.opensearch?.cluster_status ? " (" + s.opensearch.cluster_status + ")" : ""}</div>`,
+      `<div class="status-pill">${statusDot(s.embedding?.api_key_configured)} Embedding: ${s.embedding?.provider ?? "?"}/${s.embedding?.model ?? "?"}</div>`,
+      `<div class="status-pill">${statusDot(s.reranker?.api_key_configured)} Reranker: ${s.reranker?.model ?? "?"}</div>`,
+    ];
+    let extra = "";
+    if (s.opensearch?.reachable === false) {
+      extra = `<div class="status-note">OpenSearch 연결 안 됨 — hybrid/hybrid_rerank는 vector 단독(hybrid_dense_only)으로 저하되어 동작합니다. (${s.opensearch.error ?? ""})</div>`;
+    }
+    grid.innerHTML = pills.join("") + extra;
+  } catch (e) {
+    grid.innerHTML = `<div class="status-pill">${statusDot(false)} 백엔드에 연결할 수 없음</div>`;
+  }
+}
+
+document.getElementById("query").addEventListener("keydown", e => { if (e.key === "Enter") runSearch(); });
+renderHttpPresets();
+renderFilterButtons();
+setInterval(pollLogs, 1500);
+setInterval(pollStatus, 5000);
+pollLogs();
+pollStatus();
+</script>
+</body>
+</html>

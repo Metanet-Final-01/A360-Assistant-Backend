@@ -104,7 +104,7 @@ feat(rag): 액션 요약본 동시 청킹 저장 추가 (RPA-12)
 
 | 영역 | 폴더 | 담당 |
 |---|---|---|
-| 백엔드 API·DB·RAG | `app/` (agent 제외), `app/ingest/` | 백엔드 담당 |
+| 백엔드 API·DB·RAG | `app/` (agent 제외), `app/rag/` | 백엔드 담당 |
 | Agent·LLM | `app/agent/` (예정) | AI 담당 |
 | 인프라·CI/CD | `infra/`, `.github/workflows/backend-deploy.yml` | DevOps 담당 |
 

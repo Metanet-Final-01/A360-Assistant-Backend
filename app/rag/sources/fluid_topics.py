@@ -10,7 +10,7 @@ import time
 import httpx
 from bs4 import BeautifulSoup
 
-from .config import DOCS_BASE_URL
+from ..config import DOCS_BASE_URL
 
 
 def _client() -> httpx.Client:

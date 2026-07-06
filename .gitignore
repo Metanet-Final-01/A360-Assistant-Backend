@@ -34,5 +34,8 @@ docs/aws-backend-deployment.md
 data/
 tmp/
 
+# RAG 검색/리랭커 파이프라인 로그 (JSON Lines, 날짜별)
+app/rag/logs/
+
 # RAG seed dump (용량 큼 — LFS/S3로 공유)
 infra/seed/*.dump

@@ -5,11 +5,24 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
-      DATABASE_HOST: ${DATABASE_HOST:-db}
+      # 컨테이너 내부에서는 항상 서비스명 db로 접속 — .env의 DATABASE_HOST(호스트 CLI용 localhost)와 무관하게 고정
+      DATABASE_HOST: db
       DATABASE_PORT: ${DATABASE_PORT:-5432}
       DATABASE_NAME: ${DATABASE_NAME:-a360}
       DATABASE_USERNAME: ${DATABASE_USERNAME:-a360_admin}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD:-a360_local_password}
+      # 컨테이너 내부에서는 항상 서비스명 opensearch로 접속 (DATABASE_HOST와 동일한 이유)
+      OPENSEARCH_HOST: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-rag_documents}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      RRF_K: ${RRF_K:-60}
+      HYBRID_CANDIDATE_POOL_SIZE: ${HYBRID_CANDIDATE_POOL_SIZE:-50}
+      HYBRID_RERANK_CANDIDATES: ${HYBRID_RERANK_CANDIDATES:-20}
+      RERANK_MODEL: ${RERANK_MODEL:-rerank-2.5-lite}
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
@@ -36,5 +49,25 @@ services:
       timeout: 5s
       retries: 10
 
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: a360-opensearch
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # 2.12+ 보안 플러그인 데모 설치 스크립트가 security.disabled 여부와 무관하게 요구함 (로컬 전용, 실제 인증엔 안 쓰임)
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "A360-local-Dev1!"
+    ports:
+      - "${OPENSEARCH_PORT:-9200}:9200"
+    volumes:
+      - a360-opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   a360-postgres-data:
+  a360-opensearch-data:

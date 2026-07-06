@@ -5,12 +5,17 @@ RAG 문서 단위:
 - package_overview: 패키지 하나당 하나. 액션 목록 요약.
 - doc_page: 크롤링한 문서 페이지 하나당 하나.
 - bot_example: Control Room에서 수집한 실제 봇 하나당 하나 (액션 조합 예시).
+
+chunk_size를 넘는 문서는 여러 row로 쪼개지며 `parent_id`(원 문서 id)와 `chunk_index`(0부터)를 갖는다.
+안 쪼개진 문서도 스키마 일관성을 위해 `parent_id=id`, `chunk_index=0`을 갖는다.
 """
 
 import hashlib
 import json
 import re
 from pathlib import Path
+
+from .chunk import chunk_text
 
 
 def _norm(s: str) -> str:
@@ -123,8 +128,65 @@ def _summarize_bot(bot: dict) -> tuple[str, dict]:
     return content, metadata
 
 
+# doc_page는 산문(문단/문장 위주), 나머지는 normalize.py가 조립한 "라벨: 값" 정형 텍스트
+_CHUNK_STRATEGY_BY_SOURCE_TYPE = {"doc_page": "prose"}
+_DEFAULT_CHUNK_STRATEGY = "structured"
+
+# 이보다 짧은 선두 조각(대개 breadcrumb/헤더 줄만 남은 경우)은 다음 청크에 합쳐
+# 저품질 단독 청크가 생기지 않게 한다.
+_MIN_LEADING_CHUNK_CHARS = 150
+
+
+def _split_document(doc: dict, chunk_size: int | None, chunk_overlap: int) -> list[dict]:
+    if chunk_size is None:
+        # chunk_size=None: 청킹 없이 원본 길이 그대로 (EDA가 청킹 전 분포를 보기 위해 사용)
+        return [{**doc, "parent_id": doc["id"], "chunk_index": 0}]
+
+    strategy = _CHUNK_STRATEGY_BY_SOURCE_TYPE.get(doc["source_type"], _DEFAULT_CHUNK_STRATEGY)
+    parts = chunk_text(doc["content"], chunk_size, chunk_overlap, strategy=strategy)
+
+    if len(parts) > 1 and len(parts[0]) < _MIN_LEADING_CHUNK_CHARS:
+        parts = [parts[0] + "\n\n" + parts[1]] + parts[2:]
+
+    # 어떤 설정으로 쪼개졌는지 metadata에 남겨서, 나중에 다른 chunk_size/전략을 실험할 때
+    # "이 row가 어떤 실행에서 나온 건지" 추적할 수 있게 한다.
+    def _with_chunk_meta(base_doc: dict, chunk_count: int) -> dict:
+        return {
+            **base_doc,
+            "metadata": {
+                **base_doc.get("metadata", {}),
+                "chunk_strategy": strategy,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "chunk_count": chunk_count,
+            },
+        }
+
+    if len(parts) <= 1:
+        merged = _with_chunk_meta(doc, chunk_count=1)
+        return [{**merged, "parent_id": doc["id"], "chunk_index": 0, "content": parts[0] if parts else doc["content"]}]
+
+    # 청크가 여러 개면 각 청크 맨 앞에 문서 제목을 붙여 문맥을 유지한다 —
+    # 그러지 않으면 뒤쪽 청크들은 어느 문서 소속인지 알 길이 없는 본문 조각만 남는다.
+    return [
+        {
+            **_with_chunk_meta(doc, chunk_count=len(parts)),
+            "id": _doc_id(doc["id"], str(index)),
+            "parent_id": doc["id"],
+            "chunk_index": index,
+            "content": f"{doc['title']}\n\n{part}",
+        }
+        for index, part in enumerate(parts)
+    ]
+
+
 def build_rag_documents(
-    packages: list[dict], docs: list[dict], locale: str, bots: list[dict] | None = None
+    packages: list[dict],
+    docs: list[dict],
+    locale: str,
+    bots: list[dict] | None = None,
+    chunk_size: int | None = 1200,
+    chunk_overlap: int = 200,
 ) -> list[dict]:
     rag_docs: list[dict] = []
     matched_doc_ids: set[str] = set()
@@ -219,4 +281,8 @@ def build_rag_documents(
             }
         )
 
-    return rag_docs
+    return [
+        chunk
+        for doc in rag_docs
+        for chunk in _split_document(doc, chunk_size, chunk_overlap)
+    ]
