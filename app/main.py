@@ -1,16 +1,40 @@
 import json
+import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from app.api.documents import router as documents_router
 
-app = FastAPI(title="A360 Assistant Backend", version="0.1.0")
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # DB 없이도 앱은 기동돼야 한다 (프론트 로컬 개발 등) — 실패는 경고만 남긴다
+    try:
+        from app.db import init_db
+
+        init_db()
+        logger.info("DB 테이블 초기화 완료")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("DB 초기화 실패 (앱은 계속 기동): %s", e)
+    yield
+
+
+app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
+
+app.include_router(documents_router)
 
 frontend_origins = [
     origin.strip()

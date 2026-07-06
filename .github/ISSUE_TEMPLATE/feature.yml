@@ -1,7 +1,7 @@
 name: "✨ 기능 개발"
 description: "새 기능 또는 개선 작업"
 title: "[feat] "
-labels: ["type:feat"]
+labels: ["기능"]
 body:
   - type: input
     id: jira

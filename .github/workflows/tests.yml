@@ -1,0 +1,19 @@
+# pytest 단위 테스트 — PR마다 실행해 서비스 로직 회귀를 방지한다
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest -q
