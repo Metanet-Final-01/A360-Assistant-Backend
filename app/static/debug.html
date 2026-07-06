@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>A360 RAG 디버그 콘솔</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 16px; background: #0f1115; color: #e6e6e6; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .search-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+  .search-bar input { flex: 1; padding: 8px 10px; font-size: 14px; background: #1b1f27; color: #eee; border: 1px solid #333; border-radius: 4px; }
+  .search-bar button { padding: 8px 16px; font-size: 14px; background: #3b6ee0; color: white; border: none; border-radius: 4px; cursor: pointer; }
+  .search-bar button:disabled { background: #555; cursor: wait; }
+  .columns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  .column h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa4b2; border-bottom: 1px solid #333; padding-bottom: 6px; }
+  .card { background: #1b1f27; border: 1px solid #2a2f3a; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; font-size: 12px; }
+  .card .title { font-weight: 600; color: #fff; margin-bottom: 4px; }
+  .card .meta { color: #9aa4b2; font-size: 11px; margin-bottom: 4px; }
+  .card .meta span { margin-right: 8px; }
+  .card .content { color: #b9c0cc; max-height: 60px; overflow: hidden; text-overflow: ellipsis; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; }
+  .badge.both { background: #1e5f3e; color: #7ee8a0; }
+  .badge.dense { background: #1e3a5f; color: #7eb8e8; }
+  .badge.bm25 { background: #5f4a1e; color: #e8c67e; }
+  .badge.vector { background: #3a1e5f; color: #c67ee8; }
+  .log-panel { background: #05070a; border: 1px solid #2a2f3a; border-radius: 6px; padding: 10px; height: 320px; overflow-y: auto; font-family: "Cascadia Code", monospace; font-size: 11px; }
+  .log-line { padding: 2px 0; border-bottom: 1px solid #161a20; white-space: pre-wrap; }
+  .log-line.ok { color: #7ee8a0; }
+  .log-line.error { color: #ff8080; }
+  .log-line .ts { color: #6b7280; }
+  .status { font-size: 12px; color: #9aa4b2; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+  <h1>A360 RAG 디버그 콘솔 — vector / hybrid / hybrid_rerank 동시 비교 + 실시간 로그</h1>
+
+  <div class="search-bar">
+    <input id="query" type="text" placeholder="예: 엑셀 시트 활성화 어떻게 해?" value="구글시트에서 시트 활성화 어떻게 해?" />
+    <input id="limit" type="number" value="5" min="1" max="20" style="width:60px" />
+    <button id="searchBtn" onclick="runSearch()">검색</button>
+  </div>
+  <div class="status" id="status"></div>
+
+  <div class="columns">
+    <div class="column"><h2>vector (기존 방식)</h2><div id="col-vector"></div></div>
+    <div class="column"><h2>hybrid (RRF)</h2><div id="col-hybrid"></div></div>
+    <div class="column"><h2>hybrid_rerank (RRF + Voyage)</h2><div id="col-hybrid_rerank"></div></div>
+  </div>
+
+  <h2 style="font-size:13px;color:#9aa4b2;">실시간 파이프라인 로그 (1.5초마다 갱신)</h2>
+  <div class="log-panel" id="logPanel"></div>
+
+<script>
+const MODES = ["vector", "hybrid", "hybrid_rerank"];
+
+function scoreOf(item) {
+  if (item.rerank_score !== undefined) return `rerank=${item.rerank_score.toFixed(3)}`;
+  if (item.rrf_score !== undefined) return `rrf=${item.rrf_score.toFixed(4)}`;
+  if (item.score !== undefined) return `cos=${item.score.toFixed(3)}`;
+  return "";
+}
+
+function badgeFor(source) {
+  if (!source) return "";
+  const cls = source.includes("both") ? "both" : source.includes("dense") ? "dense" : source.includes("bm25") ? "bm25" : "vector";
+  return `<span class="badge ${cls}">${source}</span>`;
+}
+
+function renderColumn(elId, results) {
+  const el = document.getElementById(elId);
+  if (!results || !results.length) { el.innerHTML = "<div class='card'>결과 없음</div>"; return; }
+  el.innerHTML = results.map(r => `
+    <div class="card">
+      <div class="title">${r.title ?? "(제목 없음)"}</div>
+      <div class="meta">
+        <span>${r.source_type ?? ""}</span>
+        <span>${scoreOf(r)}</span>
+        ${r.dense_rank ? `<span>dense#${r.dense_rank}</span>` : ""}
+        ${r.bm25_rank ? `<span>bm25#${r.bm25_rank}</span>` : ""}
+        ${badgeFor(r.retrieval_source)}
+      </div>
+      <div class="content">${(r.content ?? "").slice(0, 140)}...</div>
+    </div>
+  `).join("");
+}
+
+async function runSearch() {
+  const q = document.getElementById("query").value.trim();
+  const limit = document.getElementById("limit").value || 5;
+  if (!q) return;
+  const btn = document.getElementById("searchBtn");
+  const status = document.getElementById("status");
+  btn.disabled = true;
+  status.textContent = "검색 중...";
+  try {
+    const results = await Promise.all(MODES.map(mode =>
+      fetch(`/api/rag/search?q=${encodeURIComponent(q)}&limit=${limit}&mode=${mode}`)
+        .then(r => r.json())
+        .catch(e => ({ results: [], error: String(e) }))
+    ));
+    MODES.forEach((mode, i) => renderColumn(`col-${mode}`, results[i].results));
+    status.textContent = `완료 (${new Date().toLocaleTimeString()})`;
+  } catch (e) {
+    status.textContent = `오류: ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderLogs(logs) {
+  const panel = document.getElementById("logPanel");
+  const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 10;
+  panel.innerHTML = logs.map(l => {
+    const cls = l.status === "error" ? "error" : "ok";
+    const extra = l.status === "error" ? ` ${l.error_type}: ${l.error_message}` : (l.result ? ` ${JSON.stringify(l.result)}` : "");
+    return `<div class="log-line ${cls}"><span class="ts">[${l.started_at}]</span> ${l.event} (${l.duration_ms}ms) req=${l.request_id ?? "-"}${extra}</div>`;
+  }).join("");
+  if (atBottom) panel.scrollTop = panel.scrollHeight;
+}
+
+async function pollLogs() {
+  try {
+    const data = await fetch("/api/rag/logs/recent?limit=200").then(r => r.json());
+    renderLogs([...data.logs].reverse());
+  } catch (e) { /* 백엔드 아직 안 떴을 수 있음 — 조용히 재시도 */ }
+}
+
+document.getElementById("query").addEventListener("keydown", e => { if (e.key === "Enter") runSearch(); });
+setInterval(pollLogs, 1500);
+pollLogs();
+</script>
+</body>
+</html>

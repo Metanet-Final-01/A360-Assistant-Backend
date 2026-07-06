@@ -1,7 +1,10 @@
+import json
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 
@@ -96,3 +99,28 @@ def rag_search(q: str, limit: int = 5, mode: str = "hybrid_rerank") -> dict:
     finally:
         conn.close()
     return {"query": q, "results": results}
+
+
+@app.get("/api/rag/logs/recent")
+def rag_logs_recent(limit: int = 100) -> dict:
+    """검색/리랭커 파이프라인 최근 로그 — /debug 페이지가 폴링해서 실시간처럼 보여준다."""
+    from app.rag import config
+
+    log_files = sorted(config.LOG_DIR.glob("rag-*.jsonl")) if config.LOG_DIR.exists() else []
+    if not log_files:
+        return {"logs": []}
+
+    lines: list[str] = []
+    for path in reversed(log_files):
+        lines = path.read_text(encoding="utf-8").splitlines() + lines
+        if len(lines) >= limit:
+            break
+
+    records = [json.loads(line) for line in lines[-limit:]]
+    records.reverse()  # 최신 순
+    return {"logs": records}
+
+
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/debug", StaticFiles(directory=_STATIC_DIR, html=True), name="debug")
