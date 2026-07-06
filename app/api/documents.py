@@ -9,10 +9,12 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import models
 from app.db import get_db
+from app.schemas import ProgressEvent
 from app.services import storage
 from app.services.parser import parse_document
 from app.services.upload_security import validate_upload
@@ -114,3 +116,55 @@ def get_document_content(document_id: str, db: Session = Depends(get_db)) -> dic
             detail={"code": "NOT_PARSED", "message": f"파싱이 완료되지 않았습니다 (현재 상태: {doc.status})."},
         )
     return {"id": str(doc.id), "parsed_content": doc.parsed_content}
+
+
+@router.post("/documents/{document_id}/enrich-vision")
+def enrich_vision(document_id: str, db: Session = Depends(get_db)) -> StreamingResponse:
+    """텍스트가 부족한 페이지를 비전 LLM으로 보강한다 (FR-03) — SSE 스트림.
+
+    페이지당 LLM 호출로 수십 초가 걸릴 수 있어 진행 상황을 ProgressEvent로 흘린다
+    (규약: docs/INTERFACES.md §5). 프론트는 EventSource가 아닌 fetch 스트리밍으로
+    소비한다 (POST라서). 텍스트 임계값 미만 페이지만 선별하므로 보강할 페이지가
+    없으면 LLM 비용 없이 즉시 done이 온다.
+    """
+    doc = _get_document_or_404(document_id, db)
+    if doc.status != "parsed" or doc.parsed_content is None:
+        raise HTTPException(
+            409,
+            detail={"code": "NOT_PARSED", "message": f"파싱이 완료되지 않았습니다 (현재 상태: {doc.status})."},
+        )
+
+    from app.services.parser import vision
+
+    file_content = storage.load(doc.storage_path)
+
+    def sse():
+        try:
+            for event in vision.enrich_document_stream(
+                doc.filename, file_content, doc.parsed_content, session_id=doc.session_id
+            ):
+                if event.event == "done":
+                    # 보강 결과를 먼저 저장하고, 클라이언트에는 요약만 보낸다
+                    doc.parsed_content = event.data["parsed"]
+                    db.commit()
+                    yield ProgressEvent(
+                        event="done",
+                        stage="vision",
+                        message=event.message,
+                        data={**_document_out(doc), "enriched_pages": event.data["enriched_pages"]},
+                    ).to_sse()
+                else:
+                    yield event.to_sse()
+        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
+            yield ProgressEvent(event="error", stage="vision", message=f"LLM 구성 오류: {e}").to_sse()
+        except Exception:  # noqa: BLE001
+            logger.exception("비전 보강 실패: document=%s", doc.id)
+            yield ProgressEvent(
+                event="error", stage="vision", message="비전 보강 중 오류가 발생했습니다"
+            ).to_sse()
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
