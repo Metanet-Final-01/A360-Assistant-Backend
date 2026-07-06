@@ -1,14 +1,17 @@
 # CodeRabbit AI 리뷰 설정 — https://docs.coderabbit.ai/reference/configuration
 language: "ko-KR"
 
-tone_instructions: "간결하고 실용적으로. 실제 버그·보안·계약 위반을 우선하고, 스타일 지적은 중요한 것만."
+# 모든 산출물(요약·리뷰·워크스루)을 한국어로. 영어가 섞이면 한국어로 다시 쓰도록 지시.
+tone_instructions: "항상 한국어로만 작성한다. 간결하고 실용적으로. 실제 버그·보안·계약 위반을 우선하고, 사소한 스타일 지적은 중요한 것만 남긴다."
 
 reviews:
   profile: "chill"
   request_changes_workflow: false # 사람 리뷰어(승인 1인 규칙)가 최종 결정 — 봇은 조언만
   high_level_summary: true
   poem: false
-  review_status: true
+  sequence_diagrams: false # 불필요 — 다이어그램 대신 간결한 요약만
+  changed_files_summary: false # PR 본문 템플릿과 중복이라 생략
+  review_status: false # GitHub 체크로 이미 보임
   collapse_walkthrough: true
   auto_review:
     enabled: true
@@ -16,6 +19,12 @@ reviews:
     base_branches:
       - "dev"
       - "main"
+  # 자동으로 docstring/유닛테스트 생성 제안을 붙이지 않는다 (노이즈 — 필요하면 사람이 요청)
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
   path_filters:
     - "!data/**"
     - "!infra/seed/**"
@@ -37,7 +46,8 @@ reviews:
         Agent 담당 영역입니다. app/schemas 계약(RagSource·ProgressEvent) 준수,
         DB 직접 접근 금지(app/services 경유), 엔드포인트 생성 금지(백엔드 소유)
         원칙을 확인하세요.
-    - path: "app/rag/**"
+    # search_actions 계약은 app/rag 구현과 app/services/rag.py wrapper 양쪽에 걸쳐 있다
+    - path: "app/rag/**|app/services/rag.py"
       instructions: >-
         RAG 파이프라인·검색입니다. 외부 서비스(OpenSearch·Voyage·OpenAI) 호출의
         타임아웃·예외 처리, 그리고 services/rag.py의 search_actions 계약
