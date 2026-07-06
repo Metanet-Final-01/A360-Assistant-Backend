@@ -168,7 +168,7 @@ async def chat_refine(
 ### 백엔드가 Agent에 제공하는 tool
 
 ```python
-from app.services.rag import search_actions   # (후속 이슈에서 app/ingest 검색을 서비스로 승격)
+from app.services.rag import search_actions   # app/rag 하이브리드 검색을 감싼 wrapper (RPA-9에서 구현 완료)
 
 def search_actions(
     query: str,
