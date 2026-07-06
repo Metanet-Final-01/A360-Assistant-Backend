@@ -89,16 +89,16 @@ feat(rag): 액션 요약본 동시 청킹 저장 추가 (RPA-12)
 ## 4. 이슈·라벨
 
 - 이슈 트래킹의 원본(source of truth)은 **Jira**. GitHub 이슈는 Jira Automation으로 동기화된다 (`docs/JIRA_GITHUB.md` 참고).
-- 라벨 세트:
+- 라벨 세트 (한글 기본, 약어는 영어 유지):
 
 | 라벨 | 용도 | 부여 방식 |
 |---|---|---|
-| `area:backend` `area:rag` `area:agent` `area:db` `area:infra` `area:ci` `area:docs` `area:frontend` | 담당 영역 | **PR은 자동** — labeler가 변경 파일 경로 기준 부여 (`.github/labeler.yml`) |
-| `priority:P0` `priority:P1` `priority:P2` | 우선순위 (P0=필수 연계, P1=가점 효율, P2=차별화) | 수동 (필요 시) |
-| `type:feat` `type:bug` `type:docs` | 성격 | 이슈 템플릿이 자동 부여 |
-| `from-jira` | Jira Automation이 생성한 이슈 | 자동 |
+| `백엔드` `RAG` `에이전트` `DB` `인프라` `CI` `문서` `프론트` | 담당 영역 | **PR은 자동** — labeler가 변경 파일 경로 기준 부여 (`.github/labeler.yml`) |
+| `P0` `P1` `P2` | 우선순위 (P0=필수 연계, P1=가점 효율, P2=차별화) | 수동 (필요 시) |
+| `기능` `버그` | 이슈 성격 | 이슈 템플릿이 자동 부여 |
+| `from-jira` | Jira Automation이 생성한 미러 이슈 표시 | 자동 (Jira 규칙이 부여 — 이름 변경 시 Jira Automation 규칙도 함께 수정 필요) |
 
-- **PR에 area 라벨을 수동으로 붙이지 않는다** — 여러 영역을 건드리면 여러 개가 붙는 것이 정상이며, 오히려 PR 분리를 고민할 신호다.
+- **PR에 영역 라벨을 수동으로 붙이지 않는다** — 여러 영역을 건드리면 여러 개가 붙는 것이 정상이며, 오히려 PR 분리를 고민할 신호다.
 
 ## 5. 담당 영역
 

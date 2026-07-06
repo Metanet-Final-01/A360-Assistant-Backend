@@ -1,22 +1,22 @@
-# PR 변경 파일 경로 → area 라벨 매핑 (.github/workflows/pr-labeler.yml이 사용)
-# 여러 영역을 건드리면 라벨이 여러 개 붙는다 (의도된 동작)
+# PR 변경 파일 경로 → 영역 라벨 매핑 (.github/workflows/pr-labeler.yml이 사용)
+# 여러 영역을 건드리면 라벨이 여러 개 붙는다 (의도된 동작 — PR 분리를 고민할 신호)
 
-area:backend:
+백엔드:
   - changed-files:
       - any-glob-to-any-file:
           - "app/**"
 
-area:rag:
+RAG:
   - changed-files:
       - any-glob-to-any-file:
           - "app/ingest/**"
 
-area:agent:
+에이전트:
   - changed-files:
       - any-glob-to-any-file:
           - "app/agent/**"
 
-area:db:
+DB:
   - changed-files:
       - any-glob-to-any-file:
           - "app/db.py"
@@ -24,20 +24,20 @@ area:db:
           - "app/schemas/**"
           - "infra/seed/**"
 
-area:infra:
+인프라:
   - changed-files:
       - any-glob-to-any-file:
           - "infra/**"
           - "Dockerfile"
           - "docker-compose.yml"
 
-area:ci:
+CI:
   - changed-files:
       - any-glob-to-any-file:
           - ".github/workflows/**"
           - ".github/labeler.yml"
 
-area:docs:
+문서:
   - changed-files:
       - any-glob-to-any-file:
           - "docs/**"
