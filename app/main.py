@@ -1,10 +1,13 @@
+import ipaddress
 import json
 import logging
 import os
+import socket
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -156,14 +159,38 @@ def health() -> dict[str, str]:
     return {"status": "healthy"}
 
 
+def _blocked_target_reason(url: str) -> str | None:
+    """절대 URL의 대상이 내부망이면 차단 사유를 반환한다 (SSRF 방어).
+
+    이 엔드포인트는 백엔드가 대신 HTTP 요청을 보내주는 프록시라, 열리면
+    EC2 메타데이터(169.254.169.254)로 IAM 자격증명을 조회하는 등 내부망
+    접근에 악용될 수 있다. 사설망·루프백·링크로컬 등 비공인 IP는 전부 막고,
+    호스트를 해석할 수 없으면 보수적으로 차단한다.
+    """
+    host = urlparse(url).hostname
+    if not host:
+        return "URL에서 호스트를 파싱할 수 없습니다."
+    try:
+        addrs = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except OSError:
+        return f"호스트를 해석할 수 없습니다: {host}"
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr.split("%")[0])
+        if not ip.is_global:
+            return f"내부망 주소({addr})로의 요청은 허용되지 않습니다."
+    return None
+
+
 @app.post("/api/debug/http-request")
 async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dict:
     """Debug page helper: send an arbitrary HTTP request from the backend process."""
     import httpx
 
+    # 명시적 opt-in만 허용한다. 이전에는 APP_ENV가 development(기본값)면 열렸는데,
+    # 배포 환경에서 APP_ENV를 설정하지 않으면 프로덕션에 SSRF 프록시가 열리는
+    # 구조였다. 로컬 개발은 .env의 DEBUG_HTTP_CLIENT_ENABLED=true로 켠다.
     debug_enabled = os.getenv("DEBUG_HTTP_CLIENT_ENABLED", "").lower() == "true"
-    local_env = os.getenv("APP_ENV", "development").lower() in {"development", "local", "test"}
-    if not (debug_enabled or local_env):
+    if not debug_enabled:
         raise HTTPException(status_code=403, detail="Debug HTTP client is disabled for this environment.")
 
     method = payload.method.upper()
@@ -172,8 +199,13 @@ async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dic
 
     url = payload.url.strip()
     if url.startswith("/"):
+        # 자기 자신(이 백엔드)으로의 상대경로 호출 — 디버그 콘솔의 주 용도라 허용
         url = str(request.base_url).rstrip("/") + url
-    if not (url.startswith("http://") or url.startswith("https://")):
+    elif url.startswith("http://") or url.startswith("https://"):
+        reason = _blocked_target_reason(url)
+        if reason:
+            raise HTTPException(status_code=400, detail=reason)
+    else:
         raise HTTPException(status_code=400, detail="URL must be absolute or start with '/'.")
 
     headers = {
