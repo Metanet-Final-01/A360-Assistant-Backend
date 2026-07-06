@@ -5,6 +5,10 @@ beautifulsoup4==4.12.3
 psycopg[binary]==3.2.3
 python-dotenv==1.0.1
 sqlalchemy==2.0.36
+python-multipart==0.0.9
+pypdf==5.1.0
+python-pptx==1.0.2
+boto3==1.35.99
 langgraph==1.2.7
 langgraph-checkpoint==4.1.1
 langgraph-prebuilt==1.1.0
