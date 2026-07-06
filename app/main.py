@@ -313,6 +313,32 @@ def debug_rerank(payload: RerankDebugRequest) -> dict:
     }
 
 
+_CONTRACT_FIELDS = ["id", "source_type", "package_name", "action_name", "title", "url", "content", "score"]
+
+
+@app.get("/api/rag/debug/search-actions")
+def debug_search_actions(q: str, k: int = 5, source_types: str | None = None) -> dict:
+    """docs/INTERFACES.md 계약 함수 app.services.rag.search_actions()를 그대로 호출한다.
+
+    Agent 담당의 app/agent/retrieval.py가 FakeRetriever를 이걸로 교체했을 때 받게 될
+    결과와 100% 동일하다. 계약 필드(id/source_type/package_name/action_name/title/
+    url/content/score)가 매 항목에 다 있는지 missing_fields로 같이 알려준다.
+    """
+    from app.services.rag import search_actions
+
+    types = [t.strip() for t in source_types.split(",") if t.strip()] if source_types else None
+    try:
+        results = search_actions(q, k=k, source_types=types)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    checked = [
+        {**r, "_missing_contract_fields": [f for f in _CONTRACT_FIELDS if r.get(f) is None and f != "url"]}
+        for r in results
+    ]
+    return {"query": q, "k": k, "source_types": types, "results": checked}
+
+
 @app.get("/api/rag/logs/recent")
 def rag_logs_recent(limit: int = 100) -> dict:
     """검색/리랭커 파이프라인 최근 로그 — /debug 페이지가 폴링해서 실시간처럼 보여준다."""

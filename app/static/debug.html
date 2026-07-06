@@ -80,6 +80,17 @@
     <div class="column"><h2>hybrid_rerank (RRF + Voyage)</h2><div id="col-hybrid_rerank"></div></div>
   </div>
 
+  <div class="section">
+    <h2>Agent 계약 확인 — app.services.rag.search_actions() (docs/INTERFACES.md)</h2>
+    <div class="search-bar">
+      <input id="contractQuery" type="text" placeholder="질의" value="엑셀 시트 활성화" style="flex:2" />
+      <input id="contractK" type="number" value="5" min="1" max="20" style="width:60px" />
+      <input id="contractSourceTypes" type="text" placeholder="source_types (콤마, 비우면 전체) 예: action_schema,package_overview" style="flex:2" />
+      <button onclick="runContractCheck()">계약 확인</button>
+    </div>
+    <div id="contractResult"></div>
+  </div>
+
   <div class="section http-lab">
     <h2>HTTP API Lab (backend sender)</h2>
     <div class="preset-grid" id="httpPresets"></div>
@@ -189,6 +200,43 @@ async function runSearch() {
     status.textContent = `오류: ${e}`;
   } finally {
     btn.disabled = false;
+  }
+}
+
+const CONTRACT_FIELDS = ["id", "source_type", "package_name", "action_name", "title", "url", "content", "score"];
+
+async function runContractCheck() {
+  const q = document.getElementById("contractQuery").value.trim();
+  const k = document.getElementById("contractK").value || 5;
+  const sourceTypes = document.getElementById("contractSourceTypes").value.trim();
+  const el = document.getElementById("contractResult");
+  if (!q) return;
+  el.innerHTML = "확인 중...";
+  try {
+    const params = new URLSearchParams({ q, k });
+    if (sourceTypes) params.set("source_types", sourceTypes);
+    const data = await fetch(`/api/rag/debug/search-actions?${params}`).then(r => r.json());
+    if (!data.results) { el.innerHTML = `<div class="card">오류: ${data.detail ?? JSON.stringify(data)}</div>`; return; }
+    if (!data.results.length) { el.innerHTML = "<div class='card'>결과 없음</div>"; return; }
+
+    el.innerHTML = data.results.map(r => {
+      const missing = r._missing_contract_fields ?? [];
+      const fieldRow = CONTRACT_FIELDS.map(f => {
+        const has = r[f] !== undefined && r[f] !== null;
+        const bad = missing.includes(f);
+        const color = bad ? "#ff8080" : has ? "#7ee8a0" : "#6b7280";
+        return `<span style="color:${color}; margin-right:8px;">${bad ? "✗" : "✓"} ${f}</span>`;
+      }).join("");
+      return `
+        <div class="card">
+          <div class="title">${r.title ?? "(제목 없음)"}</div>
+          <div class="meta"><span>${r.source_type}</span><span>score=${(r.score ?? 0).toFixed(3)}</span></div>
+          <div style="font-size:10px; margin-top:4px;">${fieldRow}</div>
+          ${missing.length ? `<div style="color:#ff8080; font-size:11px; margin-top:4px;">누락된 계약 필드: ${missing.join(", ")}</div>` : ""}
+        </div>`;
+    }).join("");
+  } catch (e) {
+    el.innerHTML = `<div class="card">오류: ${e}</div>`;
   }
 }
 
