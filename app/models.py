@@ -29,6 +29,17 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 
 
+class User(Base):
+    """인증 사용자 (이메일/비밀번호). password_hash에는 bcrypt 해시만 저장한다."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AnalysisSession(Base):
     """분석 세션 — 업로드부터 내보내기까지의 한 사이클 (FR-20 이력 관리 단위)."""
 
