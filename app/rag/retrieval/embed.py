@@ -11,7 +11,7 @@ _BATCH_SIZE = 16
 _MAX_CHARS = 4000
 
 
-def _post_with_retry(url: str, headers: dict, payload: dict, retries: int = 5) -> dict:
+def post_with_retry(url: str, headers: dict, payload: dict, retries: int = 5) -> dict:
     with httpx.Client(timeout=60.0) as client:
         for attempt in range(retries):
             resp = client.post(url, headers=headers, json=payload)
@@ -27,7 +27,7 @@ def _post_with_retry(url: str, headers: dict, payload: dict, retries: int = 5) -
 def _embed_voyage(texts: list[str]) -> list[list[float]]:
     if not config.VOYAGE_API_KEY:
         raise RuntimeError("VOYAGE_API_KEY 환경변수가 필요합니다")
-    data = _post_with_retry(
+    data = post_with_retry(
         "https://api.voyageai.com/v1/embeddings",
         {"Authorization": f"Bearer {config.VOYAGE_API_KEY}"},
         {"model": config.EMBEDDING_MODEL, "input": texts, "input_type": "document"},
@@ -38,7 +38,7 @@ def _embed_voyage(texts: list[str]) -> list[list[float]]:
 def _embed_openai(texts: list[str]) -> list[list[float]]:
     if not config.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
-    data = _post_with_retry(
+    data = post_with_retry(
         "https://api.openai.com/v1/embeddings",
         {"Authorization": f"Bearer {config.OPENAI_API_KEY}"},
         {"model": config.EMBEDDING_MODEL, "input": texts},
@@ -60,7 +60,7 @@ def embed_texts(texts: list[str], on_progress=None) -> list[list[float]]:
 def embed_query(text: str) -> list[float]:
     """검색 시 질의 임베딩 (Voyage는 query/document input_type을 구분)."""
     if config.EMBEDDING_PROVIDER == "voyage":
-        data = _post_with_retry(
+        data = post_with_retry(
             "https://api.voyageai.com/v1/embeddings",
             {"Authorization": f"Bearer {config.VOYAGE_API_KEY}"},
             {"model": config.EMBEDDING_MODEL, "input": [text], "input_type": "query"},

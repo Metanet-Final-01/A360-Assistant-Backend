@@ -218,6 +218,14 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     finally:
         conn.close()
 
+    if not args.skip_opensearch:
+        from .store import opensearch_client
+
+        os_client = opensearch_client.connect()
+        opensearch_client.ensure_index(os_client)
+        os_count = opensearch_client.bulk_index(os_client, documents)
+        print(f"OpenSearch 색인 완료: {os_count}개")
+
 
 def cmd_eda(args: argparse.Namespace) -> None:
     from .build.eda import compute_length_stats, print_report
@@ -236,14 +244,16 @@ def cmd_eda(args: argparse.Namespace) -> None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    from .store import db
-    from .retrieval.embed import embed_query
+    from .store import db, opensearch_client
+    from .retrieval.hybrid_search import search as hybrid_search
 
     conn = db.connect()
     try:
-        results = db.search(conn, embed_query(args.query), limit=args.limit)
+        os_client = opensearch_client.connect()
+        results = hybrid_search(conn, os_client, args.query, limit=args.limit, mode=args.mode)
         for r in results:
-            print(f"[{r['score']:.3f}] ({r['source_type']}) {r['title']}")
+            score = r.get("rerank_score", r.get("rrf_score", r.get("score", 0.0)))
+            print(f"[{score:.3f}] ({r['source_type']}, {r.get('retrieval_source', 'vector')}) {r['title']}")
             print(f"    {r['content'][:150]}...")
     finally:
         conn.close()
@@ -293,13 +303,17 @@ def main() -> None:
     p_eda.add_argument("--source", default="all", choices=["all", "docs", "github"])
     p_eda.set_defaults(func=cmd_eda)
 
-    p_ingest = sub.add_parser("ingest", help="임베딩 생성 후 pgvector 적재")
+    p_ingest = sub.add_parser("ingest", help="임베딩 생성 후 pgvector + OpenSearch 적재")
     p_ingest.add_argument("--skip-embedding", action="store_true")
+    p_ingest.add_argument("--skip-opensearch", action="store_true")
     p_ingest.set_defaults(func=cmd_ingest)
 
-    p_search = sub.add_parser("search", help="적재된 문서 벡터 검색 테스트")
+    p_search = sub.add_parser("search", help="적재된 문서 하이브리드(RRF+Reranker) 검색 테스트")
     p_search.add_argument("query")
     p_search.add_argument("--limit", type=int, default=5)
+    p_search.add_argument(
+        "--mode", default="hybrid_rerank", choices=["vector", "hybrid", "hybrid_rerank"]
+    )
     p_search.set_defaults(func=cmd_search)
 
     args = parser.parse_args()

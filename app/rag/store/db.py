@@ -92,6 +92,7 @@ def search(conn: psycopg.Connection, query_embedding: list[float], limit: int = 
         cur.execute(
             """
             SELECT id, source_type, package_name, action_name, title, url, content,
+                   parent_id, chunk_index,
                    1 - (embedding <=> %s::vector) AS score
             FROM rag_documents
             WHERE embedding IS NOT NULL
