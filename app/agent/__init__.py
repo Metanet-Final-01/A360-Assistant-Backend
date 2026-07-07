@@ -7,7 +7,8 @@
         ...
 """
 
+from .analysis import analyze
 from .graph import run_agent, stream_agent
 from .schemas import AgentResult
 
-__all__ = ["AgentResult", "run_agent", "stream_agent"]
+__all__ = ["AgentResult", "analyze", "run_agent", "stream_agent"]
