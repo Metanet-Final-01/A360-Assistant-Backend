@@ -130,6 +130,18 @@ def test_audit_skips_failed_mutation(mini_app, monkeypatch):
     assert saved == []
 
 
+def test_no_crlf_sanitizer():
+    """로그 인젝션 방지 — 경로/쿼리의 CR/LF 제거 (원시 ASGI 서버 대비 defense-in-depth).
+
+    httpx/Starlette가 전송 단계에서 CRLF를 이미 벗기지만, 미들웨어는 request.url.path를
+    로그·감사에 넣기 전 한 번 더 방어한다."""
+    from app.core.http_logging import _no_crlf
+
+    assert _no_crlf("/api/x\r\nFAKE-LOG 200 OK") == "/api/xFAKE-LOG 200 OK"
+    assert _no_crlf("q=1\nq=2") == "q=1q=2"
+    assert _no_crlf("/normal/path") == "/normal/path"
+
+
 def test_audit_captures_user_from_jwt(mini_app, monkeypatch):
     saved = []
 

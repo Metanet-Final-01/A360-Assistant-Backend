@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
+from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,11 @@ logger = logging.getLogger(__name__)
 # (그러지 않으면 로그가 자기 자신의 폴링 기록으로 도배된다).
 _SKIP_HTTP_LOG_PREFIXES = ("/api/rag/logs/recent", "/debug")
 _AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _no_crlf(value: str) -> str:
+    """CR/LF 제거 — 외부 입력(경로·쿼리)이 로그 라인을 위조하는 로그 인젝션 방지."""
+    return value.replace("\r", "").replace("\n", "")
 
 
 def _user_id_from_request(request: Request) -> str | None:
@@ -85,10 +91,11 @@ def register_http_logging(app: FastAPI) -> None:
         user_id = _user_id_from_request(request)
         started_at = datetime.now(timezone.utc)
         start = time.perf_counter()
+        safe_path = _no_crlf(request.url.path)
         common = {
             "method": request.method,
-            "path": request.url.path,
-            "query": str(request.url.query),
+            "path": safe_path,
+            "query": _no_crlf(str(request.url.query)),
             "client": request.client.host if request.client else None,
             "user_id": user_id,
             "request_id": req_id,
@@ -119,8 +126,11 @@ def register_http_logging(app: FastAPI) -> None:
         )
         response.headers["X-Request-ID"] = req_id
 
-        # 감사: 변경성 요청의 성공만 DB에 (중요 이벤트만)
+        # 감사: 변경성 요청의 성공만 DB에 (중요 이벤트만). DB I/O는 동기라 이벤트 루프를
+        # 막지 않도록 threadpool로 오프로드한다.
         if request.method in _AUDIT_METHODS and 200 <= response.status_code < 400:
-            _record_audit(req_id, user_id, request.method, request.url.path,
-                          response.status_code, int(latency_ms))
+            await run_in_threadpool(
+                _record_audit, req_id, user_id, request.method, safe_path,
+                response.status_code, int(latency_ms),
+            )
         return response

@@ -43,8 +43,10 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
-        # 미포착 예외 — request-id와 함께 스택을 서버 로그에만 남기고, 클라이언트엔 일반 메시지
-        logger.exception("미포착 예외: %s %s (request_id=%s)", request.method, request.url.path, get_request_id())
+        # 미포착 예외 — request-id와 함께 스택을 서버 로그에만 남기고, 클라이언트엔 일반 메시지.
+        # 경로의 CRLF는 제거한다 (외부 입력이 로그 라인을 위조하는 로그 인젝션 방지).
+        safe_path = request.url.path.replace("\r", "").replace("\n", "")
+        logger.exception("미포착 예외: %s %s (request_id=%s)", request.method, safe_path, get_request_id())
         return JSONResponse(
             status_code=500,
             content=_payload("INTERNAL_ERROR", "서버 내부 오류가 발생했습니다"),
