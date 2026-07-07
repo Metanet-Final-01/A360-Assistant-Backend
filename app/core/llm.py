@@ -20,6 +20,10 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+# langchain-core는 하드 의존성(requirements.txt — Agent가 사용). UsageCallbackHandler가
+# 상속한다 (덕타이핑 __getattr__은 run_inline 등 접근에서 터져 스트림을 끊었다, RPA-48).
+from langchain_core.callbacks import BaseCallbackHandler
+
 logger = logging.getLogger(__name__)
 
 _client = None
@@ -180,7 +184,7 @@ def record_usage(
         logger.warning("LLM 사용량 기록 실패 (호출은 정상): %s", e)
 
 
-class UsageCallbackHandler:
+class UsageCallbackHandler(BaseCallbackHandler):
     """Agent(LangChain)의 LLM 호출 사용량을 llm_usage에 기록하는 콜백.
 
     부착: llm.invoke(msgs, config={"callbacks": [UsageCallbackHandler()]})
@@ -198,13 +202,10 @@ class UsageCallbackHandler:
     """
 
     def __init__(self, purpose: str = "chat") -> None:
+        super().__init__()
         self._ctx = current_usage_context()  # 생성 시점 스냅샷 (요청 스레드)
         self._purpose = purpose
         self._started = time.monotonic()
-
-    # LangChain BaseCallbackHandler 인터페이스 (덕타이핑 — import 의존 없음)
-    ignore_llm = False
-    raise_error = False
 
     def on_llm_start(self, *args, **kwargs) -> None:
         self._started = time.monotonic()
@@ -220,12 +221,6 @@ class UsageCallbackHandler:
             latency_ms=latency_ms,
             ctx=self._ctx,
         )
-
-    # LangChain이 호출할 수 있는 나머지 훅은 무시 (덕타이핑 안정성)
-    def __getattr__(self, name):
-        if name.startswith("on_") or name.startswith("ignore_"):
-            return lambda *a, **k: None
-        raise AttributeError(name)
 
 
 def _extract_tokens(response) -> tuple[int, int, str | None]:

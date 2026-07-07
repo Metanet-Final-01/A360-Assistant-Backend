@@ -10,7 +10,10 @@ sqlalchemy==2.0.36
 alembic==1.14.0
 python-multipart==0.0.9
 pypdf==5.1.0
+pdfplumber==0.11.4  # PDF 표 구조화 추출 (pypdf 텍스트 위에 얹음)
 python-pptx==1.0.2
+python-docx==1.1.2  # DOCX(워드) 문단·표 추출
+olefile==0.47  # 레거시 .ppt(OLE) 검증 — PowerPoint 스트림 확인·매크로 차단
 boto3==1.35.99
 openai==2.44.0  # langchain-openai(에이전트)와 호환 범위 유지 (>=2.26,<3)
 pypdfium2==4.30.1
