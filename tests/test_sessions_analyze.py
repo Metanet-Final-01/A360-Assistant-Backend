@@ -86,8 +86,12 @@ def test_unparsed_document_returns_409():
     assert r.json()["detail"]["code"] == "NOT_PARSED"
 
 
-def test_agent_not_landed_returns_503():
-    """지금 실제 상태: app.agent가 analyze를 아직 내보내지 않음 → 503 스위치."""
+def test_agent_not_landed_returns_503(monkeypatch):
+    """agent가 analyze를 아직 안 내보낸 상태를 흉내 → 503 스위치.
+
+    실제 app.agent의 import 여부에 의존하지 않도록 _get_agent_analyze를 None으로
+    고정한다 (analyze 랜딩 전/후 모두 이 테스트는 스위치 동작만 검증)."""
+    monkeypatch.setattr(sessions_api, "_get_agent_analyze", lambda: None)
     with _client(session=_session_row(), document=_document_row()) as c:
         r = c.post(f"/api/sessions/{SESSION_ID}/analyze")
     assert r.status_code == 503
@@ -178,6 +182,44 @@ def test_analyze_failure_emits_error_event(monkeypatch):
     assert events[-1]["event"] == "error"
     # 실패도 Analysis 행으로 남는다
     assert any(getattr(row, "status", None) == "failed" for row in _FakePersist.saved)
+
+
+def test_analyze_route_with_real_agent_analyze(monkeypatch):
+    """정준환 실제 analyze()로 엔드포인트가 도는지 (계약 일치 증명) — LLM만 모킹.
+
+    core.llm.chat이 유효한 AnalysisResult JSON을 돌려준다고 가정하면, 라우트가
+    그 결과를 done.data로 흘리고 Analysis 행으로 남기는지 확인한다."""
+    import json as _json
+
+    valid = _json.dumps({
+        "schema_version": "1.0",
+        "document_title": "금 시세 조회",
+        "summary": "웹에서 시세를 받아 엑셀로 정리",
+        "steps": [{
+            "step_id": "step-1", "order": 1, "name": "시세 조회",
+            "description": "네이버 금융에서 시세 조회",
+            "inputs": ["URL"], "outputs": ["시세표"], "systems": ["Edge"],
+        }],
+        "ambiguities": [],
+    })
+    # analyze 내부의 llm.chat만 모킹 (텍스트 있는 문서라 _has_text 통과 필요)
+    import app.agent.analysis as analysis_mod
+    monkeypatch.setattr(analysis_mod.llm, "chat", lambda *a, **k: valid)
+
+    _FakePersist.saved = []
+    monkeypatch.setattr("app.db.SessionLocal", _FakePersist())
+    doc = _document_row(parsed_content={"pages": [{"page": 1, "blocks": [
+        {"type": "text", "text": "네이버 금융에서 금 시세를 조회한다"}]}], "full_text": "네이버 금융에서 금 시세를 조회한다"})
+
+    with _client(session=_session_row(), document=doc) as c:
+        with c.stream("POST", f"/api/sessions/{SESSION_ID}/analyze") as r:
+            events = [json.loads(l[5:]) for l in r.iter_lines() if l.startswith("data:")]
+
+    done = events[-1]
+    assert done["event"] == "done"
+    assert done["data"]["document_title"] == "금 시세 조회"
+    assert done["data"]["steps"][0]["step_id"] == "step-1"
+    assert _FakePersist.saved[0].status == "completed"
 
 
 def test_analyze_config_error_maps_to_error_event(monkeypatch):
