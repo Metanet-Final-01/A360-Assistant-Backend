@@ -4,7 +4,8 @@
 - 파이프라인 연결 상태·최근 로그 조회
 - 백엔드 프로세스에서 임의 HTTP 요청을 대신 보내는 프록시(SSRF 가드 포함)
 
-프로덕션 노출을 의도하지 않는다. http-request 프록시는 DEBUG_HTTP_CLIENT_ENABLED로만 활성화된다.
+프로덕션 노출을 의도하지 않는다 — 라우터 전체가 require_debug_enabled 게이트를
+거치며, http-request 프록시는 여기에 더해 DEBUG_HTTP_CLIENT_ENABLED까지 요구한다.
 """
 
 import asyncio
@@ -15,10 +16,29 @@ import socket
 import time
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-router = APIRouter(tags=["debug"])
+
+def _error(status: int, code: str, message: str) -> HTTPException:
+    """API 공통 에러 포맷 {code, message} (app/services/upload_security.py와 동일)."""
+    return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+def require_debug_enabled() -> None:
+    """디버그 라우터 전체 게이트 — 프로덕션에서는 기본 차단한다.
+
+    debug 라우트(RAG 단계별 실행·연결 상태·로그·HTTP 프록시)는 내부 구현과
+    로그를 노출하므로 운영 환경에 열려선 안 된다. APP_ENV=production이면 막고,
+    그 외(로컬/개발)에서는 허용한다. DEBUG_ENDPOINTS_ENABLED=true로 강제 허용 가능.
+    """
+    if os.getenv("DEBUG_ENDPOINTS_ENABLED", "").lower() == "true":
+        return
+    if os.getenv("APP_ENV", "development").lower() == "production":
+        raise _error(403, "DEBUG_DISABLED", "디버그 엔드포인트는 이 환경에서 비활성화되어 있습니다.")
+
+
+router = APIRouter(tags=["debug"], dependencies=[Depends(require_debug_enabled)])
 
 
 class HttpDebugRequest(BaseModel):
@@ -74,51 +94,55 @@ async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dic
     """Debug page helper: send an arbitrary HTTP request from the backend process."""
     import httpx
 
-    # 명시적 opt-in만 허용한다. 이전에는 APP_ENV가 development(기본값)면 열렸는데,
-    # 배포 환경에서 APP_ENV를 설정하지 않으면 프로덕션에 SSRF 프록시가 열리는
-    # 구조였다. 로컬 개발은 .env의 DEBUG_HTTP_CLIENT_ENABLED=true로 켠다.
-    debug_enabled = os.getenv("DEBUG_HTTP_CLIENT_ENABLED", "").lower() == "true"
-    if not debug_enabled:
-        raise HTTPException(status_code=403, detail="Debug HTTP client is disabled for this environment.")
+    # http-request 프록시는 라우터 게이트에 더해 명시적 opt-in을 요구한다 (심층 방어).
+    # 로컬 개발은 .env의 DEBUG_HTTP_CLIENT_ENABLED=true로 켠다.
+    if os.getenv("DEBUG_HTTP_CLIENT_ENABLED", "").lower() != "true":
+        raise _error(403, "DEBUG_HTTP_DISABLED", "디버그 HTTP 클라이언트가 이 환경에서 비활성화되어 있습니다.")
 
     method = payload.method.upper()
     if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported method: {payload.method}")
+        raise _error(400, "UNSUPPORTED_METHOD", f"지원하지 않는 메서드입니다: {payload.method}")
 
     url = payload.url.strip()
     request_url = url
     extensions: dict = {}
+    # 사용자 헤더는 미리 정리한다: content-length는 httpx가 계산, Host는 아래에서
+    # 검증된 값으로만 세팅한다(사용자 지정 Host가 라우팅을 덮어쓰지 못하게).
+    headers = {
+        str(k): str(v)
+        for k, v in payload.headers.items()
+        if k.lower() not in {"content-length", "host"}
+    }
+    timeout = max(1.0, min(payload.timeout_seconds, 60.0))
     is_self_call = url.startswith("/")
+
     if is_self_call:
-        # 자기 자신(이 백엔드)으로의 상대경로 호출 — 디버그 콘솔의 주 용도라 허용
-        url = request_url = str(request.base_url).rstrip("/") + url
+        # 자기 자신(이 백엔드)으로의 상대경로 호출 — Host/scheme 조작 여지가 있는
+        # base_url 조립 대신 ASGI 인프로세스 호출로 네트워크 없이 처리한다.
+        transport = httpx.ASGITransport(app=request.app)
+        client_kwargs = {"transport": transport, "base_url": "http://backend.internal"}
     elif url.startswith("http://") or url.startswith("https://"):
         parsed = urlparse(url)
         if not parsed.hostname:
-            raise HTTPException(status_code=400, detail="URL에서 호스트를 파싱할 수 없습니다.")
+            raise _error(400, "INVALID_URL", "URL에서 호스트를 파싱할 수 없습니다.")
         ip, reason = await _resolve_validated_ip(parsed.hostname)
         if reason:
-            raise HTTPException(status_code=400, detail=reason)
-        # 검증된 IP로 연결을 고정(핀)해 DNS 리바인딩을 차단한다. Host 헤더와 SNI는
-        # 원래 호스트로 유지해 라우팅·인증서 검증이 정상 동작하게 한다.
+            raise _error(400, "BLOCKED_TARGET", reason)
+        # 검증된 IP로 연결을 고정(핀)해 DNS 리바인딩을 차단한다. Host 헤더/SNI는
+        # 검증된 원래 host[:port]로 강제 세팅해 라우팅·인증서 검증이 정상 동작하게 한다.
         request_url, original_host = _pin_url_to_ip(url, ip)
-        payload.headers.setdefault("Host", original_host.split(":")[0])
+        headers["Host"] = original_host
         if parsed.scheme == "https":
             extensions["sni_hostname"] = parsed.hostname
+        client_kwargs = {}
     else:
-        raise HTTPException(status_code=400, detail="URL must be absolute or start with '/'.")
+        raise _error(400, "INVALID_URL", "URL은 절대 경로이거나 '/'로 시작해야 합니다.")
 
-    headers = {
-        str(key): str(value)
-        for key, value in payload.headers.items()
-        if key.lower() not in {"content-length"}
-    }
-    timeout = max(1.0, min(payload.timeout_seconds, 60.0))
     started = time.perf_counter()
     try:
         # 리다이렉트는 따라가지 않는다 — 검증을 우회해 내부망으로 재유도될 수 있어
         # (공인 URL → 169.254.169.254 리다이렉트) 응답만 그대로 돌려준다.
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, **client_kwargs) as client:
             req = client.build_request(
                 method,
                 request_url,
@@ -128,7 +152,7 @@ async def debug_http_request(payload: HttpDebugRequest, request: Request) -> dic
             )
             response = await client.send(req)
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"HTTP request failed: {exc}")
+        raise _error(502, "UPSTREAM_ERROR", f"HTTP 요청 실패: {exc}")
 
     content_type = response.headers.get("content-type", "")
     try:
