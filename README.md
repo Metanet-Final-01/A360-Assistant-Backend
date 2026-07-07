@@ -36,13 +36,42 @@ docker compose up -d db
 # 4) RAG 지식베이스 복원 (임베딩 포함 덤프 — 팀 공유 채널에서 수령)
 #    절차: app/rag/TEAM_SETUP.md 의 "경로 A"
 
-# 5) 서버 실행 (기동 시 테이블 자동 생성)
+# 5) 서버 실행 (기동 시 Alembic 마이그레이션이 head까지 자동 적용됨)
 uvicorn app.main:app --reload
 ```
+
+> **기존 DB(Alembic 도입 전에 만든 DB)를 쓰던 팀원**은 최초 1회만:
+> `alembic stamp head` (이미 테이블이 있으니 현재 상태로 표시). 그 뒤부터는 `upgrade`가 알아서 처리합니다.
 
 확인: http://localhost:8000/docs (Swagger UI)
 
 전체를 컨테이너로 띄우려면: `docker compose up` (backend + db)
+
+## 데이터베이스 마이그레이션 (Alembic)
+
+스키마의 단일 진실 공급원은 `migrations/`의 Alembic 마이그레이션이다 (앱은 부팅 시 `upgrade head` 자동 실행).
+
+```bash
+# 모델(app/models.py)을 바꾼 뒤 마이그레이션 생성 (DB에 반영 X, 파일만 생성)
+alembic revision --autogenerate -m "무엇을 바꿨는지"
+# 생성된 migrations/versions/*.py를 반드시 검토한 뒤 적용
+alembic upgrade head        # 최신까지 적용
+alembic downgrade -1        # 한 단계 되돌리기
+alembic current / history   # 현재 리비전 / 이력
+```
+
+- `rag_documents`는 `app/rag`가 원시 SQL(pgvector)로 관리하므로 Alembic 대상에서 제외돼 있다 (`migrations/env.py`).
+- 컬럼 추가/변경 시 `create_all`처럼 조용히 누락되지 않고, 마이그레이션 파일로 이력이 남는다.
+
+버전 이력 (`alembic history`로도 확인):
+
+| 리비전 | 내용 |
+|---|---|
+| `0001` | 도메인 8개 테이블 최초 생성 (RPA-12) |
+| `0002` | users 테이블 — 인증 (RPA-23) |
+| `0003` | llm_usage 귀속 컬럼 actor_type/user_id/component (RPA-33) |
+
+> 도입 전에 만든 기존 DB는 최초 1회 `alembic stamp head --purge`로 현재(0003) 상태로 표시한다.
 
 ## 테스트
 

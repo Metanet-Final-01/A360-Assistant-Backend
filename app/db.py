@@ -38,11 +38,17 @@ def get_db():
         db.close()
 
 
-def init_db() -> None:
-    """모델 테이블 생성 (존재하면 무시). 앱 기동 시 호출된다.
+def run_migrations() -> None:
+    """Alembic 마이그레이션을 head까지 적용한다 (스키마의 단일 진실 공급원).
 
-    스키마 변경이 잦아지면 Alembic 마이그레이션으로 전환한다.
+    신규 DB는 전체 스키마가 생성되고, 최신 DB는 no-op이다. 앱 기동 시 호출한다.
     """
-    from app import models  # noqa: F401  # Base.metadata에 모델 등록
+    from pathlib import Path
 
-    Base.metadata.create_all(engine)
+    from alembic import command
+    from alembic.config import Config
+
+    ini_path = Path(__file__).resolve().parent.parent / "alembic.ini"
+    cfg = Config(str(ini_path))
+    cfg.set_main_option("sqlalchemy.url", _database_url())
+    command.upgrade(cfg, "head")
