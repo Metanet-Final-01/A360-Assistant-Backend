@@ -2,7 +2,7 @@
 
 산출 형식 (documents.parsed_content):
 {
-  "parser": "pypdf"|"pypdf+tables"|"pdfbox"|"python-pptx"|"python-docx"|"text" (+"+vision" 보강 시),
+  "parser": "pdfplumber"|"pdfplumber+tables"|"pypdf"|"pdfbox"|"python-pptx"|"python-docx"|"text" (+"+vision"),
   "page_count": int,
   "pages": [{"page": 1, "blocks": [{"type": "text"|"table"|"notes"|"vision_text", ...}]}],
   "full_text": str,          # LLM 분석 입력용 전체 텍스트
