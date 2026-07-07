@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from app.core.llm import UsageCallbackHandler
 from app.schemas import RagSource
 
 from . import config
@@ -83,7 +84,11 @@ def _build_messages(state: AgentState) -> list:
 
 
 def _generate(state: AgentState) -> dict:
-    llm = ChatOpenAI(model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY)
+    # stream_usage=True: 스트리밍 응답에도 usage를 실어 UsageCallbackHandler가 토큰을
+    # 집계하게 한다(기본 OpenAI 엔드포인트는 자동, 커스텀 base_url까지 명시 보장).
+    llm = ChatOpenAI(
+        model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY, stream_usage=True
+    )
     response = llm.invoke(_build_messages(state))
     return {"answer": response.text}
 
@@ -131,9 +136,15 @@ def run_agent(message: str, history: list[dict] | None = None) -> AgentResult:
 
     history: 백엔드가 주입하는 이전 대화 턴 [{"role": "user"|"assistant", "content": str}].
     없으면 단발 질의응답(기존 동작)과 동일하다 — Agent는 이력을 저장하지 않는다(stateless).
+
+    LLM 사용량은 UsageCallbackHandler가 llm_usage에 기록한다 — 핸들러를 이 함수 안(요청
+    스레드)에서 만들어야 백엔드 usage_context 스냅샷이 정확히 잡힌다(귀속: component=agent).
     """
     _require_api_key()
-    result = _get_graph().invoke({"message": message, "history": history or []})
+    result = _get_graph().invoke(
+        {"message": message, "history": history or []},
+        config={"callbacks": [UsageCallbackHandler(purpose="chat")]},
+    )
     return AgentResult(answer=result["answer"], sources=_to_sources(result["docs"]))
 
 
@@ -148,10 +159,15 @@ async def stream_agent(
     그래프·노드는 run_agent와 동일한 것을 그대로 쓴다. retrieve 노드는 LLM을
     호출하지 않아 스트림에 섞이지 않는다. sources는 토큰 스트림에 싣지 않는다
     (SSE 이벤트 설계는 후속 이슈에서 백엔드와 협의).
+
+    LLM 사용량은 run_agent와 동일하게 UsageCallbackHandler가 기록한다(요청 스레드에서
+    생성해 usage_context 스냅샷). 스트리밍 usage는 usage_metadata 경로로 집계된다.
     """
     _require_api_key()
     async for chunk, _meta in _get_graph().astream(
-        {"message": message, "history": history or []}, stream_mode="messages"
+        {"message": message, "history": history or []},
+        stream_mode="messages",
+        config={"callbacks": [UsageCallbackHandler(purpose="chat")]},
     ):
         if chunk.text:
             yield chunk.text
