@@ -27,6 +27,19 @@ def _iter_block_items(parent):
             yield Table(child, parent)
 
 
+def _row_cells(row) -> list[str]:
+    """한 행의 셀 텍스트. 병합 셀은 row.cells가 같은 셀을 반복 반환하므로 _tc로 중복 제거."""
+    seen = set()
+    cells: list[str] = []
+    for cell in row.cells:
+        tc = cell._tc
+        if tc in seen:
+            continue
+        seen.add(tc)
+        cells.append(cell.text.strip())
+    return cells
+
+
 def parse_docx(content: bytes) -> dict:
     document = DocxDocument(io.BytesIO(content))
 
@@ -39,7 +52,7 @@ def parse_docx(content: bytes) -> dict:
                 blocks.append({"type": "text", "text": text})
                 full_parts.append(text)
         else:  # Table
-            rows = [[cell.text.strip() for cell in row.cells] for row in item.rows]
+            rows = [_row_cells(row) for row in item.rows]
             rows = [r for r in rows if any(r)]  # 완전 빈 행 제거
             if rows:
                 blocks.append({"type": "table", "rows": rows})

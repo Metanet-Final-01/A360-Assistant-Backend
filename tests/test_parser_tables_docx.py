@@ -46,6 +46,26 @@ def test_docx_extracts_text_and_table_in_order():
     assert "시세 조회 | Edge" in result["full_text"]
 
 
+def test_docx_merged_cells_not_duplicated():
+    """가로 병합 셀은 row.cells가 같은 셀을 반복 반환 — _tc로 중복 제거되어야 한다."""
+    doc = DocxDocument()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(1, 0).text = "값1"
+    table.cell(1, 1).text = "값2"
+    table.cell(1, 2).text = "값3"
+    # 첫 행 3칸을 하나로 병합 → row.cells는 같은 셀을 3번 반환
+    merged = table.cell(0, 0).merge(table.cell(0, 2))
+    merged.text = "제목"
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    result = parse_document("merged.docx", buf.getvalue())
+
+    table_block = next(b for b in result["pages"][0]["blocks"] if b["type"] == "table")
+    assert table_block["rows"][0] == ["제목"]  # 3번 아니라 1번
+    assert table_block["rows"][1] == ["값1", "값2", "값3"]
+
+
 def test_docx_empty_warns():
     doc = DocxDocument()
     buf = io.BytesIO()
@@ -81,8 +101,14 @@ def test_pdf_extracts_structured_table():
     rows = table_blocks[0]["rows"]
     assert ["Step", "System"] in rows
     assert ["Search", "Edge"] in rows
-    # 텍스트도 여전히 확보 (표 셀 내용이 full_text에 존재)
+    # 표 내용은 full_text에 있다 (구조화 표 → pipe 렌더)
     assert "Search" in result["full_text"]
+    # 중복 방지: 표 셀 값이 텍스트 블록에도 또 들어가면 안 된다 (analyze는 blocks를 읽음)
+    text_blocks = [
+        b for page in result["pages"] for b in page["blocks"] if b["type"] == "text"
+    ]
+    text_blob = " ".join(b["text"] for b in text_blocks)
+    assert "Search" not in text_blob, "표 셀이 텍스트 블록에 중복되면 안 됨"
 
 
 def test_clean_table_normalizes_none_and_blank_rows():

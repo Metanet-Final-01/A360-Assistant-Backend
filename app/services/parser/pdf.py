@@ -1,9 +1,9 @@
-"""PDF 텍스트·표 추출 — pypdf(텍스트, 기본) → PDFBox(레이아웃, 폴백), pdfplumber(구조화 표).
+"""PDF 텍스트·표 추출 — pdfplumber(표 영역 제외 텍스트 + 구조화 표, 기본) → pypdf → PDFBox 폴백.
 
-텍스트는 pypdf layout 모드로 빠르게 뽑고, 그 위에 pdfplumber로 표를 셀 단위 구조
-({"type":"table","rows":[...]})로 얹는다 (PPTX와 동일 계약). 표 셀 내용은 pypdf 텍스트에도
-이미 공백 배치로 들어있으므로 full_text는 pypdf 텍스트를 그대로 쓴다(중복 토큰 방지).
-pdfplumber가 없거나 실패하면 표 없이 텍스트만 반환한다(안전 폴백).
+표는 셀 단위로 {"type":"table","rows":[...]}로 뽑고, 텍스트 블록에는 표 영역을 제외한
+본문만 담는다 — 같은 표가 텍스트와 표 블록에 중복 노출돼 LLM 입력을 오염시키는 것을 막는다
+(다운스트림 analyze는 pages[].blocks를 프롬프트로 조립하므로 중복이 그대로 비용이 된다).
+pdfplumber가 없거나 텍스트를 못 뽑으면 pypdf(레이아웃)→PDFBox로 폴백한다(표는 생략).
 """
 
 import io
@@ -20,67 +20,110 @@ logger = logging.getLogger(__name__)
 
 
 def parse_pdf(content: bytes) -> dict:
-    parser, page_texts = _with_pypdf(content)
+    page_data = _with_pdfplumber(content)  # [(text, [table_rows,...]), ...] | None
+    has_tables = False
 
-    if not any(t.strip() for t in page_texts):
-        pdfbox_text = _try_pdfbox(content)
-        if pdfbox_text and pdfbox_text.strip():
-            parser = "pdfbox"
-            page_texts = pdfbox_text.split("\f") if "\f" in pdfbox_text else [pdfbox_text]
+    if page_data is not None and any(text.strip() or tables for text, tables in page_data):
+        parser = "pdfplumber"
+        has_tables = any(tables for _, tables in page_data)
+    else:
+        parser, page_texts = _with_pypdf(content)
+        if not any(t.strip() for t in page_texts):
+            pdfbox_text = _try_pdfbox(content)
+            if pdfbox_text and pdfbox_text.strip():
+                parser = "pdfbox"
+                page_texts = pdfbox_text.split("\f") if "\f" in pdfbox_text else [pdfbox_text]
+        page_data = [(t, []) for t in page_texts]
 
-    tables_by_page = _extract_tables(content)  # {page_no: [rows, ...]}
-
-    pages = []
-    warnings = []
-    for i, text in enumerate(page_texts, start=1):
+    pages: list[dict] = []
+    warnings: list[str] = []
+    full_parts: list[str] = []
+    for i, (text, tables) in enumerate(page_data, start=1):
         blocks: list[dict] = [
             {"type": "text", "text": chunk.strip()}
             for chunk in text.split("\n\n")
             if chunk.strip()
         ]
-        for rows in tables_by_page.get(i, []):
+        for rows in tables:
             blocks.append({"type": "table", "rows": rows})
         if not blocks:
             warnings.append(f"{i}페이지에서 텍스트를 찾지 못함 (이미지 페이지 가능성 — OCR은 후속 지원)")
         pages.append({"page": i, "blocks": blocks})
 
-    if tables_by_page:
+        parts = [text.strip()] if text.strip() else []
+        parts += ["\n".join(" | ".join(r) for r in rows) for rows in tables]
+        if parts:
+            full_parts.append("\n".join(parts))
+
+    if has_tables:
         parser = f"{parser}+tables"
 
     return {
         "parser": parser,
         "page_count": len(pages),
         "pages": pages,
-        "full_text": "\n\n".join(t.strip() for t in page_texts if t.strip()),
+        "full_text": "\n\n".join(full_parts),
         "warnings": warnings,
     }
 
 
-def _extract_tables(content: bytes) -> dict[int, list[list[list[str]]]]:
-    """pdfplumber로 페이지별 표를 구조화 추출한다. {page_no: [table_rows, ...]}.
+def _with_pdfplumber(content: bytes) -> list[tuple[str, list[list[list[str]]]]] | None:
+    """pdfplumber로 페이지별 (표 영역 제외 텍스트, 구조화 표들)을 추출한다.
 
-    pdfplumber 미설치·손상 등은 표 없이 진행(텍스트는 pypdf가 이미 확보). CPU 비용이
-    있어 표가 있는 문서에서만 의미가 있으므로, 실패는 경고만 남기고 조용히 넘어간다.
+    pdfplumber 미설치·손상 등은 None을 돌려 상위에서 pypdf로 폴백하게 한다.
+    표 영역의 텍스트는 제외해 텍스트 블록과 표 블록이 겹치지 않게 한다.
     """
     try:
         import pdfplumber
     except ImportError:
-        return {}
+        return None
 
-    result: dict[int, list[list[list[str]]]] = {}
+    out: list[tuple[str, list[list[list[str]]]]] = []
     try:
         with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for i, page in enumerate(pdf.pages, start=1):
-                try:
-                    raw_tables = page.extract_tables()
-                except Exception:  # noqa: BLE001 — 특정 페이지 표 추출 실패는 건너뛴다
-                    continue
-                cleaned = [t for t in (_clean_table(rt) for rt in raw_tables) if t]
-                if cleaned:
-                    result[i] = cleaned
-    except Exception as e:  # noqa: BLE001 — 손상/암호화 등은 표 없이 텍스트만 사용
-        logger.warning("pdfplumber 표 추출 실패 (텍스트만 사용): %s", e)
-    return result
+            for page in pdf.pages:
+                out.append(_plumber_page(page))
+    except Exception as e:  # noqa: BLE001 — 손상/암호화 등은 pypdf로 폴백
+        logger.warning("pdfplumber 파싱 실패, pypdf로 폴백: %s", e)
+        return None
+    return out
+
+
+def _plumber_page(page) -> tuple[str, list[list[list[str]]]]:
+    try:
+        found = page.find_tables()
+    except Exception:  # noqa: BLE001
+        found = []
+    bboxes = [t.bbox for t in found]
+
+    if bboxes:
+        try:
+            src = page.filter(lambda obj: _outside_bboxes(obj, bboxes))
+        except Exception:  # noqa: BLE001 — 필터 실패 시 전체 텍스트 사용
+            src = page
+    else:
+        src = page
+    try:
+        text = src.extract_text(layout=True) or ""
+    except Exception:  # noqa: BLE001
+        text = src.extract_text() or ""
+    text = _compress_spaces(text)
+
+    tables = [t for t in (_clean_table(f.extract()) for f in found) if t]
+    return text, tables
+
+
+def _outside_bboxes(obj: dict, bboxes: list[tuple]) -> bool:
+    """객체 중심이 어떤 표 bbox에도 들어가지 않으면 True (표 영역 제외용)."""
+    cx = (obj["x0"] + obj["x1"]) / 2
+    cy = (obj["top"] + obj["bottom"]) / 2
+    return not any(x0 <= cx <= x1 and top <= cy <= bottom for x0, top, x1, bottom in bboxes)
+
+
+def _compress_spaces(text: str) -> str:
+    """layout 모드의 과도한 정렬 공백(3칸+)을 2칸으로 압축 — 열 신호는 남기고 토큰 절약."""
+    lines = (re.sub(r" {3,}", "  ", line.rstrip()) for line in text.split("\n"))
+    return "\n".join(lines)
 
 
 def _clean_table(rows: list[list]) -> list[list[str]]:
@@ -108,8 +151,7 @@ def _extract_page_text(page) -> str:
         text = page.extract_text(extraction_mode="layout") or ""
     except Exception:  # noqa: BLE001 — 문서에 따라 layout 모드가 실패하면 기본 모드로
         text = page.extract_text() or ""
-    lines = (re.sub(r" {3,}", "  ", line.rstrip()) for line in text.split("\n"))
-    return "\n".join(lines)
+    return _compress_spaces(text)
 
 
 def _try_pdfbox(content: bytes) -> str | None:
