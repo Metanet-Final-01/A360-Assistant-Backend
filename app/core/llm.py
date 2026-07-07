@@ -20,6 +20,10 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+# langchain-core는 하드 의존성(requirements.txt — Agent가 사용). UsageCallbackHandler가
+# 상속한다 (덕타이핑 __getattr__은 run_inline 등 접근에서 터져 스트림을 끊었다, RPA-48).
+from langchain_core.callbacks import BaseCallbackHandler
+
 logger = logging.getLogger(__name__)
 
 _client = None
@@ -180,16 +184,7 @@ def record_usage(
         logger.warning("LLM 사용량 기록 실패 (호출은 정상): %s", e)
 
 
-try:
-    # 콜백 프로토콜 전체(run_inline/raise_error/ignore_* 기본값 + 미사용 훅 no-op)를
-    # 상속으로 확보한다. 이걸 덕타이핑(__getattr__)으로 흉내내면 LangChain async 매니저가
-    # 읽는 run_inline 등에서 AttributeError가 나 스트림이 통째로 끊긴다(RPA-48).
-    from langchain_core.callbacks import BaseCallbackHandler as _BaseCallbackHandler
-except ImportError:  # langchain 미설치 — 이 콜백은 Agent에서만 쓰므로 무해
-    _BaseCallbackHandler = object
-
-
-class UsageCallbackHandler(_BaseCallbackHandler):
+class UsageCallbackHandler(BaseCallbackHandler):
     """Agent(LangChain)의 LLM 호출 사용량을 llm_usage에 기록하는 콜백.
 
     부착: llm.invoke(msgs, config={"callbacks": [UsageCallbackHandler()]})
