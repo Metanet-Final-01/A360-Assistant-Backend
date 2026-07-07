@@ -113,6 +113,16 @@ def test_chat_blocks_non_owner(monkeypatch):
     assert r.status_code == 403
 
 
+def test_empty_session_id_is_400_not_stateless(monkeypatch):
+    """빈 문자열 session_id는 무상태로 조용히 처리하지 않고 400으로 드러낸다 (CodeRabbit)."""
+    monkeypatch.setattr(agent_api, "run_agent", lambda *a, **k: SimpleNamespace(answer="x", sources=[]))
+    _override(FakeDB(session=None))
+    with TestClient(app) as c:
+        r = c.post("/api/agent/chat", json={"message": "hi", "session_id": ""})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "INVALID_ID"
+
+
 def test_unknown_session_404(monkeypatch):
     monkeypatch.setattr(agent_api, "run_agent", lambda *a, **k: SimpleNamespace(answer="x", sources=[]))
     _override(FakeDB(session=None))

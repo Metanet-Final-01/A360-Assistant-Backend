@@ -84,7 +84,9 @@ def agent_chat(
     run_agent는 동기 함수라 def 라우트로 둔다 (FastAPI가 스레드풀에서 실행). usage_context로
     감싸 Agent의 LLM 사용을 귀속한다 (콜백이 이 블록 안에서 생성되며 스냅샷을 잡는다).
     """
-    session = _load_owned_session(payload.session_id, db, user) if payload.session_id else None
+    # 계약: session_id가 null/생략이면 무상태. 문자열이면(빈 문자열 포함) 반드시 유효한
+    # 소유 세션이어야 한다 — 빈/잘못된 값을 무상태로 조용히 처리하지 않고 400으로 드러낸다.
+    session = _load_owned_session(payload.session_id, db, user) if payload.session_id is not None else None
     history = _load_history(db, session.id) if session else None
     try:
         with usage_context(
@@ -126,7 +128,8 @@ async def agent_chat_stream(
     """
     user_id = user.id if user else None
     # 이력 로드·소유권 검사는 요청 스코프 db 세션이 살아있는 지금 한다(스트리밍 시작 전).
-    session = _load_owned_session(payload.session_id, db, user) if payload.session_id else None
+    # session_id가 null/생략이면 무상태, 문자열이면 반드시 유효한 소유 세션(빈 값도 400).
+    session = _load_owned_session(payload.session_id, db, user) if payload.session_id is not None else None
     session_id = session.id if session else None
     history = _load_history(db, session_id) if session else None
 
