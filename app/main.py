@@ -20,6 +20,7 @@ from app.api.debug import router as debug_router
 from app.api.documents import router as documents_router
 from app.api.rag import router as rag_router
 from app.api.sessions import router as sessions_router
+from app.core.errors import install_error_handlers
 from app.core.http_logging import register_http_logging
 
 load_dotenv()
@@ -71,6 +72,7 @@ app.add_middleware(
 )
 
 register_http_logging(app)
+install_error_handlers(app)
 
 app.include_router(auth_router)
 app.include_router(documents_router)
