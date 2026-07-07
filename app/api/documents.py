@@ -13,6 +13,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import models
+from app.api.auth import get_optional_user
+from app.core.llm import usage_context
 from app.db import get_db
 from app.schemas import ProgressEvent
 from app.services import storage
@@ -119,7 +121,11 @@ def get_document_content(document_id: str, db: Session = Depends(get_db)) -> dic
 
 
 @router.post("/documents/{document_id}/enrich-vision")
-def enrich_vision(document_id: str, db: Session = Depends(get_db)) -> StreamingResponse:
+def enrich_vision(
+    document_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> StreamingResponse:
     """텍스트가 부족한 페이지를 비전 LLM으로 보강한다 (FR-03) — SSE 스트림.
 
     페이지당 LLM 호출로 수십 초가 걸릴 수 있어 진행 상황을 ProgressEvent로 흘린다
@@ -139,31 +145,17 @@ def enrich_vision(document_id: str, db: Session = Depends(get_db)) -> StreamingR
     file_content = storage.load(doc.storage_path)
 
     doc_id, filename, parsed_content, sess_id = doc.id, doc.filename, doc.parsed_content, doc.session_id
+    user_id = user.id if user else None
 
     def sse():
+        # 비전 LLM 사용을 component=vision·사용자로 귀속. vision 내부의 ThreadPoolExecutor는
+        # copy_context로 이 컨텍스트를 워커까지 전파한다.
         try:
-            for event in vision.enrich_document_stream(
-                filename, file_content, parsed_content, session_id=sess_id
+            with usage_context(
+                component="vision", actor_type="user", user_id=user_id, session_id=sess_id
             ):
-                if event.event == "done":
-                    # 요청 스코프의 db 세션은 스트리밍 시작 전에 닫히므로(FastAPI 0.106+
-                    # yield 의존성 동작) 저장은 반드시 새 세션으로 한다
-                    from app.db import SessionLocal
-
-                    with SessionLocal() as s:
-                        fresh = s.get(models.Document, doc_id)
-                        fresh.parsed_content = event.data["parsed"]
-                        s.commit()
-                        summary = _document_out(fresh)
-                    yield ProgressEvent(
-                        event="done",
-                        stage="vision",
-                        message=event.message,
-                        data={**summary, "enriched_pages": event.data["enriched_pages"]},
-                    ).to_sse()
-                else:
-                    yield event.to_sse()
-        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
+                yield from _run_vision_stream(filename, file_content, parsed_content, sess_id, doc_id)
+        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등
             yield ProgressEvent(event="error", stage="vision", message=f"LLM 구성 오류: {e}").to_sse()
         except Exception:  # noqa: BLE001
             logger.exception("비전 보강 실패: document=%s", doc_id)
@@ -176,3 +168,30 @@ def enrich_vision(document_id: str, db: Session = Depends(get_db)) -> StreamingR
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _run_vision_stream(filename, file_content, parsed_content, sess_id, doc_id):
+    """enrich_vision의 SSE 본문 — usage_context 블록 안에서 실행된다."""
+    from app.services.parser import vision
+
+    for event in vision.enrich_document_stream(
+        filename, file_content, parsed_content, session_id=sess_id
+    ):
+        if event.event == "done":
+            # 요청 스코프의 db 세션은 스트리밍 시작 전에 닫히므로(FastAPI 0.106+
+            # yield 의존성 동작) 저장은 반드시 새 세션으로 한다
+            from app.db import SessionLocal
+
+            with SessionLocal() as s:
+                fresh = s.get(models.Document, doc_id)
+                fresh.parsed_content = event.data["parsed"]
+                s.commit()
+                summary = _document_out(fresh)
+            yield ProgressEvent(
+                event="done",
+                stage="vision",
+                message=event.message,
+                data={**summary, "enriched_pages": event.data["enriched_pages"]},
+            ).to_sse()
+        else:
+            yield event.to_sse()

@@ -170,7 +170,11 @@ class Feedback(Base):
 
 
 class LlmUsage(Base):
-    """LLM 호출 사용량 (비기능: 관측성 — 토큰/비용/응답시간 모니터링)."""
+    """LLM 호출 사용량 (비기능: 관측성 — 토큰/비용/응답시간 모니터링).
+
+    3축으로 집계 가능: user_id(누가) / component(어느 서브시스템) / model(어느 LLM).
+    actor_type='system'은 사용자와 무관한 백그라운드 사용(RAG 임베딩 적재 등).
+    """
 
     __tablename__ = "llm_usage"
 
@@ -178,7 +182,18 @@ class LlmUsage(Base):
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("analysis_sessions.id", ondelete="SET NULL"), index=True
     )
-    purpose: Mapped[str] = mapped_column(String(50))  # analyze|recommend|chat|summarize|embed|other
+    # 누가 유발했나 — user(사람) / system(임베딩 적재 등 백그라운드). user_id는 익명·시스템이면 NULL
+    actor_type: Mapped[str] = mapped_column(
+        Enum("user", "system", name="usage_actor_type", native_enum=False),
+        default="system",
+        index=True,
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    # 어느 서브시스템 — vision|agent|rag_embed|rag_rerank|other
+    component: Mapped[str] = mapped_column(String(30), default="other", index=True)
+    purpose: Mapped[str] = mapped_column(String(50))  # analyze|recommend|chat|summarize|vision_parse|embed|other
     model: Mapped[str] = mapped_column(String(100))
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
