@@ -74,6 +74,23 @@ def test_chat_stream_error_event_on_runtime_error(client, monkeypatch):
     assert events[-1]["event"] == "error"
 
 
+def test_chat_stream_non_runtime_exception_becomes_error_event(client, monkeypatch):
+    """RPA-48: 콜백 등에서 난 비-RuntimeError 예외가 스트림을 통째로 끊지 않고
+    깔끔한 error 이벤트로 나가야 한다 (ERR_INCOMPLETE_CHUNKED_ENCODING 방지)."""
+
+    async def _mid_stream_boom(message):
+        yield "부분"
+        raise ValueError("콜백 내부 폭발")  # RuntimeError가 아닌 예외
+
+    monkeypatch.setattr(agent_api, "stream_agent", _mid_stream_boom)
+    with client.stream("POST", "/api/agent/chat/stream", json={"message": "질문"}) as r:
+        assert r.status_code == 200
+        events = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: ")]
+    # 토큰 하나 나온 뒤 error로 마무리 — 스트림이 예외로 끊기지 않음
+    assert events[0]["event"] == "token"
+    assert events[-1]["event"] == "error"
+
+
 # --- 검색기 연결 ---
 
 def test_hybrid_retriever_delegates_to_search_actions(monkeypatch):

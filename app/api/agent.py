@@ -8,6 +8,8 @@ run_agent/stream_agent를 호출하고, 출처(RagSource)·SSE 규약(ProgressEv
 후속 이슈다. 이 라우터는 무상태 질의응답만 제공한다.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -17,6 +19,8 @@ from app.agent import run_agent, stream_agent
 from app.api.auth import get_optional_user
 from app.core.llm import usage_context
 from app.schemas import ProgressEvent
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -44,6 +48,12 @@ def agent_chat(
             status_code=503,
             detail={"code": "AGENT_UNAVAILABLE", "message": f"Agent 설정 오류: {e}"},
         )
+    except Exception:  # noqa: BLE001 — 미포착 예외를 raw 500 대신 {code,message}로
+        logger.exception("챗 실패")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "AGENT_ERROR", "message": "응답 생성 중 오류가 발생했습니다"},
+        ) from None
     return {
         "answer": result.answer,
         "sources": [source.model_dump() for source in result.sources],
@@ -70,8 +80,14 @@ async def agent_chat_stream(
                 async for token in stream_agent(payload.message):
                     yield ProgressEvent(event="token", stage="chat", message=token).to_sse()
                 yield ProgressEvent(event="done", stage="chat").to_sse()
-        except RuntimeError as e:
+        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 설정 오류
             yield ProgressEvent(event="error", stage="chat", message=f"Agent 설정 오류: {e}").to_sse()
+        except Exception:  # noqa: BLE001 — 미포착 예외가 스트림을 통째로 끊지(ERR_INCOMPLETE_CHUNKED_ENCODING)
+            # 않도록 깔끔한 error 이벤트로 흘린다. 원인은 서버 로그로 남긴다.
+            logger.exception("스트리밍 챗 실패")
+            yield ProgressEvent(
+                event="error", stage="chat", message="응답 생성 중 오류가 발생했습니다"
+            ).to_sse()
 
     return StreamingResponse(
         sse(),
