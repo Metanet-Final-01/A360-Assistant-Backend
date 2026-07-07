@@ -8,7 +8,8 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
-from app.main import _pin_url_to_ip, _resolve_validated_ip, app
+from app.api.debug import _pin_url_to_ip, _resolve_validated_ip
+from app.main import app
 
 
 def _resolve(host):
@@ -53,6 +54,38 @@ def test_endpoint_blocks_metadata_when_enabled(monkeypatch):
     with TestClient(app) as client:
         r = client.post("/api/debug/http-request", json={"url": "http://169.254.169.254/"})
     assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "BLOCKED_TARGET"  # {code, message} 포맷
+
+
+def test_debug_router_gated_in_production(monkeypatch):
+    """프로덕션에서는 디버그 라우터 전체가 차단된다 (RAG 디버그 엔드포인트 포함)."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("DEBUG_ENDPOINTS_ENABLED", raising=False)
+    with TestClient(app) as client:
+        r = client.get("/api/rag/debug/status")  # http-request가 아닌 다른 디버그 라우트
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "DEBUG_DISABLED"
+
+
+def test_debug_gate_forced_on_passes(monkeypatch):
+    """프로덕션이라도 DEBUG_ENDPOINTS_ENABLED=true면 게이트를 통과한다.
+
+    (엔드포인트 본문은 무거운 외부 의존이 있어 게이트 함수만 직접 검증)
+    """
+    from app.api.debug import require_debug_enabled
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DEBUG_ENDPOINTS_ENABLED", "true")
+    require_debug_enabled()  # 예외가 나지 않으면 통과
+
+
+def test_debug_gate_allows_local(monkeypatch):
+    """로컬/개발(APP_ENV 미설정=development)에서는 게이트가 열려 있다."""
+    from app.api.debug import require_debug_enabled
+
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("DEBUG_ENDPOINTS_ENABLED", raising=False)
+    require_debug_enabled()  # 예외 없음
 
 
 def test_pin_url_to_ip_preserves_host_and_port():
