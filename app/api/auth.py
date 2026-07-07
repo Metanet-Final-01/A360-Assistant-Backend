@@ -91,6 +91,19 @@ def get_optional_user(
     return db.get(models.User, user_key) if user_key else None
 
 
+def assert_session_owner(session: "models.AnalysisSession", user: models.User | None) -> None:
+    """세션에 소유자가 있으면 요청자와 일치하는지 검사한다.
+
+    익명 세션(user_id NULL)은 누구나 접근 허용(하위호환) — 소유자가 지정된 세션만
+    타인 접근을 403으로 막는다. 세션 UUID만 알면 남의 문서를 분석·조회하던 허점을 차단.
+    """
+    owner_id = getattr(session, "user_id", None)
+    if owner_id is not None and (user is None or user.id != owner_id):
+        raise HTTPException(
+            403, detail={"code": "FORBIDDEN", "message": "이 세션에 접근할 권한이 없습니다."}
+        )
+
+
 @router.post("/register", response_model=TokenResponse, status_code=201)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
     """회원가입 후 바로 로그인 상태가 되도록 토큰을 발급한다."""

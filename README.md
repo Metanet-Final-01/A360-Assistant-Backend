@@ -70,8 +70,9 @@ alembic current / history   # 현재 리비전 / 이력
 | `0001` | 도메인 8개 테이블 최초 생성 (RPA-12) |
 | `0002` | users 테이블 — 인증 (RPA-23) |
 | `0003` | llm_usage 귀속 컬럼 actor_type/user_id/component (RPA-33) |
+| `0004` | analysis_sessions.user_id — 세션 소유자 (RPA-40) |
 
-> 도입 전에 만든 기존 DB는 최초 1회 `alembic stamp head --purge`로 현재(0003) 상태로 표시한다.
+> 도입 전에 만든 기존 DB는 최초 1회 `alembic stamp head --purge`로 현재 상태로 표시한다.
 
 ## 테스트
 
