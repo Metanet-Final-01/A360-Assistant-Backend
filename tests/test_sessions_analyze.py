@@ -226,7 +226,9 @@ def test_analyze_config_error_maps_to_error_event(monkeypatch):
     def _no_key(parsed):
         raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
 
+    _FakePersist.saved = []
     monkeypatch.setattr(sessions_api, "_get_agent_analyze", lambda: _no_key)
+    monkeypatch.setattr("app.db.SessionLocal", _FakePersist())
 
     with _client(session=_session_row(), document=_document_row()) as c:
         with c.stream("POST", f"/api/sessions/{SESSION_ID}/analyze") as r:
@@ -236,3 +238,5 @@ def test_analyze_config_error_maps_to_error_event(monkeypatch):
 
     assert events[-1]["event"] == "error"
     assert "구성 오류" in events[-1]["message"]
+    # 구성 오류도 실패 행으로 남는다 (CodeRabbit 지적 반영)
+    assert any(getattr(row, "status", None) == "failed" for row in _FakePersist.saved)

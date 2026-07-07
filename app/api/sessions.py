@@ -49,7 +49,9 @@ def analyze_session(
     try:
         session_key = uuid.UUID(session_id)
     except ValueError:
-        raise HTTPException(400, detail={"code": "INVALID_ID", "message": "세션 ID 형식이 올바르지 않습니다."})
+        raise HTTPException(
+            400, detail={"code": "INVALID_ID", "message": "세션 ID 형식이 올바르지 않습니다."}
+        ) from None
 
     session = db.get(models.AnalysisSession, session_key)
     if session is None:
@@ -118,10 +120,12 @@ def analyze_session(
                 data={"analysis_id": analysis_id, **result_json},
             ).to_sse()
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
+            # 구성 오류도 시도된 분석의 실패이므로 이력에 남긴다 (계약: 실패도 영속화)
+            _record_failure(session_key_v, doc_id, "분석 엔진 구성 오류")
             yield ProgressEvent(event="error", stage="analyzing", message=f"분석 엔진 구성 오류: {e}").to_sse()
         except Exception:  # noqa: BLE001
             logger.exception("분석 실패: session=%s document=%s", session_key_v, doc_id)
-            _record_failure(session_key_v, doc_id)
+            _record_failure(session_key_v, doc_id, "분석 중 오류가 발생했습니다")
             yield ProgressEvent(
                 event="error", stage="analyzing", message="분석 중 오류가 발생했습니다"
             ).to_sse()
@@ -133,7 +137,7 @@ def analyze_session(
     )
 
 
-def _record_failure(session_id: uuid.UUID, document_id: uuid.UUID) -> None:
+def _record_failure(session_id: uuid.UUID, document_id: uuid.UUID, error: str) -> None:
     """분석 실패를 Analysis 행으로 남긴다 (실패해도 스트림 에러 이벤트는 나가야 하므로 best-effort)."""
     try:
         from app.db import SessionLocal
@@ -144,7 +148,7 @@ def _record_failure(session_id: uuid.UUID, document_id: uuid.UUID) -> None:
                     session_id=session_id,
                     document_id=document_id,
                     status="failed",
-                    error="분석 중 오류가 발생했습니다",
+                    error=error,
                 )
             )
             s.commit()
