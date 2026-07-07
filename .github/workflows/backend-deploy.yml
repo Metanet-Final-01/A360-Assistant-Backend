@@ -103,6 +103,7 @@ jobs:
               JwtSecret="${{ secrets.JWT_SECRET }}" \
               GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
               EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}" \
+              OpenSearchMode="${{ vars.OPENSEARCH_MODE || 'managed' }}" \
               NetworkMode="${{ inputs.network_mode || 'private' }}" \
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
