@@ -65,7 +65,7 @@ steps[]               ─ 업무 단계 (AnalysisResult.steps[].step_id 참조)
       "actions": [
         {
           "order": 1,
-          "package": "Browser", "action": "OpenBrowser", "label": "브라우저 열기",
+          "package": "Browser", "action": "openbrowser", "label": "브라우저 열기",
           "parameters": [
             { "name": "url", "value": "https://finance.naver.com", "value_source": "llm" }
           ],
@@ -80,18 +80,18 @@ steps[]               ─ 업무 단계 (AnalysisResult.steps[].step_id 참조)
     {
       "step_id": "step-3",
       "actions": [
-        { "order": 1, "package": "Excel_MS", "action": "OpenWorkbook", "label": "열기",
+        { "order": 1, "package": "Excel_MS", "action": "OpenSpreadsheet", "label": "열기",
           "parameters": [{ "name": "session", "value": "Default", "value_source": "schema_default" }] },
         {
           "order": 2,
-          "package": "Loop", "action": "loop", "label": "루프",
+          "package": "Loop", "action": "loop.commands.start", "label": "루프",
           "parameters": [{ "name": "loopType", "value": "Times=3", "value_source": "llm" }],
           "rationale": "'최근 3일치' 반복 요건 → Loop 3회",
           "children": [
             { "order": 1, "package": "Excel_MS", "action": "SetCell", "label": "셀 설정" }
           ]
         },
-        { "order": 3, "package": "Excel_MS", "action": "SaveWorkbook", "label": "저장" }
+        { "order": 3, "package": "Excel_MS", "action": "SaveSpreadSheet", "label": "저장" }
       ]
     }
   ],
