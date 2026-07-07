@@ -4,6 +4,7 @@
 파싱 실패는 500이 아니라 문서 상태(failed)로 기록한다 — 사용자는 다른 파일로 재시도하면 된다.
 """
 
+import contextvars
 import logging
 import os
 import uuid
@@ -147,14 +148,22 @@ def enrich_vision(
     doc_id, filename, parsed_content, sess_id = doc.id, doc.filename, doc.parsed_content, doc.session_id
     user_id = user.id if user else None
 
+    # 비전 LLM 사용을 component=vision·사용자로 귀속. usage_context를 제너레이터의 yield
+    # 너머로 걸치면 안 된다 — StreamingResponse가 next()마다 다른 스레드 컨텍스트에서
+    # 재개해 ContextVar가 끊긴다. 대신 여기(요청 스레드)서 귀속이 설정된 컨텍스트를
+    # 복사해 두고, 스트림의 매 재개를 그 컨텍스트 안에서 실행한다.
+    with usage_context(component="vision", actor_type="user", user_id=user_id, session_id=sess_id):
+        stream_ctx = contextvars.copy_context()
+
     def sse():
-        # 비전 LLM 사용을 component=vision·사용자로 귀속. vision 내부의 ThreadPoolExecutor는
-        # copy_context로 이 컨텍스트를 워커까지 전파한다.
+        inner = _run_vision_stream(filename, file_content, parsed_content, sess_id, doc_id)
         try:
-            with usage_context(
-                component="vision", actor_type="user", user_id=user_id, session_id=sess_id
-            ):
-                yield from _run_vision_stream(filename, file_content, parsed_content, sess_id, doc_id)
+            while True:
+                try:
+                    event = stream_ctx.run(next, inner)
+                except StopIteration:
+                    break
+                yield event
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등
             yield ProgressEvent(event="error", stage="vision", message=f"LLM 구성 오류: {e}").to_sse()
         except Exception:  # noqa: BLE001

@@ -19,6 +19,7 @@ from app.api.auth import router as auth_router
 from app.api.debug import router as debug_router
 from app.api.documents import router as documents_router
 from app.api.rag import router as rag_router
+from app.api.sessions import router as sessions_router
 from app.core.http_logging import register_http_logging
 
 load_dotenv()
@@ -76,6 +77,7 @@ app.include_router(documents_router)
 app.include_router(rag_router)
 app.include_router(debug_router)
 app.include_router(agent_router)
+app.include_router(sessions_router)
 
 
 class EchoRequest(BaseModel):
