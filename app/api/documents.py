@@ -54,10 +54,14 @@ def _get_document_or_404(
     doc = db.get(models.Document, key)
     if doc is None:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "문서를 찾을 수 없습니다."})
-    # 문서가 속한 세션의 소유권 검사 (남의 세션 문서 조회 차단)
+    # 문서가 속한 세션의 소유권 검사 (남의 세션 문서 조회 차단).
+    # Document.session_id는 NOT NULL이고 세션 삭제 시 문서도 CASCADE 삭제되므로 정상
+    # 상태에선 세션이 항상 존재한다. 혹시 없으면(DB 불일치) 소유권을 확인할 수 없으니
+    # fail-closed로 404 처리한다 — 검사 없이 반환하지 않는다.
     session = db.get(models.AnalysisSession, doc.session_id)
-    if session is not None:
-        assert_session_owner(session, user)
+    if session is None:
+        raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "문서를 찾을 수 없습니다."})
+    assert_session_owner(session, user)
     return doc
 
 
