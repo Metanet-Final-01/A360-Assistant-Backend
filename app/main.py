@@ -28,14 +28,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # DB 없이도 앱은 기동돼야 한다 (프론트 로컬 개발 등) — 실패는 경고만 남긴다
+    # DB 없이도 앱은 기동돼야 한다 (프론트 로컬 개발 등) — 실패는 경고만 남긴다.
+    # Alembic으로 스키마를 head까지 올린다 (신규 DB는 전체 생성, 최신 DB는 no-op).
     try:
-        from app.db import init_db
+        from app.db import run_migrations
 
-        init_db()
-        logger.info("DB 테이블 초기화 완료")
+        run_migrations()
+        logger.info("DB 마이그레이션 완료 (alembic head)")
     except Exception as e:  # noqa: BLE001
-        logger.warning("DB 초기화 실패 (앱은 계속 기동): %s", e)
+        logger.warning("DB 마이그레이션 실패 (앱은 계속 기동): %s", e)
     yield
 
 
