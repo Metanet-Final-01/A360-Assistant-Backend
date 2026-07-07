@@ -182,6 +182,20 @@ def search_actions(
 LLM 호출은 백엔드가 제공할 사용량 기록 래퍼(후속 이슈: `app/core/llm.py`)를 통과하는 것을 목표로 한다
 (토큰/비용 모니터링이 전 호출을 커버해야 하므로).
 
+**스키마 강제 출력 (analyze/recommend)** — `core.llm.chat()`은 `response_format` 파라미터를 받아
+OpenAI JSON mode / Structured Outputs를 지원한다. AnalysisResult·Recommendation처럼 스키마를
+강제해야 하는 출력은 이걸 넘긴다 (반환은 str이며 JSON 파싱·검증은 agent가 한다):
+
+```python
+from app.core.llm import chat
+# Structured Outputs (스키마 강제 — 골드셋 표기 일치에 유리)
+raw = chat(messages, purpose="analyze",
+           response_format={"type": "json_schema",
+                            "json_schema": {"name": "AnalysisResult", "schema": {...}, "strict": True}})
+# 또는 최소 JSON mode
+raw = chat(messages, purpose="recommend", response_format={"type": "json_object"})
+```
+
 ## 5. SSE 이벤트 규약 (`ProgressEvent`)
 
 `data:` 라인에 JSON 한 건. 프론트는 `event` 필드로 분기한다.

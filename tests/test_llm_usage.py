@@ -137,3 +137,38 @@ def test_copy_context_propagates_to_worker():
             pool.submit(ctx.run, worker).result()
 
     assert seen["ctx"].component == "vision"  # copy_context 없으면 여기가 'other'로 샘
+
+
+# --- response_format 패스스루 (RPA-36, analyze/recommend 선행) ---
+
+def _mock_client(captured):
+    from types import SimpleNamespace
+
+    def _create(**kwargs):
+        captured.update(kwargs)
+        msg = SimpleNamespace(content="{}")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg)],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+
+
+def test_chat_passes_response_format_when_given(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(llm, "_get_client", lambda: _mock_client(captured))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: None)
+
+    rf = {"type": "json_schema", "json_schema": {"name": "AnalysisResult", "schema": {}}}
+    llm.chat([{"role": "user", "content": "x"}], purpose="analyze", response_format=rf)
+    assert captured["response_format"] == rf  # create()에 그대로 실림
+
+
+def test_chat_omits_response_format_when_none(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(llm, "_get_client", lambda: _mock_client(captured))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: None)
+
+    llm.chat([{"role": "user", "content": "x"}], purpose="vision_parse")
+    assert "response_format" not in captured  # 기존 호출부 동작 무변경
