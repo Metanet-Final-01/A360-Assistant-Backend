@@ -172,3 +172,22 @@ def test_chat_omits_response_format_when_none(monkeypatch):
 
     llm.chat([{"role": "user", "content": "x"}], purpose="vision_parse")
     assert "response_format" not in captured  # 기존 호출부 동작 무변경
+
+
+# --- 스트리밍 끊김 회귀 (RPA-48): 콜백이 LangChain 콜백 프로토콜을 안전히 만족하는가 ---
+
+def test_callback_inherits_base_and_attrs_dont_raise():
+    """구 버그: __getattr__ 덕타이핑이 run_inline 접근에서 AttributeError → 스트림 끊김.
+    이제 BaseCallbackHandler 상속으로 run_inline/raise_error/ignore_* 기본값이 잡힌다."""
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    cb = UsageCallbackHandler()
+    assert isinstance(cb, BaseCallbackHandler)
+    # LangChain async 매니저가 읽는 속성들 — 하나라도 AttributeError면 스트림이 끊긴다
+    for attr in ("run_inline", "raise_error", "ignore_llm", "ignore_chat_model", "ignore_retry"):
+        assert getattr(cb, attr) is False, f"{attr}가 False여야 안전"
+
+    # 실제 CallbackManager에 등록돼도 예외 없이 구성돼야 한다
+    from langchain_core.callbacks import CallbackManager
+
+    assert len(CallbackManager(handlers=[cb]).handlers) == 1

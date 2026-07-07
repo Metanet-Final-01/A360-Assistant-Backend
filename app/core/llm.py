@@ -180,7 +180,16 @@ def record_usage(
         logger.warning("LLM 사용량 기록 실패 (호출은 정상): %s", e)
 
 
-class UsageCallbackHandler:
+try:
+    # 콜백 프로토콜 전체(run_inline/raise_error/ignore_* 기본값 + 미사용 훅 no-op)를
+    # 상속으로 확보한다. 이걸 덕타이핑(__getattr__)으로 흉내내면 LangChain async 매니저가
+    # 읽는 run_inline 등에서 AttributeError가 나 스트림이 통째로 끊긴다(RPA-48).
+    from langchain_core.callbacks import BaseCallbackHandler as _BaseCallbackHandler
+except ImportError:  # langchain 미설치 — 이 콜백은 Agent에서만 쓰므로 무해
+    _BaseCallbackHandler = object
+
+
+class UsageCallbackHandler(_BaseCallbackHandler):
     """Agent(LangChain)의 LLM 호출 사용량을 llm_usage에 기록하는 콜백.
 
     부착: llm.invoke(msgs, config={"callbacks": [UsageCallbackHandler()]})
@@ -198,13 +207,10 @@ class UsageCallbackHandler:
     """
 
     def __init__(self, purpose: str = "chat") -> None:
+        super().__init__()
         self._ctx = current_usage_context()  # 생성 시점 스냅샷 (요청 스레드)
         self._purpose = purpose
         self._started = time.monotonic()
-
-    # LangChain BaseCallbackHandler 인터페이스 (덕타이핑 — import 의존 없음)
-    ignore_llm = False
-    raise_error = False
 
     def on_llm_start(self, *args, **kwargs) -> None:
         self._started = time.monotonic()
@@ -220,12 +226,6 @@ class UsageCallbackHandler:
             latency_ms=latency_ms,
             ctx=self._ctx,
         )
-
-    # LangChain이 호출할 수 있는 나머지 훅은 무시 (덕타이핑 안정성)
-    def __getattr__(self, name):
-        if name.startswith("on_") or name.startswith("ignore_"):
-            return lambda *a, **k: None
-        raise AttributeError(name)
 
 
 def _extract_tokens(response) -> tuple[int, int, str | None]:
