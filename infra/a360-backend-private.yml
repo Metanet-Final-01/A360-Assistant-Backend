@@ -49,6 +49,15 @@ Parameters:
     Type: String
     Default: 10.60.21.0/24
 
+  NetworkMode:
+    Type: String
+    Default: private
+    AllowedValues: [private, public-lite]
+    Description: >-
+      private (default): app instances in private subnets behind a NAT Gateway (~$32-45/mo fixed cost).
+      public-lite: app instances in public subnets (still only reachable via the ALB security group),
+      no NAT Gateway — cheaper for short-lived test deployments.
+
   InstanceType:
     Type: String
     Default: t3.medium
@@ -107,6 +116,18 @@ Parameters:
     Default: ""
     NoEcho: true
 
+  VoyageApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "Optional — enables Voyage reranking. Hybrid search still works without it (falls back to RRF order, no rerank)."
+
+  JwtSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "Auth token signing secret. Leave blank only for throwaway test stacks — the app falls back to a well-known insecure dev secret if unset."
+
   EnableOpenSearch:
     Type: String
     Default: "false"
@@ -116,6 +137,8 @@ Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
   CreateOpenSearch: !Equals [!Ref EnableOpenSearch, "true"]
+  IsPublicLite: !Equals [!Ref NetworkMode, "public-lite"]
+  NeedsNat: !Not [!Condition IsPublicLite]
 
 Resources:
   Vpc:
@@ -243,6 +266,7 @@ Resources:
 
   NatEip:
     Type: AWS::EC2::EIP
+    Condition: NeedsNat
     DependsOn: VpcGatewayAttachment
     Properties:
       Domain: vpc
@@ -252,6 +276,7 @@ Resources:
 
   NatGateway:
     Type: AWS::EC2::NatGateway
+    Condition: NeedsNat
     Properties:
       AllocationId: !GetAtt NatEip.AllocationId
       SubnetId: !Ref PublicSubnet1
@@ -269,6 +294,7 @@ Resources:
 
   PrivateDefaultRoute:
     Type: AWS::EC2::Route
+    Condition: NeedsNat
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -407,7 +433,9 @@ Resources:
       SecretString: !Sub |
         {
           "OPENAI_API_KEY": "${OpenAiApiKey}",
-          "GITHUB_TOKEN": "${GithubToken}"
+          "GITHUB_TOKEN": "${GithubToken}",
+          "VOYAGE_API_KEY": "${VoyageApiKey}",
+          "JWT_SECRET": "${JwtSecret}"
         }
       Tags:
         - Key: Project
@@ -685,8 +713,11 @@ Resources:
         IamInstanceProfile:
           Arn: !GetAtt AppInstanceProfile.Arn
         KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
-        SecurityGroupIds:
-          - !Ref AppSecurityGroup
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: !If [IsPublicLite, true, false]
+            Groups:
+              - !Ref AppSecurityGroup
         BlockDeviceMappings:
           - DeviceName: /dev/xvda
             Ebs:
@@ -743,6 +774,8 @@ Resources:
               DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["password"])')
               OPENAI_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENAI_API_KEY", ""))')
               GITHUB_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("GITHUB_TOKEN", ""))')
+              VOYAGE_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("VOYAGE_API_KEY", ""))')
+              JWT_SECRET=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("JWT_SECRET", ""))')
 
               if [ -n "$GITHUB_TOKEN" ]; then
                 echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin
@@ -760,6 +793,10 @@ Resources:
               DATABASE_USERNAME=$DB_USERNAME
               DATABASE_PASSWORD=$DB_PASSWORD
               OPENAI_API_KEY=$OPENAI_API_KEY
+              VOYAGE_API_KEY=$VOYAGE_API_KEY
+              JWT_SECRET=$JWT_SECRET
+              EMBEDDING_PROVIDER=openai
+              AGENT_RETRIEVER=hybrid
               OPENSEARCH_HOST=${OpenSearchHost}
               PDFBOX_JAR_PATH=/opt/pdfbox/pdfbox-app.jar
               EOF
@@ -809,9 +846,10 @@ Resources:
       MinSize: "1"
       DesiredCapacity: !Ref DesiredCapacity
       MaxSize: !Ref MaxCapacity
-      VPCZoneIdentifier:
-        - !Ref PrivateAppSubnet1
-        - !Ref PrivateAppSubnet2
+      VPCZoneIdentifier: !If
+        - IsPublicLite
+        - [!Ref PublicSubnet1, !Ref PublicSubnet2]
+        - [!Ref PrivateAppSubnet1, !Ref PrivateAppSubnet2]
       TargetGroupARNs:
         - !Ref BackendTargetGroup
       HealthCheckType: ELB
