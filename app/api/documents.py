@@ -11,6 +11,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app import models
@@ -19,7 +20,7 @@ from app.core.llm import usage_context
 from app.db import get_db
 from app.schemas import ProgressEvent
 from app.services import storage
-from app.services.parser import parse_document
+from app.services.parser import parse_document, parse_text
 from app.services.upload_security import validate_upload
 
 logger = logging.getLogger(__name__)
@@ -72,25 +73,18 @@ async def upload_document(
     db: Session = Depends(get_db),
     user: models.User | None = Depends(get_optional_user),
 ) -> dict:
-    """업무정의서 업로드 → 검증·저장·파싱까지 한 번에 수행한다."""
+    """업무정의서 업로드 → 검증·저장만 하고 즉시 반환한다 (status="uploaded").
+
+    파싱은 시간이 걸릴 수 있어 분리했다: 업로드 응답을 빠르게 돌려주고, 클라이언트는
+    이어서 POST /documents/{id}/parse (SSE)로 파싱 진행을 소비한다. 파싱 완료 전까지
+    page_count/warnings는 비어 있다.
+    """
     max_mb = int(os.getenv("MAX_UPLOAD_MB", "20"))
     content = await file.read(max_mb * 1024 * 1024 + 1)
     filename = file.filename or "unnamed"
     content_type = validate_upload(filename, content, max_mb)  # 실패 시 400/413
 
-    if session_id:
-        try:
-            session = db.get(models.AnalysisSession, uuid.UUID(session_id))
-        except ValueError:
-            session = None
-        if session is None:
-            raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "세션을 찾을 수 없습니다."})
-        assert_session_owner(session, user)  # 남의 세션에 업로드 차단
-    else:
-        # 로그인 사용자면 세션 소유자로 기록 — 이후 접근 시 소유권 검사의 기준
-        session = models.AnalysisSession(title=filename, user_id=user.id if user else None)
-        db.add(session)
-        db.flush()
+    session = _resolve_session(session_id, filename, db, user)
 
     doc = models.Document(
         session_id=session.id,
@@ -103,18 +97,125 @@ async def upload_document(
     db.flush()
 
     doc.storage_path = storage.save(str(session.id), str(doc.id), filename, content)
-    doc.status = "parsing"
     db.commit()
 
+    return _document_out(doc)
+
+
+def _resolve_session(
+    session_id: str | None, title: str, db: Session, user: models.User | None
+) -> models.AnalysisSession:
+    """기존 세션(소유권 검사) 또는 신규 세션(소유자 기록)을 확보한다."""
+    if session_id:
+        try:
+            session = db.get(models.AnalysisSession, uuid.UUID(session_id))
+        except ValueError:
+            session = None
+        if session is None:
+            raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "세션을 찾을 수 없습니다."})
+        assert_session_owner(session, user)  # 남의 세션에 추가 차단
+        return session
+    # 로그인 사용자면 세션 소유자로 기록 — 이후 접근 시 소유권 검사의 기준
+    session = models.AnalysisSession(title=title, user_id=user.id if user else None)
+    db.add(session)
+    db.flush()
+    return session
+
+
+@router.post("/documents/{document_id}/parse")
+def parse_document_stream(
+    document_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> StreamingResponse:
+    """업로드된 문서를 파싱한다 (FR-02, 04) — SSE 스트림.
+
+    이벤트: stage(parsing) → done(data=문서 메타) / error. 파싱 실패는 status=failed로
+    기록하고 error 이벤트를 보낸다 (업로드 자체는 성공이므로 문서는 남는다).
+    """
+    doc = _get_document_or_404(document_id, db, user)
+    if doc.status == "parsed":
+        # 이미 파싱됨 — 재파싱하지 않고 현재 결과를 done으로 즉시 반환
+        summary = _document_out(doc)
+
+        def _already():
+            yield ProgressEvent(event="done", stage="parsing", message="이미 파싱된 문서입니다", data=summary).to_sse()
+
+        return StreamingResponse(_already(), media_type="text/event-stream")
+
+    doc_id, filename, storage_path = doc.id, doc.filename, doc.storage_path
+
+    def sse():
+        try:
+            yield ProgressEvent(event="stage", stage="parsing", message="문서를 분석용으로 파싱하고 있습니다").to_sse()
+            content = storage.load(storage_path)
+            parsed = parse_document(filename, content)
+
+            from app.db import SessionLocal
+
+            with SessionLocal() as s:
+                fresh = s.get(models.Document, doc_id)
+                fresh.parsed_content = parsed
+                fresh.status = "parsed"
+                s.commit()
+                summary = _document_out(fresh)
+            yield ProgressEvent(event="done", stage="parsing", message="파싱 완료", data=summary).to_sse()
+        except Exception as e:  # noqa: BLE001 — 파싱 실패는 문서 상태로 기록
+            logger.exception("문서 파싱 실패: document=%s", doc_id)
+            _mark_parse_failed(doc_id, str(e))
+            yield ProgressEvent(
+                event="error", stage="parsing", message="문서 파싱에 실패했습니다 (다른 파일로 다시 시도해 주세요)"
+            ).to_sse()
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _mark_parse_failed(document_id: uuid.UUID, error: str) -> None:
     try:
-        doc.parsed_content = parse_document(filename, content)
-        doc.status = "parsed"
-    except Exception as e:  # noqa: BLE001 — 파싱 실패는 문서 상태로 기록
-        logger.exception("문서 파싱 실패: %s", filename)
-        doc.status = "failed"
-        doc.error = f"파싱 실패: {e}"
-    db.commit()
+        from app.db import SessionLocal
 
+        with SessionLocal() as s:
+            fresh = s.get(models.Document, document_id)
+            if fresh is not None:
+                fresh.status = "failed"
+                fresh.error = f"파싱 실패: {error}"
+                s.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("파싱 실패 기록마저 실패: document=%s", document_id)
+
+
+class TextRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20000, description="자연어 업무 요청")
+    session_id: str | None = None
+
+
+@router.post("/documents/text", status_code=201)
+def create_document_from_text(
+    payload: TextRequest,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """자연어 업무 요청을 문서처럼 등록한다 (파일 없이 텍스트로 분석 시작).
+
+    파싱이 필요 없으므로 status="parsed"로 즉시 반환 → 곧바로 analyze 가능.
+    """
+    title = payload.text.strip().splitlines()[0][:80] if payload.text.strip() else "자연어 요청"
+    session = _resolve_session(payload.session_id, title, db, user)
+
+    doc = models.Document(
+        session_id=session.id,
+        filename=f"{title}.txt",
+        content_type="text/plain",
+        size_bytes=len(payload.text.encode("utf-8")),
+        status="parsed",
+        parsed_content=parse_text(payload.text),
+    )
+    db.add(doc)
+    db.commit()
     return _document_out(doc)
 
 
