@@ -4,7 +4,8 @@
 현재는 **retrieve(KB 검색) → generate(근거 기반 답변) 2노드 그래프**다 (RPA-11).
 검색은 스텁(`FakeRetriever`, 하드코딩 카탈로그 + 키워드 매칭)이며, 실제
 pgvector·하이브리드 검색은 RAG 담당 모듈 완성 후 교체한다 (아래 [검색 스텁 교체](#검색-스텁-교체-rag-담당-가이드) 참조).
-구조화 추천·검수 루프·멀티턴 메모리는 후속 이슈에서 진행한다.
+멀티턴은 백엔드가 대화 이력을 저장하고 호출 시 `history`로 주입하며 Agent는 stateless를 유지한다 (RPA-25).
+구조화 추천·검수 루프는 후속 이슈에서 진행한다.
 
 ## 공개 인터페이스 (백엔드 호출 계약)
 
@@ -13,8 +14,8 @@ agent는 FastAPI 엔드포인트를 소유하지 않는다. 백엔드가 아래 
 ```python
 from app.agent import run_agent, stream_agent, AgentResult
 
-def run_agent(message: str) -> AgentResult: ...            # 완성 답변 한 번에
-async def stream_agent(message: str) -> AsyncIterator[str]: ...  # SSE용 토큰 스트림
+def run_agent(message: str, history: list[dict] | None = None) -> AgentResult: ...            # 완성 답변 한 번에
+async def stream_agent(message: str, history: list[dict] | None = None) -> AsyncIterator[str]: ...  # SSE용 토큰 스트림
 
 class AgentResult(BaseModel):
     answer: str               # LLM 답변
@@ -26,6 +27,7 @@ class AgentResult(BaseModel):
 프론트가 한 가지 모델만 다루면 된다.
 
 - `message`: 사용자 질문 문자열
+- `history`(선택): 이전 대화 턴 `[{"role": "user"|"assistant", "content": str}]`. 백엔드가 세션 이력을 저장하고 호출 시 주입한다 — **Agent는 이력을 보관하지 않는다(stateless)**. 생략하면 단발 질의응답(기존 동작)과 동일하고, 현재 챗 라우트와 하위호환된다. `retrieve`는 최신 `message` 기준으로 동작한다(이력 기반 질의 재작성은 후속).
 - `run_agent`: `AgentResult` 반환 — `result.answer`로 답변 텍스트, `result.sources`로 근거 문서 접근. **동기 함수**라 `async def` 라우트에서 직접 부르면 이벤트 루프를 막는다 — 일반 `def` 라우트에서 쓰면 FastAPI가 스레드풀로 처리해서 안전.
 - `stream_agent`: async 제너레이터 — LLM이 생성하는 대로 답변 토큰(str)을 yield. SSE 응답에 이걸 쓴다. **sources는 토큰 스트림에 실리지 않는다** (`done` 이벤트의 `data`로 실을지는 후속 이슈에서 협의).
 - 둘 다 `OPENAI_API_KEY`가 없으면 `RuntimeError`를 던진다 (설정 오류 — 503으로 매핑 권장)
@@ -44,6 +46,13 @@ for source in result.sources:
 # 스트리밍
 async for token in stream_agent("A360에서 엑셀 데이터를 읽는 방법 알려줘"):
     print(token, end="", flush=True)
+
+# 멀티턴 — 백엔드가 이전 대화 턴을 history로 주입 (Agent는 stateless)
+history = [
+    {"role": "user", "content": "엑셀 읽는 방법 알려줘"},
+    {"role": "assistant", "content": "Excel advanced 패키지의 Open / Get multiple cells를 씁니다."},
+]
+result = run_agent("방금 읽은 걸 다른 시트에 쓰려면?", history=history)
 ```
 
 ## FastAPI 라우트 연동 예시 (백엔드 담당)
