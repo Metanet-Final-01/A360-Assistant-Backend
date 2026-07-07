@@ -16,6 +16,7 @@ pdfplumber). 이미지 중심 페이지는 vision.enrich_document()가 비전 LL
 
 from app.services.parser.docx import parse_docx
 from app.services.parser.pdf import parse_pdf
+from app.services.parser.ppt import parse_ppt
 from app.services.parser.pptx import parse_pptx
 
 
@@ -25,6 +26,8 @@ def parse_document(filename: str, content: bytes) -> dict:
         return parse_pdf(content)
     if ext == "pptx":
         return parse_pptx(content)
+    if ext == "ppt":
+        return parse_ppt(content)  # LibreOffice로 변환 후 parse_pptx (soffice 필요)
     if ext == "docx":
         return parse_docx(content)
     raise ValueError(f"파서가 지원하지 않는 형식: .{ext}")
