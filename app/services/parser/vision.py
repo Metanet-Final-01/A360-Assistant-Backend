@@ -11,6 +11,7 @@ llm_usage에 자동 기록된다.
 """
 
 import base64
+import contextvars
 import copy
 import io
 import logging
@@ -186,11 +187,15 @@ def enrich_document_stream(
     pages_by_no = {p["page"]: p for p in parsed["pages"]}
     enriched: list[int] = []
 
-    # 페이지별 LLM 호출은 서로 독립 → 병렬 실행 (5페이지 기준 ~21초 → ~6초)
+    # 페이지별 LLM 호출은 서로 독립 → 병렬 실행 (5페이지 기준 ~21초 → ~6초).
+    # ThreadPoolExecutor는 ContextVar를 워커로 자동 전파하지 않으므로, copy_context로
+    # 현재 usage_context(component=vision·user_id 등)를 각 워커에 넘겨 귀속이 유지되게 한다.
     concurrency = max(1, int(os.getenv("VISION_CONCURRENCY", "4")))
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {
-            pool.submit(_extract_page, page_images[n], model, session_id): n
+            pool.submit(
+                contextvars.copy_context().run, _extract_page, page_images[n], model, session_id
+            ): n
             for n in targets
             if page_images.get(n)
         }

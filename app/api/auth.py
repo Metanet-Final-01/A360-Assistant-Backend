@@ -72,6 +72,25 @@ def get_current_user(
     return user
 
 
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    db: Session = Depends(get_db),
+) -> models.User | None:
+    """토큰이 있으면 사용자를, 없거나 유효하지 않으면 None을 반환한다 (예외 없음).
+
+    아직 로그인 강제하지 않는 라우트(챗·비전 등)에서 사용량 귀속용 user_id를
+    얻기 위한 의존성. 프론트 연동 후 필수 인증으로 전환할 수 있다.
+    """
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    user_id = decode_access_token(credentials.credentials)
+    try:
+        user_key = uuid.UUID(user_id) if user_id else None
+    except (ValueError, TypeError):
+        return None
+    return db.get(models.User, user_key) if user_key else None
+
+
 @router.post("/register", response_model=TokenResponse, status_code=201)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
     """회원가입 후 바로 로그인 상태가 되도록 토큰을 발급한다."""

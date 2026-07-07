@@ -1,17 +1,17 @@
 # CodeRabbit AI 리뷰 설정 — https://docs.coderabbit.ai/reference/configuration
+# 방침: 빠르게, 필수만. 실제 버그·보안·계약 위반 위주. 정적 린터는 CI가 담당하므로 끔.
 language: "ko-KR"
 
-# 모든 산출물(요약·리뷰·워크스루)을 한국어로. 영어가 섞이면 한국어로 다시 쓰도록 지시.
-tone_instructions: "항상 한국어로만 작성한다. 간결하고 실용적으로. 실제 버그·보안·계약 위반을 우선하고, 사소한 스타일 지적은 중요한 것만 남긴다."
+tone_instructions: "항상 한국어로만. 실제 버그·보안·데이터 계약 위반만 지적하고, 스타일·사소한 개선은 생략한다. 간결하게."
 
 reviews:
-  profile: "chill"
-  request_changes_workflow: false # 사람 리뷰어(승인 1인 규칙)가 최종 결정 — 봇은 조언만
-  high_level_summary: true
+  profile: "chill"          # 노이즈 최소
+  request_changes_workflow: false
+  high_level_summary: false # 요약 생성 생략 (속도)
   poem: false
-  sequence_diagrams: false # 불필요 — 다이어그램 대신 간결한 요약만
-  changed_files_summary: false # PR 본문 템플릿과 중복이라 생략
-  review_status: false # GitHub 체크로 이미 보임
+  sequence_diagrams: false
+  changed_files_summary: false
+  review_status: false
   collapse_walkthrough: true
   auto_review:
     enabled: true
@@ -19,44 +19,52 @@ reviews:
     base_branches:
       - "dev"
       - "main"
-  # 자동으로 docstring/유닛테스트 생성 제안을 붙이지 않는다 (노이즈 — 필요하면 사람이 요청)
   finishing_touches:
     docstrings:
       enabled: false
     unit_tests:
       enabled: false
+  # AI 리뷰 대상을 실제 애플리케이션 코드로 한정 — 테스트·문서·데이터는 제외(속도·집중)
   path_filters:
+    - "app/**"
+    - "!tests/**"
+    - "!docs/**"
+    - "!**/*.md"
     - "!data/**"
-    - "!infra/seed/**"
-    - "!docs/RAG_CATALOG.md" # 자동 생성 문서
+    - "!infra/**"
   path_instructions:
     - path: "app/schemas/**"
       instructions: >-
-        백엔드·Agent·프론트가 공유하는 데이터 계약입니다. 필드 추가/변경/삭제가
-        docs/INTERFACES.md와 일치하는지, 기존 소비자(app/agent, 프론트 SSE)를
-        깨지 않는지 확인하세요. 계약 변경인데 INTERFACES.md 갱신이 없으면 지적하세요.
-    - path: "app/api/**"
+        백엔드·Agent·프론트 공유 데이터 계약. 필드 변경이 기존 소비자(app/agent,
+        프론트 SSE)를 깨는지, docs/INTERFACES.md와 어긋나는지만 지적.
+    - path: "app/api/**|app/services/rag.py"
       instructions: >-
-        라우터는 얇게 유지합니다 — 비즈니스 로직이 라우터에 들어오면 app/services로
-        분리를 제안하세요. 에러 응답은 {code, message} 형식, 오래 걸리는 작업은
-        SSE(ProgressEvent 규약)가 원칙입니다. SSE 스트림 안에서 요청 스코프 DB 세션을
-        쓰면 안 됩니다 (FastAPI가 스트리밍 전에 세션을 닫음 — 새 SessionLocal 필요).
-    - path: "app/agent/**"
-      instructions: >-
-        Agent 담당 영역입니다. app/schemas 계약(RagSource·ProgressEvent) 준수,
-        DB 직접 접근 금지(app/services 경유), 엔드포인트 생성 금지(백엔드 소유)
-        원칙을 확인하세요.
-    # search_actions 계약은 app/rag 구현과 app/services/rag.py wrapper 양쪽에 걸쳐 있다
-    - path: "app/rag/**|app/services/rag.py"
-      instructions: >-
-        RAG 파이프라인·검색입니다. 외부 서비스(OpenSearch·Voyage·OpenAI) 호출의
-        타임아웃·예외 처리, 그리고 services/rag.py의 search_actions 계약
-        (반환 필드 id/source_type/title/content/score)이 유지되는지 확인하세요.
+        라우터는 얇게(로직은 services). 에러는 {code, message}. 오래 걸리는 작업은 SSE.
+        SSE 스트림 안에서 요청 스코프 DB 세션 금지(FastAPI가 스트리밍 전에 닫음).
+        search_actions 반환 계약(id/source_type/title/content/score) 유지 확인.
     - path: "**/*.py"
       instructions: >-
-        시크릿 하드코딩 금지(.env 경유). 백엔드의 직접 LLM 호출은 app/core/llm.py
-        래퍼 경유가 원칙입니다(사용량 기록). 외부 입력(업로드 파일·URL·쿼리)을
-        신뢰하지 않는지 확인하세요.
+        시크릿 하드코딩 금지. 외부 입력(업로드·URL·쿼리) 신뢰 금지(SSRF/인젝션).
+        백엔드 직접 LLM 호출은 app/core/llm 경유(사용량 기록).
+
+# 정적 분석 도구는 CI(lint·gitleaks)가 이미 담당 → CodeRabbit에서는 꺼서 속도 확보
+tools:
+  ruff:
+    enabled: false
+  hadolint:
+    enabled: false
+  gitleaks:
+    enabled: false
+  markdownlint:
+    enabled: false
+  yamllint:
+    enabled: false
+  languagetool:
+    enabled: false
+  actionlint:
+    enabled: false
+  shellcheck:
+    enabled: false
 
 chat:
   auto_reply: true
