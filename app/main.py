@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.api.agent import router as agent_router
+from app.api.auth import router as auth_router
 from app.api.debug import router as debug_router
 from app.api.documents import router as documents_router
 from app.api.rag import router as rag_router
@@ -69,6 +70,7 @@ app.add_middleware(
 
 register_http_logging(app)
 
+app.include_router(auth_router)
 app.include_router(documents_router)
 app.include_router(rag_router)
 app.include_router(debug_router)
