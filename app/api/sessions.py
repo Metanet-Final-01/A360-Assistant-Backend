@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
+@router.post("", status_code=201)
+def create_session(
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """빈 세션을 만든다 — 문서 없이 멀티턴 챗을 시작할 때 쓴다.
+
+    문서 업로드도 세션을 자동 생성하지만, 표준 챗봇처럼 문서가 없는 경우엔 이걸로
+    session_id를 먼저 받아 챗(session_id 전달)의 대화 이력을 이 세션에 쌓는다.
+    """
+    session = models.AnalysisSession(title="채팅", user_id=user.id if user else None)
+    db.add(session)
+    db.commit()
+    return {"session_id": str(session.id), "created_at": session.created_at.isoformat() if session.created_at else None}
+
+
 def _get_agent_analyze():
     """app/agent의 analyze()를 lazy import한다. 미구현이면 None."""
     try:

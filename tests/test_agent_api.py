@@ -22,7 +22,7 @@ def client():
 def test_chat_returns_answer_and_sources(client, monkeypatch):
     from app.agent import AgentResult
 
-    def _fake_run(message):
+    def _fake_run(message, history=None):
         assert message == "엑셀 읽는 법"
         return AgentResult(
             answer="Excel advanced 패키지를 쓰세요",
@@ -38,7 +38,7 @@ def test_chat_returns_answer_and_sources(client, monkeypatch):
 
 
 def test_chat_runtime_error_maps_to_503(client, monkeypatch):
-    def _boom(message):
+    def _boom(message, history=None):
         raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
 
     monkeypatch.setattr(agent_api, "run_agent", _boom)
@@ -52,7 +52,7 @@ def test_chat_rejects_empty_message(client):
 
 
 def test_chat_stream_emits_token_then_done(client, monkeypatch):
-    async def _fake_stream(message):
+    async def _fake_stream(message, history=None):
         for tok in ["엑", "셀"]:
             yield tok
 
@@ -64,7 +64,7 @@ def test_chat_stream_emits_token_then_done(client, monkeypatch):
 
 
 def test_chat_stream_error_event_on_runtime_error(client, monkeypatch):
-    async def _boom_stream(message):
+    async def _boom_stream(message, history=None):
         raise RuntimeError("키 없음")
         yield  # pragma: no cover — 제너레이터로 만들기 위한 형식상 yield
 
@@ -78,7 +78,7 @@ def test_chat_stream_non_runtime_exception_becomes_error_event(client, monkeypat
     """RPA-48: 콜백 등에서 난 비-RuntimeError 예외가 스트림을 통째로 끊지 않고
     깔끔한 error 이벤트로 나가야 한다 (ERR_INCOMPLETE_CHUNKED_ENCODING 방지)."""
 
-    async def _mid_stream_boom(message):
+    async def _mid_stream_boom(message, history=None):
         yield "부분"
         raise ValueError("콜백 내부 폭발")  # RuntimeError가 아닌 예외
 
