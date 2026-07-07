@@ -50,5 +50,8 @@ def run_migrations() -> None:
 
     ini_path = Path(__file__).resolve().parent.parent / "alembic.ini"
     cfg = Config(str(ini_path))
-    cfg.set_main_option("sqlalchemy.url", _database_url())
+    # attributes(순수 dict)에 담는다 — set_main_option()은 configparser에 저장되는데,
+    # configparser의 기본 보간(%-interpolation)이 '%'를 특수문자로 취급해서 비밀번호에
+    # '%'가 섞이면(RDS 자동생성 비밀번호에서 실제로 발생) ValueError로 죽는다.
+    cfg.attributes["sqlalchemy_url"] = _database_url()
     command.upgrade(cfg, "head")
