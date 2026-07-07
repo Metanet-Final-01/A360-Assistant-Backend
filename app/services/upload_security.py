@@ -110,11 +110,15 @@ def _check_ole_ppt(content: bytes) -> None:
 
     if not olefile.isOleFile(io.BytesIO(content)):
         raise _error(400, "CORRUPTED_FILE", "손상된 PPT 파일입니다.")
-    ole = olefile.OleFileIO(io.BytesIO(content))
+    # OLE 파싱은 외부 입력이라 손상 파일에서 예외가 날 수 있다 → 500이 아니라 400으로
     try:
-        names = {"/".join(parts) for parts in ole.listdir()}
-    finally:
-        ole.close()
+        ole = olefile.OleFileIO(io.BytesIO(content))
+        try:
+            names = {"/".join(parts) for parts in ole.listdir()}
+        finally:
+            ole.close()
+    except Exception as e:  # noqa: BLE001
+        raise _error(400, "CORRUPTED_FILE", "손상된 PPT 파일입니다.") from e
     # PowerPoint 문서 스트림이 없으면 .doc/.xls 등을 .ppt로 위장한 것
     if not any("PowerPoint Document" in n for n in names):
         raise _error(400, "FILE_TYPE_MISMATCH", "올바른 PPT 구조가 아닙니다.")

@@ -81,6 +81,47 @@ def test_parse_ppt_without_soffice_raises_clear_message(monkeypatch):
     assert "LibreOffice" in str(e.value)
 
 
+def test_ppt_malformed_ole_maps_to_400(monkeypatch):
+    """OleFileIO/listdir이 손상 파일에서 던지는 예외는 500이 아니라 CORRUPTED_FILE(400)."""
+    import sys
+
+    def _raising_olefileio(*a, **k):
+        raise ValueError("broken ole")
+
+    fake = SimpleNamespace(isOleFile=lambda *a, **k: True, OleFileIO=_raising_olefileio)
+    monkeypatch.setitem(sys.modules, "olefile", fake)
+    with pytest.raises(HTTPException) as e:
+        validate_upload("broken.ppt", _OLE + b"rest", 20)
+    assert e.value.status_code == 400
+    assert e.value.detail["code"] == "CORRUPTED_FILE"
+
+
+def test_convert_isolates_libreoffice_profile(monkeypatch):
+    """동시 변환 충돌 방지 — soffice 호출에 -env:UserInstallation 프로필 격리가 실려야 한다."""
+    import os
+
+    from pptx import Presentation
+
+    buf = io.BytesIO()
+    Presentation().save(buf)
+    pptx_bytes = buf.getvalue()
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        outdir = cmd[cmd.index("--outdir") + 1]
+        with open(os.path.join(outdir, "in.pptx"), "wb") as f:
+            f.write(pptx_bytes)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ppt_mod, "_find_soffice", lambda: "soffice")
+    monkeypatch.setattr(ppt_mod.subprocess, "run", fake_run)
+
+    ppt_mod._convert_ppt_to_pptx(_OLE + b"rest")
+    assert any(str(a).startswith("-env:UserInstallation=") for a in captured["cmd"])
+
+
 def test_parse_ppt_converts_then_parses_pptx(monkeypatch):
     # soffice 변환을 목킹: 실제 pptx 바이트를 돌려주면 parse_pptx가 처리
     import io as _io

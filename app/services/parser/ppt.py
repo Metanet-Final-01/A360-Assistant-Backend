@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 from app.services.parser.pptx import parse_pptx
 
@@ -37,9 +38,21 @@ def _convert_ppt_to_pptx(content: bytes) -> bytes:
         src = os.path.join(tmp, "in.ppt")
         with open(src, "wb") as f:
             f.write(content)
+        # 호출마다 별도 UserInstallation 프로필로 격리 — soffice 기본 프로필은 하나뿐이라
+        # 동시 변환 시 프로필 락 충돌로 실패할 수 있다.
+        profile_uri = Path(os.path.join(tmp, "profile")).as_uri()
         try:
             subprocess.run(
-                [soffice, "--headless", "--convert-to", "pptx", "--outdir", tmp, src],
+                [
+                    soffice,
+                    f"-env:UserInstallation={profile_uri}",
+                    "--headless",
+                    "--convert-to",
+                    "pptx",
+                    "--outdir",
+                    tmp,
+                    src,
+                ],
                 check=True,
                 capture_output=True,
                 timeout=120,
