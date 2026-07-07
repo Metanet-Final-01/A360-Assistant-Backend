@@ -32,6 +32,21 @@ class AgentResult(BaseModel):
 - `stream_agent`: async 제너레이터 — LLM이 생성하는 대로 답변 토큰(str)을 yield. SSE 응답에 이걸 쓴다. **sources는 토큰 스트림에 실리지 않는다** (`done` 이벤트의 `data`로 실을지는 후속 이슈에서 협의).
 - 둘 다 `OPENAI_API_KEY`가 없으면 `RuntimeError`를 던진다 (설정 오류 — 503으로 매핑 권장)
 
+### 문서 분석 — `analyze` (FR-05)
+
+```python
+from app.agent import analyze
+from app.schemas import AnalysisResult
+
+def analyze(parsed_doc: dict) -> AnalysisResult: ...   # parsed_content → 업무 단계 분석
+```
+
+- `parsed_doc`: 백엔드 파서 산출물(`documents.parsed_content`) — 마스킹 적용된 상태로 전달.
+- 반환 `AnalysisResult`(공유 스키마): `document_title / summary / steps[WorkStep] / ambiguities`. 저장은 백엔드(`analyses.result`).
+- LLM은 `app.core.llm.chat(purpose="analyze", response_format={"type":"json_object"})` 경유 — 사용량은 `usage_context`로 귀속(백엔드가 심음). 출력은 Pydantic으로 검증하고 실패 시 1회 교정한다.
+- `OPENAI_API_KEY` 미설정 등은 `RuntimeError`(503 매핑), 교정 후에도 스키마 불일치면 `ValueError`.
+- `vision_text`(이미지 자동 추출) 기반 불확실 항목은 `ambiguities`로 분리된다. `step_id`/`order`는 결정론적으로 재부여되어 안정적이다(recommend가 참조).
+
 ## 호출 예시
 
 ```python
