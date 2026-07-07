@@ -63,6 +63,16 @@ alembic current / history   # 현재 리비전 / 이력
 - `rag_documents`는 `app/rag`가 원시 SQL(pgvector)로 관리하므로 Alembic 대상에서 제외돼 있다 (`migrations/env.py`).
 - 컬럼 추가/변경 시 `create_all`처럼 조용히 누락되지 않고, 마이그레이션 파일로 이력이 남는다.
 
+버전 이력 (`alembic history`로도 확인):
+
+| 리비전 | 내용 |
+|---|---|
+| `0001` | 도메인 8개 테이블 최초 생성 (RPA-12) |
+| `0002` | users 테이블 — 인증 (RPA-23) |
+| `0003` | llm_usage 귀속 컬럼 actor_type/user_id/component (RPA-33) |
+
+> 도입 전에 만든 기존 DB는 최초 1회 `alembic stamp head --purge`로 현재(0003) 상태로 표시한다.
+
 ## 테스트
 
 ```bash
