@@ -99,18 +99,29 @@ def chat(
     purpose: str,
     model: str | None = None,
     session_id: uuid.UUID | None = None,
+    response_format: dict | None = None,
 ) -> str:
     """Chat Completions 호출 후 응답 텍스트를 반환하고 사용량을 기록한다.
 
     귀속(user/component)은 usage_context()에서 읽는다. session_id를 명시로 주면
     context보다 우선한다 (기존 호출부 하위호환).
+
+    response_format: OpenAI JSON mode / Structured Outputs를 위한 dict를 그대로
+    패스스루한다. 미지정 시 create()에 전달하지 않아 기존 호출부(vision_parse 등)는
+    동작 무변경. 스키마 강제가 필요한 analyze/recommend는 다음을 넘긴다:
+      - Structured Outputs: {"type": "json_schema", "json_schema": {...}}
+      - 최소 JSON mode:     {"type": "json_object"}
+    반환은 str 그대로이며, JSON 파싱·검증은 호출부(agent)가 한다.
     """
     from openai import AuthenticationError, RateLimitError
 
     model = model or os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+    create_kwargs: dict = {"model": model, "messages": messages}
+    if response_format is not None:
+        create_kwargs["response_format"] = response_format
     started = time.monotonic()
     try:
-        response = _get_client().chat.completions.create(model=model, messages=messages)
+        response = _get_client().chat.completions.create(**create_kwargs)
     except AuthenticationError as e:
         raise RuntimeError("OpenAI 인증 실패 — API 키를 확인하세요") from e
     except RateLimitError as e:
