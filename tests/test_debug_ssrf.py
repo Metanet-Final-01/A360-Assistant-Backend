@@ -8,7 +8,8 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
-from app.main import _pin_url_to_ip, _resolve_validated_ip, app
+from app.api.debug import _pin_url_to_ip, _resolve_validated_ip
+from app.main import app
 
 
 def _resolve(host):
