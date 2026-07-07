@@ -183,16 +183,21 @@ class LlmUsage(Base):
         ForeignKey("analysis_sessions.id", ondelete="SET NULL"), index=True
     )
     # 누가 유발했나 — user(사람) / system(임베딩 적재 등 백그라운드). user_id는 익명·시스템이면 NULL
+    # server_default: NOT NULL 컬럼을 기존 로우에 ALTER ADD 하거나 ORM 외 직접 INSERT할 때도
+    # 안전하도록 DB 레벨 기본값을 준다 (default=는 ORM 삽입 시에만 적용됨)
     actor_type: Mapped[str] = mapped_column(
         Enum("user", "system", name="usage_actor_type", native_enum=False),
         default="system",
+        server_default="system",
         index=True,
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     # 어느 서브시스템 — vision|agent|rag_embed|rag_rerank|other
-    component: Mapped[str] = mapped_column(String(30), default="other", index=True)
+    component: Mapped[str] = mapped_column(
+        String(30), default="other", server_default="other", index=True
+    )
     purpose: Mapped[str] = mapped_column(String(50))  # analyze|recommend|chat|summarize|vision_parse|embed|other
     model: Mapped[str] = mapped_column(String(100))
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
