@@ -137,3 +137,56 @@ def test_cost_usd_from_env(monkeypatch):
     assert llm.cost_usd(1_000_000, 1_000_000) == 0.75
     monkeypatch.delenv("LLM_INPUT_COST_PER_1M")
     assert llm.cost_usd(1000, 1000) is None
+
+
+# --- 라우트 레벨 회귀: SSE 스트림에서 usage_context 유지 (RPA-38에서 발견된 버그) ---
+# 동기 제너레이터는 StreamingResponse가 next()마다 다른 스레드 컨텍스트에서 재개하므로,
+# usage_context를 yield 너머로 걸치면 귀속이 끊기고 종료 시 reset이 ValueError로 터져
+# done 뒤에 가짜 error 이벤트가 붙는다. 라우트는 copy_context로 매 재개를 감싸야 한다.
+
+def test_enrich_vision_route_keeps_context_across_yields(monkeypatch):
+    import json
+    import uuid as _uuid
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    import app.api.documents as documents_api
+    from app.core.llm import current_usage_context
+    from app.db import get_db
+    from app.main import app
+    from app.schemas import ProgressEvent
+
+    doc_id = _uuid.uuid4()
+    doc = SimpleNamespace(
+        id=doc_id, session_id=_uuid.uuid4(), filename="doc.pdf",
+        status="parsed", parsed_content={"pages": []}, storage_path="p",
+    )
+
+    class FakeDB:
+        def get(self, model, key):
+            return doc
+
+    seen_components = []
+
+    def _fake_stream(filename, content, parsed, session_id=None):
+        # 두 번 이상 yield — 재개 구간마다 컨텍스트가 유지되는지 검증
+        seen_components.append(current_usage_context().component)
+        yield ProgressEvent(event="stage", stage="vision", message="1")
+        seen_components.append(current_usage_context().component)
+        yield ProgressEvent(event="stage", stage="vision", message="2")
+
+    monkeypatch.setattr(documents_api.storage, "load", lambda path: b"%PDF-")
+    monkeypatch.setattr(vision, "enrich_document_stream", _fake_stream)
+    app.dependency_overrides[get_db] = lambda: FakeDB()
+    try:
+        with TestClient(app) as c:
+            with c.stream("POST", f"/api/documents/{doc_id}/enrich-vision") as r:
+                events = [json.loads(l[5:]) for l in r.iter_lines() if l.startswith("data:")]
+    finally:
+        app.dependency_overrides.clear()
+
+    # 가짜 error 이벤트가 뒤에 붙지 않아야 한다 (ContextVar reset ValueError 회귀)
+    assert [e["event"] for e in events] == ["stage", "stage"]
+    # 모든 재개 구간에서 vision 귀속 유지 (끊기면 기본값 'other'로 샌다)
+    assert seen_components == ["vision", "vision"]
