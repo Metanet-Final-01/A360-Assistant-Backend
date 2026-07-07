@@ -2,27 +2,18 @@ services:
   backend:
     build: .
     container_name: a360-backend
+    # .env 전체를 컨테이너로 주입한다 — JWT_SECRET·OPENAI_MODEL·VISION_* 등 모든 설정이
+    # 자동으로 들어가 "환경변수를 개별로 나열해야 하는" 누락 실수를 없앤다. .env가 없어도
+    # 기동은 되도록 required:false (그 경우 시크릿은 셸/시스템 환경변수에서 온다).
+    env_file:
+      - path: .env
+        required: false
     environment:
-      APP_ENV: ${APP_ENV:-development}
-      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
-      # 컨테이너 내부에서는 항상 서비스명 db로 접속 — .env의 DATABASE_HOST(호스트 CLI용 localhost)와 무관하게 고정
+      # 컨테이너 내부 네트워킹만 오버라이드 — .env는 호스트 CLI용(localhost/외부 포트)이라
+      # 컨테이너 안에서는 서비스명·내부 포트로 고정해야 한다 (env_file 값을 여기서 덮어씀).
       DATABASE_HOST: db
-      DATABASE_PORT: ${DATABASE_PORT:-5432}
-      DATABASE_NAME: ${DATABASE_NAME:-a360}
-      DATABASE_USERNAME: ${DATABASE_USERNAME:-a360_admin}
-      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-a360_local_password}
-      # 컨테이너 내부에서는 항상 서비스명 opensearch로 접속 (DATABASE_HOST와 동일한 이유)
+      DATABASE_PORT: "5432"           # 컨테이너↔db는 내부 5432 (호스트 매핑 포트 5433과 무관)
       OPENSEARCH_HOST: http://opensearch:9200
-      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-rag_documents}
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
-      RRF_K: ${RRF_K:-60}
-      HYBRID_CANDIDATE_POOL_SIZE: ${HYBRID_CANDIDATE_POOL_SIZE:-50}
-      HYBRID_RERANK_CANDIDATES: ${HYBRID_RERANK_CANDIDATES:-20}
-      RERANK_MODEL: ${RERANK_MODEL:-rerank-2.5-lite}
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
