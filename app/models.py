@@ -46,6 +46,11 @@ class AnalysisSession(Base):
     __tablename__ = "analysis_sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # 세션 소유자. 비로그인 업로드로 만든 세션은 NULL(익명) — 하위호환. 소유자가 있으면
+    # 접근 라우트가 요청자와 일치하는지 검사한다 (남의 세션 UUID로 접근 차단).
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     title: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[str] = mapped_column(

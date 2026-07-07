@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import models
-from app.api.auth import get_optional_user
+from app.api.auth import assert_session_owner, get_optional_user
 from app.core.llm import usage_context
 from app.db import get_db
 from app.schemas import ProgressEvent
@@ -42,14 +42,22 @@ def _document_out(doc: models.Document) -> dict:
     }
 
 
-def _get_document_or_404(document_id: str, db: Session) -> models.Document:
+def _get_document_or_404(
+    document_id: str, db: Session, user: models.User | None = None
+) -> models.Document:
     try:
         key = uuid.UUID(document_id)
     except ValueError:
-        raise HTTPException(400, detail={"code": "INVALID_ID", "message": "잘못된 문서 ID 형식입니다."})
+        raise HTTPException(
+            400, detail={"code": "INVALID_ID", "message": "잘못된 문서 ID 형식입니다."}
+        ) from None
     doc = db.get(models.Document, key)
     if doc is None:
         raise HTTPException(404, detail={"code": "NOT_FOUND", "message": "문서를 찾을 수 없습니다."})
+    # 문서가 속한 세션의 소유권 검사 (남의 세션 문서 조회 차단)
+    session = db.get(models.AnalysisSession, doc.session_id)
+    if session is not None:
+        assert_session_owner(session, user)
     return doc
 
 
@@ -58,6 +66,7 @@ async def upload_document(
     file: UploadFile = File(...),
     session_id: str | None = Form(None),
     db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
 ) -> dict:
     """업무정의서 업로드 → 검증·저장·파싱까지 한 번에 수행한다."""
     max_mb = int(os.getenv("MAX_UPLOAD_MB", "20"))
@@ -72,8 +81,10 @@ async def upload_document(
             session = None
         if session is None:
             raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "세션을 찾을 수 없습니다."})
+        assert_session_owner(session, user)  # 남의 세션에 업로드 차단
     else:
-        session = models.AnalysisSession(title=filename)
+        # 로그인 사용자면 세션 소유자로 기록 — 이후 접근 시 소유권 검사의 기준
+        session = models.AnalysisSession(title=filename, user_id=user.id if user else None)
         db.add(session)
         db.flush()
 
@@ -104,15 +115,23 @@ async def upload_document(
 
 
 @router.get("/documents/{document_id}")
-def get_document(document_id: str, db: Session = Depends(get_db)) -> dict:
+def get_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
     """문서 메타데이터·처리 상태 조회."""
-    return _document_out(_get_document_or_404(document_id, db))
+    return _document_out(_get_document_or_404(document_id, db, user))
 
 
 @router.get("/documents/{document_id}/content")
-def get_document_content(document_id: str, db: Session = Depends(get_db)) -> dict:
+def get_document_content(
+    document_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
     """파싱 결과(구조화 JSON) 조회 — 분석(FR-05) 입력으로 사용된다."""
-    doc = _get_document_or_404(document_id, db)
+    doc = _get_document_or_404(document_id, db, user)
     if doc.status != "parsed" or doc.parsed_content is None:
         raise HTTPException(
             409,
@@ -134,7 +153,7 @@ def enrich_vision(
     소비한다 (POST라서). 텍스트 임계값 미만 페이지만 선별하므로 보강할 페이지가
     없으면 LLM 비용 없이 즉시 done이 온다.
     """
-    doc = _get_document_or_404(document_id, db)
+    doc = _get_document_or_404(document_id, db, user)
     if doc.status != "parsed" or doc.parsed_content is None:
         raise HTTPException(
             409,

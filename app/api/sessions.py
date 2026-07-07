@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import models
-from app.api.auth import get_optional_user
+from app.api.auth import assert_session_owner, get_optional_user
 from app.core.llm import usage_context
 from app.db import get_db
 from app.schemas import ProgressEvent
@@ -56,6 +56,7 @@ def analyze_session(
     session = db.get(models.AnalysisSession, session_key)
     if session is None:
         raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "세션을 찾을 수 없습니다."})
+    assert_session_owner(session, user)  # 남의 세션 분석 차단
 
     # 세션의 가장 최근 문서 기준 (다중 업로드 시 마지막 업로드가 분석 대상)
     document = db.execute(
