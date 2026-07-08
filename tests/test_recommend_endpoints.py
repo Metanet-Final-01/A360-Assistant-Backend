@@ -118,6 +118,28 @@ def test_recommend_streams_and_saves_v1(monkeypatch):
     assert saved["row"].source == "agent" and saved["row"].version == 1
 
 
+def test_recommend_forwards_error_without_duplicating(monkeypatch):
+    """recommend가 자체 error를 흘리면, 백엔드가 done 없음을 또 error로 내지 않는다 (CodeRabbit)."""
+    from app.schemas import ProgressEvent
+
+    async def _err_recommend(analysis, constraints=None):
+        yield ProgressEvent(event="stage", stage="recommending", message="시작")
+        yield ProgressEvent(event="error", stage="recommending", message="내부 실패")
+
+    monkeypatch.setattr("app.agent.recommend", _err_recommend, raising=False)
+    session = SimpleNamespace(id=SID, user_id=None)
+    analysis = SimpleNamespace(id=AID, status="completed", result=_analysis_result())
+    _override(FakeDB(session=session, analysis=analysis))
+
+    with TestClient(app) as c:
+        with c.stream("POST", f"/api/sessions/{SID}/recommend") as r:
+            events = [json.loads(l[5:]) for l in r.iter_lines() if l.startswith("data:")]
+
+    # error가 정확히 1번만 (recommend 것) — 백엔드가 중복 error를 붙이지 않음
+    assert [e["event"] for e in events].count("error") == 1
+    assert events[-1]["event"] == "error"
+
+
 def test_recommend_409_without_analysis(monkeypatch):
     session = SimpleNamespace(id=SID, user_id=None)
     _override(FakeDB(session=session, analysis=None))
@@ -182,6 +204,37 @@ def test_save_edited_creates_new_version(monkeypatch):
     assert r.status_code == 201
     assert r.json()["version"] == 3
     assert saved["row"].source == "drag" and saved["row"].change_summary == "Task1 액션 교체"
+
+
+def test_save_recommendation_retries_on_version_conflict(monkeypatch):
+    """동시 저장 version 충돌(IntegrityError) 시 재계산 재시도로 성공한다 (CodeRabbit)."""
+    from sqlalchemy.exc import IntegrityError
+
+    # RecommendationVersion 저장 시도만 센다 (감사 미들웨어의 AuditLog commit은 제외)
+    rv = {"n": 0}
+
+    class _Persist:
+        def __init__(self): self.has_rv = False
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt): return SimpleNamespace(scalar=lambda: 1)
+        def add(self, row):
+            if type(row).__name__ == "RecommendationVersion":
+                self.has_rv = True
+        def commit(self):
+            if self.has_rv:
+                rv["n"] += 1
+                if rv["n"] == 1:  # 첫 시도만 version 충돌
+                    raise IntegrityError("stmt", {}, Exception("uq conflict"))
+
+    monkeypatch.setattr("app.db.SessionLocal", _Persist)
+    session = SimpleNamespace(id=SID, user_id=None)
+    _override(FakeDB(session=session, versions=[_row(1)]))
+
+    with TestClient(app) as c:
+        r = c.post(f"/api/sessions/{SID}/recommendations", json={"recommendation": _valid_recommendation()})
+    assert r.status_code == 201  # 재시도로 성공
+    assert rv["n"] == 2          # 1회 충돌 + 1회 성공
 
 
 def test_save_edited_rejects_malformed_400(monkeypatch):

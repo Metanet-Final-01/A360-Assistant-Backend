@@ -210,27 +210,39 @@ def _save_recommendation(
     session_id: uuid.UUID, analysis_id: uuid.UUID, payload: dict,
     source: str, parent_version: int | None, change_summary: str | None = None,
 ) -> dict:
-    """새 추천안 버전을 저장한다 (version은 세션 내 max+1). 새 세션 사용(스트리밍 후에도 안전)."""
+    """새 추천안 버전을 저장한다 (version은 세션 내 max+1). 새 세션 사용(스트리밍 후에도 안전).
+
+    동시 저장으로 같은 version이 계산되면 uq_recommendations_session_version 제약에
+    걸리므로(더블클릭 등), IntegrityError 시 version을 재계산해 몇 번 재시도한다.
+    """
+    from sqlalchemy.exc import IntegrityError
+
     from app.db import SessionLocal
 
-    with SessionLocal() as s:
-        last = s.execute(
-            select(func.max(models.RecommendationVersion.version))
-            .where(models.RecommendationVersion.session_id == session_id)
-        ).scalar()
-        version = (last or 0) + 1
-        row = models.RecommendationVersion(
-            session_id=session_id,
-            analysis_id=analysis_id,
-            version=version,
-            parent_version=parent_version if parent_version is not None else last,
-            source=source,
-            payload=payload,
-            change_summary=change_summary,
-        )
-        s.add(row)
-        s.commit()
-        return _recommendation_out(row)
+    for attempt in range(3):
+        try:
+            with SessionLocal() as s:
+                last = s.execute(
+                    select(func.max(models.RecommendationVersion.version))
+                    .where(models.RecommendationVersion.session_id == session_id)
+                ).scalar()
+                version = (last or 0) + 1
+                row = models.RecommendationVersion(
+                    session_id=session_id,
+                    analysis_id=analysis_id,
+                    version=version,
+                    parent_version=parent_version if parent_version is not None else last,
+                    source=source,
+                    payload=payload,
+                    change_summary=change_summary,
+                )
+                s.add(row)
+                s.commit()
+                return _recommendation_out(row)
+        except IntegrityError:
+            if attempt == 2:  # 마지막 시도까지 충돌하면 상위에서 처리
+                raise
+            logger.warning("추천안 version 충돌 — 재계산 재시도 (session=%s)", session_id)
 
 
 @router.post("/{session_id}/recommend")
@@ -262,6 +274,7 @@ async def recommend_session(
 
     async def sse():
         rec_payload = None
+        saw_error = False
         try:
             # recommend는 async 제너레이터 — 콜백이 이 블록 안에서 생성돼 귀속 스냅샷을 잡는다.
             # (async 제너레이터는 같은 태스크 컨텍스트에서 재개되므로 usage_context가 yield를
@@ -273,14 +286,20 @@ async def recommend_session(
                     if event.event == "done":
                         rec_payload = (event.data or {}).get("recommendation")
                         continue  # done은 저장 후 버전정보와 함께 다시 낸다
+                    if event.event == "error":
+                        saw_error = True  # recommend가 이미 error를 흘림 — 아래서 중복 error 안 냄
                     yield event.to_sse()
-            if rec_payload is None:
-                raise ValueError("recommend가 추천안을 반환하지 않았습니다")
-            saved = _save_recommendation(session_key, analysis_id, rec_payload, source="agent", parent_version=None)
-            yield ProgressEvent(
-                event="done", stage="recommending", message="추천 완료",
-                data={**saved, "recommendation": rec_payload},
-            ).to_sse()
+            if rec_payload is not None:
+                saved = _save_recommendation(session_key, analysis_id, rec_payload, source="agent", parent_version=None)
+                yield ProgressEvent(
+                    event="done", stage="recommending", message="추천 완료",
+                    data={**saved, "recommendation": rec_payload},
+                ).to_sse()
+            elif not saw_error:
+                # recommend가 done도 error도 안 낸 비정상 종료 — error 하나만 낸다
+                yield ProgressEvent(
+                    event="error", stage="recommending", message="추천안을 생성하지 못했습니다"
+                ).to_sse()
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등
             yield ProgressEvent(event="error", stage="recommending", message=f"추천 엔진 구성 오류: {e}").to_sse()
         except Exception:  # noqa: BLE001
