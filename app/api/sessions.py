@@ -11,14 +11,15 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import models
 from app.api.auth import assert_session_owner, get_optional_user
 from app.core.llm import usage_context
 from app.db import get_db
-from app.schemas import ProgressEvent
+from app.schemas import AnalysisResult, ProgressEvent, Recommendation
 
 logger = logging.getLogger(__name__)
 
@@ -171,3 +172,205 @@ def _record_failure(session_id: uuid.UUID, document_id: uuid.UUID, error: str) -
             s.commit()
     except Exception:  # noqa: BLE001
         logger.exception("분석 실패 기록마저 실패: session=%s", session_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 추천안(흐름도) 생성·저장·버전 편집 (FR-09~18, RPA-61)
+# 흐름도 = Recommendation 트리(steps→actions→children). 프론트가 이 트리를 블록으로
+# 렌더·드래그 편집하고, 편집본을 새 버전으로 저장한다(수정=UPDATE 아닌 새 버전 INSERT).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _owned_session_or_404(session_id: str, db: Session, user) -> models.AnalysisSession:
+    try:
+        key = uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(
+            400, detail={"code": "INVALID_ID", "message": "세션 ID 형식이 올바르지 않습니다."}
+        ) from None
+    session = db.get(models.AnalysisSession, key)
+    if session is None:
+        raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "세션을 찾을 수 없습니다."})
+    assert_session_owner(session, user)
+    return session
+
+
+def _recommendation_out(row: models.RecommendationVersion) -> dict:
+    return {
+        "id": str(row.id),
+        "version": row.version,
+        "parent_version": row.parent_version,
+        "source": row.source,
+        "change_summary": row.change_summary,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def _save_recommendation(
+    session_id: uuid.UUID, analysis_id: uuid.UUID, payload: dict,
+    source: str, parent_version: int | None, change_summary: str | None = None,
+) -> dict:
+    """새 추천안 버전을 저장한다 (version은 세션 내 max+1). 새 세션 사용(스트리밍 후에도 안전)."""
+    from app.db import SessionLocal
+
+    with SessionLocal() as s:
+        last = s.execute(
+            select(func.max(models.RecommendationVersion.version))
+            .where(models.RecommendationVersion.session_id == session_id)
+        ).scalar()
+        version = (last or 0) + 1
+        row = models.RecommendationVersion(
+            session_id=session_id,
+            analysis_id=analysis_id,
+            version=version,
+            parent_version=parent_version if parent_version is not None else last,
+            source=source,
+            payload=payload,
+            change_summary=change_summary,
+        )
+        s.add(row)
+        s.commit()
+        return _recommendation_out(row)
+
+
+@router.post("/{session_id}/recommend")
+async def recommend_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> StreamingResponse:
+    """세션의 최신 분석으로 A360 추천안(흐름도)을 생성하고 v1로 저장한다 (FR-09~12) — SSE.
+
+    이벤트: stage/partial(recommend가 흘리는 진행) → done(data={recommendation, version...}).
+    recommend()는 async라 async 제너레이터로 소비한다.
+    """
+    from app.agent import recommend
+
+    session = _owned_session_or_404(session_id, db, user)
+    analysis = db.execute(
+        select(models.Analysis)
+        .where(models.Analysis.session_id == session.id, models.Analysis.status == "completed")
+        .order_by(models.Analysis.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if analysis is None or analysis.result is None:
+        raise HTTPException(
+            409, detail={"code": "NO_ANALYSIS", "message": "먼저 문서 분석(analyze)을 완료해 주세요."}
+        )
+    analysis_result = AnalysisResult.model_validate(analysis.result)
+    session_key, analysis_id, user_id = session.id, analysis.id, (user.id if user else None)
+
+    async def sse():
+        rec_payload = None
+        try:
+            # recommend는 async 제너레이터 — 콜백이 이 블록 안에서 생성돼 귀속 스냅샷을 잡는다.
+            # (async 제너레이터는 같은 태스크 컨텍스트에서 재개되므로 usage_context가 yield를
+            #  넘어도 안전하다 — 동기 제너레이터의 ContextVar 문제와 다름.)
+            with usage_context(
+                component="agent", actor_type="user", user_id=user_id, session_id=session_key
+            ):
+                async for event in recommend(analysis_result):
+                    if event.event == "done":
+                        rec_payload = (event.data or {}).get("recommendation")
+                        continue  # done은 저장 후 버전정보와 함께 다시 낸다
+                    yield event.to_sse()
+            if rec_payload is None:
+                raise ValueError("recommend가 추천안을 반환하지 않았습니다")
+            saved = _save_recommendation(session_key, analysis_id, rec_payload, source="agent", parent_version=None)
+            yield ProgressEvent(
+                event="done", stage="recommending", message="추천 완료",
+                data={**saved, "recommendation": rec_payload},
+            ).to_sse()
+        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등
+            yield ProgressEvent(event="error", stage="recommending", message=f"추천 엔진 구성 오류: {e}").to_sse()
+        except Exception:  # noqa: BLE001
+            logger.exception("추천 생성 실패: session=%s", session_key)
+            yield ProgressEvent(
+                event="error", stage="recommending", message="추천 생성 중 오류가 발생했습니다"
+            ).to_sse()
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/{session_id}/recommendations")
+def list_recommendations(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """세션의 추천안 버전 목록(메타) — undo·이력 UI용. 최신 버전이 먼저."""
+    session = _owned_session_or_404(session_id, db, user)
+    rows = db.execute(
+        select(models.RecommendationVersion)
+        .where(models.RecommendationVersion.session_id == session.id)
+        .order_by(models.RecommendationVersion.version.desc())
+    ).scalars().all()
+    return {"versions": [_recommendation_out(r) for r in rows]}
+
+
+@router.get("/{session_id}/recommendations/latest")
+def get_latest_recommendation(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """최신 추천안 트리 전체 — 프론트가 흐름도로 렌더한다."""
+    session = _owned_session_or_404(session_id, db, user)
+    row = db.execute(
+        select(models.RecommendationVersion)
+        .where(models.RecommendationVersion.session_id == session.id)
+        .order_by(models.RecommendationVersion.version.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "NO_RECOMMENDATION", "message": "저장된 추천안이 없습니다."})
+    return {**_recommendation_out(row), "recommendation": row.payload}
+
+
+class SaveRecommendationRequest(BaseModel):
+    recommendation: dict = Field(description="편집된 Recommendation 트리 (흐름도)")
+    parent_version: int | None = Field(None, description="이 편집의 기준 버전 (없으면 현재 최신)")
+    source: str = Field("drag", pattern="^(drag|chat|feedback)$", description="편집 출처")
+    change_summary: str | None = Field(None, max_length=500)
+
+
+@router.post("/{session_id}/recommendations", status_code=201)
+def save_edited_recommendation(
+    session_id: str,
+    payload: SaveRecommendationRequest,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """프론트에서 블록 드래그로 편집한 추천안을 새 버전으로 저장한다 (FR-18).
+
+    수정은 UPDATE가 아니라 새 버전 INSERT — undo·수정 이력이 여기서 나온다.
+    페이로드는 Recommendation 스키마로 검증한다(카탈로그 액션명 검증은 후속).
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    try:
+        Recommendation.model_validate(payload.recommendation)  # 스키마 검증 (구조 깨짐 방지)
+    except ValidationError as e:
+        raise HTTPException(
+            400, detail={"code": "INVALID_RECOMMENDATION", "message": f"추천안 형식이 올바르지 않습니다: {e.error_count()}건"}
+        ) from None
+    # 기준 버전(부모)에서 analysis_id를 이어받는다 — 편집본도 같은 분석에 속한다
+    base = db.execute(
+        select(models.RecommendationVersion)
+        .where(models.RecommendationVersion.session_id == session.id)
+        .order_by(models.RecommendationVersion.version.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if base is None:
+        raise HTTPException(
+            409, detail={"code": "NO_RECOMMENDATION", "message": "편집할 기준 추천안이 없습니다 (먼저 recommend)."}
+        )
+    saved = _save_recommendation(
+        session.id, base.analysis_id, payload.recommendation,
+        source=payload.source, parent_version=payload.parent_version if payload.parent_version is not None else base.version,
+        change_summary=payload.change_summary,
+    )
+    return saved
