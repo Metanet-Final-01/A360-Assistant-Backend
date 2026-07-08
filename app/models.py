@@ -226,3 +226,24 @@ class EvalRun(Base):
     metrics: Mapped[dict] = mapped_column(JSONB)
     detail: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuditLog(Base):
+    """감사 로그 (횡단 관심사/AOP) — 변경성 요청(POST/PUT/PATCH/DELETE)의 '누가·무엇을'.
+
+    관측성 미들웨어가 자동 기록한다. 조회(GET)는 구조화 로그로만 남고 여기엔 안 들어온다
+    (중요 이벤트만 DB). user_id는 JWT에서 뽑으며 익명이면 NULL.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    request_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    method: Mapped[str] = mapped_column(String(10))
+    path: Mapped[str] = mapped_column(String(512), index=True)
+    status_code: Mapped[int] = mapped_column(Integer)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())

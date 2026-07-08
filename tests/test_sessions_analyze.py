@@ -159,8 +159,10 @@ def test_analyze_streams_stage_then_done_and_persists(monkeypatch):
     assert done["data"]["steps"][0]["step_id"] == "step-1"
     assert done["data"]["analysis_id"]  # 영속화된 행 id가 실림
 
-    assert len(_FakePersist.saved) == 1
-    row = _FakePersist.saved[0]
+    # AOP 감사 로그(AuditLog)도 같은 SessionLocal로 기록되므로 Analysis 행만 골라 검증
+    analyses = [r for r in _FakePersist.saved if type(r).__name__ == "Analysis"]
+    assert len(analyses) == 1
+    row = analyses[0]
     assert row.status == "completed" and row.result["summary"] == "요약"
     assert seen_ctx["component"] == "agent"  # LLM 사용량이 agent로 귀속
 
@@ -219,7 +221,8 @@ def test_analyze_route_with_real_agent_analyze(monkeypatch):
     assert done["event"] == "done"
     assert done["data"]["document_title"] == "금 시세 조회"
     assert done["data"]["steps"][0]["step_id"] == "step-1"
-    assert _FakePersist.saved[0].status == "completed"
+    analyses = [r for r in _FakePersist.saved if type(r).__name__ == "Analysis"]
+    assert analyses and analyses[0].status == "completed"
 
 
 def test_analyze_config_error_maps_to_error_event(monkeypatch):

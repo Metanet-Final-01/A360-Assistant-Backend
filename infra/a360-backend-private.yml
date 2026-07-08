@@ -49,6 +49,15 @@ Parameters:
     Type: String
     Default: 10.60.21.0/24
 
+  NetworkMode:
+    Type: String
+    Default: private
+    AllowedValues: [private, public-lite]
+    Description: >-
+      private (default): app instances in private subnets behind a NAT Gateway (~$32-45/mo fixed cost).
+      public-lite: app instances in public subnets (still only reachable via the ALB security group),
+      no NAT Gateway — cheaper for short-lived test deployments.
+
   InstanceType:
     Type: String
     Default: t3.medium
@@ -107,15 +116,43 @@ Parameters:
     Default: ""
     NoEcho: true
 
+  VoyageApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "Optional — enables Voyage reranking. Hybrid search still works without it (falls back to RRF order, no rerank)."
+
+  JwtSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "Auth token signing secret. Leave blank only for throwaway test stacks — the app falls back to a well-known insecure dev secret if unset."
+
   EnableOpenSearch:
     Type: String
     Default: "false"
     AllowedValues: ["true", "false"]
 
+  OpenSearchMode:
+    Type: String
+    Default: managed
+    AllowedValues: [managed, container]
+    Description: >-
+      Only matters when EnableOpenSearch=true. managed (default): AWS::OpenSearchService::Domain,
+      t3.small.search always-on (~$26-36/mo fixed, separate from the app instance).
+      container: run OpenSearch as a plain container alongside the backend on the same EC2
+      instance (same image as local docker-compose) — no extra AWS resource/cost, but shares
+      the instance's RAM/CPU (bump InstanceType if using this) and loses its data if the
+      instance is replaced (no managed backups/patching either).
+
 Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
   CreateOpenSearch: !Equals [!Ref EnableOpenSearch, "true"]
+  UseManagedOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "managed"]]
+  UseContainerOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "container"]]
+  IsPublicLite: !Equals [!Ref NetworkMode, "public-lite"]
+  NeedsNat: !Not [!Condition IsPublicLite]
 
 Resources:
   Vpc:
@@ -243,6 +280,7 @@ Resources:
 
   NatEip:
     Type: AWS::EC2::EIP
+    Condition: NeedsNat
     DependsOn: VpcGatewayAttachment
     Properties:
       Domain: vpc
@@ -252,6 +290,7 @@ Resources:
 
   NatGateway:
     Type: AWS::EC2::NatGateway
+    Condition: NeedsNat
     Properties:
       AllocationId: !GetAtt NatEip.AllocationId
       SubnetId: !Ref PublicSubnet1
@@ -269,6 +308,7 @@ Resources:
 
   PrivateDefaultRoute:
     Type: AWS::EC2::Route
+    Condition: NeedsNat
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -368,7 +408,7 @@ Resources:
 
   OpenSearchSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Condition: CreateOpenSearch
+    Condition: UseManagedOpenSearch
     Properties:
       GroupDescription: Private OpenSearch security group
       VpcId: !Ref Vpc
@@ -407,7 +447,9 @@ Resources:
       SecretString: !Sub |
         {
           "OPENAI_API_KEY": "${OpenAiApiKey}",
-          "GITHUB_TOKEN": "${GithubToken}"
+          "GITHUB_TOKEN": "${GithubToken}",
+          "VOYAGE_API_KEY": "${VoyageApiKey}",
+          "JWT_SECRET": "${JwtSecret}"
         }
       Tags:
         - Key: Project
@@ -498,7 +540,7 @@ Resources:
 
   OpenSearchDomain:
     Type: AWS::OpenSearchService::Domain
-    Condition: CreateOpenSearch
+    Condition: UseManagedOpenSearch
     Properties:
       DomainName: !Sub "${ProjectName}-${Environment}-search"
       EngineVersion: OpenSearch_2.13
@@ -591,6 +633,11 @@ Resources:
       Subnets:
         - !Ref PublicSubnet1
         - !Ref PublicSubnet2
+      LoadBalancerAttributes:
+        # CloudFront의 OriginReadTimeout(60초)보다 짧으면 ALB가 먼저 끊어서 같은 증상이
+        # 재발한다 — 여유를 두고 그보다 길게(RAG 챗봇 스트림 감안).
+        - Key: idle_timeout.timeout_seconds
+          Value: "120"
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-${Environment}-alb"
@@ -653,6 +700,11 @@ Resources:
               HTTPPort: 80
               OriginSSLProtocols:
                 - TLSv1.2
+              # 기본값 30초는 RAG 챗봇 스트림(임베딩+검색+rerank+LLM, Voyage 재시도 시 30초+)에
+              # 너무 짧아서 CloudFront가 스트림 도중 끊어버린다(클라이언트엔 HTTP/2 프로토콜
+              # 에러로 보임). CloudFront가 허용하는 최댓값(60초)으로 올린다.
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
         DefaultCacheBehavior:
           TargetOriginId: backend-alb
           ViewerProtocolPolicy: https-only
@@ -685,8 +737,11 @@ Resources:
         IamInstanceProfile:
           Arn: !GetAtt AppInstanceProfile.Arn
         KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
-        SecurityGroupIds:
-          - !Ref AppSecurityGroup
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: !If [IsPublicLite, true, false]
+            Groups:
+              - !Ref AppSecurityGroup
         BlockDeviceMappings:
           - DeviceName: /dev/xvda
             Ebs:
@@ -743,6 +798,8 @@ Resources:
               DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["password"])')
               OPENAI_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENAI_API_KEY", ""))')
               GITHUB_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("GITHUB_TOKEN", ""))')
+              VOYAGE_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("VOYAGE_API_KEY", ""))')
+              JWT_SECRET=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("JWT_SECRET", ""))')
 
               if [ -n "$GITHUB_TOKEN" ]; then
                 echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin
@@ -760,6 +817,10 @@ Resources:
               DATABASE_USERNAME=$DB_USERNAME
               DATABASE_PASSWORD=$DB_PASSWORD
               OPENAI_API_KEY=$OPENAI_API_KEY
+              VOYAGE_API_KEY=$VOYAGE_API_KEY
+              JWT_SECRET=$JWT_SECRET
+              EMBEDDING_PROVIDER=openai
+              AGENT_RETRIEVER=hybrid
               OPENSEARCH_HOST=${OpenSearchHost}
               PDFBOX_JAR_PATH=/opt/pdfbox/pdfbox-app.jar
               EOF
@@ -778,6 +839,7 @@ Resources:
                     interval: 30s
                     timeout: 5s
                     retries: 3
+              ${OpenSearchComposeBlock}
               EOF
 
               cd /opt/a360
@@ -789,8 +851,15 @@ Resources:
                 --resource AppAutoScalingGroup \
                 --region ${AWS::Region}
             - OpenSearchHost: !If
-                - CreateOpenSearch
+                - UseManagedOpenSearch
                 - !Sub "https://${OpenSearchDomain.DomainEndpoint}"
+                - !If [UseContainerOpenSearch, "http://opensearch:9200", ""]
+              # 명시적 \n 문자열로 조립한다 — YAML 블록 스칼라(|)의 공통 들여쓰기 제거 규칙과
+              # 겹치면 결과 docker-compose.yml의 들여쓰기가 미묘하게 어긋나기 쉬워서, 각 줄의
+              # 절대 들여쓰기를 여기서 명시적으로 고정해 둔다.
+              OpenSearchComposeBlock: !If
+                - UseContainerOpenSearch
+                - "  opensearch:\n    image: opensearchproject/opensearch:2.13.0\n    container_name: a360-opensearch\n    restart: unless-stopped\n    environment:\n      discovery.type: single-node\n      plugins.security.disabled: \"true\"\n      OPENSEARCH_JAVA_OPTS: \"-Xms512m -Xmx512m\"\n      OPENSEARCH_INITIAL_ADMIN_PASSWORD: \"A360-container-Dev1!\"\n    volumes:\n      - opensearch-data:/usr/share/opensearch/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -sf http://localhost:9200/_cluster/health || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 10\n\nvolumes:\n  opensearch-data:"
                 - ""
 
   AppAutoScalingGroup:
@@ -809,9 +878,10 @@ Resources:
       MinSize: "1"
       DesiredCapacity: !Ref DesiredCapacity
       MaxSize: !Ref MaxCapacity
-      VPCZoneIdentifier:
-        - !Ref PrivateAppSubnet1
-        - !Ref PrivateAppSubnet2
+      VPCZoneIdentifier: !If
+        - IsPublicLite
+        - [!Ref PublicSubnet1, !Ref PublicSubnet2]
+        - [!Ref PrivateAppSubnet1, !Ref PrivateAppSubnet2]
       TargetGroupARNs:
         - !Ref BackendTargetGroup
       HealthCheckType: ELB
@@ -861,7 +931,7 @@ Outputs:
     Value: !Ref DocumentBucket
 
   OpenSearchEndpoint:
-    Condition: CreateOpenSearch
+    Condition: UseManagedOpenSearch
     Description: Private OpenSearch endpoint
     Value: !Sub "https://${OpenSearchDomain.DomainEndpoint}"
 
