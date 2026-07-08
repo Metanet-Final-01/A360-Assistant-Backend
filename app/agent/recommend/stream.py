@@ -7,6 +7,11 @@ astream(stream_mode="custom")으로 받아 ProgressEvent로 감싼다. 스트리
 """
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 def emit(payload: dict) -> None:
     """ProgressEvent-형 dict를 스트림에 방출한다 (컨텍스트 없으면 no-op)."""
     try:
@@ -14,4 +19,4 @@ def emit(payload: dict) -> None:
 
         get_stream_writer()(payload)
     except Exception:  # noqa: BLE001 — 스트림 컨텍스트 밖에서는 무시
-        pass
+        logger.debug("emit 무시됨 (스트림 컨텍스트 없음 또는 실패): %s", payload)

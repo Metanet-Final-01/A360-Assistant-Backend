@@ -115,6 +115,16 @@ _FAKE_ACTIONS: list[dict] = [
                        ["For each row in a data table", "N times", "For each item in list"], "반복 유형")]},
     {"package": "If", "action": "if", "label": "If",
      "parameters": [_p("condition", "CONDITION", True, label="조건")]},
+    {"package": "If", "action": "elseIf", "label": "Else If",
+     "parameters": [_p("condition", "CONDITION", True, label="조건")]},
+    {"package": "If", "action": "else", "label": "Else", "parameters": []},
+    {"package": "Step", "action": "step", "label": "단계",
+     "parameters": [_p("title", "TEXT", False, label="제목")]},
+    {"package": "ErrorHandler", "action": "try", "label": "Try", "parameters": []},
+    {"package": "ErrorHandler", "action": "catch", "label": "Catch",
+     "parameters": [_p("exception", "EXCEPTION", True, label="예외"),
+                    _p("continueOnError", "CHECKBOX", False, label="오류 발생 시 계속")]},
+    {"package": "ErrorHandler", "action": "finally", "label": "Finally", "parameters": []},
     # --- 글루 ---
     {"package": "Datetime", "action": "toString", "label": "To 문자열",
      "parameters": [_p("datetime", "VARIABLE", True, label="날짜/시간"),
@@ -136,6 +146,7 @@ class FakeCatalog:
 
 
 _fake_catalog: CatalogLookup = FakeCatalog()
+_catalog_cache: dict[str, CatalogLookup] = {}
 
 
 def get_catalog() -> CatalogLookup:
@@ -144,9 +155,20 @@ def get_catalog() -> CatalogLookup:
     AGENT_CATALOG=backend이면 백엔드 카탈로그 서비스(app.services.catalog)를,
     아니면 FakeCatalog(스텁)를 반환한다. 기본은 fake라 인프라 없이도 그래프가 돈다.
     백엔드 서비스가 준비되면 이 분기만 실제 구현으로 바꾼다.
+
+    카탈로그는 정적 참조 데이터라 mode별로 1회만 해석해 캐싱한다 — 병렬 step 노드가
+    매 호출마다 재조회(특히 backend 서비스 재생성)하지 않게 한다 (RPA-27 리뷰).
     """
-    if os.getenv("AGENT_CATALOG", "fake").lower() == "backend":
+    mode = "backend" if os.getenv("AGENT_CATALOG", "fake").lower() == "backend" else "fake"
+    cached = _catalog_cache.get(mode)
+    if cached is not None:
+        return cached
+
+    if mode == "backend":
         from app.services.catalog import get_backend_catalog
 
-        return get_backend_catalog()
-    return _fake_catalog
+        catalog = get_backend_catalog()
+    else:
+        catalog = _fake_catalog
+    _catalog_cache[mode] = catalog
+    return catalog

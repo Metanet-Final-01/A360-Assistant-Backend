@@ -139,9 +139,10 @@ async def recommend(
     except RuntimeError as e:  # 인프라(키/인증/rate limit) — 사용자용 문구로
         yield ProgressEvent(event="error", message=str(e))
         return
-    except Exception as e:  # noqa: BLE001 — 예기치 못한 실패도 스트림을 죽이지 않는다
+    except Exception:  # noqa: BLE001 — 예기치 못한 실패도 스트림을 죽이지 않는다
+        # 원인은 서버 로그로만 남기고, 사용자에겐 내부 정보(경로·라이브러리 메시지)를 노출하지 않는다.
         logger.exception("recommend 실패")
-        yield ProgressEvent(event="error", message=f"추천 생성 중 오류: {e}")
+        yield ProgressEvent(event="error", message="추천 생성 중 오류가 발생했습니다")
         return
 
     yield ProgressEvent(
