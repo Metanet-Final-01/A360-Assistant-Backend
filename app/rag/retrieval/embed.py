@@ -1,5 +1,6 @@
 """임베딩 생성. Anthropic은 임베딩 API가 없어 Voyage AI(공식 권장) 또는 OpenAI를 사용한다."""
 
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -8,9 +9,33 @@ import httpx
 from .. import config
 from ..observability import log_call, log_event
 
+logger = logging.getLogger(__name__)
+
 # 한국어는 문자당 토큰 수가 많아(최대 ~2토큰/자) 보수적으로 자른다: 4000자 ≈ 최대 8k 토큰
 _BATCH_SIZE = 16
 _MAX_CHARS = 4000
+
+
+def _record_embed_usage(data: dict) -> None:
+    """임베딩 응답의 토큰을 llm_usage에 기록한다 (component=rag_embed).
+
+    임베딩은 사용자와 무관한 인프라(적재·검색)이므로 system 사용으로 귀속한다.
+    core.llm은 lazy import하고, 기록 실패가 임베딩 자체를 막지 않도록 best-effort로 삼킨다.
+    """
+    try:
+        usage = data.get("usage") or {}
+        tokens = usage.get("total_tokens") or usage.get("prompt_tokens") or 0
+        if not tokens:
+            return
+        from app.core.llm import record_usage, usage_context
+
+        with usage_context(component="rag_embed"):  # actor_type=system, user_id=None
+            record_usage(
+                purpose="embed", model=config.EMBEDDING_MODEL,
+                input_tokens=int(tokens), output_tokens=0,
+            )
+    except Exception:  # noqa: BLE001 — 사용량 기록 실패가 임베딩을 막으면 안 됨
+        logger.debug("임베딩 사용량 기록 실패 (무시)", exc_info=True)
 
 
 def post_with_retry(url: str, headers: dict, payload: dict, retries: int = 5) -> dict:
@@ -97,6 +122,7 @@ def _embed_voyage(texts: list[str]) -> list[list[float]]:
         {"Authorization": f"Bearer {config.VOYAGE_API_KEY}"},
         {"model": config.EMBEDDING_MODEL, "input": texts, "input_type": "document"},
     )
+    _record_embed_usage(data)
     return [item["embedding"] for item in data["data"]]
 
 
@@ -108,6 +134,7 @@ def _embed_openai(texts: list[str]) -> list[list[float]]:
         {"Authorization": f"Bearer {config.OPENAI_API_KEY}"},
         {"model": config.EMBEDDING_MODEL, "input": texts},
     )
+    _record_embed_usage(data)
     return [item["embedding"] for item in data["data"]]
 
 
@@ -135,5 +162,6 @@ def embed_query(text: str) -> list[float]:
             {"Authorization": f"Bearer {config.VOYAGE_API_KEY}"},
             {"model": config.EMBEDDING_MODEL, "input": [text], "input_type": "query"},
         )
+        _record_embed_usage(data)
         return data["data"][0]["embedding"]
     return _embed_openai([text])[0]
