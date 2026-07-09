@@ -52,6 +52,10 @@ class AnalysisSession(Base):
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     title: Mapped[str | None] = mapped_column(String(255))
+    # 자동화 대상 솔루션. 에이전트가 탈 그래프와 RAG 카탈로그를 가르는 결정론적 키
+    # (업로드 시점에 확정 저장, 매 턴 그대로 에이전트에 전달 — 프롬프트로 추측 금지).
+    # 현재는 A360 단일이라 기본 "a360"; 타 솔루션 카탈로그 지원은 후속.
+    solution: Mapped[str] = mapped_column(String(50), server_default="a360", default="a360")
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[str] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

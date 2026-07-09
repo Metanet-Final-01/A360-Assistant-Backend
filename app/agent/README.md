@@ -32,6 +32,41 @@ class AgentResult(BaseModel):
 - `stream_agent`: async 제너레이터 — LLM이 생성하는 대로 답변 토큰(str)을 yield. SSE 응답에 이걸 쓴다. **sources는 토큰 스트림에 실리지 않는다** (`done` 이벤트의 `data`로 실을지는 후속 이슈에서 협의).
 - 둘 다 `OPENAI_API_KEY`가 없으면 `RuntimeError`를 던진다 (설정 오류 — 503으로 매핑 권장)
 
+### 단일 진입점 — `stream_agent_turn` (FR-13~16, 미구현·계약 확정)
+
+대화형 상호작용(분석/질문/흐름도 수정)을 **하나의 진입점**으로 합친다. 백엔드가
+`POST /api/sessions/{id}/turn`에서 이 함수를 lazy import해 붙인다 — export하는 순간 활성화된다.
+
+```python
+async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[ProgressEvent]: ...
+```
+
+- **intent는 받지 않는다.** 라우터가 `message`로 브랜치(analyze/edit/ask)를 판단한다.
+  버튼처럼 메시지가 없는 동작은 프론트가 합성 메시지를 넣어 보낸다.
+- `context`(백엔드가 세션에서 매 턴 조립해 전달 — agent는 stateless, DB 안 붙음):
+  ```python
+  {
+    "solution": str,            # "a360" | ... — 탈 그래프·RAG 카탈로그를 가르는 결정론적 키
+    "history": [{"role", "content"}],       # 최근 대화 턴
+    "analysis": AnalysisResult_dict | None,      # 최신 분석본
+    "recommendation": Recommendation_dict | None,  # 최신 흐름도 트리 (edit 대상)
+    "parsed_doc": dict | None,                   # 최신 문서 파싱본 (analyze 대비)
+  }
+  ```
+- 진행은 기존 규약대로 `stage/partial/token` ProgressEvent로 흘리고, **종료 `done` 이벤트의
+  `data`에 판별 유니온 결과**를 싣는다 (백엔드가 `type`으로 저장을 분기한다):
+  ```python
+  { "type": "answer" | "analysis" | "recommendation",
+    "answer": str, "sources": [RagSource, ...],
+    "analysis_result": AnalysisResult_dict | None,        # type=="analysis"
+    "updated_recommendation": Recommendation_dict | None, # type=="recommendation"
+    "change_summary": str | None }                        # type=="recommendation"
+  ```
+- ⚠️ **`type`은 정확해야 한다** — 백엔드가 이걸로 저장을 가른다(analysis→Analysis, recommendation→
+  RecommendationVersion(source="chat"), answer→대화만). 수행한 작업과 `type`을 일치시킬 것.
+- `solution`으로 그래프를 라우팅한다(A360 전용/타 솔루션 범용). `solution`은 세션에 확정
+  저장된 값이라 프롬프트로 추측하지 않는다.
+
 ### 문서 분석 — `analyze` (FR-05)
 
 ```python
