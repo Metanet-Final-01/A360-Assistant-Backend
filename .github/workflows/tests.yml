@@ -16,4 +16,14 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      - run: pytest -q
+      - name: Run tests with coverage
+        run: pytest -q --cov=app --cov-report=term-missing --cov-report=xml
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "### 🧪 테스트 커버리지"
+            echo '```'
+            coverage report
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

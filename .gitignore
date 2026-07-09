@@ -7,6 +7,11 @@ __pycache__/
 .env.*
 !.env.example
 
+# Test coverage
+.coverage
+coverage.xml
+htmlcov/
+
 # Virtual environments
 venv/
 .venv/

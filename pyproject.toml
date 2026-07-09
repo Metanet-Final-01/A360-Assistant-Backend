@@ -2,3 +2,17 @@
 # 실행 방식(pytest vs python -m pytest)과 무관하게 리포 루트를 import 경로에 포함
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# 커버리지에서 제외할 관례적 라인 (런타임 로직이 아님)
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "\\.\\.\\.",
+]
