@@ -15,7 +15,7 @@ from app.schemas import Recommendation
 
 from ..recommend.stream import emit
 from ..verify.catalog import CatalogLookup
-from ..verify.checker import run_checks
+from ..verify.checker import run_checks, run_session_checks
 from .jsonio import chat_json
 from .render import dump_json
 
@@ -28,13 +28,19 @@ _MAX_REPAIRS = 1
 
 
 def collect_violations(flow: dict, catalog: CatalogLookup) -> list[dict]:
-    """흐름도 전체(steps[].actions 트리)를 R1~R6로 검사한다. 위반에 step_id를 부착."""
+    """흐름도 전체를 검사한다: R1~R6(단계별 액션 문법) + R7~R8(단계 경계를 넘는 세션 흐름).
+
+    R1~R6은 단계별로 돌며 위반에 step_id를 부착하고, R7~R8은 전체 흐름도를 실행 순서로
+    순회한다(위반 액션의 step_id는 checker가 이미 싣는다).
+    """
     violations: list[dict] = []
     for step in flow.get("steps", []):
         for v in run_checks(step.get("actions", []), catalog):
             d = v.as_dict()
             d["step_id"] = step.get("step_id")
             violations.append(d)
+    for v in run_session_checks(flow.get("steps", [])):
+        violations.append(v.as_dict())
     return violations
 
 

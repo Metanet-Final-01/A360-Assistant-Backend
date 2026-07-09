@@ -21,13 +21,14 @@ from app.schemas import AnalysisResult
 _CTX = {"solution": "a360", "history": [], "analysis": None,
         "recommendation": None, "parsed_doc": None}
 
+# 세션 무관 clean 픽스처(String/assign) — 세션 검사(R7~R8) 노이즈 없이 산출/수정 경로만 본다.
 _CLEAN_FLOW = {
     "schema_version": "1.0",
     "steps": [{
         "step_id": "step-1",
         "actions": [{
-            "order": 1, "package": "Excel_MS", "action": "SaveSpreadSheet", "label": "저장",
-            "parameters": [{"name": "session", "value": "Default", "value_source": "schema_default"}],
+            "order": 1, "package": "String", "action": "assign", "label": "값 지정",
+            "parameters": [{"name": "value", "value": "x", "value_source": "llm"}],
             "children": [],
         }],
     }],
