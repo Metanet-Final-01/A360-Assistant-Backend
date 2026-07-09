@@ -47,15 +47,20 @@ class EditOutput(BaseModel):
 
 
 def _make_llm() -> ChatOpenAI:
-    # stream_usage=True: UsageCallbackHandler(진입점 config)가 토큰을 집계하게 한다.
+    """이 노드용 ChatOpenAI를 만든다.
+
+    stream_usage=True: UsageCallbackHandler(진입점 config)가 토큰을 집계하게 한다.
+    """
     return ChatOpenAI(model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY, stream_usage=True)
 
 
 def _parse_output(text: str) -> EditOutput:
+    """LLM 출력(코드펜스 허용)을 EditOutput으로 파싱한다."""
     return EditOutput.model_validate(json.loads(_FENCE.sub("", text.strip())))
 
 
 def _build_messages(state: TurnState) -> list:
+    """현재 흐름도·압축·이력·수정 요청을 담은 edit 프롬프트 메시지를 만든다."""
     user_content = (
         f"[현재 흐름도]\n{dump_json(state.get('recommendation'))}\n\n"
         f"[이전 대화 압축 요약]\n{render_compact(state.get('compact'))}\n\n"
@@ -66,6 +71,11 @@ def _build_messages(state: TurnState) -> list:
 
 
 async def edit_node(state: TurnState) -> dict:
+    """기존 흐름도 수정 브랜치 — 툴로 카탈로그를 확인하며 국소 수정안을 낸다.
+
+    LLM이 '수정 없음'(recommendation=null)을 택하면 type="answer"로 저하한다.
+    반환: {turn_type, recommendation_out?, change_summary?, violations, answer, sources}.
+    """
     emit({"event": "stage", "stage": "refining", "message": "흐름도 수정 중"})
     is_a360 = (state.get("solution") or "a360") == "a360"
     sink: list[dict] = []
