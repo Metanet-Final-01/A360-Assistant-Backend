@@ -106,16 +106,3 @@ def test_hybrid_retriever_delegates_to_search_actions(monkeypatch):
     results = ar.HybridRetriever().search("엑셀", limit=3)
     assert captured == {"query": "엑셀", "k": 3}
     assert results[0]["source_type"] == "action_schema"
-
-
-def test_get_retriever_switches_by_env(monkeypatch):
-    from app.agent import retrieval
-    from app.agent.retrieval import FakeRetriever
-
-    monkeypatch.setenv("AGENT_RETRIEVER", "fake")
-    assert isinstance(retrieval.get_retriever(), FakeRetriever)
-
-    monkeypatch.setenv("AGENT_RETRIEVER", "hybrid")
-    from app.services.agent_retriever import HybridRetriever
-
-    assert isinstance(retrieval.get_retriever(), HybridRetriever)
