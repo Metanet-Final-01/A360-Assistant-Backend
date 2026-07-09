@@ -404,6 +404,7 @@ def save_edited_recommendation(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _TURN_HISTORY_LIMIT = 20  # 매 턴 주입하는 최근 대화 상한 (토큰 폭주 방지)
+_VALID_TURN_TYPES = {"answer", "analysis", "recommendation"}  # 에이전트 결과 type 계약
 
 
 def _get_agent_turn():
@@ -461,9 +462,11 @@ def _assemble_turn_context(session: models.AnalysisSession, db: Session) -> dict
         .limit(1)
     ).scalar_one_or_none()
 
+    # 파싱 완료 문서만 — 최신 업로드가 uploaded/failed이면 parsed_doc가 비거나 분석이
+    # 잘못된 document_id에 묶일 수 있으므로 status="parsed"로 거른다 (CodeRabbit).
     document = db.execute(
         select(models.Document)
-        .where(models.Document.session_id == session.id)
+        .where(models.Document.session_id == session.id, models.Document.status == "parsed")
         .order_by(models.Document.created_at.desc())
         .limit(1)
     ).scalar_one_or_none()
@@ -497,14 +500,24 @@ def _save_analysis(session_id: uuid.UUID, document_id: uuid.UUID, result: dict) 
         return row.id
 
 
-def _persist_chat_turn(session_id: uuid.UUID, user_msg: str, assistant_msg: str) -> None:
-    """이번 턴을 chat_messages에 저장한다 (best-effort — 실패해도 응답을 막지 않는다)."""
+def _persist_chat_turn(
+    session_id: uuid.UUID, user_msg: str, assistant_msg: str,
+    recommendation_version: int | None = None,
+) -> None:
+    """이번 턴을 chat_messages에 저장한다 (best-effort — 실패해도 응답을 막지 않는다).
+
+    이 턴이 추천 버전을 만들었으면 assistant 메시지에 그 버전 번호를 남긴다
+    (ChatMessage.recommendation_version 계약 — 어느 대화가 어느 버전을 만들었는지).
+    """
     try:
         from app.db import SessionLocal
 
         with SessionLocal() as s:
             s.add(models.ChatMessage(session_id=session_id, role="user", content=user_msg))
-            s.add(models.ChatMessage(session_id=session_id, role="assistant", content=assistant_msg))
+            s.add(models.ChatMessage(
+                session_id=session_id, role="assistant", content=assistant_msg,
+                recommendation_version=recommendation_version,
+            ))
             s.commit()
     except Exception:  # noqa: BLE001 — 대화 저장 실패가 응답을 막으면 안 됨
         logger.warning("대화 턴 저장 실패 (무시): session=%s", session_id, exc_info=True)
@@ -520,43 +533,56 @@ def _persist_turn_result(
     "분석 없이 바로 흐름도" 턴은 type="recommendation"이지만 분석을 선행 수행해 analysis_result도
     함께 오고, 흐름도의 step_id가 그 분석본을 참조하므로 분석이 저장 안 되면 참조가 끊긴다.
     이때 흐름도는 이번 턴에 새로 저장한 분석의 id에 귀속시켜 무결성을 지킨다.
-    주 산출물 저장 실패는 상위 SSE 핸들러로 전파해 error로 알리고, 대화 기록만 best-effort로 삼킨다.
+    계약 위반(알 수 없는 type, 선언한 산출물 누락, 저장할 문서 없음)은 성공 done으로 내보내지
+    않고 ValueError로 올려 상위 SSE 핸들러가 error로 매핑한다 (CodeRabbit). 주 산출물 저장 실패도
+    상위로 전파하고, 대화 기록만 best-effort로 삼킨다.
     """
+    rtype = result.get("type")
+    if rtype not in _VALID_TURN_TYPES:
+        raise ValueError(f"에이전트 결과 type이 올바르지 않습니다: {rtype!r}")
+
     answer = result.get("answer") or ""
+    ar = result.get("analysis_result")
+    rec = result.get("updated_recommendation")
+
+    # 선언한 type의 산출물이 실제로 있어야 한다 (없으면 성공 done 대신 error)
+    if rtype == "analysis" and ar is None:
+        raise ValueError("type=analysis인데 analysis_result가 없습니다")
+    if rtype == "recommendation" and rec is None:
+        raise ValueError("type=recommendation인데 updated_recommendation이 없습니다")
+
     out = {
-        "type": result.get("type"),
+        "type": rtype,
         "answer": answer,
         "sources": result.get("sources") or [],
         "session_id": str(session_id),
     }
 
-    # 분석본 — non-null이면 저장 (type 무관)
-    ar = result.get("analysis_result")
+    # 분석본 — non-null이면 저장 (type 무관). 저장할 파싱 완료 문서가 없으면 계약 위반.
     new_analysis_id = None
-    if ar is not None and document_id is not None:
+    if ar is not None:
+        if document_id is None:
+            raise ValueError("분석 결과를 저장할 파싱 완료 문서가 없습니다")
         new_analysis_id = _save_analysis(session_id, document_id, ar)
         out["analysis_id"] = str(new_analysis_id)
         out["analysis_result"] = ar
 
     # 흐름도 — non-null이면 새 버전 저장 (type 무관). 이번 턴에 분석을 새로 냈으면 그 id에
-    # 귀속(참조 무결성), 아니면 기존 base/최신 분석 id를 잇는다.
-    rec = result.get("updated_recommendation")
+    # 귀속(참조 무결성), 아니면 기존 base/최신 분석 id를 잇는다. 귀속할 분석이 없으면 계약 위반.
+    saved_version = None
     if rec is not None:
         analysis_id = new_analysis_id or rec_analysis_id
-        if analysis_id is not None:
-            saved = _save_recommendation(
-                session_id, analysis_id, rec, source="chat",
-                parent_version=None, change_summary=result.get("change_summary"),
-            )
-            out.update(saved)  # id, version, parent_version, source, change_summary, created_at
-            out["recommendation"] = rec
-        else:
-            # 귀속할 분석이 전혀 없음 — 렌더는 되게 payload는 주되 미저장 표시
-            logger.warning("추천 저장 불가(analysis_id 없음) — 미저장 반환: session=%s", session_id)
-            out["recommendation"] = rec
-            out["saved"] = False
+        if analysis_id is None:
+            raise ValueError("흐름도를 귀속할 분석이 없습니다 (분석 선행 필요)")
+        saved = _save_recommendation(
+            session_id, analysis_id, rec, source="chat",
+            parent_version=None, change_summary=result.get("change_summary"),
+        )
+        out.update(saved)  # id, version, parent_version, source, change_summary, created_at
+        out["recommendation"] = rec
+        saved_version = saved["version"]
 
-    _persist_chat_turn(session_id, user_message, answer)
+    _persist_chat_turn(session_id, user_message, answer, recommendation_version=saved_version)
     return out
 
 

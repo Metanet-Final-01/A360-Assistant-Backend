@@ -61,7 +61,11 @@ class FakeDB:
         if "recommendations" in text:
             return SimpleNamespace(scalar_one_or_none=lambda: self.rec)
         if "documents" in text:
-            return SimpleNamespace(scalar_one_or_none=lambda: self.document)
+            # 실제 쿼리는 status="parsed"만 고른다 — fake도 미파싱 문서는 제외
+            doc = self.document
+            if doc is not None and getattr(doc, "status", "parsed") != "parsed":
+                doc = None
+            return SimpleNamespace(scalar_one_or_none=lambda: doc)
         return SimpleNamespace(scalar_one_or_none=lambda: None,
                                scalars=lambda: SimpleNamespace(all=lambda: []))
 
@@ -156,6 +160,9 @@ def test_recommendation_saves_chat_version(monkeypatch):
     assert done["data"]["recommendation"]["steps"][0]["step_id"] == "step-1"
     saved = captured["RecommendationVersion"][0]
     assert saved.source == "chat" and saved.analysis_id == AID
+    # 추천을 만든 assistant 메시지에 버전 번호 기록 (CodeRabbit)
+    assistant_msg = [m for m in captured["ChatMessage"] if m.role == "assistant"][0]
+    assert assistant_msg.recommendation_version == 2
 
 
 # --- type=analysis: Analysis 저장 ---
@@ -238,6 +245,45 @@ def test_full_context_passed_to_agent(monkeypatch):
     assert ctx["recommendation"]["steps"][0]["step_id"] == "step-1"
     assert ctx["parsed_doc"] == {"pages": [1]}
     assert "intent" not in ctx  # intent는 넘기지 않는다
+
+
+# --- 계약 위반은 성공 done이 아니라 error로 (CodeRabbit) ---
+
+def test_unknown_type_errors(monkeypatch):
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={"type": "bogus", "answer": "x", "sources": []}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run()
+    assert events[-1]["event"] == "error"
+
+
+def test_analysis_type_without_result_errors(monkeypatch):
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={"type": "analysis", "answer": "x", "sources": []}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    document = SimpleNamespace(id=DID, status="parsed", parsed_content={})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360"), document=document))
+    _, events = _run()
+    assert events[-1]["event"] == "error"
+
+
+def test_unparsed_document_not_used_for_analysis(monkeypatch):
+    """최신 문서가 uploaded면 파싱본이 없어 분석 저장 불가 → error (미파싱 문서 배제, CodeRabbit)."""
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={
+            "type": "analysis", "answer": "분석", "sources": [], "analysis_result": _analysis_result()}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    document = SimpleNamespace(id=DID, status="uploaded", parsed_content=None)  # 미파싱
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360"), document=document))
+    _, events = _run()
+    assert events[-1]["event"] == "error"
 
 
 # --- 에이전트 미구현 시 503 ---
