@@ -53,6 +53,30 @@ def build_kb_tools(sources_sink: list[dict]):
     return [search_kb, get_action_schema]
 
 
+def describe_tool_calls(tool_calls: list[dict]) -> str:
+    """tool_calls를 진행 표시용 한글 문구로 요약한다 (qa·edit의 stage 이벤트용).
+
+    어떤 도구를 무슨 인자로 부르는지 사람이 읽게 풀어준다 — search_kb는 질의어를,
+    get_action_schema는 패키지/액션을 노출한다. 여러 건이면 앞 2개만 싣는다.
+    """
+    labels: list[str] = []
+    for tc in tool_calls or []:
+        args = tc.get("args") or {}
+        if tc.get("name") == "search_kb":
+            query = (args.get("query") or "").strip()
+            labels.append(f"'{query}' 검색 중" if query else "지식베이스 검색 중")
+        elif tc.get("name") == "get_action_schema":
+            pkg, act = args.get("package"), args.get("action")
+            labels.append(f"{pkg}/{act} 스펙 확인 중" if pkg and act else "액션 스펙 확인 중")
+        else:
+            labels.append("지식베이스 확인 중")
+    if not labels:
+        return "지식베이스 확인 중"
+    if len(labels) <= 2:
+        return " · ".join(labels)
+    return " · ".join(labels[:2]) + f" 외 {len(labels) - 2}건"
+
+
 def execute_tool_calls(tools: list, ai_message) -> list[ToolMessage]:
     """AI 메시지의 tool_calls를 실행해 ToolMessage 목록으로 돌려준다.
 

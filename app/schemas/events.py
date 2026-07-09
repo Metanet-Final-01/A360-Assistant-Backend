@@ -19,7 +19,7 @@ class ProgressEvent(BaseModel):
     """
 
     event: Literal["stage", "partial", "token", "done", "error"]
-    stage: str | None = None  # parsing|masking|analyzing|searching|recommending|refining
+    stage: str | None = None  # routing|reading|analyzing|searching|composing|recommending|refining|verifying|compacting
     message: str | None = None
     data: dict[str, Any] | None = None
 

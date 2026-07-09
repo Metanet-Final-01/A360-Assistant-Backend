@@ -28,7 +28,7 @@ from ..verify.catalog import get_catalog
 from .harness import verify_and_repair
 from .render import dump_json, render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
-from .tools import build_kb_tools, execute_tool_calls, sink_to_sources
+from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,8 @@ async def edit_node(state: TurnState) -> dict:
     rounds = 0
     while getattr(response, "tool_calls", None) and rounds < _MAX_TOOL_ROUNDS:
         rounds += 1
-        emit({"event": "stage", "stage": "searching", "message": "카탈로그 확인 중"})
+        emit({"event": "stage", "stage": "searching",
+              "message": describe_tool_calls(response.tool_calls)})
         messages.append(response)
         messages.extend(execute_tool_calls(tools, response))
         # 마지막 라운드는 도구 없이 강제 마무리 — 무한 검색을 끊는다.

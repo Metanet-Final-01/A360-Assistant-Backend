@@ -19,7 +19,7 @@ from .. import config
 from ..recommend.stream import emit
 from .render import analysis_brief, context_signals, flow_outline, render_compact
 from .state import TYPE_ANSWER, TurnState
-from .tools import build_kb_tools, execute_tool_calls, sink_to_sources
+from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,9 @@ def _build_system(state: TurnState) -> str:
 
 
 async def qa_node(state: TurnState) -> dict:
+    # 진입 즉시 신호 — 인사·컨텍스트 질문은 검색 없이 바로 토큰이 흐르므로,
+    # 첫 토큰 전까지 화면이 비지 않게 한다.
+    emit({"event": "stage", "stage": "reading", "message": "질문 이해 중"})
     sink: list[dict] = []
     # KB는 A360 전용 — 타 솔루션 세션엔 툴을 바인딩하지 않는다 (컨텍스트로만 답변).
     tools = build_kb_tools(sink) if (state.get("solution") or "a360") == "a360" else []
@@ -91,7 +94,8 @@ async def qa_node(state: TurnState) -> dict:
                 emit({"event": "token", "stage": "chat", "message": chunk.text})
         if not getattr(gathered, "tool_calls", None):
             break
-        emit({"event": "stage", "stage": "searching", "message": "지식베이스 확인 중"})
+        emit({"event": "stage", "stage": "searching",
+              "message": describe_tool_calls(gathered.tool_calls)})
         messages.append(gathered)
         messages.extend(execute_tool_calls(tools, gathered))
 

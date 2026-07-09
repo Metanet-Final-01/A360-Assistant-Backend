@@ -85,6 +85,7 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
     반환: {"flow": dict, "violations": list[dict], "repaired": bool}.
     교정 LLM 출력이 스키마에 안 맞거나(ValueError) 위반이 줄지 않으면 원본을 유지한다.
     """
+    emit({"event": "stage", "stage": "verifying", "message": "흐름도 최종 검수 중"})
     violations = collect_violations(flow, catalog)
     repaired = False
     for _ in range(_MAX_REPAIRS):
