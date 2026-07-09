@@ -340,6 +340,11 @@ def _validate_compact_payload(cp) -> None:
     for key, expected in _COMPACT_SECTIONS.items():
         if not isinstance(cp[key], expected):
             raise ValueError(f"compact 섹션 타입 오류: {key}는 {expected.__name__}이어야 합니다")
+    # verbatim은 유실-critical(카탈로그 원문) — 항목이 {kind, content} 형태인지까지 확인.
+    # (빈 리스트/빈 문자열 자체는 정상이라 강제하지 않는다; 내용 완결성은 에이전트 union 보정 몫)
+    for item in cp["verbatim"]:
+        if not (isinstance(item, dict) and "kind" in item and "content" in item):
+            raise ValueError("compact verbatim 항목은 {kind, content} 객체여야 합니다")
 
 
 def _save_compact(session_id: uuid.UUID, payload: dict) -> str:
