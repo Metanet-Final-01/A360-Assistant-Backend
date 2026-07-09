@@ -1,6 +1,5 @@
 """추천안(흐름도) 생성·저장·버전 편집 엔드포인트 테스트 (RPA-61)."""
 
-import json
 import uuid
 from types import SimpleNamespace
 
@@ -76,77 +75,6 @@ def _row(version, source="agent", payload=None):
         change_summary=None, created_at=None, analysis_id=AID,
         payload=payload or _valid_recommendation(),
     )
-
-
-# --- recommend: 생성 + v1 저장 (SSE) ---
-
-def test_recommend_streams_and_saves_v1(monkeypatch):
-    from app.schemas import ProgressEvent
-
-    async def _fake_recommend(analysis, constraints=None):
-        yield ProgressEvent(event="stage", stage="recommending", message="검색 중")
-        yield ProgressEvent(event="done", data={"recommendation": _valid_recommendation()})
-
-    monkeypatch.setattr("app.agent.recommend", _fake_recommend, raising=False)
-
-    saved = {}
-
-    class _Persist:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def execute(self, stmt): return SimpleNamespace(scalar=lambda: None)  # max version None → v1
-        def add(self, row):
-            if type(row).__name__ == "RecommendationVersion":
-                saved["row"] = row
-        def commit(self): pass
-
-    monkeypatch.setattr("app.db.SessionLocal", _Persist)  # 실제 RecommendationVersion 인스턴스 생성
-
-    session = SimpleNamespace(id=SID, user_id=None)
-    analysis = SimpleNamespace(id=AID, status="completed", result=_analysis_result())
-    _override(FakeDB(session=session, analysis=analysis))
-
-    with TestClient(app) as c:
-        with c.stream("POST", f"/api/sessions/{SID}/recommend") as r:
-            events = [json.loads(l[5:]) for l in r.iter_lines() if l.startswith("data:")]
-
-    assert events[0]["event"] == "stage"
-    done = events[-1]
-    assert done["event"] == "done"
-    assert done["data"]["version"] == 1
-    assert done["data"]["recommendation"]["steps"][0]["step_id"] == "step-1"
-    assert saved["row"].source == "agent" and saved["row"].version == 1
-
-
-def test_recommend_forwards_error_without_duplicating(monkeypatch):
-    """recommend가 자체 error를 흘리면, 백엔드가 done 없음을 또 error로 내지 않는다 (CodeRabbit)."""
-    from app.schemas import ProgressEvent
-
-    async def _err_recommend(analysis, constraints=None):
-        yield ProgressEvent(event="stage", stage="recommending", message="시작")
-        yield ProgressEvent(event="error", stage="recommending", message="내부 실패")
-
-    monkeypatch.setattr("app.agent.recommend", _err_recommend, raising=False)
-    session = SimpleNamespace(id=SID, user_id=None)
-    analysis = SimpleNamespace(id=AID, status="completed", result=_analysis_result())
-    _override(FakeDB(session=session, analysis=analysis))
-
-    with TestClient(app) as c:
-        with c.stream("POST", f"/api/sessions/{SID}/recommend") as r:
-            events = [json.loads(l[5:]) for l in r.iter_lines() if l.startswith("data:")]
-
-    # error가 정확히 1번만 (recommend 것) — 백엔드가 중복 error를 붙이지 않음
-    assert [e["event"] for e in events].count("error") == 1
-    assert events[-1]["event"] == "error"
-
-
-def test_recommend_409_without_analysis(monkeypatch):
-    session = SimpleNamespace(id=SID, user_id=None)
-    _override(FakeDB(session=session, analysis=None))
-    with TestClient(app) as c:
-        with c.stream("POST", f"/api/sessions/{SID}/recommend") as r:
-            # 409는 스트림 시작 전 판정
-            assert r.status_code == 409
 
 
 # --- 조회 ---
@@ -265,11 +193,3 @@ def test_blocks_non_owner():
     with TestClient(app) as c:
         r = c.get(f"/api/sessions/{SID}/recommendations/latest")
     assert r.status_code == 403
-
-
-def _analysis_result() -> dict:
-    return {
-        "schema_version": "1.0", "document_title": "t", "summary": "s",
-        "steps": [{"step_id": "step-1", "order": 1, "name": "n", "description": "d"}],
-        "ambiguities": [],
-    }

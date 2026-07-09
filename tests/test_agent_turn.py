@@ -320,6 +320,39 @@ def test_compact_type_without_payload_errors(monkeypatch):
     assert events[-1]["event"] == "error"
 
 
+def test_compact_malformed_payload_errors(monkeypatch):
+    """빈/섹션 누락 compact는 저장 경계 검증에 걸려 error (CodeRabbit) — session_compacts에 안 샌다."""
+    from app.schemas import ProgressEvent
+    captured = {}
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={
+            "type": "compact", "answer": "x", "sources": [],
+            "compact": {"task_overview": "개요"}}),  # decisions/flow_journal/... 누락
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run(operation="compact")
+    assert events[-1]["event"] == "error"
+    assert "SessionCompact" not in captured  # 저장 안 됨
+
+
+def test_compact_bad_verbatim_shape_errors(monkeypatch):
+    """verbatim 항목이 {kind, content} 형태가 아니면 error (유실-critical 섹션 보강, CodeRabbit)."""
+    from app.schemas import ProgressEvent
+    captured = {}
+    bad = _compact_payload()
+    bad["verbatim"] = ["원문 문자열"]  # dict 아님 — 형태 위반
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={
+            "type": "compact", "answer": "x", "sources": [], "compact": bad}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run(operation="compact")
+    assert events[-1]["event"] == "error"
+    assert "SessionCompact" not in captured
+
+
 # --- 계약 위반은 성공 done이 아니라 error로 (CodeRabbit) ---
 
 def test_unknown_type_errors(monkeypatch):

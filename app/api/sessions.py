@@ -1,9 +1,7 @@
-"""세션 단위 파이프라인 라우터 — 분석(FR-05). 추천·챗 수정은 후속 이슈.
+"""세션 단위 라우터 — 세션 생성, 추천안(흐름도) 버전 CRUD, 에이전트 단일 진입점(/turn).
 
-분석 실행 주체는 app/agent의 analyze()다 (INTERFACES.md §4 계약, Agent 담당 구현).
-아직 랜딩 전이므로 lazy import 스위치를 둔다: 없으면 503 AGENT_UNAVAILABLE을 돌려주고,
-Agent가 analyze를 내보내는 순간 이 라우트는 코드 변경 없이 활성화된다
-(RPA-24의 get_retriever() 스위치와 같은 패턴).
+분석/질문/흐름도 수정은 모두 POST /{id}/turn 하나로 처리한다 (app/agent의 stream_agent_turn).
+레거시 개별 엔드포인트(/analyze, /recommend, /api/agent/chat)는 /turn으로 흡수돼 제거됐다 (RPA-67).
 """
 
 import logging
@@ -19,7 +17,7 @@ from app import models
 from app.api.auth import assert_session_owner, get_optional_user
 from app.core.llm import usage_context
 from app.db import get_db
-from app.schemas import AnalysisResult, ProgressEvent, Recommendation
+from app.schemas import ProgressEvent, Recommendation
 
 logger = logging.getLogger(__name__)
 
@@ -40,138 +38,6 @@ def create_session(
     db.add(session)
     db.commit()
     return {"session_id": str(session.id), "created_at": session.created_at.isoformat() if session.created_at else None}
-
-
-def _get_agent_analyze():
-    """app/agent의 analyze()를 lazy import한다. 미구현이면 None."""
-    try:
-        from app.agent import analyze  # noqa: PLC0415
-
-        return analyze
-    except ImportError:
-        return None
-
-
-@router.post("/{session_id}/analyze")
-def analyze_session(
-    session_id: str,
-    db: Session = Depends(get_db),
-    user: models.User | None = Depends(get_optional_user),
-) -> StreamingResponse:
-    """세션의 최신 파싱 완료 문서를 Agent로 분석한다 (FR-05) — SSE 스트림.
-
-    이벤트: stage(analyzing) → done(data=AnalysisResult JSON) / error.
-    LLM 호출로 수십 초 걸릴 수 있어 SSE로 진행 상황을 흘린다 (규약: INTERFACES.md §5).
-    """
-    try:
-        session_key = uuid.UUID(session_id)
-    except ValueError:
-        raise HTTPException(
-            400, detail={"code": "INVALID_ID", "message": "세션 ID 형식이 올바르지 않습니다."}
-        ) from None
-
-    session = db.get(models.AnalysisSession, session_key)
-    if session is None:
-        raise HTTPException(404, detail={"code": "SESSION_NOT_FOUND", "message": "세션을 찾을 수 없습니다."})
-    assert_session_owner(session, user)  # 남의 세션 분석 차단
-
-    # 세션의 가장 최근 문서 기준 (다중 업로드 시 마지막 업로드가 분석 대상)
-    document = db.execute(
-        select(models.Document)
-        .where(models.Document.session_id == session_key)
-        .order_by(models.Document.created_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if document is None:
-        raise HTTPException(404, detail={"code": "NO_DOCUMENT", "message": "세션에 업로드된 문서가 없습니다."})
-    if document.status != "parsed" or document.parsed_content is None:
-        raise HTTPException(
-            409,
-            detail={"code": "NOT_PARSED", "message": f"파싱이 완료되지 않았습니다 (현재 상태: {document.status})."},
-        )
-
-    analyze = _get_agent_analyze()
-    if analyze is None:
-        # 스트림을 열기 전에 판정 — 프론트가 일반 HTTP 에러로 잡아 목업 폴백 등 분기하기 쉽게
-        raise HTTPException(
-            503,
-            detail={"code": "AGENT_UNAVAILABLE", "message": "분석 엔진이 아직 준비되지 않았습니다."},
-        )
-
-    doc_id, session_key_v, parsed = document.id, session.id, document.parsed_content
-    user_id = user.id if user else None
-
-    def sse():
-        try:
-            yield ProgressEvent(
-                event="stage", stage="analyzing", message="업무 단계를 분석하고 있습니다"
-            ).to_sse()
-            # 주의: usage_context를 yield 너머로 걸치면 안 된다 — 동기 제너레이터는
-            # StreamingResponse가 next()마다 다른 스레드 컨텍스트에서 재개하므로
-            # ContextVar가 전파되지 않고 reset도 ValueError로 터진다.
-            # with 블록은 yield 없이 한 재개 구간 안에서 열고 닫는다.
-            with usage_context(
-                component="agent", actor_type="user", user_id=user_id, session_id=session_key_v
-            ):
-                result = analyze(parsed)  # AnalysisResult (INTERFACES §4)
-            result_json = result.model_dump()
-
-            # 요청 스코프 db 세션은 스트리밍 시작 전에 닫히므로 저장은 새 세션으로 (FastAPI 0.106+)
-            from app.db import SessionLocal
-
-            analysis_id = None
-            with SessionLocal() as s:
-                row = models.Analysis(
-                    session_id=session_key_v,
-                    document_id=doc_id,
-                    status="completed",
-                    result=result_json,
-                )
-                s.add(row)
-                s.commit()
-                analysis_id = str(row.id)
-
-            yield ProgressEvent(
-                event="done",
-                stage="analyzing",
-                message="분석 완료",
-                data={"analysis_id": analysis_id, **result_json},
-            ).to_sse()
-        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
-            # 구성 오류도 시도된 분석의 실패이므로 이력에 남긴다 (계약: 실패도 영속화)
-            _record_failure(session_key_v, doc_id, "분석 엔진 구성 오류")
-            yield ProgressEvent(event="error", stage="analyzing", message=f"분석 엔진 구성 오류: {e}").to_sse()
-        except Exception:  # noqa: BLE001
-            logger.exception("분석 실패: session=%s document=%s", session_key_v, doc_id)
-            _record_failure(session_key_v, doc_id, "분석 중 오류가 발생했습니다")
-            yield ProgressEvent(
-                event="error", stage="analyzing", message="분석 중 오류가 발생했습니다"
-            ).to_sse()
-
-    return StreamingResponse(
-        sse(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-def _record_failure(session_id: uuid.UUID, document_id: uuid.UUID, error: str) -> None:
-    """분석 실패를 Analysis 행으로 남긴다 (실패해도 스트림 에러 이벤트는 나가야 하므로 best-effort)."""
-    try:
-        from app.db import SessionLocal
-
-        with SessionLocal() as s:
-            s.add(
-                models.Analysis(
-                    session_id=session_id,
-                    document_id=document_id,
-                    status="failed",
-                    error=error,
-                )
-            )
-            s.commit()
-    except Exception:  # noqa: BLE001
-        logger.exception("분석 실패 기록마저 실패: session=%s", session_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -243,76 +109,6 @@ def _save_recommendation(
             if attempt == 2:  # 마지막 시도까지 충돌하면 상위에서 처리
                 raise
             logger.warning("추천안 version 충돌 — 재계산 재시도 (session=%s)", session_id)
-
-
-@router.post("/{session_id}/recommend")
-async def recommend_session(
-    session_id: str,
-    db: Session = Depends(get_db),
-    user: models.User | None = Depends(get_optional_user),
-) -> StreamingResponse:
-    """세션의 최신 분석으로 A360 추천안(흐름도)을 생성하고 v1로 저장한다 (FR-09~12) — SSE.
-
-    이벤트: stage/partial(recommend가 흘리는 진행) → done(data={recommendation, version...}).
-    recommend()는 async라 async 제너레이터로 소비한다.
-    """
-    from app.agent import recommend
-
-    session = _owned_session_or_404(session_id, db, user)
-    analysis = db.execute(
-        select(models.Analysis)
-        .where(models.Analysis.session_id == session.id, models.Analysis.status == "completed")
-        .order_by(models.Analysis.created_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if analysis is None or analysis.result is None:
-        raise HTTPException(
-            409, detail={"code": "NO_ANALYSIS", "message": "먼저 문서 분석(analyze)을 완료해 주세요."}
-        )
-    analysis_result = AnalysisResult.model_validate(analysis.result)
-    session_key, analysis_id, user_id = session.id, analysis.id, (user.id if user else None)
-
-    async def sse():
-        rec_payload = None
-        saw_error = False
-        try:
-            # recommend는 async 제너레이터 — 콜백이 이 블록 안에서 생성돼 귀속 스냅샷을 잡는다.
-            # (async 제너레이터는 같은 태스크 컨텍스트에서 재개되므로 usage_context가 yield를
-            #  넘어도 안전하다 — 동기 제너레이터의 ContextVar 문제와 다름.)
-            with usage_context(
-                component="agent", actor_type="user", user_id=user_id, session_id=session_key
-            ):
-                async for event in recommend(analysis_result):
-                    if event.event == "done":
-                        rec_payload = (event.data or {}).get("recommendation")
-                        continue  # done은 저장 후 버전정보와 함께 다시 낸다
-                    if event.event == "error":
-                        saw_error = True  # recommend가 이미 error를 흘림 — 아래서 중복 error 안 냄
-                    yield event.to_sse()
-            if rec_payload is not None:
-                saved = _save_recommendation(session_key, analysis_id, rec_payload, source="agent", parent_version=None)
-                yield ProgressEvent(
-                    event="done", stage="recommending", message="추천 완료",
-                    data={**saved, "recommendation": rec_payload},
-                ).to_sse()
-            elif not saw_error:
-                # recommend가 done도 error도 안 낸 비정상 종료 — error 하나만 낸다
-                yield ProgressEvent(
-                    event="error", stage="recommending", message="추천안을 생성하지 못했습니다"
-                ).to_sse()
-        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등
-            yield ProgressEvent(event="error", stage="recommending", message=f"추천 엔진 구성 오류: {e}").to_sse()
-        except Exception:  # noqa: BLE001
-            logger.exception("추천 생성 실패: session=%s", session_key)
-            yield ProgressEvent(
-                event="error", stage="recommending", message="추천 생성 중 오류가 발생했습니다"
-            ).to_sse()
-
-    return StreamingResponse(
-        sse(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @router.get("/{session_id}/recommendations")
@@ -523,6 +319,34 @@ def _save_analysis(session_id: uuid.UUID, document_id: uuid.UUID, result: dict) 
         return row.id
 
 
+# compact 고정 섹션 계약(RPA-66) — 저장 경계에서 강제한다. 값 타입까지 확인해
+# dict 아닌 payload·빈 dict·섹션 누락이 session_compacts에 새는 것을 막는다.
+_COMPACT_SECTIONS = {
+    "task_overview": str,
+    "decisions": list,
+    "flow_journal": list,
+    "open_questions": list,
+    "verbatim": list,
+}
+
+
+def _validate_compact_payload(cp) -> None:
+    """compact payload가 고정 섹션 JSON 계약을 지키는지 검증한다 (위반 시 ValueError → SSE error)."""
+    if not isinstance(cp, dict):
+        raise ValueError("compact payload가 객체(dict)가 아닙니다")
+    missing = [k for k in _COMPACT_SECTIONS if k not in cp]
+    if missing:
+        raise ValueError(f"compact 필수 섹션 누락: {', '.join(missing)}")
+    for key, expected in _COMPACT_SECTIONS.items():
+        if not isinstance(cp[key], expected):
+            raise ValueError(f"compact 섹션 타입 오류: {key}는 {expected.__name__}이어야 합니다")
+    # verbatim은 유실-critical(카탈로그 원문) — 항목이 {kind, content} 형태인지까지 확인.
+    # (빈 리스트/빈 문자열 자체는 정상이라 강제하지 않는다; 내용 완결성은 에이전트 union 보정 몫)
+    for item in cp["verbatim"]:
+        if not (isinstance(item, dict) and "kind" in item and "content" in item):
+            raise ValueError("compact verbatim 항목은 {kind, content} 객체여야 합니다")
+
+
 def _save_compact(session_id: uuid.UUID, payload: dict) -> str:
     """대화 압축본을 session_compacts에 저장한다 (append-only — 최신 행이 다음 턴에 주입된다)."""
     from app.db import SessionLocal
@@ -585,8 +409,7 @@ def _persist_turn_result(
     # chat_messages에 남기지 않는다 (압축 이후 이력을 다시 늘리지 않도록).
     if rtype == "compact":
         cp = result.get("compact")
-        if cp is None:
-            raise ValueError("type=compact인데 compact가 없습니다")
+        _validate_compact_payload(cp)  # dict + 고정 섹션 계약을 저장 경계에서 강제
         _save_compact(session_id, cp)
         return {
             "type": "compact", "answer": answer,
