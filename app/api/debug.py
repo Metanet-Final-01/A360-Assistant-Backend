@@ -205,6 +205,8 @@ def debug_vector_search(q: str, limit: int = 5) -> dict:
         raise _error(503, "DB_UNAVAILABLE", f"DB 연결 실패: {e}") from e
     try:
         results = db.search(conn, query_embedding, limit=limit)
+    except Exception as e:  # connect처럼 검색 실패도 표준 포맷으로 (finally엔 close만 있었음)
+        raise _error(503, "DB_UNAVAILABLE", f"검색 실패: {e}") from e
     finally:
         conn.close()
     return {"query": q, "results": results}

@@ -89,6 +89,31 @@ def test_search_non_runtime_error_standardized(monkeypatch):
     assert r.json()["detail"]["code"] == "SEARCH_UNAVAILABLE"
 
 
+def test_debug_vector_search_db_search_failure_standardized(monkeypatch):
+    """debug vector-search의 db.search 실패도 표준 {code,message} + conn 닫힘 (CodeRabbit).
+
+    같은 함수의 connect 실패는 _error로 고쳤는데 바로 다음 db.search만 try/finally로 남아
+    원시 예외가 샜던 것을 막는다. (debug는 게이트/로컬 전용이라 상세 메시지는 유지)
+    """
+    import app.rag.retrieval.embed as embed_mod
+    import app.rag.store.db as db
+
+    monkeypatch.setattr(embed_mod, "embed_query", lambda q: [0.1, 0.2])
+    conn = _FakeConn()
+    monkeypatch.setattr(db, "connect", lambda: conn)
+
+    def _boom(*a, **k):
+        raise RuntimeError("pgvector query failed")
+
+    monkeypatch.setattr(db, "search", _boom)
+    with TestClient(app) as c:
+        r = c.get("/api/rag/debug/vector-search", params={"q": "엑셀"})
+
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "DB_UNAVAILABLE"  # raw 예외 아님
+    assert conn.closed  # 열어둔 커넥션은 닫힌다
+
+
 class _FakeConn:
     def __init__(self):
         self.closed = False
