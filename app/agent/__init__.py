@@ -1,9 +1,7 @@
 """Agent 오케스트레이터 (LangGraph). 백엔드는 이 패키지의 공개 진입점만 import한다.
 
-    from app.agent import run_agent, stream_agent
-
-    result = run_agent("질문")           # 완성 답변 한 번에
-    async for token in stream_agent("질문"):  # SSE용 토큰 스트림
+    from app.agent import stream_agent_turn          # 단일 진입점 (RPA-64/65)
+    async for event in stream_agent_turn(message, context):  # done.data.type으로 저장 분기
         ...
 
     from app.agent import analyze, recommend
@@ -11,22 +9,16 @@
     async for event in recommend(analysis):         # 추천 스트림 (FR-09~12)
         ...
 
-    from app.agent import stream_agent_turn          # 단일 진입점 (RPA-64/65)
-    async for event in stream_agent_turn(message, context):  # done.data.type으로 저장 분기
-        ...
+구 챗 진입점 run_agent/stream_agent(retrieve→generate)는 orchestrator의 qa 노드로
+대체돼 삭제됐다 (RPA-76). 대화형 상호작용은 전부 stream_agent_turn 하나로 들어온다.
 """
 
 from .analysis import analyze
-from .graph import run_agent, stream_agent
 from .orchestrator import stream_agent_turn
 from .recommend import recommend
-from .schemas import AgentResult
 
 __all__ = [
-    "AgentResult",
     "analyze",
     "recommend",
-    "run_agent",
-    "stream_agent",
     "stream_agent_turn",
 ]
