@@ -421,6 +421,62 @@ def test_error_forwarded_without_duplication(monkeypatch):
     assert events[-1]["event"] == "error"
 
 
+# --- 사용량 게이지 (RPA-83) ---
+
+def test_answer_includes_usage_gauge(monkeypatch):
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={"type": "answer", "answer": "hi", "sources": []}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    monkeypatch.setattr(sessions_api, "_read_intake_gauge",
+                        lambda sid: {"intake_tokens": 8000, "limit_tokens": 100000,
+                                     "ratio": 0.08, "compact_recommended": False})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run()
+    assert events[-1]["data"]["usage_gauge"]["intake_tokens"] == 8000
+
+
+def test_compact_turn_skips_gauge(monkeypatch):
+    """compact 턴은 intake가 없어 게이지 조회 자체를 안 한다."""
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={
+            "type": "compact", "answer": "요약", "sources": [], "compact": _compact_payload()}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    called = {"n": 0}
+    monkeypatch.setattr(sessions_api, "_read_intake_gauge",
+                        lambda sid: called.__setitem__("n", called["n"] + 1))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run(operation="compact")
+    assert "usage_gauge" not in events[-1]["data"]
+    assert called["n"] == 0
+
+
+def test_read_intake_gauge_ratio_and_recommend(monkeypatch):
+    class _S:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: 75000)
+
+    monkeypatch.setattr("app.db.SessionLocal", _S)
+    monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", "100000")
+    g = sessions_api._read_intake_gauge(SID)
+    assert g["intake_tokens"] == 75000 and g["ratio"] == 0.75
+    assert g["compact_recommended"] is True  # 0.75 >= 0.7
+
+
+def test_read_intake_gauge_none_when_no_intake(monkeypatch):
+    class _S:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    monkeypatch.setattr("app.db.SessionLocal", _S)
+    assert sessions_api._read_intake_gauge(SID) is None
+
+
 # --- 소유권: 남의 세션 차단 ---
 
 def test_blocks_non_owner(monkeypatch):
