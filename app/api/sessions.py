@@ -7,14 +7,14 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app import models
-from app.api.auth import assert_session_owner, get_optional_user
+from app.api.auth import assert_session_owner, get_current_user, get_optional_user
 from app.core.llm import usage_context
 from app.db import get_db
 from app.schemas import ProgressEvent, Recommendation
@@ -38,6 +38,143 @@ def create_session(
     db.add(session)
     db.commit()
     return {"session_id": str(session.id), "created_at": session.created_at.isoformat() if session.created_at else None}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 세션 조회·관리 — 목록/상세/삭제/대화이력/분석재조회 (FR-20, RPA-78)
+# 데이터는 DB에 쌓이지만 읽을 API가 없어 프론트(아카이브·재조회)가 막혀 있던 것을 연다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _session_out(session: models.AnalysisSession) -> dict:
+    return {
+        "id": str(session.id),
+        "title": session.title,
+        "solution": session.solution,
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+    }
+
+
+def _analysis_out(row: models.Analysis) -> dict:
+    return {
+        "id": str(row.id),
+        "document_id": str(row.document_id) if row.document_id else None,
+        "status": row.status,
+        "model": row.model,
+        "error": row.error,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+    }
+
+
+@router.get("")
+def list_sessions(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+) -> dict:
+    """로그인 사용자의 세션 목록(최신 활동순). 익명 세션(user_id NULL)은 소유자 식별이
+    안 되므로 목록 대상이 아니다 — 그래서 인증을 요구한다(get_current_user → 미인증 401)."""
+    rows = db.execute(
+        select(models.AnalysisSession)
+        .where(models.AnalysisSession.user_id == user.id)
+        .order_by(models.AnalysisSession.updated_at.desc())
+        .limit(limit).offset(offset)
+    ).scalars().all()
+    return {"sessions": [_session_out(s) for s in rows]}
+
+
+@router.get("/{session_id}")
+def get_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """세션 상세(메타)."""
+    return _session_out(_owned_session_or_404(session_id, db, user))
+
+
+@router.delete("/{session_id}", status_code=204)
+def delete_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> None:
+    """세션 삭제 — 문서/분석/추천/대화/compact가 FK ON DELETE CASCADE로 함께 삭제된다.
+
+    Core delete를 쓴다: ORM db.delete(session)는 관계(documents/recommendations)의 자식 FK를
+    NULL로 만들려다 NOT NULL 제약에 걸린다. 원시 DELETE는 DB CASCADE가 모든 자식을 처리한다.
+    """
+    session = _owned_session_or_404(session_id, db, user)  # 소유권 검사
+    db.execute(delete(models.AnalysisSession).where(models.AnalysisSession.id == session.id))
+    db.commit()
+
+
+@router.get("/{session_id}/chat-messages")
+def list_chat_messages(
+    session_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """세션의 대화 이력(시간순) — 프론트가 아카이브/새로고침에서 재구성한다."""
+    session = _owned_session_or_404(session_id, db, user)
+    rows = db.execute(
+        select(models.ChatMessage)
+        .where(models.ChatMessage.session_id == session.id)
+        .order_by(models.ChatMessage.created_at.asc())
+        .limit(limit).offset(offset)
+    ).scalars().all()
+    return {
+        "messages": [
+            {
+                "id": str(m.id),
+                "role": m.role,
+                "content": m.content,
+                "recommendation_version": m.recommendation_version,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in rows
+        ]
+    }
+
+
+@router.get("/{session_id}/analyses")
+def list_analyses(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """세션의 분석 목록(메타, 최신순). 전체 result는 /analyses/latest로 받는다."""
+    session = _owned_session_or_404(session_id, db, user)
+    rows = db.execute(
+        select(models.Analysis)
+        .where(models.Analysis.session_id == session.id)
+        .order_by(models.Analysis.created_at.desc())
+    ).scalars().all()
+    return {"analyses": [_analysis_out(r) for r in rows]}
+
+
+@router.get("/{session_id}/analyses/latest")
+def get_latest_analysis(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """최신 완료 분석의 전체 result — SSE done을 놓쳤을 때 재조회한다."""
+    session = _owned_session_or_404(session_id, db, user)
+    row = db.execute(
+        select(models.Analysis)
+        .where(models.Analysis.session_id == session.id, models.Analysis.status == "completed")
+        .order_by(models.Analysis.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, detail={"code": "NO_ANALYSIS", "message": "완료된 분석이 없습니다."})
+    return {**_analysis_out(row), "result": row.result}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
