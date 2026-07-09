@@ -236,3 +236,73 @@ def test_infra_error_becomes_error_event(monkeypatch):
     events = _collect("안녕", dict(_CTX))
     assert events[-1].event == "error"
     assert "rate limit" in events[-1].message
+
+
+# ── usage 콜백 전파 (CodeRabbit #100 반박용 회귀 방지) ─────────────────────────
+# 진입점이 최상위 config에 얹은 UsageCallbackHandler가, 노드 안에서 직접 만드는
+# ChatOpenAI 호출 시점까지 전파돼야 "모든 LLM 호출은 usage 경로 경유" 불변식이
+# 성립한다(링 게이지 전제). async 노드/서브그래프로의 contextvar 전파에 의존하므로,
+# 누가 이를 깨뜨리면(sync 노드화 등) 이 테스트가 잡는다.
+
+class _CallbackSpyStreamLLM:
+    """astream 시점의 config.callbacks를 포착하는 qa용 스파이."""
+
+    def __init__(self, captured):
+        self._captured = captured
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.runnables.config import ensure_config
+
+        self._captured["callbacks"] = ensure_config().get("callbacks") or []
+        yield _Chunk("ok")
+
+
+class _CallbackSpyInvokeLLM:
+    """ainvoke 시점의 config.callbacks를 포착하는 edit용 스파이."""
+
+    def __init__(self, captured, response):
+        self._captured = captured
+        self._response = response
+
+    def bind_tools(self, tools):
+        return self
+
+    async def ainvoke(self, messages):
+        from langchain_core.runnables.config import ensure_config
+
+        self._captured["callbacks"] = ensure_config().get("callbacks") or []
+        return self._response
+
+
+def _has_usage_handler(callbacks) -> bool:
+    from app.core.llm import UsageCallbackHandler
+
+    # 노드 컨텍스트 안에서는 callbacks가 CallbackManager로 변환돼 온다(핸들러는 .handlers).
+    # 리스트로 오는 경우(직접 config)도 대비해 둘 다 처리한다.
+    handlers = getattr(callbacks, "handlers", callbacks) or []
+    return any(isinstance(h, UsageCallbackHandler) for h in handlers)
+
+
+def test_usage_callback_propagates_into_qa_llm(monkeypatch):
+    _set_api_key(monkeypatch)
+    _route(monkeypatch, "qa")
+    captured = {}
+    monkeypatch.setattr(qa_mod, "_make_llm", lambda: _CallbackSpyStreamLLM(captured))
+    _collect("안녕", dict(_CTX))
+    assert _has_usage_handler(captured["callbacks"])  # 노드 안 astream까지 전파됨
+
+
+def test_usage_callback_propagates_into_edit_llm(monkeypatch):
+    _set_api_key(monkeypatch)
+    _route(monkeypatch, "edit")
+    edited = json.dumps({"recommendation": _CLEAN_FLOW, "change_summary": "정리", "answer": "수정"},
+                        ensure_ascii=False)
+    captured = {}
+    monkeypatch.setattr(edit_mod, "_make_llm",
+                        lambda: _CallbackSpyInvokeLLM(captured, _Chunk(edited)))
+    ctx = dict(_CTX, recommendation=_CLEAN_FLOW, analysis=_ANALYSIS.model_dump())
+    _collect("세션명 정리해줘", ctx)
+    assert _has_usage_handler(captured["callbacks"])  # 노드 안 ainvoke까지 전파됨
