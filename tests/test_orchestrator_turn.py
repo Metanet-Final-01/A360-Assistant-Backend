@@ -76,7 +76,7 @@ class _FakeStreamLLM:
     def bind_tools(self, tools):
         return self
 
-    async def astream(self, messages):
+    async def astream(self, messages, config=None):
         for chunk in self._rounds.pop(0):
             yield chunk
 
@@ -90,7 +90,7 @@ class _FakeInvokeLLM:
     def bind_tools(self, tools):
         return self
 
-    async def ainvoke(self, messages):
+    async def ainvoke(self, messages, config=None):
         return self._responses.pop(0)
 
 
@@ -239,14 +239,13 @@ def test_infra_error_becomes_error_event(monkeypatch):
     assert "rate limit" in events[-1].message
 
 
-# ── usage 콜백 전파 (CodeRabbit #100 반박용 회귀 방지) ─────────────────────────
-# 진입점이 최상위 config에 얹은 UsageCallbackHandler가, 노드 안에서 직접 만드는
-# ChatOpenAI 호출 시점까지 전파돼야 "모든 LLM 호출은 usage 경로 경유" 불변식이
-# 성립한다(링 게이지 전제). async 노드/서브그래프로의 contextvar 전파에 의존하므로,
-# 누가 이를 깨뜨리면(sync 노드화 등) 이 테스트가 잡는다.
+# ── usage 노드별 purpose 태깅 (RPA-73 게이지 계약) ────────────────────────────
+# 최상위 turn 콜백을 제거하고, qa/edit 노드가 각자 UsageCallbackHandler를 자기 LLM
+# 호출 config에 얹어 purpose를 turn_qa/turn_edit로 분리한다. 스파이가 노드에서 넘어온
+# config를 포착해 그 콜백의 purpose를 확인한다 — 누가 이 태깅을 깨뜨리면 잡는다.
 
 class _CallbackSpyStreamLLM:
-    """astream 시점의 config.callbacks를 포착하는 qa용 스파이."""
+    """astream에 넘어온 config를 포착하는 qa용 스파이."""
 
     def __init__(self, captured):
         self._captured = captured
@@ -254,15 +253,13 @@ class _CallbackSpyStreamLLM:
     def bind_tools(self, tools):
         return self
 
-    async def astream(self, messages):
-        from langchain_core.runnables.config import ensure_config
-
-        self._captured["callbacks"] = ensure_config().get("callbacks") or []
+    async def astream(self, messages, config=None):
+        self._captured["config"] = config
         yield _Chunk("ok")
 
 
 class _CallbackSpyInvokeLLM:
-    """ainvoke 시점의 config.callbacks를 포착하는 edit용 스파이."""
+    """ainvoke에 넘어온 config를 포착하는 edit용 스파이."""
 
     def __init__(self, captured, response):
         self._captured = captured
@@ -271,32 +268,29 @@ class _CallbackSpyInvokeLLM:
     def bind_tools(self, tools):
         return self
 
-    async def ainvoke(self, messages):
-        from langchain_core.runnables.config import ensure_config
-
-        self._captured["callbacks"] = ensure_config().get("callbacks") or []
+    async def ainvoke(self, messages, config=None):
+        self._captured["config"] = config
         return self._response
 
 
-def _has_usage_handler(callbacks) -> bool:
+def _usage_purposes(config) -> list[str]:
     from app.core.llm import UsageCallbackHandler
 
-    # 노드 컨텍스트 안에서는 callbacks가 CallbackManager로 변환돼 온다(핸들러는 .handlers).
-    # 리스트로 오는 경우(직접 config)도 대비해 둘 다 처리한다.
-    handlers = getattr(callbacks, "handlers", callbacks) or []
-    return any(isinstance(h, UsageCallbackHandler) for h in handlers)
+    callbacks = (config or {}).get("callbacks") or []
+    handlers = getattr(callbacks, "handlers", callbacks)  # 매니저/리스트 둘 다 대응
+    return [h._purpose for h in handlers if isinstance(h, UsageCallbackHandler)]
 
 
-def test_usage_callback_propagates_into_qa_llm(monkeypatch):
+def test_qa_llm_tagged_turn_qa(monkeypatch):
     _set_api_key(monkeypatch)
     _route(monkeypatch, "qa")
     captured = {}
     monkeypatch.setattr(qa_mod, "_make_llm", lambda: _CallbackSpyStreamLLM(captured))
     _collect("안녕", dict(_CTX))
-    assert _has_usage_handler(captured["callbacks"])  # 노드 안 astream까지 전파됨
+    assert _usage_purposes(captured["config"]) == ["turn_qa"]  # 이중 기록 없이 정확히 1개
 
 
-def test_usage_callback_propagates_into_edit_llm(monkeypatch):
+def test_edit_llm_tagged_turn_edit(monkeypatch):
     _set_api_key(monkeypatch)
     _route(monkeypatch, "edit")
     edited = json.dumps({"recommendation": _CLEAN_FLOW, "change_summary": "정리", "answer": "수정"},
@@ -306,4 +300,4 @@ def test_usage_callback_propagates_into_edit_llm(monkeypatch):
                         lambda: _CallbackSpyInvokeLLM(captured, _Chunk(edited)))
     ctx = dict(_CTX, recommendation=_CLEAN_FLOW, analysis=_ANALYSIS.model_dump())
     _collect("세션명 정리해줘", ctx)
-    assert _has_usage_handler(captured["callbacks"])  # 노드 안 ainvoke까지 전파됨
+    assert _usage_purposes(captured["config"]) == ["turn_edit"]

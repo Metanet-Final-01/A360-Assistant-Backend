@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
 
+from app.core.llm import UsageCallbackHandler
 from app.schemas import Recommendation
 
 from .. import config
@@ -72,8 +73,12 @@ async def edit_node(state: TurnState) -> dict:
     llm = _make_llm()
     runnable = llm.bind_tools(tools) if tools else llm
 
+    # 이 노드의 LLM 호출을 purpose="turn_edit"로 기록한다(RPA-73). 노드 진입 시점에
+    # 생성해 귀속 context를 스냅샷하고 모든 ainvoke config에 얹는다(최상위 콜백 없음).
+    usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_edit")]}
+
     messages = _build_messages(state)
-    response = await runnable.ainvoke(messages)
+    response = await runnable.ainvoke(messages, config=usage_config)
     rounds = 0
     while getattr(response, "tool_calls", None) and rounds < _MAX_TOOL_ROUNDS:
         rounds += 1
@@ -82,7 +87,7 @@ async def edit_node(state: TurnState) -> dict:
         messages.extend(execute_tool_calls(tools, response))
         # 마지막 라운드는 도구 없이 강제 마무리 — 무한 검색을 끊는다.
         target = llm if rounds == _MAX_TOOL_ROUNDS else runnable
-        response = await target.ainvoke(messages)
+        response = await target.ainvoke(messages, config=usage_config)
 
     try:
         out = _parse_output(response.text)
@@ -93,7 +98,7 @@ async def edit_node(state: TurnState) -> dict:
             f"위 출력이 지정한 JSON 형식을 만족하지 못했습니다. 오류:\n{first_error}\n"
             "설명 없이, 형식에 맞는 JSON 객체만 다시 출력하세요."
         )))
-        response = await llm.ainvoke(messages)  # 교정 턴은 도구 없이
+        response = await llm.ainvoke(messages, config=usage_config)  # 교정 턴은 도구 없이
         try:
             out = _parse_output(response.text)
         except (json.JSONDecodeError, ValidationError) as second_error:
