@@ -82,7 +82,11 @@ def _make_persist(captured, max_version=None):
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def execute(self, stmt): return SimpleNamespace(scalar=lambda: max_version)
-        def add(self, row): captured.setdefault(type(row).__name__, []).append(row)
+        def add(self, row):
+            # 실제 DB는 flush 시 id를 채운다 — fake는 저장 후 참조 체이닝 검증을 위해 부여
+            if type(row).__name__ == "Analysis" and getattr(row, "id", None) is None:
+                row.id = uuid.uuid4()
+            captured.setdefault(type(row).__name__, []).append(row)
         def commit(self): pass
     return _P
 
@@ -176,6 +180,37 @@ def test_analysis_saves_analysis_row(monkeypatch):
     assert done["data"]["analysis_result"]["document_title"] == "t"
     saved = captured["Analysis"][0]
     assert saved.status == "completed" and saved.document_id == DID
+
+
+# --- type=recommendation + analysis_result 동봉: 둘 다 저장, 흐름도는 새 분석에 귀속 ---
+
+def test_recommendation_with_analysis_saves_both_and_chains(monkeypatch):
+    """분석 없이 흐름도 턴 — 분석 선행 산출본도 함께 저장하고, 흐름도를 그 분석에 귀속한다 (조정1)."""
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={
+            "type": "recommendation", "answer": "분석하고 흐름도까지 만들었어요", "sources": [],
+            "analysis_result": _analysis_result(),        # 선행 분석도 동봉
+            "updated_recommendation": _recommendation(),
+            "change_summary": "신규 생성"}),
+    ])
+    captured = {}
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured, max_version=None))  # 첫 버전 → v1
+
+    session = SimpleNamespace(id=SID, user_id=None, solution="a360")
+    document = SimpleNamespace(id=DID, parsed_content={"pages": []})
+    _override(FakeDB(session=session, document=document))  # 기존 분석·추천 없음
+    _, events = _run()
+
+    done = events[-1]
+    assert done["data"]["type"] == "recommendation"
+    # 분석·추천 둘 다 저장
+    analysis_row = captured["Analysis"][0]
+    rec_row = captured["RecommendationVersion"][0]
+    assert analysis_row.status == "completed" and analysis_row.document_id == DID
+    # 흐름도가 이번 턴에 새로 저장한 분석 id에 귀속됐는지 (참조 무결성)
+    assert rec_row.analysis_id == analysis_row.id
+    assert rec_row.source == "chat" and rec_row.version == 1
 
 
 # --- 컨텍스트 조립: full context를 solution과 함께 넘긴다 ---

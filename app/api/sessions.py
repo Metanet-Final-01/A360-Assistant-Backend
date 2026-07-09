@@ -484,8 +484,8 @@ def _assemble_turn_context(session: models.AnalysisSession, db: Session) -> dict
     }
 
 
-def _save_analysis(session_id: uuid.UUID, document_id: uuid.UUID, result: dict) -> str:
-    """분석 결과를 Analysis 행으로 저장한다 (새 세션 — 스트리밍 후에도 안전)."""
+def _save_analysis(session_id: uuid.UUID, document_id: uuid.UUID, result: dict) -> uuid.UUID:
+    """분석 결과를 Analysis 행으로 저장하고 새 id를 반환한다 (새 세션 — 스트리밍 후에도 안전)."""
     from app.db import SessionLocal
 
     with SessionLocal() as s:
@@ -494,7 +494,7 @@ def _save_analysis(session_id: uuid.UUID, document_id: uuid.UUID, result: dict) 
         )
         s.add(row)
         s.commit()
-        return str(row.id)
+        return row.id
 
 
 def _persist_chat_turn(session_id: uuid.UUID, user_msg: str, assistant_msg: str) -> None:
@@ -514,39 +514,44 @@ def _persist_turn_result(
     session_id: uuid.UUID, rec_analysis_id: uuid.UUID | None, document_id: uuid.UUID | None,
     user_message: str, result: dict,
 ) -> dict:
-    """반환 type에 따라 저장하고, 프론트에 줄 최종 done.data를 만든다.
+    """반환 결과를 저장하고, 프론트에 줄 최종 done.data를 만든다.
 
-    - answer: 대화만 기록
-    - analysis: Analysis 저장 (+대화)
-    - recommendation: RecommendationVersion(source="chat") 새 버전 저장 (+대화)
-    주 산출물(analysis/recommendation) 저장 실패는 상위 SSE 핸들러로 전파해 error로 알린다;
-    대화 기록만 best-effort로 삼킨다.
+    산출물(analysis_result/updated_recommendation)은 **type과 무관하게 non-null이면 모두 저장**한다:
+    "분석 없이 바로 흐름도" 턴은 type="recommendation"이지만 분석을 선행 수행해 analysis_result도
+    함께 오고, 흐름도의 step_id가 그 분석본을 참조하므로 분석이 저장 안 되면 참조가 끊긴다.
+    이때 흐름도는 이번 턴에 새로 저장한 분석의 id에 귀속시켜 무결성을 지킨다.
+    주 산출물 저장 실패는 상위 SSE 핸들러로 전파해 error로 알리고, 대화 기록만 best-effort로 삼킨다.
     """
-    rtype = result.get("type")
     answer = result.get("answer") or ""
     out = {
-        "type": rtype,
+        "type": result.get("type"),
         "answer": answer,
         "sources": result.get("sources") or [],
         "session_id": str(session_id),
     }
 
-    if rtype == "analysis":
-        ar = result.get("analysis_result")
-        if ar is not None and document_id is not None:
-            out["analysis_id"] = _save_analysis(session_id, document_id, ar)
-            out["analysis_result"] = ar
-    elif rtype == "recommendation":
-        rec = result.get("updated_recommendation")
-        if rec is not None and rec_analysis_id is not None:
+    # 분석본 — non-null이면 저장 (type 무관)
+    ar = result.get("analysis_result")
+    new_analysis_id = None
+    if ar is not None and document_id is not None:
+        new_analysis_id = _save_analysis(session_id, document_id, ar)
+        out["analysis_id"] = str(new_analysis_id)
+        out["analysis_result"] = ar
+
+    # 흐름도 — non-null이면 새 버전 저장 (type 무관). 이번 턴에 분석을 새로 냈으면 그 id에
+    # 귀속(참조 무결성), 아니면 기존 base/최신 분석 id를 잇는다.
+    rec = result.get("updated_recommendation")
+    if rec is not None:
+        analysis_id = new_analysis_id or rec_analysis_id
+        if analysis_id is not None:
             saved = _save_recommendation(
-                session_id, rec_analysis_id, rec, source="chat",
+                session_id, analysis_id, rec, source="chat",
                 parent_version=None, change_summary=result.get("change_summary"),
             )
             out.update(saved)  # id, version, parent_version, source, change_summary, created_at
             out["recommendation"] = rec
-        elif rec is not None:
-            # 분석이 전혀 없어 버전에 귀속할 수 없음 — 렌더는 되게 payload는 주되 미저장 표시
+        else:
+            # 귀속할 분석이 전혀 없음 — 렌더는 되게 payload는 주되 미저장 표시
             logger.warning("추천 저장 불가(analysis_id 없음) — 미저장 반환: session=%s", session_id)
             out["recommendation"] = rec
             out["saved"] = False
