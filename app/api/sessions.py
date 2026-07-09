@@ -393,3 +393,229 @@ def save_edited_recommendation(
         change_summary=payload.change_summary,
     )
     return saved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 에이전트 단일 진입점 — analyze/ask/흐름도 수정 통합 (RPA-64)
+# intent는 두지 않는다: 에이전트 라우터가 message로 브랜치를 판단하므로, 백엔드는
+# 어느 브랜치로 갈지 모른 채 매 턴 full context(solution/history/analysis/recommendation/
+# parsed_doc)를 조립해 넘긴다. 에이전트는 stateless(DB 안 붙음)를 유지한다.
+# 반환 type("answer"|"analysis"|"recommendation")으로 백엔드가 저장을 분기한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TURN_HISTORY_LIMIT = 20  # 매 턴 주입하는 최근 대화 상한 (토큰 폭주 방지)
+
+
+def _get_agent_turn():
+    """app/agent의 통합 진입점 stream_agent_turn을 lazy import한다 (미구현이면 None).
+
+    기대 계약 (Agent 담당 구현):
+        async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[ProgressEvent]
+      context = {solution, history, analysis, recommendation, parsed_doc}  # intent 없음
+      종료 done 이벤트의 data = {
+          "type": "answer" | "analysis" | "recommendation",
+          "answer": str, "sources": [RagSource, ...],
+          "analysis_result": {...} | None,          # type=="analysis"
+          "updated_recommendation": {...} | None,   # type=="recommendation"
+          "change_summary": str | None,             # type=="recommendation"
+      }
+    agent가 stream_agent_turn을 export하는 순간 이 라우트는 코드 변경 없이 활성화된다.
+    """
+    try:
+        from app.agent import stream_agent_turn  # noqa: PLC0415
+
+        return stream_agent_turn
+    except ImportError:
+        return None
+
+
+class AgentTurnRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000, description="사용자 메시지 (버튼이면 프론트가 합성)")
+
+
+def _assemble_turn_context(session: models.AnalysisSession, db: Session) -> dict:
+    """단일 턴에 필요한 full context를 세션에서 조립한다 (intent 없으니 재료를 다 준다).
+
+    agent에 넘길 컨텍스트와, 백엔드 저장에 필요한 참조(analysis_id/document_id)를 함께 담아
+    반환한다 — 요청 스코프 db가 살아있는 지금(스트리밍 시작 전) 모두 평문 값으로 스냅샷한다.
+    """
+    history_rows = db.execute(
+        select(models.ChatMessage)
+        .where(models.ChatMessage.session_id == session.id)
+        .order_by(models.ChatMessage.created_at.desc())
+        .limit(_TURN_HISTORY_LIMIT)
+    ).scalars().all()
+    history = [{"role": m.role, "content": m.content} for m in reversed(history_rows)]
+
+    analysis = db.execute(
+        select(models.Analysis)
+        .where(models.Analysis.session_id == session.id, models.Analysis.status == "completed")
+        .order_by(models.Analysis.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    rec = db.execute(
+        select(models.RecommendationVersion)
+        .where(models.RecommendationVersion.session_id == session.id)
+        .order_by(models.RecommendationVersion.version.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    document = db.execute(
+        select(models.Document)
+        .where(models.Document.session_id == session.id)
+        .order_by(models.Document.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    return {
+        "agent_context": {
+            "solution": session.solution,
+            "history": history,
+            "analysis": analysis.result if analysis else None,
+            "recommendation": rec.payload if rec else None,
+            "parsed_doc": document.parsed_content if document else None,
+        },
+        # 저장용 참조 (agent엔 안 보냄)
+        "document_id": document.id if document else None,
+        # 추천 새 버전은 기준(base) 버전의 analysis_id를 잇고, 없으면 최신 분석의 id를 쓴다
+        # (recommendations.analysis_id는 NOT NULL).
+        "rec_analysis_id": (rec.analysis_id if rec else (analysis.id if analysis else None)),
+    }
+
+
+def _save_analysis(session_id: uuid.UUID, document_id: uuid.UUID, result: dict) -> str:
+    """분석 결과를 Analysis 행으로 저장한다 (새 세션 — 스트리밍 후에도 안전)."""
+    from app.db import SessionLocal
+
+    with SessionLocal() as s:
+        row = models.Analysis(
+            session_id=session_id, document_id=document_id, status="completed", result=result
+        )
+        s.add(row)
+        s.commit()
+        return str(row.id)
+
+
+def _persist_chat_turn(session_id: uuid.UUID, user_msg: str, assistant_msg: str) -> None:
+    """이번 턴을 chat_messages에 저장한다 (best-effort — 실패해도 응답을 막지 않는다)."""
+    try:
+        from app.db import SessionLocal
+
+        with SessionLocal() as s:
+            s.add(models.ChatMessage(session_id=session_id, role="user", content=user_msg))
+            s.add(models.ChatMessage(session_id=session_id, role="assistant", content=assistant_msg))
+            s.commit()
+    except Exception:  # noqa: BLE001 — 대화 저장 실패가 응답을 막으면 안 됨
+        logger.warning("대화 턴 저장 실패 (무시): session=%s", session_id, exc_info=True)
+
+
+def _persist_turn_result(
+    session_id: uuid.UUID, rec_analysis_id: uuid.UUID | None, document_id: uuid.UUID | None,
+    user_message: str, result: dict,
+) -> dict:
+    """반환 type에 따라 저장하고, 프론트에 줄 최종 done.data를 만든다.
+
+    - answer: 대화만 기록
+    - analysis: Analysis 저장 (+대화)
+    - recommendation: RecommendationVersion(source="chat") 새 버전 저장 (+대화)
+    주 산출물(analysis/recommendation) 저장 실패는 상위 SSE 핸들러로 전파해 error로 알린다;
+    대화 기록만 best-effort로 삼킨다.
+    """
+    rtype = result.get("type")
+    answer = result.get("answer") or ""
+    out = {
+        "type": rtype,
+        "answer": answer,
+        "sources": result.get("sources") or [],
+        "session_id": str(session_id),
+    }
+
+    if rtype == "analysis":
+        ar = result.get("analysis_result")
+        if ar is not None and document_id is not None:
+            out["analysis_id"] = _save_analysis(session_id, document_id, ar)
+            out["analysis_result"] = ar
+    elif rtype == "recommendation":
+        rec = result.get("updated_recommendation")
+        if rec is not None and rec_analysis_id is not None:
+            saved = _save_recommendation(
+                session_id, rec_analysis_id, rec, source="chat",
+                parent_version=None, change_summary=result.get("change_summary"),
+            )
+            out.update(saved)  # id, version, parent_version, source, change_summary, created_at
+            out["recommendation"] = rec
+        elif rec is not None:
+            # 분석이 전혀 없어 버전에 귀속할 수 없음 — 렌더는 되게 payload는 주되 미저장 표시
+            logger.warning("추천 저장 불가(analysis_id 없음) — 미저장 반환: session=%s", session_id)
+            out["recommendation"] = rec
+            out["saved"] = False
+
+    _persist_chat_turn(session_id, user_message, answer)
+    return out
+
+
+@router.post("/{session_id}/turn")
+async def agent_turn(
+    session_id: str,
+    payload: AgentTurnRequest,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> StreamingResponse:
+    """에이전트 단일 진입점 — 한 메시지로 분석/질문/흐름도 수정을 모두 처리한다 (SSE).
+
+    백엔드가 세션에서 full context를 조립해 에이전트에 넘기고, 에이전트가 solution으로
+    그래프를 골라 intent(analyze/edit/ask)를 판단한다. 반환 type으로 저장을 분기한다.
+    이벤트: (에이전트가 흘리는) stage/partial/token → done(data={type, ...저장 메타, answer, ...}).
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    stream_turn = _get_agent_turn()
+    if stream_turn is None:
+        # 스트림 열기 전 판정 — 프론트가 일반 HTTP 에러로 잡아 폴백 분기하기 쉽게
+        raise HTTPException(
+            503, detail={"code": "AGENT_UNAVAILABLE", "message": "에이전트가 아직 준비되지 않았습니다."}
+        )
+
+    ctx = _assemble_turn_context(session, db)
+    agent_context = ctx["agent_context"]
+    session_key = session.id
+    rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
+    user_id, message = (user.id if user else None), payload.message
+
+    async def sse():
+        result_data = None
+        saw_error = False
+        try:
+            # async 제너레이터라 usage_context가 yield를 넘어도 안전 (같은 태스크 컨텍스트).
+            with usage_context(
+                component="agent", actor_type="user", user_id=user_id, session_id=session_key
+            ):
+                async for event in stream_turn(message, agent_context):
+                    if event.event == "done":
+                        result_data = event.data or {}
+                        continue  # done은 저장 후 최종 메타와 함께 다시 낸다
+                    if event.event == "error":
+                        saw_error = True  # 에이전트가 이미 error를 흘림 — 중복 error 안 냄
+                    yield event.to_sse()
+            if result_data is not None:
+                final = _persist_turn_result(
+                    session_key, rec_analysis_id, document_id, message, result_data
+                )
+                yield ProgressEvent(event="done", stage="agent", message="완료", data=final).to_sse()
+            elif not saw_error:
+                yield ProgressEvent(
+                    event="error", stage="agent", message="응답을 생성하지 못했습니다"
+                ).to_sse()
+        except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
+            yield ProgressEvent(event="error", stage="agent", message=f"에이전트 구성 오류: {e}").to_sse()
+        except Exception:  # noqa: BLE001 — 미포착 예외가 스트림을 끊지 않도록 error로 흘린다
+            logger.exception("에이전트 턴 실패: session=%s", session_key)
+            yield ProgressEvent(
+                event="error", stage="agent", message="응답 생성 중 오류가 발생했습니다"
+            ).to_sse()
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
