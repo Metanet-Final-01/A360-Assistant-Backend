@@ -46,11 +46,14 @@ def step_node(state: dict) -> dict:
     order = state.get("order", 0)
     constraints = state.get("constraints") or []
     step_id = step.get("step_id") or f"step-{order}"
+    label = step.get("name") or step_id
 
     emit({"event": "stage", "stage": "searching",
-          "message": f"[{step.get('name') or step_id}] 관련 A360 액션 검색 중"})
+          "message": f"[{label}] 관련 A360 액션 검색 중"})
 
     sl = shortlist(step, constraints)
+    emit({"event": "stage", "stage": "composing",
+          "message": f"[{label}] 액션 시퀀스 구성 중"})
     try:
         out = compose(step, sl, constraints)
         actions = [a.model_dump() for a in out.actions]
