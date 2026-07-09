@@ -1,8 +1,11 @@
 """RAG 검색 API — A360 패키지/액션 지식 검색 (FR-07)."""
 
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
 
@@ -23,16 +26,33 @@ def rag_search(
     from app.rag.retrieval.hybrid_search import search as hybrid_search
 
     # request_id는 log_http_requests 미들웨어가 이미 생성해둠 — 여기서 다시 만들지 않는다
+    # 공개 엔드포인트라 내부 예외 문자열은 클라이언트에 노출하지 않는다(정보 누출 방지) —
+    # 표준 {code,message}만 돌려주고 원인은 서버 로그로 남긴다.
     try:
         conn = db.connect()
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"DB 연결 실패: {e}")
+        logger.exception("RAG 검색 DB 연결 실패")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "SEARCH_STORE_UNAVAILABLE", "message": "검색 저장소에 연결할 수 없습니다."},
+        ) from e
     try:
-        os_client = opensearch_client.connect()
+        try:
+            os_client = opensearch_client.connect()
+        except Exception as e:  # OpenSearch 연결 실패도 표준 포맷으로 (outer try엔 except가 없었음)
+            logger.exception("RAG 검색 OpenSearch 연결 실패")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "SEARCH_STORE_UNAVAILABLE", "message": "검색 저장소에 연결할 수 없습니다."},
+            ) from e
         try:
             results = hybrid_search(conn, os_client, q, limit=limit, mode=mode)
-        except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+        except Exception as e:  # RuntimeError뿐 아니라 OpenSearch/psycopg 등 어떤 예외도 표준화
+            logger.exception("RAG 하이브리드 검색 실패")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "SEARCH_UNAVAILABLE", "message": "검색 처리 중 오류가 발생했습니다."},
+            ) from e
     finally:
         conn.close()
     return {"query": q, "results": results}

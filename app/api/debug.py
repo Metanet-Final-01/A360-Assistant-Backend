@@ -185,7 +185,7 @@ def debug_embed(text: str) -> dict:
     try:
         vector = embed_query(text)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _error(503, "EMBED_UNAVAILABLE", str(e)) from e
     return {"text": text, "dim": len(vector), "preview": vector[:8]}
 
 
@@ -198,13 +198,15 @@ def debug_vector_search(q: str, limit: int = 5) -> dict:
     try:
         query_embedding = embed_query(q)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _error(503, "EMBED_UNAVAILABLE", str(e)) from e
     try:
         conn = db.connect()
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"DB 연결 실패: {e}")
+        raise _error(503, "DB_UNAVAILABLE", f"DB 연결 실패: {e}") from e
     try:
         results = db.search(conn, query_embedding, limit=limit)
+    except Exception as e:  # connect처럼 검색 실패도 표준 포맷으로 (finally엔 close만 있었음)
+        raise _error(503, "DB_UNAVAILABLE", f"검색 실패: {e}") from e
     finally:
         conn.close()
     return {"query": q, "results": results}
@@ -219,7 +221,7 @@ def debug_bm25_search(q: str, size: int = 5) -> dict:
         client = opensearch_client.connect()
         results = opensearch_client.keyword_search(client, q, size=size)
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"OpenSearch 오류: {e}")
+        raise _error(503, "OPENSEARCH_UNAVAILABLE", f"OpenSearch 오류: {e}") from e
     return {"query": q, "results": results}
 
 
@@ -231,7 +233,7 @@ def debug_rerank(payload: RerankDebugRequest) -> dict:
     try:
         reranked = rerank(payload.query, payload.documents, top_k=payload.top_k)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _error(503, "RERANK_UNAVAILABLE", str(e)) from e
     return {
         "query": payload.query,
         "results": [
@@ -266,7 +268,7 @@ def debug_search_actions(q: str, k: int = 5, source_types: str | None = None) ->
     try:
         results = search_actions(q, k=k, source_types=types)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise _error(503, "SEARCH_UNAVAILABLE", str(e)) from e
 
     checked = []
     for r in results:
