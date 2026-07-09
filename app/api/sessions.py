@@ -6,9 +6,10 @@
 
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -326,6 +327,44 @@ def save_edited_recommendation(
         change_summary=payload.change_summary,
     )
     return saved
+
+
+@router.get("/{session_id}/recommendations/{version}/export")
+def export_recommendation(
+    session_id: str,
+    version: int,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> JSONResponse:
+    """확정된 추천안(흐름도)을 다운로드용 JSON으로 내보낸다 (FR-17).
+
+    지정 버전의 Recommendation 페이로드를 메타 봉투에 담아 attachment로 반환한다.
+    라우트는 4세그먼트라 /recommendations·/recommendations/latest와 충돌하지 않는다.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    row = db.execute(
+        select(models.RecommendationVersion).where(
+            models.RecommendationVersion.session_id == session.id,
+            models.RecommendationVersion.version == version,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
+        )
+    envelope = {
+        "schema_version": "1.0",
+        "session_id": str(session.id),
+        "recommendation_version": row.version,
+        "source": row.source,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "recommendation": row.payload,
+    }
+    filename = f"recommendation-{session.id}-v{row.version}.json"
+    return JSONResponse(
+        content=envelope,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
