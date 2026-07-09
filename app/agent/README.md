@@ -47,7 +47,9 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
   ```python
   {
     "solution": str,            # "a360" | ... — 탈 그래프·RAG 카탈로그를 가르는 결정론적 키
-    "history": [{"role", "content"}],       # 최근 대화 턴
+    "operation": "chat" | "compact",   # compact면 라우터 우회, 압축 노드 직행 (버튼발 결정론)
+    "history": [{"role", "content"}],  # 최신 compact 이후 대화 (그 이전은 compact가 대체)
+    "compact": CompactContext | None,  # 이전 압축본 — 매 턴 주입 + 재압축 입력
     "analysis": AnalysisResult_dict | None,      # 최신 분석본
     "recommendation": Recommendation_dict | None,  # 최신 흐름도 트리 (edit 대상)
     "parsed_doc": dict | None,                   # 최신 문서 파싱본 (analyze 대비)
@@ -56,16 +58,28 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 - 진행은 기존 규약대로 `stage/partial/token` ProgressEvent로 흘리고, **종료 `done` 이벤트의
   `data`에 판별 유니온 결과**를 싣는다 (백엔드가 `type`으로 저장을 분기한다):
   ```python
-  { "type": "answer" | "analysis" | "recommendation",
+  { "type": "answer" | "analysis" | "recommendation" | "compact",
     "answer": str, "sources": [RagSource, ...],
     "analysis_result": AnalysisResult_dict | None,        # type=="analysis"
     "updated_recommendation": Recommendation_dict | None, # type=="recommendation"
-    "change_summary": str | None }                        # type=="recommendation"
+    "change_summary": str | None,                         # type=="recommendation"
+    "compact": CompactContext | None }                    # type=="compact"
   ```
 - ⚠️ **`type`은 정확해야 한다** — 백엔드가 이걸로 저장을 가른다(analysis→Analysis, recommendation→
-  RecommendationVersion(source="chat"), answer→대화만). 수행한 작업과 `type`을 일치시킬 것.
+  RecommendationVersion(source="chat"), compact→SessionCompact, answer→대화만). 산출물이 non-null이면
+  `type`과 무관하게 모두 저장하니, 수행한 작업과 `type`·산출물을 일치시킬 것.
 - `solution`으로 그래프를 라우팅한다(A360 전용/타 솔루션 범용). `solution`은 세션에 확정
   저장된 값이라 프롬프트로 추측하지 않는다.
+- **compact** (대화 압축, RPA-66): `operation="compact"`면 압축 노드 직행. 입력은 `compact`(이전
+  압축본) + `history`(그 이후 대화 전체)이고, 받은 걸 전부 압축한다. 출력 `compact`는 고정 섹션 JSON:
+  ```python
+  { "schema_version": "1.0",
+    "task_overview": str,
+    "decisions": [str, ...],        # 재압축에도 유실 금지
+    "flow_journal": [str, ...],
+    "open_questions": [str, ...],
+    "verbatim": [{"kind": "catalog", "content": str}, ...] }  # 요약 금지 원문 (카탈로그 등)
+  ```
 
 ### 문서 분석 — `analyze` (FR-05)
 

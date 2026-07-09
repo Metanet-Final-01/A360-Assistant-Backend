@@ -157,6 +157,26 @@ class ChatMessage(Base):
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SessionCompact(Base):
+    """대화 압축본 (RPA-66). 대화가 길어지면 압축 노드가 이력을 고정 섹션 JSON으로 요약한다.
+
+    매 턴 최신 압축본을 컨텍스트로 주입하고, 압축 시점 이후 대화만 이력으로 넘긴다(그 이전은
+    이 압축본이 대체). 재압축을 거듭해도 결정사항·사용자 제공 카탈로그(verbatim)가 유실되지
+    않도록 에이전트가 코드로 보정한다. append-only — 최신 행을 사용한다.
+    """
+
+    __tablename__ = "session_compacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("analysis_sessions.id", ondelete="CASCADE"), index=True
+    )
+    schema_version: Mapped[str] = mapped_column(String(20), default="1.0")
+    # {task_overview, decisions[], flow_journal[], open_questions[], verbatim[{kind, content}]}
+    payload: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Feedback(Base):
     """추천 결과 피드백 (추가 기능). applied는 이후 추천 생성에 반영됐는지 표시."""
 

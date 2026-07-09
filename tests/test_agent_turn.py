@@ -42,18 +42,22 @@ def _analysis_result() -> dict:
 class FakeDB:
     """세션 조회 + 컨텍스트 조립용 4개 쿼리(chat/analyses/recommendations/documents)를 흉내낸다."""
 
-    def __init__(self, session=None, history=None, analysis=None, rec=None, document=None):
+    def __init__(self, session=None, history=None, analysis=None, rec=None, document=None,
+                 compact=None):
         self.session = session
         self.history = history or []
         self.analysis = analysis
         self.rec = rec
         self.document = document
+        self.compact = compact
 
     def get(self, model, key):
         return self.session
 
     def execute(self, stmt):
         text = str(stmt).lower()
+        if "session_compacts" in text:
+            return SimpleNamespace(scalar_one_or_none=lambda: self.compact)
         if "chat_messages" in text:
             return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: self.history))
         if "from analyses" in text or " analyses" in text:
@@ -104,12 +108,23 @@ def _install_agent(monkeypatch, events):
     return _fake_turn
 
 
-def _run(sid=SID):
+def _run(sid=SID, operation=None):
+    body = {"message": "안녕"}
+    if operation is not None:
+        body["operation"] = operation
     with TestClient(app) as c:
-        with c.stream("POST", f"/api/sessions/{sid}/turn", json={"message": "안녕"}) as r:
+        with c.stream("POST", f"/api/sessions/{sid}/turn", json=body) as r:
             status = r.status_code
             events = [json.loads(l[5:]) for l in r.iter_lines() if l.startswith("data:")]
     return status, events
+
+
+def _compact_payload() -> dict:
+    return {
+        "schema_version": "1.0", "task_overview": "업무 개요",
+        "decisions": ["엑셀 저장 경로는 D드라이브"], "flow_journal": ["3단계 반복문화"],
+        "open_questions": [], "verbatim": [{"kind": "catalog", "content": "요약 금지 원문"}],
+    }
 
 
 # --- type=answer: 대화만 저장 ---
@@ -230,8 +245,8 @@ def test_full_context_passed_to_agent(monkeypatch):
     monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
 
     session = SimpleNamespace(id=SID, user_id=None, solution="uipath")
-    # 쿼리는 created_at DESC(최신 먼저)로 오고 코드가 reversed()로 시간순 복원한다 → fake도 DESC로
-    history = [SimpleNamespace(role="assistant", content="답"), SimpleNamespace(role="user", content="이전")]
+    # 쿼리는 created_at ASC(시간순)로 온다 (상한 없이 전체) → fake도 시간순으로
+    history = [SimpleNamespace(role="user", content="이전"), SimpleNamespace(role="assistant", content="답")]
     rec = SimpleNamespace(payload=_recommendation(), analysis_id=AID, version=1)
     analysis = SimpleNamespace(result=_analysis_result(), id=AID)
     document = SimpleNamespace(id=DID, parsed_content={"pages": [1]})
@@ -245,6 +260,64 @@ def test_full_context_passed_to_agent(monkeypatch):
     assert ctx["recommendation"]["steps"][0]["step_id"] == "step-1"
     assert ctx["parsed_doc"] == {"pages": [1]}
     assert "intent" not in ctx  # intent는 넘기지 않는다
+
+
+# --- compact: 압축본 저장, 이력엔 안 남김, operation 신호·주입 (RPA-66) ---
+
+def test_compact_saves_and_skips_chat(monkeypatch):
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={
+            "type": "compact", "answer": "이전 대화를 요약했어요", "sources": [],
+            "compact": _compact_payload()}),
+    ])
+    captured = {}
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run(operation="compact")
+
+    done = events[-1]
+    assert done["data"]["type"] == "compact"
+    assert done["data"]["compact"]["decisions"] == ["엑셀 저장 경로는 D드라이브"]
+    assert len(captured.get("SessionCompact", [])) == 1        # 압축본 저장
+    assert "ChatMessage" not in captured                       # 압축 턴은 이력에 안 남긴다
+
+
+def test_operation_compact_passed_to_agent(monkeypatch):
+    from app.schemas import ProgressEvent
+    fake = _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={
+            "type": "compact", "answer": "ok", "sources": [], "compact": _compact_payload()}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _run(operation="compact")
+    assert fake.seen_context["operation"] == "compact"
+
+
+def test_latest_compact_injected_into_context(monkeypatch):
+    from app.schemas import ProgressEvent
+    fake = _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={"type": "answer", "answer": "ok", "sources": []}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    from datetime import datetime, timezone
+    cp = SimpleNamespace(payload=_compact_payload(), created_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360"), compact=cp))
+    _run()  # operation 기본 "chat"
+    assert fake.seen_context["operation"] == "chat"
+    assert fake.seen_context["compact"]["task_overview"] == "업무 개요"  # 최신 압축본 주입
+
+
+def test_compact_type_without_payload_errors(monkeypatch):
+    from app.schemas import ProgressEvent
+    _install_agent(monkeypatch, [
+        ProgressEvent(event="done", data={"type": "compact", "answer": "x", "sources": []}),
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run(operation="compact")
+    assert events[-1]["event"] == "error"
 
 
 # --- 계약 위반은 성공 done이 아니라 error로 (CodeRabbit) ---
