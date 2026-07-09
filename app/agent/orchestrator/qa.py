@@ -13,6 +13,8 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from app.core.llm import UsageCallbackHandler
+
 from .. import config
 from ..graph import _history_messages
 from ..recommend.stream import emit
@@ -50,6 +52,11 @@ async def qa_node(state: TurnState) -> dict:
     llm = _make_llm()
     runnable = llm.bind_tools(tools) if tools else llm
 
+    # 이 노드의 LLM 호출을 purpose="turn_qa"로 기록한다(RPA-73). 노드 진입 시점(async,
+    # usage_context 활성)에 생성해 귀속 context를 정확히 스냅샷하고, 각 astream 호출
+    # config에 얹는다 — 최상위 콜백은 제거돼 있어 이중 기록되지 않는다.
+    usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_qa")]}
+
     messages = [
         SystemMessage(content=_build_system(state)),
         *_history_messages(state.get("history")),
@@ -61,7 +68,7 @@ async def qa_node(state: TurnState) -> dict:
         # 상한 도달 시 도구 없이 마무리 — 무한 검색을 끊는다.
         target = llm if round_no == _MAX_TOOL_ROUNDS else runnable
         gathered = None
-        async for chunk in target.astream(messages):
+        async for chunk in target.astream(messages, config=usage_config):
             gathered = chunk if gathered is None else gathered + chunk
             if chunk.text:  # 도구 호출 턴은 텍스트가 없어 토큰이 새지 않는다
                 parts.append(chunk.text)

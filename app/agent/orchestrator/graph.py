@@ -18,7 +18,6 @@ from collections.abc import AsyncIterator
 
 from langgraph.graph import END, START, StateGraph
 
-from app.core.llm import UsageCallbackHandler
 from app.schemas import ProgressEvent
 
 from .. import config
@@ -126,23 +125,25 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
     yield: stage/partial/token → done(data={type, answer, sources, analysis_result,
            updated_recommendation, change_summary, ...}). 실패는 error 이벤트로 흘린다.
 
-    Agent는 stateless — 저장·버전·이력은 백엔드 몫. LLM 사용량은 core.llm.chat(구조화
-    호출, intake는 purpose="intake"로 링 게이지 측정 대상)과 UsageCallbackHandler
-    (qa·edit의 ChatOpenAI 호출)가 빠짐없이 기록한다.
+    Agent는 stateless — 저장·버전·이력은 백엔드 몫. LLM 사용량 purpose는 노드별로
+    나뉜다: core.llm.chat 경로가 purpose로 기록(intake="intake"로 링 게이지 측정
+    대상, compact/generate="recommend"/verify), qa/edit는 각 노드가 turn_qa/turn_edit
+    콜백을 얹는다. 그래서 이 진입점 최상위 config에는 usage 콜백을 두지 않는다.
     """
     if not config.OPENAI_API_KEY:
         yield ProgressEvent(event="error", message="OPENAI_API_KEY 환경변수가 필요합니다")
         return
 
+    # LLM 사용량 태깅은 노드별로 나뉜다(RPA-73): chat 경로(intake/compact/generate/verify)는
+    # core.llm.chat이 purpose로 기록하고, LangChain 경로(qa/edit)는 각 노드가 자기
+    # UsageCallbackHandler(purpose="turn_qa"/"turn_edit")를 호출 config에 얹는다. 그래서
+    # 여기 최상위 config에는 콜백을 두지 않는다 — 두면 노드 콜백과 이중 기록된다.
     final_state: dict = {}
     try:
         async for mode, chunk in _get_graph().astream(
             _to_inputs(message, context),
             stream_mode=["custom", "values"],
-            config={
-                "callbacks": [UsageCallbackHandler(purpose="turn")],
-                "max_concurrency": _MAX_CONCURRENCY,
-            },
+            config={"max_concurrency": _MAX_CONCURRENCY},
         ):
             if mode == "custom":
                 yield ProgressEvent(**chunk)
