@@ -467,6 +467,20 @@ def test_read_intake_gauge_ratio_and_recommend(monkeypatch):
     assert g["compact_recommended"] is True  # 0.75 >= 0.7
 
 
+def test_read_intake_gauge_invalid_limit_falls_back(monkeypatch):
+    """비정상 env(non-numeric)는 기본값으로 폴백 — 게이지가 꺼지거나 크래시하지 않는다 (CodeRabbit)."""
+    class _S:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: 50000)
+
+    monkeypatch.setattr("app.db.SessionLocal", _S)
+    for bad in ("abc", "0", "-5", ""):
+        monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", bad)
+        g = sessions_api._read_intake_gauge(SID)
+        assert g["limit_tokens"] == 100000 and g["ratio"] == 0.5  # 폴백값 사용
+
+
 def test_read_intake_gauge_none_when_no_intake(monkeypatch):
     class _S:
         def __enter__(self): return self

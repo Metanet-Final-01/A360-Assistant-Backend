@@ -661,13 +661,20 @@ def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
         ).scalar_one_or_none()
     if tokens is None:
         return None
-    limit = int(os.getenv("TURN_GAUGE_LIMIT_TOKENS", "100000"))
-    ratio = round(tokens / limit, 4) if limit > 0 else 0.0
+    # env가 비정상(non-numeric)·0·음수면 기본값으로 폴백 — 게이지를 통째로 끄거나
+    # ZeroDivision을 내지 않고 항상 의미 있는 값을 낸다.
+    try:
+        limit = int(os.getenv("TURN_GAUGE_LIMIT_TOKENS", "100000"))
+    except ValueError:
+        limit = 0
+    if limit <= 0:
+        limit = 100000
+    ratio = round(tokens / limit, 4)
     return {
         "intake_tokens": int(tokens),
         "limit_tokens": limit,
         "ratio": ratio,
-        "compact_recommended": bool(limit > 0 and ratio >= _GAUGE_WARN_RATIO),
+        "compact_recommended": bool(ratio >= _GAUGE_WARN_RATIO),
     }
 
 
