@@ -10,11 +10,23 @@
     analysis = analyze(parsed_doc)                  # 문서 분석 (FR-05)
     async for event in recommend(analysis):         # 추천 스트림 (FR-09~12)
         ...
+
+    from app.agent import stream_agent_turn          # 단일 진입점 (RPA-64/65)
+    async for event in stream_agent_turn(message, context):  # done.data.type으로 저장 분기
+        ...
 """
 
 from .analysis import analyze
 from .graph import run_agent, stream_agent
+from .orchestrator import stream_agent_turn
 from .recommend import recommend
 from .schemas import AgentResult
 
-__all__ = ["AgentResult", "analyze", "recommend", "run_agent", "stream_agent"]
+__all__ = [
+    "AgentResult",
+    "analyze",
+    "recommend",
+    "run_agent",
+    "stream_agent",
+    "stream_agent_turn",
+]
