@@ -261,40 +261,54 @@ def run_session_checks(steps: list[dict]) -> list[Violation]:
     steps: Recommendation.steps[] (각 {step_id, actions[]}). 카탈로그는 쓰지 않는다 —
     opener/closer는 (package, action) 상수로 판정하고, 세션 이름은 파라미터 값으로 좁는다.
 
-    R7: 세션 파라미터를 쓰는 액션이 열려 있지 않은 세션을 참조(열기 전/닫은 후).
+    세션은 (package, name)으로 식별한다 — Excel_MS 세션 "Default"와 WebAutomation 세션
+    "Default"는 다른 세션이므로 이름만으로 키를 잡으면 서로 덮어쓴다.
+
+    R7: 열려 있지 않은 세션을 참조(열기 전/닫은 후 사용) 또는 열린 적 없는 세션을 닫음
+        (close-before-open / double-close — 닫을 대상이 없다).
     R8: 순회가 끝났는데 닫히지 않은 채 남은 세션(리소스 누수).
     """
-    opened: dict[str, tuple[str | None, str]] = {}  # session_name -> (step_id, location) 연 지점
+    opened: dict[tuple[str, str], tuple[str | None, str]] = {}  # (package, name) -> (step_id, location)
     violations: list[Violation] = []
 
     for step in steps:
         step_id = step.get("step_id")
         for action, location in _iter_execution_order(step.get("actions", []), "actions"):
-            key = (action.get("package"), action.get("action"))
+            pkg = action.get("package")
+            key = (pkg, action.get("action"))
             name = _session_name(action)
+            if name is None:
+                continue  # 세션 무관 액션 (세션 이름 없음)
+            sess = (pkg, name)
             if key in SESSION_OPENERS:
-                if name:
-                    opened[name] = (step_id, location)
+                opened[sess] = (step_id, location)
             elif key in SESSION_CLOSERS:
-                if name:
-                    opened.pop(name, None)
-            elif name is not None and name not in opened:
+                if sess in opened:
+                    opened.pop(sess)
+                else:
+                    violations.append(
+                        Violation(
+                            "R7", location,
+                            f"세션 '{name}'을(를) 열지 않았는데 닫으려 합니다 (닫을 세션이 없습니다).",
+                            package=pkg, action=action.get("action"), step_id=step_id,
+                        )
+                    )
+            elif sess not in opened:
                 violations.append(
                     Violation(
                         "R7", location,
                         f"세션 '{name}'이(가) 열려 있지 않은 상태에서 사용됩니다 "
                         "(여는 액션보다 먼저 오거나 닫은 뒤에 옵니다).",
-                        package=action.get("package"), action=action.get("action"),
-                        step_id=step_id,
+                        package=pkg, action=action.get("action"), step_id=step_id,
                     )
                 )
 
-    for name, (step_id, location) in opened.items():
+    for (pkg, name), (step_id, location) in opened.items():
         violations.append(
             Violation(
                 "R8", location,
                 f"세션 '{name}'을(를) 연 뒤 닫지 않았습니다 (닫는 액션이 없습니다).",
-                step_id=step_id,
+                package=pkg, step_id=step_id,
             )
         )
     return violations

@@ -127,6 +127,46 @@ def test_webautomation_session_bracket():
     assert run_session_checks(steps) == []
 
 
+def test_r7_close_before_open():
+    # 열지 않은 세션을 닫으려 함 → 닫을 대상이 없음 (R7)
+    steps = [_step("step-1", [_close("S")])]
+    v = run_session_checks(steps)
+    assert [x.rule for x in v] == ["R7"]
+    assert "닫" in v[0].message
+
+
+def test_r7_double_close():
+    # 정상 브래킷 뒤에 한 번 더 닫음 → 두 번째 close는 닫을 대상 없음 (R7)
+    steps = [_step("step-1", [_open("S"), _use("S"), _close("S"), _close("S")])]
+    v = run_session_checks(steps)
+    assert [x.rule for x in v] == ["R7"]
+
+
+def test_same_name_different_package_are_independent():
+    # Excel 세션 "Default"와 WebAutomation 세션 "Default"는 별개 — 서로 덮어쓰지 않는다.
+    steps = [_step("step-1", [
+        _open("Default"),                 # Excel_MS Default 열림
+        _use("Default"),                  # Excel_MS Default 사용 (정상)
+        {"package": "WebAutomation", "action": "openpage",  # Web Default — 안 열림 (R7)
+         "parameters": [{"name": "sessionName", "value": "Default"}], "children": []},
+    ])]
+    v = run_session_checks(steps)
+    assert sorted(x.rule for x in v) == ["R7", "R8"]  # Web R7(미개시) + Excel R8(미종료)
+    web_r7 = next(x for x in v if x.rule == "R7")
+    assert web_r7.package == "WebAutomation"
+    excel_r8 = next(x for x in v if x.rule == "R8")
+    assert excel_r8.package == "Excel_MS"
+
+
+def test_same_name_same_package_reopen_is_ok():
+    # 같은 패키지·이름을 닫고 다시 열면 정상 (재사용)
+    steps = [_step("step-1", [
+        _open("S"), _use("S"), _close("S"),
+        _open("S"), _use("S"), _close("S"),
+    ])]
+    assert run_session_checks(steps) == []
+
+
 def test_action_without_session_param_is_ignored():
     steps = [_step("step-1", [
         {"package": "String", "action": "assign",
