@@ -220,6 +220,7 @@ def _generate_other(state: TurnState) -> dict:
     카탈로그를 못 찾으면 흐름도를 만들지 않고 안내 답변으로 종료한다 —
     실제로 recommendation을 안 만들었으므로 type도 "answer"다(type 정확성 원칙).
     """
+    emit({"event": "stage", "stage": "recommending", "message": "제공하신 카탈로그 확인 중"})
     extraction = extract_user_catalog(state)
     if not extraction.actions:
         return {
