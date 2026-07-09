@@ -164,6 +164,21 @@ def _repair(messages: list[dict], bad_output: str, error: Exception) -> str:
     return llm.chat(repair_messages, purpose="analyze", response_format=_RESPONSE_FORMAT)
 
 
+def _run_analysis(messages: list[dict]) -> AnalysisResult:
+    """LLM 호출 → 파싱 → 1회 교정 → 정규화. analyze/analyze_text의 공통 경로."""
+    raw = llm.chat(messages, purpose="analyze", response_format=_RESPONSE_FORMAT)
+    try:
+        result = _parse_analysis(raw)
+    except (json.JSONDecodeError, ValidationError) as first_error:
+        logger.warning("analyze 첫 출력 파싱 실패, 1회 교정 시도: %s", first_error)
+        repaired = _repair(messages, raw, first_error)
+        try:
+            result = _parse_analysis(repaired)
+        except (json.JSONDecodeError, ValidationError) as second_error:
+            raise ValueError(f"analyze 출력 파싱 실패(교정 후에도): {second_error}") from second_error
+    return _normalize(result)
+
+
 def analyze(parsed_doc: dict) -> AnalysisResult:
     """업무정의서 parsed_content를 분석해 AnalysisResult를 반환한다 (FR-05).
 
@@ -180,15 +195,34 @@ def analyze(parsed_doc: dict) -> AnalysisResult:
             ambiguities=["문서에서 분석할 텍스트를 추출하지 못했습니다 (이미지 전용/빈 문서 가능성)."],
         )
 
-    messages = _build_messages(parsed_doc)
-    raw = llm.chat(messages, purpose="analyze", response_format=_RESPONSE_FORMAT)
-    try:
-        result = _parse_analysis(raw)
-    except (json.JSONDecodeError, ValidationError) as first_error:
-        logger.warning("analyze 첫 출력 파싱 실패, 1회 교정 시도: %s", first_error)
-        repaired = _repair(messages, raw, first_error)
-        try:
-            result = _parse_analysis(repaired)
-        except (json.JSONDecodeError, ValidationError) as second_error:
-            raise ValueError(f"analyze 출력 파싱 실패(교정 후에도): {second_error}") from second_error
-    return _normalize(result)
+    return _run_analysis(_build_messages(parsed_doc))
+
+
+# 채팅 서술 입력용 프롬프트 보강 — 문서 전제(페이지·비전추출)를 대화 전제로 바꾼다.
+_TEXT_ADDENDUM = """
+
+[입력 형태 안내 — 이번 입력은 문서가 아니라 대화다]
+- 아래 입력은 사용자가 채팅으로 서술한 업무 설명(압축 요약·대화 이력 포함)이다.
+- evidence.page는 null로 두고, snippet에는 근거가 된 사용자 발화를 발췌해 넣는다.
+- '어시스턴트' 발화는 참고만 하고, 업무 사실의 근거는 '사용자' 발화에서 찾는다.
+- 대화에 없는 시스템·단계·값을 지어내지 않는다. 확정 못 한 것은 ambiguities에 남긴다."""
+
+
+def analyze_text(description: str) -> AnalysisResult:
+    """채팅으로 서술된 업무 설명을 분석해 AnalysisResult를 반환한다 (RPA-65).
+
+    문서 없이 대화만으로 업무를 정의한 세션의 analyze/generate 경로에서 쓴다.
+    analyze()와 동일한 분해 규칙·스키마·교정 경로를 공유하며, 근거(evidence)만
+    문서 페이지 대신 대화 발췌로 남긴다. 실패 모드도 analyze()와 동일하다.
+    """
+    if not description.strip():
+        return AnalysisResult(
+            document_title=None,
+            steps=[],
+            ambiguities=["분석할 업무 설명이 없습니다. 업무 내용을 채팅으로 알려주세요."],
+        )
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT + _TEXT_ADDENDUM},
+        {"role": "user", "content": description},
+    ]
+    return _run_analysis(messages)

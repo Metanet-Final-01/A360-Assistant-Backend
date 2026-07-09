@@ -102,6 +102,11 @@ def _get_graph():
     return _graph
 
 
+def get_graph():
+    """컴파일된 recommend 그래프의 공개 접근자 — 오케스트레이터(RPA-65)가 서브그래프로 쓴다."""
+    return _get_graph()
+
+
 def _to_dict(analysis: Any) -> dict:
     """AnalysisResult(Pydantic) 또는 dict를 상태용 dict로 정규화한다."""
     if hasattr(analysis, "model_dump"):
