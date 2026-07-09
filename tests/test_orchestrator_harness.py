@@ -12,14 +12,15 @@ from tests.agent_stubs import FakeCatalog
 
 _CATALOG = FakeCatalog()
 
-# FakeCatalog 표기 기준: SaveSpreadSheet는 존재, session이 유일한 필수 파라미터.
+# 세션 무관 clean 픽스처: String/assign은 카탈로그에 있고 value(필수) 하나뿐이라
+# R1~R6은 물론 세션 검사(R7~R8) 노이즈도 없다 (세션 파라미터 없음).
 _CLEAN_FLOW = {
     "schema_version": "1.0",
     "steps": [{
         "step_id": "step-1",
         "actions": [{
-            "order": 1, "package": "Excel_MS", "action": "SaveSpreadSheet", "label": "저장",
-            "parameters": [{"name": "session", "value": "Default", "value_source": "schema_default"}],
+            "order": 1, "package": "String", "action": "assign", "label": "값 지정",
+            "parameters": [{"name": "value", "value": "x", "value_source": "llm"}],
             "children": [],
         }],
     }],
@@ -60,7 +61,7 @@ def test_repair_adopted_when_violations_shrink(monkeypatch):
     result = verify_and_repair(_BROKEN_FLOW, _CATALOG)
     assert result["repaired"] is True
     assert result["violations"] == []
-    assert result["flow"]["steps"][0]["actions"][0]["action"] == "SaveSpreadSheet"
+    assert result["flow"]["steps"][0]["actions"][0]["action"] == "assign"
 
 
 def test_repair_rejected_when_violations_do_not_shrink(monkeypatch):
