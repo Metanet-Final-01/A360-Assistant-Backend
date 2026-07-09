@@ -404,9 +404,6 @@ def save_edited_recommendation(
 # compact는 대화 압축(RPA-66): operation="compact" 버튼발 요청은 라우터를 우회해 압축 노드 직행.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# compact 없는 세션의 이력 상한 (첫 압축 전). 압축이 생기면 그 이후 이력은 절삭 없이 넘긴다
-# (게이지 충실도 — 대화 누적이 intake 토큰에 그대로 반영되도록).
-_TURN_HISTORY_LIMIT = 40
 _VALID_TURN_TYPES = {"answer", "analysis", "recommendation", "compact"}  # 에이전트 결과 type 계약
 
 
@@ -460,19 +457,16 @@ def _assemble_turn_context(
         .limit(1)
     ).scalar_one_or_none()
 
+    # history는 절삭 없이 넘긴다 — 압축이 있으면 그 이후 대화만, 없으면 전체. 상한을 두면
+    # (1) 첫 compact 때 오래된 대화가 SessionCompact에도 안 들어가 영구 유실되고(CodeRabbit),
+    # (2) intake 토큰이 대화 누적을 충실히 반영 못 해 게이지가 왜곡된다. 폭주는 임계 초과
+    # 자동 compact(안전망, 후속)로 막는다.
     hist_q = select(models.ChatMessage).where(models.ChatMessage.session_id == session.id)
     if compact is not None:
-        # 압축 이후 대화만 — 절삭 없이 (그 이전은 compact가 대체)
-        hist_q = hist_q.where(models.ChatMessage.created_at > compact.created_at).order_by(
-            models.ChatMessage.created_at.asc()
-        )
-        history_rows = db.execute(hist_q).scalars().all()
-    else:
-        # 첫 압축 전엔 상한을 둔다 (아직 압축본이 없어 폭주 방지)
-        history_rows = db.execute(
-            hist_q.order_by(models.ChatMessage.created_at.desc()).limit(_TURN_HISTORY_LIMIT)
-        ).scalars().all()
-        history_rows = list(reversed(history_rows))
+        hist_q = hist_q.where(models.ChatMessage.created_at > compact.created_at)  # 그 이전은 compact가 대체
+    history_rows = db.execute(
+        hist_q.order_by(models.ChatMessage.created_at.asc())
+    ).scalars().all()
     history = [{"role": m.role, "content": m.content} for m in history_rows]
 
     analysis = db.execute(

@@ -245,8 +245,8 @@ def test_full_context_passed_to_agent(monkeypatch):
     monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
 
     session = SimpleNamespace(id=SID, user_id=None, solution="uipath")
-    # 쿼리는 created_at DESC(최신 먼저)로 오고 코드가 reversed()로 시간순 복원한다 → fake도 DESC로
-    history = [SimpleNamespace(role="assistant", content="답"), SimpleNamespace(role="user", content="이전")]
+    # 쿼리는 created_at ASC(시간순)로 온다 (상한 없이 전체) → fake도 시간순으로
+    history = [SimpleNamespace(role="user", content="이전"), SimpleNamespace(role="assistant", content="답")]
     rec = SimpleNamespace(payload=_recommendation(), analysis_id=AID, version=1)
     analysis = SimpleNamespace(result=_analysis_result(), id=AID)
     document = SimpleNamespace(id=DID, parsed_content={"pages": [1]})
