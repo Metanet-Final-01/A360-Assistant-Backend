@@ -5,8 +5,8 @@
   헤더(X-Request-ID)로도 나간다.
 - 요청/응답 구조화 로그(method·path·status·latency·user) — app/rag/observability로.
 - 성능 측정(latency).
-- 감사 로그(누가·무엇을) → 변경성 요청(POST/PUT/PATCH/DELETE)의 성공만 audit_logs DB에.
-  조회(GET)는 로그로만 남긴다 (중요 이벤트만 DB).
+- 감사 로그(누가·무엇을) → 변경성 요청(POST/PUT/PATCH/DELETE)을 성공·실패 모두 audit_logs DB에
+  (status_code로 구분). 조회(GET)는 로그로만 남긴다 (중요 이벤트만 DB).
 
 user_id는 Authorization 헤더의 JWT를 디코드해 얻는다 (DB 조회 없이, best-effort) —
 의존성 실행 순서/스레드풀 전파에 기대지 않아 견고하다.
@@ -104,15 +104,21 @@ def register_http_logging(app: FastAPI) -> None:
         try:
             response = await call_next(request)
         except Exception as exc:
+            failed_ms = round((time.perf_counter() - start) * 1000, 2)
             log_event(
                 "http_request",
                 **common,
                 status="error",
                 error_type=type(exc).__name__,
                 error_message=str(exc),
-                duration_ms=round((time.perf_counter() - start) * 1000, 2),
+                duration_ms=failed_ms,
                 ended_at=datetime.now(timezone.utc).isoformat(),
             )
+            # 전역 핸들러가 못 잡은 예외도 변경성 요청이면 500으로 감사에 남긴다
+            if request.method in _AUDIT_METHODS:
+                await run_in_threadpool(
+                    _record_audit, req_id, user_id, request.method, safe_path, 500, int(failed_ms),
+                )
             raise
 
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -126,9 +132,10 @@ def register_http_logging(app: FastAPI) -> None:
         )
         response.headers["X-Request-ID"] = req_id
 
-        # 감사: 변경성 요청의 성공만 DB에 (중요 이벤트만). DB I/O는 동기라 이벤트 루프를
-        # 막지 않도록 threadpool로 오프로드한다.
-        if request.method in _AUDIT_METHODS and 200 <= response.status_code < 400:
+        # 감사: 변경성 요청은 성공·실패 모두 DB에 남긴다 — "누가 무엇을 시도했나"(403/404/5xx
+        # 포함)를 forensics로 추적하기 위함. status_code로 성공/실패를 구분한다. DB I/O는
+        # 동기라 이벤트 루프를 막지 않도록 threadpool로 오프로드한다.
+        if request.method in _AUDIT_METHODS:
             await run_in_threadpool(
                 _record_audit, req_id, user_id, request.method, safe_path,
                 response.status_code, int(latency_ms),
