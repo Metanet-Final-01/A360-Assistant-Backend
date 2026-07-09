@@ -37,10 +37,17 @@ def rag_search(
             detail={"code": "SEARCH_STORE_UNAVAILABLE", "message": "검색 저장소에 연결할 수 없습니다."},
         ) from e
     try:
-        os_client = opensearch_client.connect()
+        try:
+            os_client = opensearch_client.connect()
+        except Exception as e:  # OpenSearch 연결 실패도 표준 포맷으로 (outer try엔 except가 없었음)
+            logger.exception("RAG 검색 OpenSearch 연결 실패")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "SEARCH_STORE_UNAVAILABLE", "message": "검색 저장소에 연결할 수 없습니다."},
+            ) from e
         try:
             results = hybrid_search(conn, os_client, q, limit=limit, mode=mode)
-        except RuntimeError as e:
+        except Exception as e:  # RuntimeError뿐 아니라 OpenSearch/psycopg 등 어떤 예외도 표준화
             logger.exception("RAG 하이브리드 검색 실패")
             raise HTTPException(
                 status_code=503,
