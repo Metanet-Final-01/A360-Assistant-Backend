@@ -398,13 +398,16 @@ def save_edited_recommendation(
 # ─────────────────────────────────────────────────────────────────────────────
 # 에이전트 단일 진입점 — analyze/ask/흐름도 수정 통합 (RPA-64)
 # intent는 두지 않는다: 에이전트 라우터가 message로 브랜치를 판단하므로, 백엔드는
-# 어느 브랜치로 갈지 모른 채 매 턴 full context(solution/history/analysis/recommendation/
-# parsed_doc)를 조립해 넘긴다. 에이전트는 stateless(DB 안 붙음)를 유지한다.
-# 반환 type("answer"|"analysis"|"recommendation")으로 백엔드가 저장을 분기한다.
+# 어느 브랜치로 갈지 모른 채 매 턴 full context(solution/operation/history/compact/analysis/
+# recommendation/parsed_doc)를 조립해 넘긴다. 에이전트는 stateless(DB 안 붙음)를 유지한다.
+# 반환 type("answer"|"analysis"|"recommendation"|"compact")으로 백엔드가 저장을 분기한다.
+# compact는 대화 압축(RPA-66): operation="compact" 버튼발 요청은 라우터를 우회해 압축 노드 직행.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_TURN_HISTORY_LIMIT = 20  # 매 턴 주입하는 최근 대화 상한 (토큰 폭주 방지)
-_VALID_TURN_TYPES = {"answer", "analysis", "recommendation"}  # 에이전트 결과 type 계약
+# compact 없는 세션의 이력 상한 (첫 압축 전). 압축이 생기면 그 이후 이력은 절삭 없이 넘긴다
+# (게이지 충실도 — 대화 누적이 intake 토큰에 그대로 반영되도록).
+_TURN_HISTORY_LIMIT = 40
+_VALID_TURN_TYPES = {"answer", "analysis", "recommendation", "compact"}  # 에이전트 결과 type 계약
 
 
 def _get_agent_turn():
@@ -412,13 +415,17 @@ def _get_agent_turn():
 
     기대 계약 (Agent 담당 구현):
         async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[ProgressEvent]
-      context = {solution, history, analysis, recommendation, parsed_doc}  # intent 없음
+      context = {solution, operation, history, compact, analysis, recommendation, parsed_doc}
+        - operation: "chat" | "compact" (버튼발 결정론 신호 — compact면 LLM 라우터 우회, 압축 노드 직행)
+        - compact: 이전 압축본(CompactContext) | None — 매 턴 프롬프트 주입 + 재압축 입력
+        - history: 최신 압축 이후 대화 (그 이전은 compact가 대체)
       종료 done 이벤트의 data = {
-          "type": "answer" | "analysis" | "recommendation",
+          "type": "answer" | "analysis" | "recommendation" | "compact",
           "answer": str, "sources": [RagSource, ...],
           "analysis_result": {...} | None,          # type=="analysis"
           "updated_recommendation": {...} | None,   # type=="recommendation"
           "change_summary": str | None,             # type=="recommendation"
+          "compact": {...} | None,                  # type=="compact" (고정 섹션 JSON)
       }
     agent가 stream_agent_turn을 export하는 순간 이 라우트는 코드 변경 없이 활성화된다.
     """
@@ -432,21 +439,41 @@ def _get_agent_turn():
 
 class AgentTurnRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000, description="사용자 메시지 (버튼이면 프론트가 합성)")
+    # compact 버튼발 결정론 요청 — LLM 라우터를 우회하는 명시 신호 (기본 "chat")
+    operation: str = Field("chat", pattern="^(chat|compact)$", description="chat | compact")
 
 
-def _assemble_turn_context(session: models.AnalysisSession, db: Session) -> dict:
+def _assemble_turn_context(
+    session: models.AnalysisSession, db: Session, operation: str = "chat"
+) -> dict:
     """단일 턴에 필요한 full context를 세션에서 조립한다 (intent 없으니 재료를 다 준다).
 
     agent에 넘길 컨텍스트와, 백엔드 저장에 필요한 참조(analysis_id/document_id)를 함께 담아
     반환한다 — 요청 스코프 db가 살아있는 지금(스트리밍 시작 전) 모두 평문 값으로 스냅샷한다.
+    최신 압축본(compact)을 주입하고, history는 그 압축 이후 대화만(절삭 없이) 넘긴다 —
+    압축 이전은 compact가 대체하며, 게이지가 대화 누적을 충실히 반영하게 한다.
     """
-    history_rows = db.execute(
-        select(models.ChatMessage)
-        .where(models.ChatMessage.session_id == session.id)
-        .order_by(models.ChatMessage.created_at.desc())
-        .limit(_TURN_HISTORY_LIMIT)
-    ).scalars().all()
-    history = [{"role": m.role, "content": m.content} for m in reversed(history_rows)]
+    compact = db.execute(
+        select(models.SessionCompact)
+        .where(models.SessionCompact.session_id == session.id)
+        .order_by(models.SessionCompact.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    hist_q = select(models.ChatMessage).where(models.ChatMessage.session_id == session.id)
+    if compact is not None:
+        # 압축 이후 대화만 — 절삭 없이 (그 이전은 compact가 대체)
+        hist_q = hist_q.where(models.ChatMessage.created_at > compact.created_at).order_by(
+            models.ChatMessage.created_at.asc()
+        )
+        history_rows = db.execute(hist_q).scalars().all()
+    else:
+        # 첫 압축 전엔 상한을 둔다 (아직 압축본이 없어 폭주 방지)
+        history_rows = db.execute(
+            hist_q.order_by(models.ChatMessage.created_at.desc()).limit(_TURN_HISTORY_LIMIT)
+        ).scalars().all()
+        history_rows = list(reversed(history_rows))
+    history = [{"role": m.role, "content": m.content} for m in history_rows]
 
     analysis = db.execute(
         select(models.Analysis)
@@ -474,7 +501,9 @@ def _assemble_turn_context(session: models.AnalysisSession, db: Session) -> dict
     return {
         "agent_context": {
             "solution": session.solution,
+            "operation": operation,
             "history": history,
+            "compact": compact.payload if compact else None,
             "analysis": analysis.result if analysis else None,
             "recommendation": rec.payload if rec else None,
             "parsed_doc": document.parsed_content if document else None,
@@ -498,6 +527,21 @@ def _save_analysis(session_id: uuid.UUID, document_id: uuid.UUID, result: dict) 
         s.add(row)
         s.commit()
         return row.id
+
+
+def _save_compact(session_id: uuid.UUID, payload: dict) -> str:
+    """대화 압축본을 session_compacts에 저장한다 (append-only — 최신 행이 다음 턴에 주입된다)."""
+    from app.db import SessionLocal
+
+    with SessionLocal() as s:
+        row = models.SessionCompact(
+            session_id=session_id,
+            schema_version=str(payload.get("schema_version", "1.0")),
+            payload=payload,
+        )
+        s.add(row)
+        s.commit()
+        return str(row.id)
 
 
 def _persist_chat_turn(
@@ -542,6 +586,20 @@ def _persist_turn_result(
         raise ValueError(f"에이전트 결과 type이 올바르지 않습니다: {rtype!r}")
 
     answer = result.get("answer") or ""
+
+    # compact — 압축본을 저장하고 여기서 끝낸다. 압축은 이력을 대체하므로 이 턴 자체는
+    # chat_messages에 남기지 않는다 (압축 이후 이력을 다시 늘리지 않도록).
+    if rtype == "compact":
+        cp = result.get("compact")
+        if cp is None:
+            raise ValueError("type=compact인데 compact가 없습니다")
+        _save_compact(session_id, cp)
+        return {
+            "type": "compact", "answer": answer,
+            "sources": result.get("sources") or [], "session_id": str(session_id),
+            "compact": cp,
+        }
+
     ar = result.get("analysis_result")
     rec = result.get("updated_recommendation")
 
@@ -607,7 +665,7 @@ async def agent_turn(
             503, detail={"code": "AGENT_UNAVAILABLE", "message": "에이전트가 아직 준비되지 않았습니다."}
         )
 
-    ctx = _assemble_turn_context(session, db)
+    ctx = _assemble_turn_context(session, db, operation=payload.operation)
     agent_context = ctx["agent_context"]
     session_key = session.id
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
