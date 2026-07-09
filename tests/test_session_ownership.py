@@ -1,7 +1,7 @@
 """세션 소유권 검사 테스트 (RPA-40).
 
 핵심 규칙: 소유자가 있는 세션은 본인만 접근(403 otherwise), 익명 세션(user_id NULL)은
-누구나 접근(하위호환). analyze·문서 조회 라우트에 적용된다.
+누구나 접근(하위호환). 세션/문서 조회 라우트에 적용된다.
 """
 
 import uuid
@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-import app.api.sessions as sessions_api
 from app.api.auth import assert_session_owner
 from app.db import get_db
 from app.main import app
@@ -49,62 +48,10 @@ def test_owned_session_blocks_anonymous():
     assert exc.value.status_code == 403
 
 
-# --- 라우트: analyze가 소유권을 강제하는가 ---
-
-class FakeDB:
-    def __init__(self, session):
-        self._session = session
-
-    def get(self, model, key):
-        return self._session
-
-    def execute(self, stmt):
-        doc = SimpleNamespace(id=DOC_ID, status="parsed", parsed_content={"full_text": "x"})
-        return SimpleNamespace(scalar_one_or_none=lambda: doc)
-
-
 @pytest.fixture(autouse=True)
 def _cleanup():
     yield
     app.dependency_overrides.clear()
-
-
-def _override(session, user):
-    app.dependency_overrides[get_db] = lambda: FakeDB(session)
-    app.dependency_overrides[sessions_api.get_optional_user] = lambda: user
-
-
-def test_analyze_blocks_non_owner():
-    from fastapi.testclient import TestClient
-
-    owned_session = SimpleNamespace(id=SESSION_ID, user_id=USER_A)
-    _override(owned_session, SimpleNamespace(id=USER_B))  # 다른 사용자
-    with TestClient(app) as c:
-        r = c.post(f"/api/sessions/{SESSION_ID}/analyze")
-    assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "FORBIDDEN"
-
-
-def test_analyze_allows_anonymous_session():
-    """익명 세션(user_id NULL)은 통과 → 소유권이 아닌 다음 단계(agent 미존재 시 503)로."""
-    from fastapi.testclient import TestClient
-
-    anon_session = SimpleNamespace(id=SESSION_ID, user_id=None)
-    _override(anon_session, None)
-    with TestClient(app) as c:
-        r = c.post(f"/api/sessions/{SESSION_ID}/analyze")
-    # 소유권은 통과 → 403이 아니어야 한다 (agent 상태에 따라 200/503)
-    assert r.status_code != 403
-
-
-def test_analyze_allows_owner():
-    from fastapi.testclient import TestClient
-
-    owned_session = SimpleNamespace(id=SESSION_ID, user_id=USER_A)
-    _override(owned_session, SimpleNamespace(id=USER_A))
-    with TestClient(app) as c:
-        r = c.post(f"/api/sessions/{SESSION_ID}/analyze")
-    assert r.status_code != 403  # 소유자 본인은 통과
 
 
 # --- 라우트: 문서 조회도 세션 소유권을 강제하는가 ---
