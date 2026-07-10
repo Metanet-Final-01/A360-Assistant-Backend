@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app.api.admin as admin_api
-from app.db import get_db
+from app.core.observability_db import get_obs_db
 from app.main import app
 
 
@@ -46,7 +46,7 @@ def _agg(key, calls, i, o, cost):
 def test_non_admin_user_403(monkeypatch):
     """화이트리스트에 없는 로그인 사용자는 403 — 전 사용자 데이터 열람 차단."""
     monkeypatch.setenv("ADMIN_EMAILS", "admin@test.com")
-    app.dependency_overrides[get_db] = lambda: FakeDB()
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     app.dependency_overrides[admin_api.get_current_user] = (
         lambda: SimpleNamespace(id=uuid.uuid4(), email="someone@test.com")
     )
@@ -59,7 +59,7 @@ def test_non_admin_user_403(monkeypatch):
 def test_admin_emails_unset_denies_all(monkeypatch):
     """ADMIN_EMAILS 미설정이면 전부 차단 (fail-closed)."""
     monkeypatch.delenv("ADMIN_EMAILS", raising=False)
-    app.dependency_overrides[get_db] = lambda: FakeDB()
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     app.dependency_overrides[admin_api.get_current_user] = (
         lambda: SimpleNamespace(id=uuid.uuid4(), email="anyone@test.com")
     )
@@ -71,7 +71,7 @@ def test_admin_emails_unset_denies_all(monkeypatch):
 def test_whitelisted_admin_passes(monkeypatch):
     """화이트리스트 이메일(대소문자 무시)은 통과."""
     monkeypatch.setenv("ADMIN_EMAILS", "Admin@Test.com, ops@test.com")
-    app.dependency_overrides[get_db] = lambda: FakeDB()
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     app.dependency_overrides[admin_api.get_current_user] = (
         lambda: SimpleNamespace(id=uuid.uuid4(), email="admin@test.com")
     )
@@ -84,7 +84,7 @@ def test_whitelisted_admin_passes(monkeypatch):
 
 def test_llm_usage_stats_aggregates():
     db = FakeDB(agg_rows=[_agg("agent", 10, 1000, 200, 0.05), _agg("vision", 3, 300, 0, 0.01)])
-    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_obs_db] = lambda: db
     _auth()
     with TestClient(app) as c:
         r = c.get("/api/admin/llm-usage/stats", params={"group_by": "component", "days": 7})
@@ -99,7 +99,7 @@ def test_llm_usage_stats_aggregates():
 def test_llm_usage_stats_user_group_stringifies_uuid():
     uid = uuid.uuid4()
     db = FakeDB(agg_rows=[_agg(uid, 5, 500, 100, 0.02), _agg(None, 2, 50, 0, 0.0)])
-    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_obs_db] = lambda: db
     _auth()
     with TestClient(app) as c:
         r = c.get("/api/admin/llm-usage/stats", params={"group_by": "user"})
@@ -108,7 +108,7 @@ def test_llm_usage_stats_user_group_stringifies_uuid():
 
 
 def test_llm_usage_stats_requires_auth():
-    app.dependency_overrides[get_db] = lambda: FakeDB()
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     _auth(HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "x"}))
     with TestClient(app) as c:
         r = c.get("/api/admin/llm-usage/stats")
@@ -116,7 +116,7 @@ def test_llm_usage_stats_requires_auth():
 
 
 def test_llm_usage_stats_invalid_group_by_422():
-    app.dependency_overrides[get_db] = lambda: FakeDB()
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     _auth()
     with TestClient(app) as c:
         r = c.get("/api/admin/llm-usage/stats", params={"group_by": "session"})
@@ -128,7 +128,7 @@ def test_llm_usage_stats_invalid_group_by_422():
 def test_audit_logs_returns_rows():
     rows = [SimpleNamespace(request_id="abc123", user_id=None, method="POST",
                             path="/api/sessions", status_code=201, latency_ms=12, created_at=None)]
-    app.dependency_overrides[get_db] = lambda: FakeDB(audit_rows=rows)
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB(audit_rows=rows)
     _auth()
     with TestClient(app) as c:
         r = c.get("/api/admin/audit-logs", params={"method": "post", "limit": 50})
@@ -138,7 +138,7 @@ def test_audit_logs_returns_rows():
 
 
 def test_audit_logs_invalid_user_id_400():
-    app.dependency_overrides[get_db] = lambda: FakeDB()
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     _auth()
     with TestClient(app) as c:
         r = c.get("/api/admin/audit-logs", params={"user_id": "not-a-uuid"})

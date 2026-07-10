@@ -46,6 +46,10 @@ async def lifespan(app: FastAPI):
     from app.api.sessions import warmup_token_encoder
 
     threading.Thread(target=warmup_token_encoder, daemon=True).start()
+    # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 설정 시 테이블 보장 (실패해도 기동)
+    from app.core.observability_db import ensure_observability_schema
+
+    ensure_observability_schema()
     yield
 
 

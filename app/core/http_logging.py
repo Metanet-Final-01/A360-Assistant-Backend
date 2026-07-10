@@ -52,7 +52,7 @@ def _record_audit(request_id, user_id, method, path, status_code, latency_ms) ->
         import uuid as _uuid
 
         from app import models
-        from app.db import SessionLocal
+        from app.core.observability_db import observability_sessionmaker
 
         uid = None
         if user_id:
@@ -60,7 +60,8 @@ def _record_audit(request_id, user_id, method, path, status_code, latency_ms) ->
                 uid = _uuid.UUID(user_id)
             except (ValueError, TypeError):
                 uid = None
-        with SessionLocal() as s:
+        # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 미설정이면 앱 DB 폴백
+        with observability_sessionmaker()() as s:
             s.add(
                 models.AuditLog(
                     request_id=request_id,
