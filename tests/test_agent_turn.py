@@ -565,7 +565,7 @@ def test_lookahead_compact_triggers_on_huge_input(monkeypatch):
                         lambda sid: {"intake_tokens": 99500, "limit_tokens": 100000, "ratio": 0.995,
                                      "compact_recommended": True, "compact_required": False})
     _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
-    # message max_length=4000. 3000자 → 폴백 추정 len//2=1500 ≥ 필요치 500 (tiktoken이면 더 큼)
+    # message max_length=4000. 3000자 → 폴백 추정 len=3000 ≥ 필요치 500 (tiktoken 실측도 유사)
     huge = "업무 자동화 요청 " * 300  # ≈3000자
     _, events = _run(message=huge)
 
@@ -599,9 +599,9 @@ def test_estimate_message_tokens_fallback():
 
 
 def test_estimate_uses_char_fallback_before_warmup(monkeypatch):
-    """인코더 미준비(워밍업 전/실패)면 요청 경로에서 로드하지 않고 문자 폴백(len//2)."""
+    """인코더 미준비(워밍업 전/실패)면 요청 경로에서 로드하지 않고 문자 폴백(1문자≈1토큰)."""
     monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
-    assert sessions_api._estimate_message_tokens("가" * 100) == 50
+    assert sessions_api._estimate_message_tokens("가" * 100) == 100  # 한글 ≈1 tok/char 실측 반영
 
 
 def test_warmup_failure_is_not_sticky(monkeypatch):

@@ -698,7 +698,7 @@ _TOKEN_ENCODER = None
 def warmup_token_encoder() -> None:
     """tiktoken 인코더를 미리 로드한다 — lifespan이 백그라운드 스레드로 호출.
 
-    실패(미설치·오프라인 등)해도 앱은 계속 뜨고, 추정은 문자 폴백(len//2)으로 동작한다.
+    실패(미설치·오프라인 등)해도 앱은 계속 뜨고, 추정은 문자 폴백(len)으로 동작한다.
     """
     global _TOKEN_ENCODER
     try:
@@ -718,8 +718,9 @@ def _estimate_message_tokens(text: str) -> int:
     """이번 입력 message의 토큰 수 추정 — 선행 compact 판단용 (RPA-86).
 
     tiktoken이 있으면 실제 인코딩으로 세고(정확), 없으면 문자 기반으로 폴백한다.
-    안전망 성격상 과소추정이 더 위험(스파이크를 놓침)하므로, 한글이 섞여도 넉넉히
-    잡도록 폴백은 len//2를 쓴다(대략 1토큰≈2문자 가정, 보수적으로 크게).
+    안전망 성격상 과소추정이 더 위험(스파이크를 놓침)하므로 폴백은 1문자≈1토큰(len)로
+    잡는다 — cl100k_base 실측: 한글 ≈0.9~1.0 tok/char라 len//2는 절반 과소추정이었고
+    (CodeRabbit #134), len은 한글과 거의 일치·영문(≈0.15 tok/char)엔 과대추정이라 가드로 안전.
     """
     if not text:
         return 0
@@ -729,7 +730,7 @@ def _estimate_message_tokens(text: str) -> int:
             return len(enc.encode(text))
         except Exception:  # noqa: BLE001 — 인코딩 실패 시 문자 폴백
             pass
-    return max(1, len(text) // 2)
+    return max(1, len(text))
 
 
 def _needs_auto_compact(gauge: dict, message: str) -> bool:
