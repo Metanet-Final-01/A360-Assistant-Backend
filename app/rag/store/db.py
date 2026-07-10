@@ -41,6 +41,15 @@ def ensure_schema(conn: psycopg.Connection) -> None:
     conn.commit()
 
 
+def clear_all(conn: psycopg.Connection) -> None:
+    """rag_documents 전체 삭제. upsert는 새 build에 없는 옛 row를 절대 지우지 않으므로,
+    RAG 구조를 크게 바꿔 재적재할 때(예: 패키지/액션 스키마 커버리지 범위 변경) 쓰는
+    명시적 초기화 — 자동으로 호출되지 않고 `ingest --clean`에서만 실행된다."""
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE TABLE rag_documents")
+    conn.commit()
+
+
 def upsert_documents(conn: psycopg.Connection, documents: list[dict], embeddings: list | None) -> int:
     sql = """
         INSERT INTO rag_documents
