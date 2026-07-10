@@ -108,7 +108,8 @@ def test_audit_records_mutating_success_only(mini_app, monkeypatch):
     assert saved[0].method == "POST" and saved[0].path == "/do" and saved[0].status_code == 200
 
 
-def test_audit_skips_failed_mutation(mini_app, monkeypatch):
+def test_audit_records_failed_mutation(mini_app, monkeypatch):
+    """실패한 변경 요청(4xx)도 감사에 남긴다 — "누가 무엇을 시도했나" forensics (RPA-82)."""
     saved = []
 
     class _FakeDB:
@@ -122,12 +123,13 @@ def test_audit_skips_failed_mutation(mini_app, monkeypatch):
 
     @mini_app.post("/fail")
     def _fail():
-        raise AppError("NOPE", "실패", status_code=400)
+        raise AppError("NOPE", "실패", status_code=400)  # 전역 핸들러가 400 응답으로 변환
 
     with TestClient(mini_app) as c:
-        c.post("/fail")  # 4xx → 중요 이벤트 아님 → 감사 안 됨
+        c.post("/fail")  # 4xx 변경 요청 → 감사에 기록됨(status_code=400)
 
-    assert saved == []
+    assert len(saved) == 1
+    assert saved[0].method == "POST" and saved[0].path == "/fail" and saved[0].status_code == 400
 
 
 def test_no_crlf_sanitizer():
