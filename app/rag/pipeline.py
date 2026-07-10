@@ -478,6 +478,15 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # Windows 콘솔 기본 코드페이지(cp949 등)는 em-dash(—)/en-dash(–) 같은 문자를
+    # 인코딩 못 해 print()가 UnicodeEncodeError로 죽는다(실측: 크롤링한 문서 내용을
+    # 그대로 출력하는 search 명령에서 재현됨 — 외부 문서 텍스트는 어떤 특수문자가
+    # 들어있을지 통제할 수 없다). UTF-8로 강제하고, 그래도 콘솔이 못 그리는 문자는
+    # errors="replace"로 안전하게 대체해 최소한 크래시는 나지 않게 한다.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(prog="python -m app.rag.pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
