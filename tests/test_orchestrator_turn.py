@@ -203,6 +203,55 @@ def test_edit_no_change_returns_answer_type(monkeypatch):
     assert data["updated_recommendation"] is None
 
 
+def test_edit_other_solution_verifies_via_user_catalog(monkeypatch):
+    """타 솔루션 edit도 대화에서 UserCatalog를 재추출해 검수한다 (RPA-96, a360과 대칭)."""
+    _set_api_key(monkeypatch)
+    _route(monkeypatch, "edit")
+    edited = json.dumps({"recommendation": _CLEAN_FLOW, "change_summary": "정리", "answer": "수정"},
+                        ensure_ascii=False)
+    monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(edited)]))
+
+    from app.agent.orchestrator.generate import (
+        CatalogExtraction, UserCatalogAction, UserCatalogParam,
+    )
+    called = {"extract": False}
+
+    def fake_extract(state):
+        called["extract"] = True
+        return CatalogExtraction(solution="uipath", actions=[
+            UserCatalogAction(package="String", action="assign",
+                              parameters=[UserCatalogParam(name="value", type="TEXT", required=True)]),
+        ])
+
+    monkeypatch.setattr(edit_mod, "extract_user_catalog", fake_extract)
+    ctx = dict(_CTX, solution="uipath", recommendation=_CLEAN_FLOW, analysis=_ANALYSIS.model_dump())
+    data = _done(_collect("값 정리해줘", ctx))
+    assert called["extract"] is True  # 타 솔루션도 카탈로그를 추출해 검수한다
+    assert data["type"] == "recommendation"
+    assert data["violations"] == []   # String/assign은 추출 카탈로그에 있어 무위반
+
+
+def test_edit_other_solution_skips_verify_without_catalog(monkeypatch):
+    """카탈로그를 추출하지 못하면(액션 없음) 검수 기준이 없어 생략한다."""
+    _set_api_key(monkeypatch)
+    _route(monkeypatch, "edit")
+    edited = json.dumps({"recommendation": _CLEAN_FLOW, "change_summary": "", "answer": "수정"},
+                        ensure_ascii=False)
+    monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(edited)]))
+
+    from app.agent.orchestrator.generate import CatalogExtraction
+    monkeypatch.setattr(edit_mod, "extract_user_catalog", lambda state: CatalogExtraction(actions=[]))
+
+    def verify_boom(*a, **k):
+        raise AssertionError("카탈로그가 없으면 검수를 생략해야 함")
+
+    monkeypatch.setattr(edit_mod, "verify_and_repair", verify_boom)
+    ctx = dict(_CTX, solution="uipath", recommendation=_CLEAN_FLOW)
+    data = _done(_collect("바꿔줘", ctx))
+    assert data["type"] == "recommendation"
+    assert data["violations"] == []
+
+
 def test_compact_operation_bypasses_intake(monkeypatch):
     _set_api_key(monkeypatch)
 
