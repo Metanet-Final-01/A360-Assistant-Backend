@@ -39,6 +39,13 @@ async def lifespan(app: FastAPI):
         logger.info("DB 마이그레이션 완료 (alembic head)")
     except Exception as e:  # noqa: BLE001
         logger.warning("DB 마이그레이션 실패 (앱은 계속 기동): %s", e)
+    # tiktoken 인코더 워밍업(RPA-86) — 최초 get_encoding은 원격 BPE 다운로드라 요청 경로에서
+    # 부르면 이벤트 루프를 막는다. 백그라운드 스레드로 미리 로드 (실패 시 문자 폴백으로 동작).
+    import threading
+
+    from app.api.sessions import warmup_token_encoder
+
+    threading.Thread(target=warmup_token_encoder, daemon=True).start()
     # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 설정 시 테이블 보장 (실패해도 기동)
     from app.core.observability_db import ensure_observability_schema
 
