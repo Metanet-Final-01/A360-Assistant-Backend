@@ -31,9 +31,6 @@ from .stream import emit
 
 logger = logging.getLogger(__name__)
 
-# 동시 LLM 호출 상한 (rate limit 방어). 병렬 단계가 많아도 이만큼씩만 돈다.
-_MAX_CONCURRENCY = 3
-
 
 def step_node(state: dict) -> dict:
     """한 업무 단계 → 액션 시퀀스. shortlist→compose→check를 순차 실행한다.
@@ -138,7 +135,7 @@ async def recommend(
     try:
         async for mode, chunk in _get_graph().astream(
             inputs, stream_mode=["custom", "values"],
-            config={"max_concurrency": _MAX_CONCURRENCY},
+            config={"max_concurrency": config.MAX_LLM_CONCURRENCY},
         ):
             if mode == "custom":
                 yield ProgressEvent(**chunk)

@@ -58,4 +58,5 @@ def intake_node(state: TurnState) -> dict:
     if route == ROUTE_EDIT and not (state.get("recommendation") or {}).get("steps"):
         route, reason = ROUTE_GENERATE, "수정 요청이지만 흐름도가 없어 신규 산출로 전환"
 
+    logger.info("intake route=%s (%s)", route, reason)
     return {"route": route, "route_reason": reason}

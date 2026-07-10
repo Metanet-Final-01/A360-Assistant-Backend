@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.schemas import Recommendation
 
+from .. import config
 from ..analysis import _has_text, analyze, analyze_text
 from ..recommend.graph import get_graph as get_recommend_graph
 from ..recommend.stream import emit
@@ -33,9 +34,6 @@ logger = logging.getLogger(__name__)
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _CATALOG_PROMPT = (_PROMPT_DIR / "other_catalog.md").read_text(encoding="utf-8")
 _COMPOSE_PROMPT = (_PROMPT_DIR / "other_compose.md").read_text(encoding="utf-8")
-
-# recommend 서브그래프의 동시 LLM 호출 상한 (recommend.graph._MAX_CONCURRENCY와 동일 취지).
-_MAX_CONCURRENCY = 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,7 +107,7 @@ async def _generate_a360(state: TurnState) -> dict:
     final_state: dict = {}
     async for mode, chunk in get_recommend_graph().astream(
         inputs, stream_mode=["custom", "values"],
-        config={"max_concurrency": _MAX_CONCURRENCY},
+        config={"max_concurrency": config.MAX_LLM_CONCURRENCY},
     ):
         if mode == "custom":
             emit(chunk)

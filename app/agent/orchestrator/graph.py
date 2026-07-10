@@ -35,9 +35,6 @@ from .state import (
 
 logger = logging.getLogger(__name__)
 
-# 그래프 전체 동시 LLM 호출 상한 (recommend 서브그래프 병렬 단계 포함, rate limit 방어).
-_MAX_CONCURRENCY = 3
-
 
 def _route_entry(state: TurnState) -> str:
     """compact 버튼(operation)은 결정론 요청 — LLM 라우터를 우회한다."""
@@ -143,7 +140,7 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
         async for mode, chunk in _get_graph().astream(
             _to_inputs(message, context),
             stream_mode=["custom", "values"],
-            config={"max_concurrency": _MAX_CONCURRENCY},
+            config={"max_concurrency": config.MAX_LLM_CONCURRENCY},
         ):
             if mode == "custom":
                 yield ProgressEvent(**chunk)
