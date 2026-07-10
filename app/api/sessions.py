@@ -5,6 +5,7 @@
 """
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -637,6 +638,46 @@ def _persist_turn_result(
     return out
 
 
+_GAUGE_WARN_RATIO = 0.7  # intake 토큰이 이 비율을 넘으면 compact 권장 신호
+
+
+def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
+    """이번 세션 최신 intake 호출의 prompt_tokens로 대화 누적 게이지를 만든다.
+
+    정준환의 intake 태깅(purpose="intake", RPA-73) 기준 — 이 호출엔 history+compact가 절삭
+    없이 실리므로 input_tokens가 "대화 누적분"의 충실한 대리값이다. 임계는 env로 조정한다.
+    """
+    from app.db import SessionLocal
+
+    with SessionLocal() as s:
+        tokens = s.execute(
+            select(models.LlmUsage.input_tokens)
+            .where(
+                models.LlmUsage.session_id == session_id,
+                models.LlmUsage.purpose == "intake",
+            )
+            .order_by(models.LlmUsage.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+    if tokens is None:
+        return None
+    # env가 비정상(non-numeric)·0·음수면 기본값으로 폴백 — 게이지를 통째로 끄거나
+    # ZeroDivision을 내지 않고 항상 의미 있는 값을 낸다.
+    try:
+        limit = int(os.getenv("TURN_GAUGE_LIMIT_TOKENS", "100000"))
+    except ValueError:
+        limit = 0
+    if limit <= 0:
+        limit = 100000
+    ratio = round(tokens / limit, 4)
+    return {
+        "intake_tokens": int(tokens),
+        "limit_tokens": limit,
+        "ratio": ratio,
+        "compact_recommended": bool(ratio >= _GAUGE_WARN_RATIO),
+    }
+
+
 @router.post("/{session_id}/turn")
 async def agent_turn(
     session_id: str,
@@ -683,6 +724,15 @@ async def agent_turn(
                 final = _persist_turn_result(
                     session_key, rec_analysis_id, document_id, message, result_data
                 )
+                # 대화 누적 게이지 — compact 턴은 intake가 없어 갱신 안 함(다음 대화 턴에서 압축값 반영).
+                # best-effort: 게이지 조회 실패가 정상 응답을 error로 바꾸지 않게 한다.
+                if final.get("type") != "compact":
+                    try:
+                        gauge = _read_intake_gauge(session_key)
+                        if gauge is not None:
+                            final["usage_gauge"] = gauge
+                    except Exception:  # noqa: BLE001
+                        logger.warning("게이지 조회 실패 (무시): session=%s", session_key, exc_info=True)
                 yield ProgressEvent(event="done", stage="agent", message="완료", data=final).to_sse()
             elif not saw_error:
                 yield ProgressEvent(
