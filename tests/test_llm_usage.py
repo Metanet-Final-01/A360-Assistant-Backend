@@ -221,6 +221,13 @@ def test_cost_usd_chat_model_uses_env(monkeypatch):
     assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini-2026-03-17") == 0.75
 
 
+def test_cost_usd_longest_prefix_wins():
+    """rerank-2.5-lite는 rerank-2.5(0.05)가 아니라 자기 단가(0.02)로 — 최장 prefix 우선."""
+    # 1M 토큰 → lite=0.02, 일반=0.05. lite가 일반으로 새면 안 된다.
+    assert llm.cost_usd(1_000_000, 0, "rerank-2.5-lite") == 0.02
+    assert llm.cost_usd(1_000_000, 0, "rerank-2.5") == 0.05
+
+
 def test_cost_usd_none_when_no_price(monkeypatch):
     """미지 모델 + env 미설정이면 None (억지 계산 금지)."""
     monkeypatch.delenv("LLM_INPUT_COST_PER_1M", raising=False)

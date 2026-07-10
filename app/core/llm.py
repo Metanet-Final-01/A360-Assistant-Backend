@@ -95,7 +95,7 @@ _AUX_MODEL_PRICES: dict[str, tuple[float, float]] = {
     "text-embedding-3-small": (0.02, 0.0),  # OpenAI
     "text-embedding-3-large": (0.13, 0.0),  # OpenAI (혹시 전환 시)
     "rerank-2.5-lite": (0.02, 0.0),         # Voyage
-    "rerank-2.5": (0.06, 0.0),              # Voyage (혹시 전환 시)
+    "rerank-2.5": (0.05, 0.0),              # Voyage (혹시 전환 시, docs.voyageai.com)
 }
 
 
@@ -107,8 +107,11 @@ def cost_usd(input_tokens: int, output_tokens: int, model: str | None = None) ->
     - 단가를 못 구하면(미지 모델 + env 미설정) None.
     """
     if model:
-        for prefix, (in_price, out_price) in _AUX_MODEL_PRICES.items():
+        # 최장 prefix 우선 — "rerank-2.5-lite"가 "rerank-2.5"보다 먼저 매칭돼야 한다
+        # (dict 순서에 기대지 않고 항상 가장 구체적인 항목을 고른다).
+        for prefix in sorted(_AUX_MODEL_PRICES, key=len, reverse=True):
             if model.startswith(prefix):
+                in_price, out_price = _AUX_MODEL_PRICES[prefix]
                 return (input_tokens * in_price + output_tokens * out_price) / 1_000_000
     try:
         in_price = float(os.environ["LLM_INPUT_COST_PER_1M"])
