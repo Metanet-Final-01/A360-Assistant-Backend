@@ -159,3 +159,36 @@ def test_localized_repair_fixes_each_scattered_step(monkeypatch):
     assert result["repaired"] is True
     assert result["violations"] == []
     assert all(s["actions"][0]["action"] == "assign" for s in result["flow"]["steps"])
+
+
+def _web_open(name):
+    """열기만 하고 닫지 않는 세션 액션(R1~R6은 clean, 세션은 미종료 → R8)."""
+    return {
+        "order": 1, "package": "WebAutomation", "action": "StartSessionWebAutomation",
+        "label": "세션 시작", "children": [],
+        "parameters": [
+            {"name": "browserType", "value": "Chrome", "value_source": "llm"},
+            {"name": "sessionName", "value": name, "value_source": "llm"},
+        ],
+    }
+
+
+def test_global_guard_discards_repairs_that_worsen_total(monkeypatch):
+    """국소 교정이 R1은 고치되 세션 누수(R8)를 더 만들어 전체가 악화되면 모두 폐기한다.
+
+    원본: R1 1건. 국소 교정본: R1 0건이지만 미종료 세션 2개(R8 2건) → 전체 2건.
+    세션 교정도 못 줄이면 전역 가드가 원본(R1 1건)을 되돌린다. (CodeRabbit RPA-91 리뷰)
+    """
+    # step 국소 교정과 세션 교정 모두 이 '세션 누수' 흐름도를 돌려준다.
+    leak_flow = {
+        "schema_version": "1.0",
+        "steps": [{"step_id": "step-1", "actions": [_web_open("A"), _web_open("B")]}],
+        "variables": [], "notes": None,
+    }
+    monkeypatch.setattr(harness_mod, "chat_json",
+                        lambda *a, **k: Recommendation.model_validate(leak_flow))
+    result = verify_and_repair(_BROKEN_FLOW, _CATALOG)
+
+    assert result["repaired"] is False  # 전체가 나빠졌으므로 교정 폐기
+    assert len(result["violations"]) == 1 and result["violations"][0]["rule"] == "R1"
+    assert result["flow"]["steps"][0]["actions"][0]["action"] == "SaveWorkbook"  # 원본 유지

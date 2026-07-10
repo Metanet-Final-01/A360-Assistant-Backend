@@ -158,7 +158,9 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
     1단계: 단계별 문법 위반(R1~R6)을 그 단계 서브트리만 국소 교정한다(단계마다 독립 —
     흩어진 위반도 각각 시도되고, 위반 없는 단계는 그대로 보존된다).
     2단계: 남은 세션 위반(R7~R8)만 흐름도 전체 관점에서 1회 교정한다.
-    어느 단계든 교정본은 위반이 줄었을 때만 채택하므로 repair가 흐름도를 악화시키지 않는다.
+    각 교정은 자기 기준(단계별 R1~R6 / 세션별 전체)으로 위반이 줄 때만 채택하고, 마지막에
+    전역 회귀 가드로 전체 위반이 원본보다 늘었으면 모든 교정을 폐기한다 — repair가 흐름도를
+    악화시키지 않는다.
 
     반환: {"flow": dict, "violations": list[dict], "repaired": bool}.
     """
@@ -166,6 +168,10 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
     violations = collect_violations(flow, catalog)
     if not violations:
         return {"flow": flow, "violations": violations, "repaired": False}
+
+    # 국소 교정(1단계)은 단계별 R1~R6만 보고 채택하므로 액션 수정이 단계 경계를 넘는
+    # R7~R8을 새로 만들 수 있다. 전역 회귀 가드용으로 원본을 붙잡아 둔다.
+    original_flow, original_violations = flow, violations
 
     emit({"event": "stage", "stage": "verifying",
           "message": f"검수 위반 {len(violations)}건 교정 중"})
@@ -187,5 +193,12 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
     if any(v["rule"] in _SESSION_RULES for v in violations):
         flow, violations, sess_repaired = _repair_sessions(flow, violations, catalog)
         repaired = repaired or sess_repaired
+
+    # 전역 회귀 가드: 국소 교정이 R7~R8을 새로 만들어 전체 위반이 원본보다 늘었으면
+    # (단계별·세션별 채택 기준으로는 못 잡는 경로) 모든 교정을 폐기하고 원본을 유지한다.
+    if len(violations) > len(original_violations):
+        logger.info("교정 후 전체 위반 증가(%d→%d) — 모든 교정 폐기, 원본 유지",
+                    len(original_violations), len(violations))
+        return {"flow": original_flow, "violations": original_violations, "repaired": False}
 
     return {"flow": flow, "violations": violations, "repaired": repaired}
