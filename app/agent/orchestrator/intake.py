@@ -58,5 +58,7 @@ def intake_node(state: TurnState) -> dict:
     if route == ROUTE_EDIT and not (state.get("recommendation") or {}).get("steps"):
         route, reason = ROUTE_GENERATE, "수정 요청이지만 흐름도가 없어 신규 산출로 전환"
 
-    logger.info("intake route=%s (%s)", route, reason)
+    # reason은 LLM이 만든 근거라 사용자 발화를 인용할 수 있어(PII 축적 방지) 길이를 제한해
+    # 로깅한다. route가 주 신호이고 reason은 보조 맥락이다. 원문 전체는 route_reason으로 반환.
+    logger.info("intake route=%s (%s)", route, reason[:120])
     return {"route": route, "route_reason": reason}
