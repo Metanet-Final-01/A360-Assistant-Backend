@@ -104,21 +104,19 @@ def register_http_logging(app: FastAPI) -> None:
         try:
             response = await call_next(request)
         except Exception as exc:
-            failed_ms = round((time.perf_counter() - start) * 1000, 2)
+            # 전역 에러 핸들러(install_error_handlers)가 Exception까지 잡아 500 응답으로 바꾸므로
+            # 여기(미들웨어 except)는 거의 안 탄다. 그 500 응답은 아래 감사 경로가 이미 기록한다.
+            # 여기서 다시 _record_audit(=DB commit)을 시도하면, 장애 원인이 DB일 때 같은 DB로
+            # 무제한 재시도해 스레드풀을 오래 점유할 수 있어(CodeRabbit) 감사는 남기지 않는다.
             log_event(
                 "http_request",
                 **common,
                 status="error",
                 error_type=type(exc).__name__,
                 error_message=str(exc),
-                duration_ms=failed_ms,
+                duration_ms=round((time.perf_counter() - start) * 1000, 2),
                 ended_at=datetime.now(timezone.utc).isoformat(),
             )
-            # 전역 핸들러가 못 잡은 예외도 변경성 요청이면 500으로 감사에 남긴다
-            if request.method in _AUDIT_METHODS:
-                await run_in_threadpool(
-                    _record_audit, req_id, user_id, request.method, safe_path, 500, int(failed_ms),
-                )
             raise
 
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
