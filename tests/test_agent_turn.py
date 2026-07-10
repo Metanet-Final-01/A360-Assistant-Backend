@@ -102,10 +102,25 @@ def _make_persist(captured, max_version=None):
 def _install_agent(monkeypatch, events):
     async def _fake_turn(message, context):
         _fake_turn.seen_context = context  # 컨텍스트 검증용
+        _fake_turn.calls += 1
         for ev in events:
             yield ev
+    _fake_turn.calls = 0
     monkeypatch.setattr("app.agent.stream_agent_turn", _fake_turn, raising=False)
     return _fake_turn
+
+
+def _install_agent_seq(monkeypatch, call_events):
+    """호출마다 다른 이벤트 시퀀스를 yield — 자동 compact는 stream_turn을 2번 부른다."""
+    seq = iter(call_events)
+
+    async def _fake(message, context):
+        _fake.calls += 1
+        for ev in next(seq):
+            yield ev
+    _fake.calls = 0
+    monkeypatch.setattr("app.agent.stream_agent_turn", _fake, raising=False)
+    return _fake
 
 
 def _run(sid=SID, operation=None):
@@ -489,6 +504,61 @@ def test_read_intake_gauge_none_when_no_intake(monkeypatch):
 
     monkeypatch.setattr("app.db.SessionLocal", _S)
     assert sessions_api._read_intake_gauge(SID) is None
+
+
+# --- 하드 자동 compact (RPA-84) ---
+
+def test_auto_compact_triggers_over_hard(monkeypatch):
+    """대화 누적이 하드 임계를 넘으면 실제 턴 전에 자동 compact가 먼저 돈다."""
+    from app.schemas import ProgressEvent
+    fake = _install_agent_seq(monkeypatch, [
+        [ProgressEvent(event="done", data={"type": "compact", "answer": "요약",
+                                           "sources": [], "compact": _compact_payload()})],
+        [ProgressEvent(event="done", data={"type": "answer", "answer": "실제 답", "sources": []})],
+    ])
+    captured = {}
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured))
+    monkeypatch.setattr(sessions_api, "_read_intake_gauge",
+                        lambda sid: {"intake_tokens": 120000, "limit_tokens": 100000, "ratio": 1.2,
+                                     "compact_recommended": True, "compact_required": True})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run()  # operation 기본 "chat"
+
+    assert fake.calls == 2  # 자동 compact + 실제 턴
+    assert len(captured.get("SessionCompact", [])) == 1  # 압축본 저장됨
+    assert any(e["event"] == "stage" and "자동 압축" in e.get("message", "") for e in events)
+    assert events[-1]["data"]["answer"] == "실제 답"  # 원래 턴이 이어짐
+
+
+def test_no_auto_compact_under_hard(monkeypatch):
+    """임계 미만이면 자동 compact 없이 실제 턴만 돈다 (1회 호출)."""
+    from app.schemas import ProgressEvent
+    fake = _install_agent_seq(monkeypatch, [
+        [ProgressEvent(event="done", data={"type": "answer", "answer": "답", "sources": []})],
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    monkeypatch.setattr(sessions_api, "_read_intake_gauge",
+                        lambda sid: {"intake_tokens": 10000, "limit_tokens": 100000, "ratio": 0.1,
+                                     "compact_recommended": False, "compact_required": False})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run()
+
+    assert fake.calls == 1  # 자동 compact 없음
+    assert not any(e["event"] == "stage" and "자동 압축" in e.get("message", "") for e in events)
+    assert events[-1]["data"]["answer"] == "답"
+
+
+def test_gauge_includes_compact_required(monkeypatch):
+    class _S:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: 130000)
+
+    monkeypatch.setattr("app.db.SessionLocal", _S)
+    monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", "100000")
+    monkeypatch.setenv("TURN_GAUGE_HARD_RATIO", "1.0")
+    g = sessions_api._read_intake_gauge(SID)
+    assert g["compact_required"] is True and g["compact_recommended"] is True  # 1.3 >= 1.0
 
 
 # --- 소유권: 남의 세션 차단 ---
