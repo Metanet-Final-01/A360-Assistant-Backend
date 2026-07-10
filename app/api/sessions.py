@@ -738,6 +738,9 @@ async def agent_turn(
 
     # 하드 자동 compact: chat 턴이고 대화 누적이 임계를 넘으면 실제 턴 전에 먼저 압축한다.
     # 요청 db가 살아있는 지금(제너레이터 전) 처리하고, 이후 컨텍스트 조립이 새 compact를 집는다.
+    # 한계(후행 지표): 게이지는 "직전 턴의 intake prompt_tokens" 기준이라 지금 들어온 message는
+    # 반영되지 않는다. 그래서 게이지 0.99에서 단일 초대형 입력이 오면 당턴은 compact_required가
+    # False라 압축 없이 진행되고, 초과분은 다음 턴에서야 잡힌다. 선행(look-ahead) 가드는 RPA-86(#133).
     auto_compacted = False
     if payload.operation == "chat":
         try:
