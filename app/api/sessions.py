@@ -638,7 +638,17 @@ def _persist_turn_result(
     return out
 
 
-_GAUGE_WARN_RATIO = 0.7  # intake 토큰이 이 비율을 넘으면 compact 권장 신호
+def _gauge_warn_ratio() -> float:
+    """compact 권장(소프트) 임계 비율 — 기본 0.7. env로 조정, 비정상값은 0.7 (RPA-89).
+
+    RPA-89 캘리브레이션 리포트가 실데이터에서 권장값을 산출하면 이 env로 적용한다
+    (코드 수정 없이 사람이 승인해 갱신 — 통제형 거버넌스).
+    """
+    try:
+        v = float(os.getenv("TURN_GAUGE_WARN_RATIO", "0.7"))
+    except ValueError:
+        return 0.7
+    return v if 0 < v <= 1 else 0.7
 
 
 def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
@@ -675,7 +685,7 @@ def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
         "intake_tokens": int(tokens),
         "limit_tokens": limit,
         "ratio": ratio,
-        "compact_recommended": bool(ratio >= _GAUGE_WARN_RATIO),  # 소프트: 프론트가 압축 유도
+        "compact_recommended": bool(ratio >= _gauge_warn_ratio()),  # 소프트: 프론트가 압축 유도
         "compact_required": bool(ratio >= _gauge_hard_ratio()),   # 하드: 백엔드가 자동 compact
     }
 
