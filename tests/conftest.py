@@ -25,3 +25,20 @@ def _stub_agent_rag(monkeypatch):
     fake_catalog = FakeCatalog()
     monkeypatch.setattr(retrieval_mod, "_make_retriever", lambda: fake_retriever)
     monkeypatch.setattr(catalog_mod, "_make_catalog", lambda: fake_catalog)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_observability_db(monkeypatch):
+    """테스트가 공유 관측 DB(Neon)를 절대 때리지 않게 격리한다 (RPA-90).
+
+    개발자 .env에 OBSERVABILITY_DATABASE_URL이 설정돼 있으면 record_usage/_record_audit이
+    실제 팀 공유 DB에 테스트 쓰레기를 쓴다 — env를 지워 앱 SessionLocal 폴백(각 테스트가
+    monkeypatch하는 대상)으로 고정하고 모듈 싱글톤도 초기화한다. 관측 DB 라우팅 자체를
+    검증하는 테스트(test_observability_db.py)는 자기 setenv로 다시 켠다.
+    """
+    import app.core.observability_db as obs
+
+    monkeypatch.delenv("OBSERVABILITY_DATABASE_URL", raising=False)
+    obs._engine = None
+    obs._sessionmaker = None
+    obs._url_cached = None

@@ -73,19 +73,33 @@ def get_obs_db():
 def _observability_metadata() -> MetaData:
     """관측 테이블(audit_logs·llm_usage)의 FK-제거 사본 메타데이터.
 
-    관측 DB엔 부모 테이블(users·analysis_sessions)이 없다 — FK 제약만 떼고
-    값 컬럼(UUID)·인덱스는 유지해 models의 ORM 객체와 완전 호환을 지킨다.
+    관측 DB엔 부모 테이블(users·analysis_sessions)이 없다 — to_metadata 사본에서
+    FK를 지우는 방식은 컬럼에 남는 참조 때문에 create 시 부모를 찾다 실패하므로,
+    처음부터 FK 없이 컬럼(이름·타입·PK·nullable·server_default)과 인덱스만 재구성한다.
+    테이블명·컬럼이 models와 동일해 ORM 객체를 그대로 add/select할 수 있다.
     """
+    from sqlalchemy import Column, Index, Table
+
     from app import models
 
     meta = MetaData()
-    for table in (models.AuditLog.__table__, models.LlmUsage.__table__):
-        copied = table.to_metadata(meta)
-        for constraint in list(copied.constraints):
-            if isinstance(constraint, ForeignKeyConstraint):
-                copied.constraints.discard(constraint)
-        for column in copied.columns:
-            column.foreign_keys.clear()
+    for src in (models.AuditLog.__table__, models.LlmUsage.__table__):
+        table = Table(
+            src.name,
+            meta,
+            *[
+                Column(
+                    c.name,
+                    c.type,
+                    primary_key=c.primary_key,
+                    nullable=c.nullable,
+                    server_default=c.server_default.arg if c.server_default is not None else None,
+                )
+                for c in src.columns
+            ],
+        )
+        for idx in src.indexes:
+            Index(idx.name, *[table.c[col.name] for col in idx.columns], unique=idx.unique)
     return meta
 
 
