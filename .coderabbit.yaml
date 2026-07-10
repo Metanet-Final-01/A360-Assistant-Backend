@@ -46,25 +46,25 @@ reviews:
       instructions: >-
         시크릿 하드코딩 금지. 외부 입력(업로드·URL·쿼리) 신뢰 금지(SSRF/인젝션).
         백엔드 직접 LLM 호출은 app/core/llm 경유(사용량 기록).
-
-# 정적 분석 도구는 CI(lint·gitleaks)가 이미 담당 → CodeRabbit에서는 꺼서 속도 확보
-tools:
-  ruff:
-    enabled: false
-  hadolint:
-    enabled: false
-  gitleaks:
-    enabled: false
-  markdownlint:
-    enabled: false
-  yamllint:
-    enabled: false
-  languagetool:
-    enabled: false
-  actionlint:
-    enabled: false
-  shellcheck:
-    enabled: false
+  # 정적 분석 도구는 CI(lint·gitleaks)가 이미 담당 → CodeRabbit에서는 꺼서 속도 확보
+  # (CodeRabbit v2 스키마: tools는 reviews 하위. 최상위에 두면 통째로 무시됨 — RPA-85)
+  tools:
+    ruff:
+      enabled: false
+    hadolint:
+      enabled: false
+    gitleaks:
+      enabled: false
+    markdownlint:
+      enabled: false
+    yamllint:
+      enabled: false
+    languagetool:
+      enabled: false
+    actionlint:
+      enabled: false
+    shellcheck:
+      enabled: false
 
 chat:
   auto_reply: true
