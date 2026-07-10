@@ -25,6 +25,7 @@ from app.schemas import Recommendation
 from .. import config
 from ..recommend.stream import emit
 from ..verify.catalog import get_catalog
+from .generate import UserCatalog, extract_user_catalog
 from .harness import verify_and_repair
 from .render import dump_json, render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
@@ -131,8 +132,15 @@ async def edit_node(state: TurnState) -> dict:
     flow = out.recommendation.model_dump()
     if is_a360:
         result = verify_and_repair(flow, get_catalog())
-    else:  # 타 솔루션 흐름도 — 기준 카탈로그가 없어 정적 검수 생략
-        result = {"flow": flow, "violations": [], "repaired": False}
+    else:
+        # 타 솔루션: generate와 동일하게 대화(메시지+이력+compact.verbatim)에서 UserCatalog를
+        # 재추출해 검수한다. 카탈로그를 못 찾으면 검수 기준이 없어 생략한다.
+        extraction = extract_user_catalog(state)
+        if extraction.actions:
+            specs = [a.as_spec() for a in extraction.actions]
+            result = verify_and_repair(flow, UserCatalog(specs))
+        else:
+            result = {"flow": flow, "violations": [], "repaired": False}
 
     answer = out.answer or (out.change_summary or "요청하신 대로 흐름도를 수정했어요.")
     if result["violations"]:
