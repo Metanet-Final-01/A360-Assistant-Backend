@@ -39,6 +39,10 @@ async def lifespan(app: FastAPI):
         logger.info("DB 마이그레이션 완료 (alembic head)")
     except Exception as e:  # noqa: BLE001
         logger.warning("DB 마이그레이션 실패 (앱은 계속 기동): %s", e)
+    # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 설정 시 테이블 보장 (실패해도 기동)
+    from app.core.observability_db import ensure_observability_schema
+
+    ensure_observability_schema()
     yield
 
 

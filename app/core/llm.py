@@ -161,10 +161,11 @@ def record_usage(
     """
     ctx = ctx or current_usage_context()
     try:
-        from app.db import SessionLocal
+        from app.core.observability_db import observability_sessionmaker
         from app.models import LlmUsage
 
-        with SessionLocal() as db:
+        # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 미설정이면 앱 DB 폴백
+        with observability_sessionmaker()() as db:
             db.add(
                 LlmUsage(
                     actor_type=ctx.actor_type,

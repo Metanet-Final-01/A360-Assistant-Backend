@@ -646,10 +646,11 @@ def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
 
     정준환의 intake 태깅(purpose="intake", RPA-73) 기준 — 이 호출엔 history+compact가 절삭
     없이 실리므로 input_tokens가 "대화 누적분"의 충실한 대리값이다. 임계는 env로 조정한다.
+    llm_usage는 관측 DB(RPA-90)에 쌓이므로 같은 곳에서 읽는다 (미설정 시 앱 DB 폴백).
     """
-    from app.db import SessionLocal
+    from app.core.observability_db import observability_sessionmaker
 
-    with SessionLocal() as s:
+    with observability_sessionmaker()() as s:
         tokens = s.execute(
             select(models.LlmUsage.input_tokens)
             .where(

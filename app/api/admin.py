@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.api.auth import get_current_user
-from app.db import get_db
+from app.core.observability_db import get_obs_db
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ _GROUP_COLS = {
 def llm_usage_stats(
     days: int = Query(30, ge=1, le=365, description="집계 기간(일)"),
     group_by: str = Query("component", pattern="^(component|model|user)$"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_obs_db),
     user: models.User = Depends(require_admin),
 ) -> dict:
     """기간 내 LLM 사용량 집계 — 총계 + group_by별 breakdown (시각화 데이터 소스)."""
@@ -93,7 +93,7 @@ def audit_logs(
     method: str | None = Query(None, description="GET/POST 등 필터"),
     status_code: int | None = Query(None),
     user_id: str | None = Query(None),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_obs_db),
     user: models.User = Depends(require_admin),
 ) -> dict:
     """최근 감사 로그(변경성 요청, 최신순) — method/status_code/user_id 필터. forensics·모니터링용."""
