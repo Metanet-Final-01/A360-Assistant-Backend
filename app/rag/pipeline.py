@@ -20,8 +20,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import config
+
+if TYPE_CHECKING:
+    from .build.doc_action_tree import PackageActionTree
 
 
 def cmd_crawl(args: argparse.Namespace) -> None:

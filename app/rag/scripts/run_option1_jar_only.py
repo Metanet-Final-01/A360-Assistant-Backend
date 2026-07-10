@@ -11,6 +11,9 @@ from _run_steps import run_steps
 if __name__ == "__main__":
     run_steps([
         ["crawl"],
+        # en-US도 크롤링해야 build-action-tree가 packages.json과 일치하는 진짜 영어
+        # package_name을 뽑는다 — 없으면 한국어 제목 기반 폴백으로 이름이 어긋날 수 있다.
+        ["crawl", "--locale", "en-US"],
         ["build-action-tree"],
         ["build"],
         ["ingest"],
