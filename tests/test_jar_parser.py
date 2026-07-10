@@ -44,6 +44,28 @@ def test_duplicate_name_order_independent_richer_always_wins():
     assert result[0] is richer
 
 
+def test_duplicate_logs_even_when_new_action_is_not_richer(capsys):
+    # 실측 버그: 파라미터 개수가 같거나(순수 중복) 새 액션 쪽이 더 적으면
+    # 예전 코드는 로그 없이 조용히 넘어갔다 — 이 함수의 목적(중복 발견 가시화)에
+    # 어긋난다. 승패와 무관하게 항상 로그가 남아야 한다.
+    richer_first = _action("checkelement", 5)
+    poorer_second = _action("checkelement", 5)  # 완전 동일 중복(WebAutomation 17개 중 7개 패턴)
+    _dedupe_actions_by_name([richer_first, poorer_second], "WebAutomation", "web.jar")
+    assert "중복 정의 발견" in capsys.readouterr().out
+
+
+def test_duplicate_logs_when_new_action_arrives_with_fewer_parameters(capsys):
+    richer_first = _action("clickelement", 6)
+    poorer_second = _action("clickelement", 4)
+    _dedupe_actions_by_name([richer_first, poorer_second], "WebAutomation", "web.jar")
+    assert "중복 정의 발견" in capsys.readouterr().out
+
+
+def test_no_duplicate_produces_no_log(capsys):
+    _dedupe_actions_by_name([_action("a", 2), _action("b", 3)], "Pkg", "pkg.jar")
+    assert capsys.readouterr().out == ""
+
+
 def test_exact_duplicate_collapses_to_one():
     a = _action("checkelement", 5)
     b = _action("checkelement", 5)

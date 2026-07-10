@@ -101,12 +101,19 @@ def _dedupe_actions_by_name(actions: list[dict], package_name: str, source_name:
         existing = by_name.get(name)
         if existing is None:
             by_name[name] = action
-        elif len(action.get("parameters", [])) > len(existing.get("parameters", [])):
-            print(
-                f"  [경고] {package_name}({source_name}): 액션 '{name}' 중복 정의 발견, "
-                f"파라미터 {len(existing.get('parameters', []))}개 버전 대신 "
-                f"{len(action.get('parameters', []))}개 버전 채택"
-            )
+            continue
+
+        existing_count = len(existing.get("parameters", []))
+        new_count = len(action.get("parameters", []))
+        # 승패와 무관하게 항상 로그를 남긴다 — 파라미터 개수가 같은 순수 중복이거나
+        # 새 액션 쪽이 더 적은 경우도 실제로 중복이 있었다는 사실 자체는 남아야 한다
+        # (그래야 이 함수의 목적인 "중복 정의 발견"이 어떤 경우에도 가시화된다).
+        print(
+            f"  [경고] {package_name}({source_name}): 액션 '{name}' 중복 정의 발견, "
+            f"파라미터 {existing_count}개 버전과 {new_count}개 버전 중 "
+            f"{max(existing_count, new_count)}개 버전 채택"
+        )
+        if new_count > existing_count:
             by_name[name] = action
     return list(by_name.values())
 
