@@ -123,8 +123,8 @@ def _install_agent_seq(monkeypatch, call_events):
     return _fake
 
 
-def _run(sid=SID, operation=None):
-    body = {"message": "안녕"}
+def _run(sid=SID, operation=None, message="안녕"):
+    body = {"message": message}
     if operation is not None:
         body["operation"] = operation
     with TestClient(app) as c:
@@ -546,6 +546,85 @@ def test_no_auto_compact_under_hard(monkeypatch):
     assert fake.calls == 1  # 자동 compact 없음
     assert not any(e["event"] == "stage" and "자동 압축" in e.get("message", "") for e in events)
     assert events[-1]["data"]["answer"] == "답"
+
+
+# --- 선행(look-ahead) 가드 (RPA-86) ---
+
+def test_lookahead_compact_triggers_on_huge_input(monkeypatch):
+    """게이지 0.99여도 이번 입력이 거대하면 예상 비율이 임계를 넘어 선행 compact가 돈다."""
+    from app.schemas import ProgressEvent
+    fake = _install_agent_seq(monkeypatch, [
+        [ProgressEvent(event="done", data={"type": "compact", "answer": "요약",
+                                           "sources": [], "compact": _compact_payload()})],
+        [ProgressEvent(event="done", data={"type": "answer", "answer": "실제 답", "sources": []})],
+    ])
+    captured = {}
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured))
+    # 직전 intake 기준 게이지는 0.995(하드 미만) — compact_required=False. 이번 입력 토큰만 넘으면 됨
+    monkeypatch.setattr(sessions_api, "_read_intake_gauge",
+                        lambda sid: {"intake_tokens": 99500, "limit_tokens": 100000, "ratio": 0.995,
+                                     "compact_recommended": True, "compact_required": False})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    # message max_length=4000. 3000자 → 폴백 추정 len=3000 ≥ 필요치 500 (tiktoken 실측도 유사)
+    huge = "업무 자동화 요청 " * 300  # ≈3000자
+    _, events = _run(message=huge)
+
+    assert fake.calls == 2  # 선행 compact + 실제 턴
+    assert len(captured.get("SessionCompact", [])) == 1
+    assert any(e["event"] == "stage" and "자동 압축" in e.get("message", "") for e in events)
+    assert events[-1]["data"]["answer"] == "실제 답"
+
+
+def test_lookahead_no_compact_on_small_input(monkeypatch):
+    """게이지 0.99여도 이번 입력이 작으면 예상 비율이 임계 미만 → compact 없이 실제 턴만."""
+    from app.schemas import ProgressEvent
+    fake = _install_agent_seq(monkeypatch, [
+        [ProgressEvent(event="done", data={"type": "answer", "answer": "답", "sources": []})],
+    ])
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    monkeypatch.setattr(sessions_api, "_read_intake_gauge",
+                        lambda sid: {"intake_tokens": 99000, "limit_tokens": 100000, "ratio": 0.99,
+                                     "compact_recommended": True, "compact_required": False})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+    _, events = _run(message="짧은 질문")  # 몇 토큰 → 99000+n < 100000
+
+    assert fake.calls == 1  # 자동 compact 없음
+    assert events[-1]["data"]["answer"] == "답"
+
+
+def test_estimate_message_tokens_fallback():
+    """빈 입력은 0, 비어있지 않으면 양수. (tiktoken 유무와 무관하게 성립)"""
+    assert sessions_api._estimate_message_tokens("") == 0
+    assert sessions_api._estimate_message_tokens("업무 자동화 요청입니다") > 0
+
+
+def test_estimate_uses_char_fallback_before_warmup(monkeypatch):
+    """인코더 미준비(워밍업 전/실패)면 요청 경로에서 로드하지 않고 문자 폴백(1문자≈1토큰)."""
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
+    assert sessions_api._estimate_message_tokens("가" * 100) == 100  # 한글 ≈1 tok/char 실측 반영
+
+
+def test_warmup_failure_is_not_sticky(monkeypatch):
+    """워밍업 실패가 영구 고착되지 않는다 — 재워밍업이 성공하면 인코더를 쓴다 (CodeRabbit #134)."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_tiktoken(name, *a, **kw):
+        if name == "tiktoken":
+            raise ImportError("offline")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
+    monkeypatch.setattr(builtins, "__import__", _no_tiktoken)
+    sessions_api.warmup_token_encoder()  # 실패 → None 유지, 예외 없음
+    assert sessions_api._token_encoder() is None
+
+    monkeypatch.setattr(builtins, "__import__", real_import)
+    sessions_api.warmup_token_encoder()  # 재시도 성공 → 인코더 준비
+    enc = sessions_api._token_encoder()
+    if enc is not None:  # 오프라인 CI면 BPE 다운로드가 실패할 수 있어 조건부 검증
+        assert sessions_api._estimate_message_tokens("hello world") > 0
 
 
 def test_gauge_includes_compact_required(monkeypatch):

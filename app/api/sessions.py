@@ -688,6 +688,67 @@ def _gauge_hard_ratio() -> float:
     return v if v > 0 else 1.0
 
 
+# tiktoken 인코더 — 요청 경로에서 로드하지 않는다 (CodeRabbit #134).
+# get_encoding()은 캐시 미준비 시 원격 BPE 다운로드를 하므로 async 라우트 안에서 부르면
+# 이벤트 루프를 막을 수 있고, lru_cache로 감싸면 일시 실패(None)까지 영구 고정된다.
+# → 앱 시작 시(lifespan) 백그라운드 스레드로 한 번 워밍업하고, 요청은 준비된 것만 쓴다.
+_TOKEN_ENCODER = None
+
+
+def warmup_token_encoder() -> None:
+    """tiktoken 인코더를 미리 로드한다 — lifespan이 백그라운드 스레드로 호출.
+
+    실패(미설치·오프라인 등)해도 앱은 계속 뜨고, 추정은 문자 폴백(len)으로 동작한다.
+    """
+    global _TOKEN_ENCODER
+    try:
+        import tiktoken
+
+        _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+    except Exception:  # noqa: BLE001 — tiktoken 미설치/BPE 다운로드 실패 등
+        logger.warning("tiktoken 인코더 로드 실패 — 문자 기반 폴백으로 동작", exc_info=True)
+
+
+def _token_encoder():
+    """준비된 인코더를 돌려준다 (워밍업 전/실패면 None → 호출부가 문자 폴백)."""
+    return _TOKEN_ENCODER
+
+
+def _estimate_message_tokens(text: str) -> int:
+    """이번 입력 message의 토큰 수 추정 — 선행 compact 판단용 (RPA-86).
+
+    tiktoken이 있으면 실제 인코딩으로 세고(정확), 없으면 문자 기반으로 폴백한다.
+    안전망 성격상 과소추정이 더 위험(스파이크를 놓침)하므로 폴백은 1문자≈1토큰(len)로
+    잡는다 — cl100k_base 실측: 한글 ≈0.9~1.0 tok/char라 len//2는 절반 과소추정이었고
+    (CodeRabbit #134), len은 한글과 거의 일치·영문(≈0.15 tok/char)엔 과대추정이라 가드로 안전.
+    """
+    if not text:
+        return 0
+    enc = _token_encoder()
+    if enc is not None:
+        try:
+            return len(enc.encode(text))
+        except Exception:  # noqa: BLE001 — 인코딩 실패 시 문자 폴백
+            pass
+    return max(1, len(text))
+
+
+def _needs_auto_compact(gauge: dict, message: str) -> bool:
+    """자동 compact가 필요한가 — 후행 게이지 + 이번 입력 선행(look-ahead) 반영 (RPA-84/86).
+
+    게이지의 compact_required는 '직전 intake 기준'이라 지금 들어온 대형 입력을 못 본다.
+    이번 message의 토큰 추정치를 더한 '예상 비율'이 하드 임계를 넘으면 미리 압축한다 —
+    게이지 0.99에서 초대형 단일 입력이 당턴을 넘치게 하는 갭(RPA-86)을 닫는다.
+    """
+    if gauge.get("compact_required"):
+        return True
+    limit = gauge.get("limit_tokens") or 0
+    if limit <= 0:
+        return False
+    projected = (gauge.get("intake_tokens", 0) + _estimate_message_tokens(message)) / limit
+    return projected >= _gauge_hard_ratio()
+
+
 async def _run_internal_compact(session_id: uuid.UUID, message: str, stream_turn, compact_ctx: dict) -> bool:
     """대화 누적이 하드 임계를 넘었을 때 실제 턴 전에 자동으로 한 번 압축한다 (RPA-84).
 
@@ -738,16 +799,15 @@ async def agent_turn(
 
     # 하드 자동 compact: chat 턴이고 대화 누적이 임계를 넘으면 실제 턴 전에 먼저 압축한다.
     # 요청 db가 살아있는 지금(제너레이터 전) 처리하고, 이후 컨텍스트 조립이 새 compact를 집는다.
-    # 한계(후행 지표): 게이지는 "직전 턴의 intake prompt_tokens" 기준이라 지금 들어온 message는
-    # 반영되지 않는다. 그래서 게이지 0.99에서 단일 초대형 입력이 오면 당턴은 compact_required가
-    # False라 압축 없이 진행되고, 초과분은 다음 턴에서야 잡힌다. 선행(look-ahead) 가드는 RPA-86(#133).
+    # 게이지(후행)는 직전 intake 기준이라 이번 대형 입력을 못 보므로, _needs_auto_compact가
+    # 이번 message 토큰을 더한 선행(look-ahead) 판단까지 겸한다 (RPA-86).
     auto_compacted = False
     if payload.operation == "chat":
         try:
             gauge = _read_intake_gauge(session_key)
         except Exception:  # noqa: BLE001 — 게이지 조회 실패는 자동 압축을 건너뛴다
             gauge = None
-        if gauge and gauge.get("compact_required"):
+        if gauge and _needs_auto_compact(gauge, message):
             compact_ctx = _assemble_turn_context(session, db, operation="compact")["agent_context"]
             try:
                 with usage_context(
