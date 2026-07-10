@@ -123,47 +123,51 @@ steps[]               ─ 업무 단계 (AnalysisResult.steps[].step_id 참조)
 **이 JSON 하나를 재사용하는 기능들**: 내보내기(FR-17) · 흐름도/드래그 편집(FR-18, 트리 렌더) ·
 챗봇 수정(FR-13, 새 버전 저장) · 골드셋 채점(`iter_actions()` 평탄화) · 비개발자 요약본 생성.
 
-## 3. 현행 계약 v0 (RPA-7에서 Agent 팀이 구현 — 동작 중)
+## 3. 현행 계약 — 단일 진입점 `stream_agent_turn` (RPA-64/67, 동작 중)
+
+옛 3분할(analyze/recommend/chat_refine)·v0(run_agent/stream_agent)은 **폐기**됐다. 분석·질문·흐름도
+생성/수정·압축이 전부 이 하나로 통합된다. **에이전트는 stateless** — 백엔드가 세션에서 full
+context를 조립해 넘기고, 반환 `type`으로 저장을 분기한다.
 
 ```python
-from app.agent import run_agent, stream_agent, AgentResult
+from app.agent import stream_agent_turn
+from app.schemas import ProgressEvent
 
-def run_agent(message: str) -> AgentResult                    # AgentResult(answer: str)
-async def stream_agent(message: str) -> AsyncIterator[str]    # 토큰 스트림
+async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[ProgressEvent]:
+    """백엔드 POST /api/sessions/{id}/turn 이 호출하는 유일한 진입점.
+
+    message : 사용자 메시지 (버튼이면 프론트가 합성한 문구 — intent 파라미터 없음)
+    context : 백엔드가 세션에서 조립해 넘기는 전체 컨텍스트 (아래)
+    반환    : ProgressEvent 스트림. 백엔드가 그대로 SSE로 흘리고, done.data로 저장을 분기.
+    """
 ```
 
-백엔드는 이 계약으로 첫 챗봇 엔드포인트를 연결한다 (연동 예시는 `app/agent/README.md`).
+### context (백엔드 → 에이전트, 매 턴 조립)
 
-## 4. 목표 계약 v1 (제안 — Agent 담당과 합의 후 확정)
+| 키 | 내용 |
+|---|---|
+| `solution` | 라우팅 키 (세션 확정값, 기본 `"a360"`) — 에이전트가 전용 그래프를 고른다 |
+| `operation` | `"chat"` \| `"compact"` (compact면 LLM 라우터 우회, 압축 노드 직행) |
+| `history` | 대화 이력 `[{"role","content"}]` (마지막 compact 이후분, 절삭 없이) |
+| `compact` | 최신 대화 압축본 (없으면 None) |
+| `analysis` / `recommendation` / `parsed_doc` | 세션의 최신 분석·추천·파싱 문서 (있으면) |
 
-FR-05/09/13을 지원하는 3개 진입점. **v0에서 점진 확장**하며, 각 함수 시그니처가 곧 후속 이슈다.
+### done.data (에이전트 → 백엔드, 판별 유니온) — `type`으로 저장 분기
 
 ```python
-from app.schemas import AnalysisResult, Recommendation, ProgressEvent
-
-# ① 문서 분석 (FR-05) — Agent 구현
-def analyze(parsed_doc: dict) -> AnalysisResult:
-    """parsed_doc: 백엔드 파서의 구조화 출력 (Document.parsed_content).
-    마스킹은 백엔드가 이미 적용한 상태로 전달한다."""
-
-# ② 추천 생성 (FR-09~12) — Agent 구현. 진행 이벤트를 yield하고 마지막에 done으로 산출물 전달
-async def recommend(
-    analysis: AnalysisResult,
-    constraints: list[str] | None = None,   # 사용자 제약 (FR-14)
-) -> AsyncIterator[ProgressEvent]:
-    """yield 순서 예: stage(searching) → partial(step별 결과) → ... → done(data={"recommendation": ...})
-    백엔드 SSE 엔드포인트가 이벤트를 그대로 흘려보낸다."""
-
-# ③ 챗봇 수정 (FR-13~16) — Agent 구현
-async def chat_refine(
-    current: Recommendation,
-    analysis: AnalysisResult,
-    user_message: str,
-    history: list[dict],                    # [{"role": "user"|"assistant", "content": str}]
-) -> AsyncIterator[ProgressEvent]:
-    """답변 텍스트는 token 이벤트로, 수정된 추천안은 done(data={"recommendation": ..., "change_summary": str})로.
-    추천안 변경이 없는 단순 질의응답이면 done.data.recommendation = None."""
+# type ∈ answer | analysis | recommendation | compact
+{ "type": "answer",         "answer": str, "sources": list }                       # 대화만 저장
+{ "type": "analysis",       "answer": str, "sources": list, "analysis_result": {...} }  # + Analysis 저장
+{ "type": "recommendation", "answer": str, "sources": list,
+  "updated_recommendation": {...}, "change_summary": str }                          # + 새 버전 저장
+{ "type": "compact",        "answer": str, "sources": list, "compact": {...} }      # 압축본 저장
 ```
+- **비-null 산출물은 type과 무관하게 모두 저장**한다(분석 선행 후 흐름도 턴의 참조 무결성). 백엔드가
+  `updated_recommendation`을 저장 후 응답엔 `recommendation`+버전 메타로 노출한다.
+- `compact`는 고정 섹션 JSON: `task_overview`/`decisions`/`flow_journal`/`open_questions`/`verbatim`.
+- 대화 누적 게이지(`usage_gauge`)는 **백엔드가** intake 사용량으로 계산해 붙인다(에이전트 책임 아님).
+  단 그 전제는 에이전트의 intake 호출이 `purpose="intake"`로 태깅되고 history+compact를 절삭 없이
+  싣는 것(RPA-73) — 이 계약이 게이지의 정확도를 좌우한다.
 
 ### 백엔드가 Agent에 제공하는 tool
 
@@ -179,8 +183,11 @@ def search_actions(
     현재는 GET /api/rag/search 로도 노출되어 있다."""
 ```
 
-LLM 호출은 백엔드가 제공할 사용량 기록 래퍼(후속 이슈: `app/core/llm.py`)를 통과하는 것을 목표로 한다
-(토큰/비용 모니터링이 전 호출을 커버해야 하므로).
+LLM 호출은 백엔드 사용량 기록 래퍼 `app/core/llm.py`를 통과한다(**구현 완료** — 토큰/비용이
+전 호출에 걸쳐 `llm_usage`에 기록된다). 에이전트는 `UsageCallbackHandler(purpose=...)`를 LLM 호출
+config에 얹기만 하면 되고, 귀속(user/component/session)은 `usage_context` ContextVar로 전파된다.
+purpose 예: `intake`/`turn_qa`/`turn_edit`/`compact`/`generate`/`verify`(에이전트), `embed`/`rerank`(RAG).
+게이지(RPA-83)가 `purpose="intake"` 행을 읽으므로 intake 태깅은 계약이다.
 
 **스키마 강제 출력 (analyze/recommend)** — `core.llm.chat()`은 `response_format` 파라미터를 받아
 OpenAI JSON mode / Structured Outputs를 지원한다. AnalysisResult·Recommendation처럼 스키마를
@@ -196,7 +203,7 @@ raw = chat(messages, purpose="analyze",
 raw = chat(messages, purpose="recommend", response_format={"type": "json_object"})
 ```
 
-## 5. SSE 이벤트 규약 (`ProgressEvent`)
+## 4. SSE 이벤트 규약 (`ProgressEvent`)
 
 `data:` 라인에 JSON 한 건. 프론트는 `event` 필드로 분기한다.
 
@@ -206,21 +213,25 @@ raw = chat(messages, purpose="recommend", response_format={"type": "json_object"
 | `partial` | 중간 산출물 | `data` (예: 단계 1개 분석/추천 완료분) |
 | `token` | LLM 텍스트 조각 | `message` |
 | `done` | 완료 | `data` (최종 산출물) |
-| `error` | 실패 | `message` (사용자용 문구) |
+| `error` | 실패 | `message` (사용자용 문구 — HTTP {code,message}와 달리 code 없음) |
 
 ```
 data: {"event":"stage","stage":"searching","message":"관련 A360 액션 검색 중"}
-data: {"event":"partial","data":{"step_id":"step-1","actions":[...]}}
-data: {"event":"done","data":{"recommendation":{...}}}
+data: {"event":"token","message":"조각"}
+data: {"event":"done","data":{"type":"recommendation","answer":"...","updated_recommendation":{...},"change_summary":"..."}}
 ```
 
-## 6. 추천안 버전 관리 (백엔드 내부 — Agent는 몰라도 됨)
+**stage 키 어휘** (진행 문구 교체용): `routing` · `reading` · `analyzing` · `searching` ·
+`composing` · `recommending` · `refining` · `verifying` · `compacting`.
+(자동/버튼 compact 시 `compacting`이 먼저 흐른다. 파싱·마스킹은 이 스트림이 아니라 문서 파이프라인 소관.)
+
+## 5. 추천안 버전 관리 (백엔드 내부 — Agent는 몰라도 됨)
 
 모든 수정(챗봇/드래그/피드백)은 `recommendations` 테이블에 **새 버전 INSERT**.
 Agent의 `chat_refine`은 수정된 `Recommendation` 전체를 반환하기만 하면 되고,
 버전 번호·저장·이력은 백엔드가 처리한다.
 
-## 7. 골드셋 채점 인터페이스 (요구사항 8.2)
+## 6. 골드셋 채점 인터페이스 (요구사항 8.2)
 
 평가 하네스(후속 이슈)는 `Recommendation.iter_actions()`로 액션 트리를 평탄화한
 `(package, action)` 쌍을 골드셋과 대조한다. **retrieval hit rate(검색 품질 — 백엔드 책임)와 최종 매핑 정확도(프롬프트 품질 — Agent 책임)를
