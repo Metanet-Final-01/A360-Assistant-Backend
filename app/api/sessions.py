@@ -674,8 +674,41 @@ def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
         "intake_tokens": int(tokens),
         "limit_tokens": limit,
         "ratio": ratio,
-        "compact_recommended": bool(ratio >= _GAUGE_WARN_RATIO),
+        "compact_recommended": bool(ratio >= _GAUGE_WARN_RATIO),  # 소프트: 프론트가 압축 유도
+        "compact_required": bool(ratio >= _gauge_hard_ratio()),   # 하드: 백엔드가 자동 compact
     }
+
+
+def _gauge_hard_ratio() -> float:
+    """자동 compact 하드 임계 비율 — 기본 1.0(=LIMIT 도달). env로 조정, 비정상값은 1.0."""
+    try:
+        v = float(os.getenv("TURN_GAUGE_HARD_RATIO", "1.0"))
+    except ValueError:
+        v = 1.0
+    return v if v > 0 else 1.0
+
+
+async def _run_internal_compact(session_id: uuid.UUID, message: str, stream_turn, compact_ctx: dict) -> bool:
+    """대화 누적이 하드 임계를 넘었을 때 실제 턴 전에 자동으로 한 번 압축한다 (RPA-84).
+
+    compact 결과를 session_compacts에 저장해, 이어지는 실제 턴의 컨텍스트가 새 압축본을 집게 한다.
+    best-effort — 압축이 실패하면 False를 돌려 원본 이력 그대로 진행한다(사용자 턴을 막지 않음).
+    """
+    result = None
+    async for ev in stream_turn(message, compact_ctx):
+        if ev.event == "done":
+            result = ev.data or {}
+        elif ev.event == "error":
+            return False
+    if not (result and result.get("type") == "compact" and result.get("compact")):
+        return False
+    try:
+        _validate_compact_payload(result["compact"])
+        _save_compact(session_id, result["compact"])
+        return True
+    except Exception:  # noqa: BLE001 — 자동 압축 저장 실패가 사용자 턴을 막지 않게
+        logger.warning("자동 compact 저장 실패 (무시): session=%s", session_id, exc_info=True)
+        return False
 
 
 @router.post("/{session_id}/turn")
@@ -689,7 +722,8 @@ async def agent_turn(
 
     백엔드가 세션에서 full context를 조립해 에이전트에 넘기고, 에이전트가 solution으로
     그래프를 골라 intent(analyze/edit/ask)를 판단한다. 반환 type으로 저장을 분기한다.
-    이벤트: (에이전트가 흘리는) stage/partial/token → done(data={type, ...저장 메타, answer, ...}).
+    대화 누적이 하드 임계를 넘으면(chat 턴) 실제 턴 전에 자동 compact를 먼저 돌린다(RPA-84).
+    이벤트: [자동압축 stage] → (에이전트가 흘리는) stage/partial/token → done(data={type, ...}).
     """
     session = _owned_session_or_404(session_id, db, user)
     stream_turn = _get_agent_turn()
@@ -699,16 +733,44 @@ async def agent_turn(
             503, detail={"code": "AGENT_UNAVAILABLE", "message": "에이전트가 아직 준비되지 않았습니다."}
         )
 
+    session_key = session.id
+    user_id, message = (user.id if user else None), payload.message
+
+    # 하드 자동 compact: chat 턴이고 대화 누적이 임계를 넘으면 실제 턴 전에 먼저 압축한다.
+    # 요청 db가 살아있는 지금(제너레이터 전) 처리하고, 이후 컨텍스트 조립이 새 compact를 집는다.
+    # 한계(후행 지표): 게이지는 "직전 턴의 intake prompt_tokens" 기준이라 지금 들어온 message는
+    # 반영되지 않는다. 그래서 게이지 0.99에서 단일 초대형 입력이 오면 당턴은 compact_required가
+    # False라 압축 없이 진행되고, 초과분은 다음 턴에서야 잡힌다. 선행(look-ahead) 가드는 RPA-86(#133).
+    auto_compacted = False
+    if payload.operation == "chat":
+        try:
+            gauge = _read_intake_gauge(session_key)
+        except Exception:  # noqa: BLE001 — 게이지 조회 실패는 자동 압축을 건너뛴다
+            gauge = None
+        if gauge and gauge.get("compact_required"):
+            compact_ctx = _assemble_turn_context(session, db, operation="compact")["agent_context"]
+            try:
+                with usage_context(
+                    component="agent", actor_type="user", user_id=user_id, session_id=session_key
+                ):
+                    auto_compacted = await _run_internal_compact(
+                        session_key, message, stream_turn, compact_ctx
+                    )
+            except Exception:  # noqa: BLE001 — 자동 압축 실패가 사용자 턴을 막지 않게
+                logger.warning("자동 compact 실패 (무시): session=%s", session_key, exc_info=True)
+
     ctx = _assemble_turn_context(session, db, operation=payload.operation)
     agent_context = ctx["agent_context"]
-    session_key = session.id
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
-    user_id, message = (user.id if user else None), payload.message
 
     async def sse():
         result_data = None
         saw_error = False
         try:
+            if auto_compacted:
+                yield ProgressEvent(
+                    event="stage", stage="compacting", message="대화가 길어 자동 압축했습니다"
+                ).to_sse()
             # async 제너레이터라 usage_context가 yield를 넘어도 안전 (같은 태스크 컨텍스트).
             with usage_context(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
