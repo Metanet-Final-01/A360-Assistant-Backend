@@ -41,6 +41,45 @@ def test_intake_keeps_edit_with_flow(monkeypatch):
     assert out["route"] == "edit"
 
 
+def test_intake_upgrades_qa_to_edit_when_flow_and_modify_command(monkeypatch):
+    """흐름도가 있는데 수정 명령이 qa로 샌 경우 edit로 상향한다 (RPA-98, E2E 관찰 오분류).
+
+    실제로 샜던 문구: 대상(흐름도)이 암묵적인 '…액션을 추가해줘'.
+    """
+    monkeypatch.setattr(intake_mod, "chat_json",
+                        lambda *a, **k: IntakeOutput(route="qa", reason="오분류"))
+    msg = "흐름도에서 엑셀 정리 단계에 '파일을 D드라이브에 저장' 액션을 추가해줘"
+    out = intake_node(_state(message=msg, recommendation=_FLOW))
+    assert out["route"] == "edit"
+
+
+def test_intake_qa_guard_keeps_question_as_qa(monkeypatch):
+    """흐름도가 있어도 '대한' 질문은 qa로 유지한다 — 가드가 과탐하지 않는다."""
+    monkeypatch.setattr(intake_mod, "chat_json",
+                        lambda *a, **k: IntakeOutput(route="qa", reason="질문"))
+    out = intake_node(_state(message="왜 2번 단계가 Loop야?", recommendation=_FLOW))
+    assert out["route"] == "qa"
+
+
+def test_intake_qa_guard_ignores_modify_without_flow(monkeypatch):
+    """흐름도가 없으면 수정 문구여도 qa 상향을 하지 않는다 (수정 대상 없음)."""
+    monkeypatch.setattr(intake_mod, "chat_json",
+                        lambda *a, **k: IntakeOutput(route="qa", reason="흐름도 없음"))
+    out = intake_node(_state(message="검증 단계 추가해줘", recommendation=None))
+    assert out["route"] == "qa"
+
+
+def test_intake_keeps_correct_edit_phrases_with_flow(monkeypatch):
+    """정상 분류(LLM=edit)된 명시적 수정 문구는 흐름도가 있으면 edit 유지 (RPA-98 회귀셋)."""
+    monkeypatch.setattr(intake_mod, "chat_json",
+                        lambda *a, **k: IntakeOutput(route="edit", reason="수정"))
+    for msg in (
+        "3단계 메일 발송 앞에 '엑셀 파일 열어서 검증' 단계를 추가해서 흐름도를 수정해줘",
+        "흐름도 2단계를 반복문으로 바꿔줘",
+    ):
+        assert intake_node(_state(message=msg, recommendation=_FLOW))["route"] == "edit"
+
+
 def test_intake_falls_back_to_qa_on_unknown_route(monkeypatch):
     monkeypatch.setattr(intake_mod, "chat_json",
                         lambda *a, **k: IntakeOutput(route="deploy", reason="?"))
