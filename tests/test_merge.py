@@ -1,7 +1,7 @@
 """app/rag/build/merge.py 단위 테스트 — 순수 파이썬 조립 로직, LLM/DB 불필요.
 
 JAR 경로(schema_source="jar")가 기존과 동일하게 동작하는지, 그리고 리프=액션
-베이스라인(naive_leaf_actions)이 action_reference로만 순수 추가되고 JAR 커버 패키지는
+베이스라인(naive_leaf_actions)이 action_candidate로만 순수 추가되고 JAR 커버 패키지는
 절대 안 건드리는지를 확인한다. 리프의 진짜 액션 여부/파라미터 스키마 추출은 팀
 결정(2026-07-10)으로 별도의 LLM 기반 파싱 Agent가 담당할 예정이며, merge.py는 그
 산출물 포맷이 확정되기 전까지 이 경로(action_schema)를 갖지 않는다.
@@ -60,13 +60,13 @@ def test_duplicate_action_ids_raise_instead_of_silently_overwriting():
         _build(packages=[colliding_package])
 
 
-def test_naive_leaf_action_becomes_action_reference_not_action_schema():
+def test_naive_leaf_action_becomes_action_candidate_not_action_schema():
     naive = [{"package_name": "Database", "title": "연결 문서", "url": "https://docs/connect",
               "path_titles": ["Database 패키지", "연결 문서"]}]
     docs = _build(naive_leaf_actions=naive)
     db_rows = [d for d in docs if d["package_name"] == "Database"]
     assert len(db_rows) == 1
-    assert db_rows[0]["source_type"] == "action_reference"
+    assert db_rows[0]["source_type"] == "action_candidate"
     assert db_rows[0]["action_name"] is None
     assert db_rows[0]["url"] == "https://docs/connect"
     assert db_rows[0]["metadata"]["schema_source"] == "naive_leaf_action"

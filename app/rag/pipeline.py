@@ -10,7 +10,7 @@
   python -m app.rag.pipeline export-for-agent --packages Database  # JAR 없는 패키지 문서(구조화 HTML 포함) -> 향후 파싱 Agent용 산출물 (--packages 생략 시 발견된 전체 미커버 패키지)
   python -m app.rag.pipeline export-naive-leaf-actions             # 리프=액션 필터링 없이 전부 나열 (파라미터 없음, 빠른 훑어보기용)
   python -m app.rag.pipeline build                               # 문서+스키마+봇 → rag_documents.jsonl (청킹 포함)
-  python -m app.rag.pipeline build --include-naive-leaf-actions   # 위와 동일 + JAR 없는 패키지 리프를 action_reference로 포함
+  python -m app.rag.pipeline build --include-naive-leaf-actions   # 위와 동일 + JAR 없는 패키지 리프를 action_candidate로 포함
   python -m app.rag.pipeline eda                                  # 문서 길이 분포 분석 (청크 크기 결정용)
   python -m app.rag.pipeline ingest [--skip-embedding]           # pgvector 적재
   python -m app.rag.pipeline search "구글시트에서 시트 활성화 어떻게 해?"
@@ -527,7 +527,7 @@ def main() -> None:
     )
     p_build.add_argument(
         "--include-naive-leaf-actions", action="store_true",
-        help="export-naive-leaf-actions 산출물(리프=액션 필터링 없는 후보)을 action_reference로 같이 포함",
+        help="export-naive-leaf-actions 산출물(리프=액션 필터링 없는 후보)을 action_candidate로 같이 포함",
     )
     p_build.set_defaults(func=cmd_build)
 
