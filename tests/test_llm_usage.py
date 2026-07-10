@@ -51,6 +51,10 @@ def test_record_usage_uses_context(monkeypatch):
         def add(self, row): captured.update(vars(row) if hasattr(row, "__dict__") else {})
         def commit(self): pass
 
+    # record_usage는 관측 세션(observability_sessionmaker, RPA-90)으로 쓴다 — 그 경로를 패치.
+    # (앱 DB 폴백 경로 app.db.SessionLocal도 함께 패치해 로컬 .env에 관측 URL이 있어도 Neon을 안 때린다)
+    import app.core.observability_db as obs
+    monkeypatch.setattr(obs, "observability_sessionmaker", lambda: (lambda: _FakeDB()))
     monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
 
     class _Row:
@@ -191,3 +195,44 @@ def test_callback_inherits_base_and_attrs_dont_raise():
     from langchain_core.callbacks import CallbackManager
 
     assert len(CallbackManager(handlers=[cb]).handlers) == 1
+
+
+# --- 모델별 비용 계산 (RPA-97) ---
+
+def test_cost_usd_aux_models_use_own_price(monkeypatch):
+    """임베딩·리랭커는 env와 무관하게 자기 공식 단가로 계산된다 (챗 단가 오염 방지)."""
+    # 챗 단가를 일부러 크게 설정 — 보조 모델이 이걸 쓰면 안 된다
+    monkeypatch.setenv("LLM_INPUT_COST_PER_1M", "0.75")
+    monkeypatch.setenv("LLM_OUTPUT_COST_PER_1M", "4.50")
+    # text-embedding-3-small: in $0.02, out 0 → 1,000,000 토큰 = $0.02
+    assert llm.cost_usd(1_000_000, 0, "text-embedding-3-small") == 0.02
+    # rerank-2.5-lite: in $0.02 → 43만 토큰 = $0.0086 (챗 단가면 $0.3225로 뻥튀기됐을 것)
+    assert abs(llm.cost_usd(430_000, 0, "rerank-2.5-lite") - 0.0086) < 1e-9
+    assert llm.cost_usd(430_000, 0, "rerank-2.5-lite") != 430_000 * 0.75 / 1e6  # 챗 단가 아님
+
+
+def test_cost_usd_chat_model_uses_env(monkeypatch):
+    """주 챗 모델(gpt-5.4-mini)은 env 단가로 — 데모 조정 가능·하위호환."""
+    monkeypatch.setenv("LLM_INPUT_COST_PER_1M", "0.75")
+    monkeypatch.setenv("LLM_OUTPUT_COST_PER_1M", "4.50")
+    # 1M in + 1M out = 0.75 + 4.50 = 5.25
+    assert llm.cost_usd(1_000_000, 1_000_000, "gpt-5.4-mini") == 5.25
+    # 날짜 스냅샷 이름도 prefix로 챗 취급(보조 테이블엔 없으니 env)
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini-2026-03-17") == 0.75
+
+
+def test_cost_usd_longest_prefix_wins():
+    """rerank-2.5-lite는 rerank-2.5(0.05)가 아니라 자기 단가(0.02)로 — 최장 prefix 우선."""
+    # 1M 토큰 → lite=0.02, 일반=0.05. lite가 일반으로 새면 안 된다.
+    assert llm.cost_usd(1_000_000, 0, "rerank-2.5-lite") == 0.02
+    assert llm.cost_usd(1_000_000, 0, "rerank-2.5") == 0.05
+
+
+def test_cost_usd_none_when_no_price(monkeypatch):
+    """미지 모델 + env 미설정이면 None (억지 계산 금지)."""
+    monkeypatch.delenv("LLM_INPUT_COST_PER_1M", raising=False)
+    monkeypatch.delenv("LLM_OUTPUT_COST_PER_1M", raising=False)
+    assert llm.cost_usd(1000, 500, "some-unknown-model") is None
+    assert llm.cost_usd(1000, 500, None) is None
+    # 단, 보조 모델은 env 없어도 내장 단가로 계산된다
+    assert llm.cost_usd(1_000_000, 0, "text-embedding-3-small") == 0.02
