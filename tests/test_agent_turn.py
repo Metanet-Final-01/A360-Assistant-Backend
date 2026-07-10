@@ -598,6 +598,35 @@ def test_estimate_message_tokens_fallback():
     assert sessions_api._estimate_message_tokens("업무 자동화 요청입니다") > 0
 
 
+def test_estimate_uses_char_fallback_before_warmup(monkeypatch):
+    """인코더 미준비(워밍업 전/실패)면 요청 경로에서 로드하지 않고 문자 폴백(len//2)."""
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
+    assert sessions_api._estimate_message_tokens("가" * 100) == 50
+
+
+def test_warmup_failure_is_not_sticky(monkeypatch):
+    """워밍업 실패가 영구 고착되지 않는다 — 재워밍업이 성공하면 인코더를 쓴다 (CodeRabbit #134)."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_tiktoken(name, *a, **kw):
+        if name == "tiktoken":
+            raise ImportError("offline")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
+    monkeypatch.setattr(builtins, "__import__", _no_tiktoken)
+    sessions_api.warmup_token_encoder()  # 실패 → None 유지, 예외 없음
+    assert sessions_api._token_encoder() is None
+
+    monkeypatch.setattr(builtins, "__import__", real_import)
+    sessions_api.warmup_token_encoder()  # 재시도 성공 → 인코더 준비
+    enc = sessions_api._token_encoder()
+    if enc is not None:  # 오프라인 CI면 BPE 다운로드가 실패할 수 있어 조건부 검증
+        assert sessions_api._estimate_message_tokens("hello world") > 0
+
+
 def test_gauge_includes_compact_required(monkeypatch):
     class _S:
         def __enter__(self): return self

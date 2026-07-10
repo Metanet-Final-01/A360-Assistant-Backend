@@ -4,7 +4,6 @@
 레거시 개별 엔드포인트(/analyze, /recommend, /api/agent/chat)는 /turn으로 흡수돼 제거됐다 (RPA-67).
 """
 
-import functools
 import logging
 import os
 import uuid
@@ -689,15 +688,30 @@ def _gauge_hard_ratio() -> float:
     return v if v > 0 else 1.0
 
 
-@functools.lru_cache(maxsize=1)
-def _token_encoder():
-    """토큰 인코더(tiktoken)를 한 번만 로드해 캐시한다. 부재/오류면 None (호출부가 폴백)."""
+# tiktoken 인코더 — 요청 경로에서 로드하지 않는다 (CodeRabbit #134).
+# get_encoding()은 캐시 미준비 시 원격 BPE 다운로드를 하므로 async 라우트 안에서 부르면
+# 이벤트 루프를 막을 수 있고, lru_cache로 감싸면 일시 실패(None)까지 영구 고정된다.
+# → 앱 시작 시(lifespan) 백그라운드 스레드로 한 번 워밍업하고, 요청은 준비된 것만 쓴다.
+_TOKEN_ENCODER = None
+
+
+def warmup_token_encoder() -> None:
+    """tiktoken 인코더를 미리 로드한다 — lifespan이 백그라운드 스레드로 호출.
+
+    실패(미설치·오프라인 등)해도 앱은 계속 뜨고, 추정은 문자 폴백(len//2)으로 동작한다.
+    """
+    global _TOKEN_ENCODER
     try:
         import tiktoken
 
-        return tiktoken.get_encoding("cl100k_base")
-    except Exception:  # noqa: BLE001 — tiktoken 미설치/BPE 로드 실패 등
-        return None
+        _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+    except Exception:  # noqa: BLE001 — tiktoken 미설치/BPE 다운로드 실패 등
+        logger.warning("tiktoken 인코더 로드 실패 — 문자 기반 폴백으로 동작", exc_info=True)
+
+
+def _token_encoder():
+    """준비된 인코더를 돌려준다 (워밍업 전/실패면 None → 호출부가 문자 폴백)."""
+    return _TOKEN_ENCODER
 
 
 def _estimate_message_tokens(text: str) -> int:
