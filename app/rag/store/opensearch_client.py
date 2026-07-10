@@ -55,6 +55,14 @@ def ensure_index(client: OpenSearch) -> None:
         client.indices.create(index=config.OPENSEARCH_INDEX, body=_INDEX_BODY)
 
 
+def delete_index(client: OpenSearch) -> None:
+    """색인 전체 삭제. bulk_index는 옛 문서를 지우지 않는 순수 색인(op_type=index)이라,
+    RAG 구조를 크게 바꿔 재적재할 때는 명시적으로 지우고 ensure_index로 새로 만들어야
+    한다 — 자동 호출되지 않고 `ingest --clean`에서만 실행된다."""
+    if client.indices.exists(index=config.OPENSEARCH_INDEX):
+        client.indices.delete(index=config.OPENSEARCH_INDEX)
+
+
 def bulk_index(client: OpenSearch, documents: list[dict]) -> int:
     def _actions():
         for doc in documents:
