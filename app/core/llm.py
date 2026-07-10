@@ -87,8 +87,29 @@ def _get_client():
     return _client
 
 
-def cost_usd(input_tokens: int, output_tokens: int) -> float | None:
-    """환경변수 단가(USD per 1M tokens)가 설정된 경우에만 비용을 계산한다."""
+# 보조 모델(임베딩·리랭커) 공식 단가 (USD per 1M tokens, 2026-07 확인) — RPA-97.
+# 이들은 주 챗 모델과 단가가 크게 달라(임베딩·리랭커는 훨씬 쌈), env 단일 단가로 계산하면
+# 심하게 과대추정된다(rerank 43만 토큰이 챗 단가면 실제의 19배). 그래서 자기 단가로 계산한다.
+# (output은 임베딩·리랭커 모두 과금 없음 → 0). 챗 모델은 아래 env로 조정 가능하게 남긴다.
+_AUX_MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "text-embedding-3-small": (0.02, 0.0),  # OpenAI
+    "text-embedding-3-large": (0.13, 0.0),  # OpenAI (혹시 전환 시)
+    "rerank-2.5-lite": (0.02, 0.0),         # Voyage
+    "rerank-2.5": (0.06, 0.0),              # Voyage (혹시 전환 시)
+}
+
+
+def cost_usd(input_tokens: int, output_tokens: int, model: str | None = None) -> float | None:
+    """비용(USD)을 모델별 단가로 계산한다 (RPA-97).
+
+    - 보조 모델(임베딩·리랭커)은 내장 공식 단가 테이블로.
+    - 주 챗 모델 등 그 외는 env 단가(LLM_INPUT/OUTPUT_COST_PER_1M) — 데모 조정·하위호환.
+    - 단가를 못 구하면(미지 모델 + env 미설정) None.
+    """
+    if model:
+        for prefix, (in_price, out_price) in _AUX_MODEL_PRICES.items():
+            if model.startswith(prefix):
+                return (input_tokens * in_price + output_tokens * out_price) / 1_000_000
     try:
         in_price = float(os.environ["LLM_INPUT_COST_PER_1M"])
         out_price = float(os.environ["LLM_OUTPUT_COST_PER_1M"])
@@ -176,7 +197,7 @@ def record_usage(
                     model=model,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    cost_usd=cost_usd(input_tokens, output_tokens),
+                    cost_usd=cost_usd(input_tokens, output_tokens, model),
                     latency_ms=latency_ms,
                 )
             )
