@@ -80,6 +80,7 @@ def test_obs_metadata_strips_foreign_keys():
     meta = obs._observability_metadata()
     assert set(meta.tables) == {
         "audit_logs", "llm_usage", "request_metrics", "metrics_daily", "usage_daily",
+        "turn_events",
     }
     for table in meta.tables.values():
         assert not any(c.foreign_keys for c in table.columns)

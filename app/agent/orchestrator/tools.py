@@ -53,6 +53,24 @@ def build_kb_tools(sources_sink: list[dict]):
     return [search_kb, get_action_schema]
 
 
+def tool_calls_data(tool_calls: list[dict]) -> dict:
+    """관측 전용(RPA-105) — tool_calls를 turn_events용 구조화 data로 요약한다.
+
+    describe_tool_calls(사람용 문구)와 별개로, 백엔드가 "무슨 검색/조회를 했나"를
+    적재할 수 있게 도구 이름·질의어만 뽑는다 (표시·로직에 영향 없음).
+    """
+    out = []
+    for tc in tool_calls or []:
+        args = tc.get("args") or {}
+        entry: dict = {"name": tc.get("name")}
+        if args.get("query"):
+            entry["query"] = str(args["query"])[:100]
+        if args.get("package") and args.get("action"):
+            entry["action"] = f"{args['package']}/{args['action']}"[:80]
+        out.append(entry)
+    return {"tools": out}
+
+
 def describe_tool_calls(tool_calls: list[dict]) -> str:
     """tool_calls를 진행 표시용 한글 문구로 요약한다 (qa·edit의 stage 이벤트용).
 

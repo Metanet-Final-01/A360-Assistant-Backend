@@ -4,8 +4,10 @@
 레거시 개별 엔드포인트(/analyze, /recommend, /api/agent/chat)는 /turn으로 흡수돼 제거됐다 (RPA-67).
 """
 
+import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -14,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app import models
 from app.api.auth import assert_session_owner, get_current_user, get_optional_user
@@ -638,6 +641,25 @@ def _persist_turn_result(
     return out
 
 
+def _save_turn_events(session_id: uuid.UUID, request_id: str | None, rows: list[dict]) -> None:
+    """턴 하나의 노드 타임라인을 관측 DB에 일괄 적재한다 (RPA-105, best-effort).
+
+    스트리밍 중 매 이벤트마다 DB를 치지 않고 버퍼를 턴 종료 시 한 번에 쓴다 —
+    관측이 스트림 지연에 얹히지 않게. 실패는 경고만(턴 응답에 영향 없음).
+    """
+    if not rows:
+        return
+    try:
+        from app.core.observability_db import observability_sessionmaker
+
+        with observability_sessionmaker()() as s:
+            for r in rows:
+                s.add(models.TurnEvent(session_id=session_id, request_id=request_id, **r))
+            s.commit()
+    except Exception:  # noqa: BLE001
+        logger.warning("turn_events 적재 실패 (턴은 정상): session=%s", session_id, exc_info=True)
+
+
 def _gauge_warn_ratio() -> float:
     """compact 권장(소프트) 임계 비율 — 기본 0.7. env로 조정, 비정상값은 0.7 (RPA-89).
 
@@ -834,11 +856,29 @@ async def agent_turn(
     agent_context = ctx["agent_context"]
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
 
+    # 턴 노드 타임라인 관측(RPA-105) — 스트림을 지나는 stage/error/done을 버퍼링해 턴
+    # 종료 시 일괄 적재. request_id는 미들웨어가 심은 ContextVar에서 (같은 요청 묶음 키).
+    from app.rag.observability import get_request_id
+
+    turn_request_id = get_request_id()
+
     async def sse():
         result_data = None
         saw_error = False
+        turn_t0 = time.perf_counter()
+        tev: list[dict] = []
+
+        def _tev(kind: str, stage: str | None = None, message: str | None = None, data: dict | None = None):
+            tev.append({
+                "seq": len(tev), "kind": kind, "stage": stage,
+                "message": (message or "")[:512] or None,
+                "detail": json.dumps(data, ensure_ascii=False, default=str)[:4000] if data else None,
+                "elapsed_ms": int((time.perf_counter() - turn_t0) * 1000),
+            })
+
         try:
             if auto_compacted:
+                _tev("stage", "compacting", "대화가 길어 자동 압축했습니다")
                 yield ProgressEvent(
                     event="stage", stage="compacting", message="대화가 길어 자동 압축했습니다"
                 ).to_sse()
@@ -852,6 +892,8 @@ async def agent_turn(
                         continue  # done은 저장 후 최종 메타와 함께 다시 낸다
                     if event.event == "error":
                         saw_error = True  # 에이전트가 이미 error를 흘림 — 중복 error 안 냄
+                    if event.event in ("stage", "error"):  # token/partial은 볼륨 때문에 제외
+                        _tev(event.event, event.stage, event.message, event.data)
                     yield event.to_sse()
             if result_data is not None:
                 final = _persist_turn_result(
@@ -866,18 +908,25 @@ async def agent_turn(
                             final["usage_gauge"] = gauge
                     except Exception:  # noqa: BLE001
                         logger.warning("게이지 조회 실패 (무시): session=%s", session_key, exc_info=True)
+                _tev("done", "agent", "완료", {"type": final.get("type")})
                 yield ProgressEvent(event="done", stage="agent", message="완료", data=final).to_sse()
             elif not saw_error:
+                _tev("error", "agent", "응답을 생성하지 못했습니다")
                 yield ProgressEvent(
                     event="error", stage="agent", message="응답을 생성하지 못했습니다"
                 ).to_sse()
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
+            _tev("error", "agent", f"에이전트 구성 오류: {e}")
             yield ProgressEvent(event="error", stage="agent", message=f"에이전트 구성 오류: {e}").to_sse()
         except Exception:  # noqa: BLE001 — 미포착 예외가 스트림을 끊지 않도록 error로 흘린다
             logger.exception("에이전트 턴 실패: session=%s", session_key)
+            _tev("error", "agent", "응답 생성 중 오류가 발생했습니다")
             yield ProgressEvent(
                 event="error", stage="agent", message="응답 생성 중 오류가 발생했습니다"
             ).to_sse()
+        # 타임라인 일괄 적재 — 스트림이 정상 종료된 뒤 한 번 (best-effort, threadpool).
+        # 클라이언트가 중간에 끊으면 여기 못 오지만, 끊김 처리는 별도 과제(HIGH todo).
+        await run_in_threadpool(_save_turn_events, session_key, turn_request_id, tev)
 
     return StreamingResponse(
         sse(),

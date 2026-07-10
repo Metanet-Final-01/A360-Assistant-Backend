@@ -85,4 +85,8 @@ def intake_node(state: TurnState) -> dict:
     # reason은 LLM이 만든 근거라 사용자 발화를 인용할 수 있어(PII 축적 방지) 길이를 제한해
     # 로깅한다. route가 주 신호이고 reason은 보조 맥락이다. 원문 전체는 route_reason으로 반환.
     logger.info("intake route=%s (%s)", route, reason[:120])
+    # 관측 전용(RPA-105): 최종 라우트 결정을 스트림에 흘린다 — message는 기존과 동일해
+    # 프론트 표시 불변(같은 문구 재설정), 백엔드 turn_events가 data(route/reason)를 적재한다.
+    emit({"event": "stage", "stage": "routing", "message": "요청 분석 중",
+          "data": {"route": route, "reason": reason[:200]}})
     return {"route": route, "route_reason": reason}
