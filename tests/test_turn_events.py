@@ -101,6 +101,73 @@ def test_turn_events_error_recorded(monkeypatch):
     assert rows[1]["message"] == "실패했습니다"
 
 
+# --- SSE 클라이언트 끊김 처리 (RPA-106) ---
+
+def _setup_disconnect(monkeypatch, agent_events, disconnect_flags):
+    """가짜 에이전트 + is_disconnected 시퀀스. (소비된 이벤트 수, persist 호출, tev 저장) 반환."""
+    consumed = {"n": 0}
+
+    async def _fake_turn(message, context):
+        for ev in agent_events:
+            consumed["n"] += 1
+            yield ev
+
+    flags = iter(disconnect_flags)
+
+    async def _fake_dc(self):
+        return next(flags, True)
+
+    monkeypatch.setattr("app.agent.stream_agent_turn", _fake_turn, raising=False)
+    monkeypatch.setattr("starlette.requests.Request.is_disconnected", _fake_dc)
+    persists = []
+    monkeypatch.setattr(sessions_api, "_persist_turn_result",
+                        lambda *a: persists.append(a) or {"type": "answer", "answer": "x", "sources": []})
+    monkeypatch.setattr(sessions_api, "_read_intake_gauge", lambda sid: None)
+    saves = []
+    monkeypatch.setattr(sessions_api, "_save_turn_events",
+                        lambda sid, rid, rows: saves.append(rows))
+    monkeypatch.setattr("app.db.SessionLocal", _persist_stub())
+    app.dependency_overrides[get_db] = lambda: FakeDB(
+        session=SimpleNamespace(id=SID, user_id=None, solution="a360"))
+    app.dependency_overrides[sessions_api.get_optional_user] = lambda: None
+    lines = []
+    with TestClient(app) as c:
+        with c.stream("POST", f"/api/sessions/{SID}/turn", json={"message": "안녕"}) as r:
+            lines = [ln for ln in r.iter_lines() if ln.startswith("data:")]
+    return consumed["n"], persists, saves, lines
+
+
+def test_disconnect_stops_stream_and_skips_persist(monkeypatch):
+    """done 전 끊김 → 에이전트 스트림 소비 중단(비용 방어) + 저장 없음 + 관측 기록."""
+    from app.schemas import ProgressEvent
+
+    events = [ProgressEvent(event="stage", stage=f"s{i}", message=f"단계{i}") for i in range(5)]
+    events.append(ProgressEvent(event="done", data={"type": "answer", "answer": "a", "sources": []}))
+    # 첫 이벤트 체크만 연결됨, 이후 끊김
+    n, persists, saves, _ = _setup_disconnect(monkeypatch, events, [False, True])
+
+    assert n == 2, f"2번째 이벤트에서 끊김 감지 후 소비 중단이어야 함 (실제 {n}/6)"
+    assert persists == [], "done 미도달 — 저장하면 안 됨"
+    rows = saves[0]
+    assert rows[-1]["kind"] == "error" and "끊김" in rows[-1]["message"]
+
+
+def test_disconnect_after_done_persists_but_skips_send(monkeypatch):
+    """done 후 끊김 → 완료된 작업은 저장(비용 유실 방지), 전송만 생략."""
+    from app.schemas import ProgressEvent
+
+    events = [
+        ProgressEvent(event="done", data={"type": "answer", "answer": "a", "sources": []}),
+        ProgressEvent(event="stage", stage="tail", message="후속"),
+    ]
+    n, persists, saves, lines = _setup_disconnect(monkeypatch, events, [False, True])
+
+    assert len(persists) == 1, "done을 받았으므로 저장돼야 함"
+    assert not any('"event": "done"' in ln or '"event":"done"' in ln for ln in lines), \
+        "끊긴 클라이언트에 done 전송은 생략"
+    assert saves[0][-2]["kind"] == "error" and saves[0][-1]["kind"] == "done"  # 끊김 기록 + done 기록
+
+
 def test_save_turn_events_best_effort(monkeypatch):
     """관측 DB 장애가 예외로 새지 않는다 (best-effort)."""
     class _Boom:

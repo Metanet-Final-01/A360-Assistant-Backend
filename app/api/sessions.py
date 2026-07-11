@@ -11,7 +11,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import delete, func, select
@@ -809,6 +809,7 @@ async def _run_internal_compact(session_id: uuid.UUID, message: str, stream_turn
 async def agent_turn(
     session_id: str,
     payload: AgentTurnRequest,
+    request: Request,
     db: Session = Depends(get_db),
     user: models.User | None = Depends(get_optional_user),
 ) -> StreamingResponse:
@@ -865,6 +866,7 @@ async def agent_turn(
     async def sse():
         result_data = None
         saw_error = False
+        disconnected = False
         turn_t0 = time.perf_counter()
         tev: list[dict] = []
 
@@ -887,6 +889,18 @@ async def agent_turn(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
             ):
                 async for event in stream_turn(message, agent_context):
+                    # 클라이언트 끊김 체크 (RPA-106) — 탭 닫기·네트워크 단절 후에도 에이전트
+                    # 스트림을 계속 소비하면 이후 노드 LLM 호출이 허공에 계속 나간다(비용 낭비).
+                    # 이터레이션을 멈추면 astream이 더 진행하지 않으므로 진행 중이던 호출 1건만
+                    # 완료되고 끝. BaseHTTPMiddleware 조합에선 Starlette 자동 취소가 보장되지
+                    # 않아 이벤트 경계마다 명시적으로 확인한다.
+                    # done 전 끊김 → 미완성 턴 폐기(저장 안 함). done 후 끊김 → 작업이 이미
+                    # 완료됐으므로 저장은 하되 전송만 생략 — 이력에 남아 재전송 중복을 막는다.
+                    if await request.is_disconnected():
+                        logger.info("클라이언트 끊김 — 턴 중단: session=%s", session_key)
+                        _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
+                        disconnected = True
+                        break
                     if event.event == "done":
                         result_data = event.data or {}
                         continue  # done은 저장 후 최종 메타와 함께 다시 낸다
@@ -909,8 +923,9 @@ async def agent_turn(
                     except Exception:  # noqa: BLE001
                         logger.warning("게이지 조회 실패 (무시): session=%s", session_key, exc_info=True)
                 _tev("done", "agent", "완료", {"type": final.get("type")})
-                yield ProgressEvent(event="done", stage="agent", message="완료", data=final).to_sse()
-            elif not saw_error:
+                if not disconnected:  # 끊긴 클라이언트엔 전송 생략 (저장·관측은 위에서 완료)
+                    yield ProgressEvent(event="done", stage="agent", message="완료", data=final).to_sse()
+            elif not saw_error and not disconnected:
                 _tev("error", "agent", "응답을 생성하지 못했습니다")
                 yield ProgressEvent(
                     event="error", stage="agent", message="응답을 생성하지 못했습니다"
