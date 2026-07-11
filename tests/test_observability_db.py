@@ -78,7 +78,7 @@ def test_ensure_schema_survives_bad_url(monkeypatch):
 def test_obs_metadata_strips_foreign_keys():
     """관측 테이블 사본은 FK 제약이 없어야 한다 — 관측 DB엔 부모 테이블이 없다."""
     meta = obs._observability_metadata()
-    assert set(meta.tables) == {"audit_logs", "llm_usage", "request_metrics"}
+    assert set(meta.tables) == {"audit_logs", "llm_usage"}
     for table in meta.tables.values():
         assert not any(c.foreign_keys for c in table.columns)
 
