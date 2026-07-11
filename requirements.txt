@@ -27,3 +27,4 @@ langgraph-prebuilt==1.1.0
 langchain-core==1.4.8
 langchain-openai==1.3.3
 tiktoken==0.13.0  # 선행 compact 토큰 추정(RPA-86). langchain-openai 경유 전이 의존을 명시 고정
+apscheduler==3.10.4  # 일별 롤업 배치(RPA-104) — metrics_daily·usage_daily 재집계 + retention

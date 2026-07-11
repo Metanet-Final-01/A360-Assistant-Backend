@@ -46,11 +46,15 @@ def step_node(state: dict) -> dict:
     label = step.get("name") or step_id
 
     emit({"event": "stage", "stage": "searching",
-          "message": f"[{label}] 관련 A360 액션 검색 중"})
+          "message": f"[{label}] 관련 A360 액션 검색 중",
+          "data": {"step_id": step_id}})  # 관측 전용(RPA-105) — 표시 문구 불변
 
     sl = shortlist(step, constraints)
     emit({"event": "stage", "stage": "composing",
-          "message": f"[{label}] 액션 시퀀스 구성 중"})
+          "message": f"[{label}] 액션 시퀀스 구성 중",
+          # 관측 전용(RPA-105): 카탈로그 커버리지 — 후보 수·검색 약한 substep 수
+          "data": {"step_id": step_id, "candidates": len(sl.get("menu") or []),
+                   "uncovered": len(sl.get("uncovered") or [])}})
     try:
         out = compose(step, sl, constraints)
         actions = [a.model_dump() for a in out.actions]

@@ -13,6 +13,7 @@ import uuid
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -294,3 +295,70 @@ class RequestMetric(Base):
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True  # 일별 롤업 스캔 키
     )
+
+
+class MetricsDaily(Base):
+    """일별 요청 성능 집계 (RPA-104) — request_metrics를 (일자×method×path)로 피벗한 롤업.
+
+    Streamlit(별도 레포)이 raw 대신 이걸 읽는다 — 빠르고, raw는 retention으로 정리해도
+    집계본은 장기 보관. APScheduler가 주기적으로 멱등 재집계(DELETE+INSERT)한다.
+    """
+
+    __tablename__ = "metrics_daily"
+
+    day: Mapped[str] = mapped_column(Date, primary_key=True)
+    method: Mapped[str] = mapped_column(String(10), primary_key=True)
+    path: Mapped[str] = mapped_column(String(255), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    err_4xx: Mapped[int] = mapped_column(Integer, default=0)
+    err_5xx: Mapped[int] = mapped_column(Integer, default=0)
+    p50_ms: Mapped[int | None] = mapped_column(Integer)
+    p95_ms: Mapped[int | None] = mapped_column(Integer)
+    avg_ms: Mapped[int | None] = mapped_column(Integer)
+    max_ms: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class UsageDaily(Base):
+    """일별 LLM 사용량 집계 (RPA-104) — llm_usage를 (일자×component×purpose×model)로 롤업.
+
+    비용 대시보드의 "날짜별 purpose 비용" 피벗 원천. 규칙은 MetricsDaily와 동일(멱등 재집계).
+    """
+
+    __tablename__ = "usage_daily"
+
+    day: Mapped[str] = mapped_column(Date, primary_key=True)
+    component: Mapped[str] = mapped_column(String(30), primary_key=True)
+    purpose: Mapped[str] = mapped_column(String(50), primary_key=True)
+    model: Mapped[str] = mapped_column(String(100), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TurnEvent(Base):
+    """에이전트 턴 노드 타임라인 (RPA-105) — /turn SSE를 지나는 stage/error/done 기록.
+
+    백엔드가 스트림 경계에서 관측해 턴 종료 시 일괄 적재한다(에이전트는 이벤트에
+    data만 얹음 — 라우트 결정·검색 쿼리·검수 위반 등). "어떤 노드를 얼마 만에 탔고
+    어디서 실패했나"의 원천. token/partial은 볼륨 때문에 제외. FK 없음(관측 전용).
+    """
+
+    __tablename__ = "turn_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    request_id: Mapped[str | None] = mapped_column(String(32), index=True)  # 같은 턴 묶음 키
+    seq: Mapped[int] = mapped_column(Integer)  # 턴 안 순서
+    kind: Mapped[str] = mapped_column(String(10))  # stage | error | done
+    stage: Mapped[str | None] = mapped_column(String(30))
+    message: Mapped[str | None] = mapped_column(String(512))
+    detail: Mapped[str | None] = mapped_column(Text)  # 이벤트 data JSON (route·query·violations 등)
+    elapsed_ms: Mapped[int] = mapped_column(Integer)  # 턴 시작 기준 경과
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())

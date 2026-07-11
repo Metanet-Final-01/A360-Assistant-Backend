@@ -50,7 +50,12 @@ async def lifespan(app: FastAPI):
     from app.core.observability_db import ensure_observability_schema
 
     ensure_observability_schema()
+    # 일별 롤업 스케줄러(RPA-104) — metrics_daily·usage_daily 재집계 + retention (실패해도 기동)
+    from app.core.scheduler import start_scheduler, stop_scheduler
+
+    start_scheduler()
     yield
+    stop_scheduler()
 
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)

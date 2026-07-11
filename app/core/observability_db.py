@@ -83,7 +83,14 @@ def _observability_metadata() -> MetaData:
     from app import models
 
     meta = MetaData()
-    for src in (models.AuditLog.__table__, models.LlmUsage.__table__, models.RequestMetric.__table__):
+    for src in (
+        models.AuditLog.__table__,
+        models.LlmUsage.__table__,
+        models.RequestMetric.__table__,
+        models.MetricsDaily.__table__,
+        models.UsageDaily.__table__,
+        models.TurnEvent.__table__,
+    ):
         table = Table(
             src.name,
             meta,

@@ -19,7 +19,7 @@ from .. import config
 from ..recommend.stream import emit
 from .render import analysis_brief, context_signals, flow_outline, render_compact
 from .state import TYPE_ANSWER, TurnState
-from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources
+from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources, tool_calls_data
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,8 @@ async def qa_node(state: TurnState) -> dict:
         if not getattr(gathered, "tool_calls", None):
             break
         emit({"event": "stage", "stage": "searching",
-              "message": describe_tool_calls(gathered.tool_calls)})
+              "message": describe_tool_calls(gathered.tool_calls),
+              "data": tool_calls_data(gathered.tool_calls)})  # data는 관측 전용(RPA-105)
         messages.append(gathered)
         messages.extend(execute_tool_calls(tools, gathered))
 
