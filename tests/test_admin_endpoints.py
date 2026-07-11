@@ -1,6 +1,7 @@
 """운영·모니터링 집계 조회 API 테스트 (RPA-81)."""
 
 import uuid
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -13,14 +14,14 @@ from app.main import app
 
 
 class FakeDB:
-    def __init__(self, agg_rows=None, audit_rows=None):
+    def __init__(self, agg_rows=None, scalar_rows=None):
         self.agg_rows = agg_rows or []
-        self.audit_rows = audit_rows or []
+        self.scalar_rows = scalar_rows or []
 
     def execute(self, stmt):
         return SimpleNamespace(
             all=lambda: self.agg_rows,
-            scalars=lambda: SimpleNamespace(all=lambda: self.audit_rows),
+            scalars=lambda: SimpleNamespace(all=lambda: self.scalar_rows),
         )
 
 
@@ -128,7 +129,7 @@ def test_llm_usage_stats_invalid_group_by_422():
 def test_audit_logs_returns_rows():
     rows = [SimpleNamespace(request_id="abc123", user_id=None, method="POST",
                             path="/api/sessions", status_code=201, latency_ms=12, created_at=None)]
-    app.dependency_overrides[get_obs_db] = lambda: FakeDB(audit_rows=rows)
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB(scalar_rows=rows)
     _auth()
     with TestClient(app) as c:
         r = c.get("/api/admin/audit-logs", params={"method": "post", "limit": 50})
@@ -144,3 +145,80 @@ def test_audit_logs_invalid_user_id_400():
         r = c.get("/api/admin/audit-logs", params={"user_id": "not-a-uuid"})
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "INVALID_ID"
+
+
+# --- metrics-daily ---
+
+def test_metrics_daily_returns_rows():
+    rows = [SimpleNamespace(day=date(2026, 7, 11), method="GET", path="/api/sessions/:id",
+                            calls=42, err_4xx=1, err_5xx=0, p50_ms=80, p95_ms=200, avg_ms=95, max_ms=500)]
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB(scalar_rows=rows)
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/metrics-daily", params={"method": "get", "days": 7})
+    assert r.status_code == 200
+    row = r.json()["rows"][0]
+    assert row["day"] == "2026-07-11" and row["path"] == "/api/sessions/:id" and row["calls"] == 42
+    assert row["p95_ms"] == 200
+
+
+def test_metrics_daily_requires_auth():
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth(HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "x"}))
+    with TestClient(app) as c:
+        r = c.get("/api/admin/metrics-daily")
+    assert r.status_code == 401
+
+
+# --- usage-daily ---
+
+def test_usage_daily_returns_rows():
+    rows = [SimpleNamespace(day=date(2026, 7, 11), component="agent", purpose="recommend",
+                            model="claude-sonnet-5", calls=5, input_tokens=1000, output_tokens=200, cost_usd=0.05)]
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB(scalar_rows=rows)
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/usage-daily", params={"component": "agent", "days": 30})
+    assert r.status_code == 200
+    row = r.json()["rows"][0]
+    assert row["day"] == "2026-07-11" and row["component"] == "agent" and row["cost_usd"] == 0.05
+
+
+def test_usage_daily_requires_auth():
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth(HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "x"}))
+    with TestClient(app) as c:
+        r = c.get("/api/admin/usage-daily")
+    assert r.status_code == 401
+
+
+# --- turn-events ---
+
+def test_turn_events_returns_rows():
+    sid = uuid.uuid4()
+    rows = [SimpleNamespace(session_id=sid, request_id="req1", seq=0, kind="stage",
+                            stage="agent", message="시작", detail=None, elapsed_ms=10, created_at=None)]
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB(scalar_rows=rows)
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/turn-events", params={"session_id": str(sid)})
+    assert r.status_code == 200
+    ev = r.json()["events"][0]
+    assert ev["session_id"] == str(sid) and ev["kind"] == "stage" and ev["seq"] == 0
+
+
+def test_turn_events_invalid_session_id_400():
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/turn-events", params={"session_id": "not-a-uuid"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "INVALID_ID"
+
+
+def test_turn_events_requires_auth():
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth(HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "x"}))
+    with TestClient(app) as c:
+        r = c.get("/api/admin/turn-events")
+    assert r.status_code == 401
