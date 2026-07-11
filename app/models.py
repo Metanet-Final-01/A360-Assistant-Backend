@@ -271,3 +271,26 @@ class AuditLog(Base):
     status_code: Mapped[int] = mapped_column(Integer)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RequestMetric(Base):
+    """요청 성능 메트릭 (RPA-103) — **모든** 요청(GET 포함)의 지연·상태를 관측 DB에.
+
+    audit_logs(변경 요청 forensics, 실제 UUID 경로)와 달리 성능 집계용이라:
+    - path는 **정규화**(UUID→:id)해 저장 — GROUP BY/피벗(엔드포인트별 p95)이 되게
+    - FK 없음 — 관측 DB(Neon)엔 users가 없고, 순수 메트릭이라 참조 무결성 불필요
+    APScheduler 일별 롤업(metrics_daily)·Streamlit 성능 대시보드의 원천이다.
+    """
+
+    __tablename__ = "request_metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    request_id: Mapped[str | None] = mapped_column(String(32))
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    method: Mapped[str] = mapped_column(String(10))
+    path: Mapped[str] = mapped_column(String(255), index=True)  # 정규화된 경로 (:id)
+    status_code: Mapped[int] = mapped_column(Integer)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True  # 일별 롤업 스캔 키
+    )

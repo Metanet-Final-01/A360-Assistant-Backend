@@ -79,6 +79,12 @@ def test_streaming_response_not_buffered(mini_app):
 
 
 # --- 감사 로그 DB 기록 ---
+# AuditLog는 SimpleNamespace로 패치되고 RequestMetric(RPA-103)은 실제 모델이 저장되므로,
+# 감사 검증은 isinstance(SimpleNamespace)로 감사 행만 골라 본다.
+
+def _audits(saved):
+    return [r for r in saved if isinstance(r, SimpleNamespace)]
+
 
 def test_audit_records_mutating_success_only(mini_app, monkeypatch):
     saved = []
@@ -104,8 +110,9 @@ def test_audit_records_mutating_success_only(mini_app, monkeypatch):
         c.post("/do")     # 변경성 성공 → 감사 기록됨
         c.get("/read")    # 조회 → 감사 안 됨
 
-    assert len(saved) == 1
-    assert saved[0].method == "POST" and saved[0].path == "/do" and saved[0].status_code == 200
+    audits = _audits(saved)
+    assert len(audits) == 1
+    assert audits[0].method == "POST" and audits[0].path == "/do" and audits[0].status_code == 200
 
 
 def test_audit_records_failed_mutation(mini_app, monkeypatch):
@@ -128,8 +135,9 @@ def test_audit_records_failed_mutation(mini_app, monkeypatch):
     with TestClient(mini_app) as c:
         c.post("/fail")  # 4xx 변경 요청 → 감사에 기록됨(status_code=400)
 
-    assert len(saved) == 1
-    assert saved[0].method == "POST" and saved[0].path == "/fail" and saved[0].status_code == 400
+    audits = _audits(saved)
+    assert len(audits) == 1
+    assert audits[0].method == "POST" and audits[0].path == "/fail" and audits[0].status_code == 400
 
 
 def test_no_crlf_sanitizer():
@@ -166,5 +174,57 @@ def test_audit_captures_user_from_jwt(mini_app, monkeypatch):
     with TestClient(mini_app) as c:
         c.post("/act", headers={"Authorization": "Bearer faketoken"})
 
-    assert len(saved) == 1
-    assert saved[0].user_id == uid
+    audits = _audits(saved)
+    assert len(audits) == 1
+    assert audits[0].user_id == uid
+
+
+# --- 요청 성능 메트릭 (RPA-103) ---
+
+def test_normalize_path():
+    """UUID·숫자 세그먼트를 플레이스홀더로 — 엔드포인트별 집계(피벗)가 가능한 형태."""
+    from app.core.http_logging import _normalize_path
+
+    assert _normalize_path(
+        "/api/sessions/4b800caf-8b61-4711-8b75-648006400000/turn"
+    ) == "/api/sessions/:id/turn"
+    assert _normalize_path("/api/sessions/abc/recommendations/3/export") == \
+        "/api/sessions/abc/recommendations/:n/export"
+    assert _normalize_path("/api/health") == "/api/health"
+
+
+def test_metric_records_all_requests_normalized(mini_app, monkeypatch):
+    """GET 포함 모든 요청이 정규화된 path로 request_metrics에 남는다 (RPA-103)."""
+    saved = []
+
+    class _FakeDB:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def add(self, row): saved.append(row)
+        def commit(self): pass
+
+    monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
+    monkeypatch.setattr("app.models.AuditLog", lambda **kw: SimpleNamespace(**kw))
+
+    sid = uuid.uuid4()
+
+    @mini_app.get("/api/items/{item_id}")
+    def _read(item_id: str):
+        return {"id": item_id}
+
+    @mini_app.post("/do")
+    def _do():
+        return {"done": True}
+
+    with TestClient(mini_app) as c:
+        c.get(f"/api/items/{sid}")   # GET → 메트릭만
+        c.post("/do")                 # POST → 감사 + 메트릭
+        c.options("/do")              # OPTIONS → 메트릭 제외 (preflight 노이즈)
+
+    from app.models import RequestMetric
+    metrics = [r for r in saved if isinstance(r, RequestMetric)]
+    assert len(metrics) == 2, f"GET+POST 2건이어야 함 (OPTIONS 제외): {len(metrics)}"
+    get_m = next(m for m in metrics if m.method == "GET")
+    assert get_m.path == "/api/items/:id"          # UUID 정규화
+    assert get_m.status_code == 200 and get_m.latency_ms is not None
+    assert next(m for m in metrics if m.method == "POST").path == "/do"
