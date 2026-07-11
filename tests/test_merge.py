@@ -46,7 +46,9 @@ def test_jar_action_schema_tagged_with_schema_source_jar():
 def test_duplicate_action_ids_raise_instead_of_silently_overwriting():
     # 서로 다른 두 액션이 같은 (package_name, action_name)으로 귀결되면 id가 겹쳐서
     # DB의 ON CONFLICT(id) upsert가 하나를 조용히 지워버린다 — 조용히 넘어가지 않고
-    # build 단계에서 바로 터뜨려야 한다.
+    # build 단계에서 바로 터뜨려야 한다. 정본 판단(JAR 자체에 중복 액션이 있을 때 어느
+    # 버전을 쓸지)은 jar_parser.py가 파싱 시점에 이미 처리하므로, 여기 도달할 때 겹치면
+    # 그건 예상 못 한 새로운 데이터 문제다.
     colliding_package = {
         **_JAR_PACKAGE,
         "actions": [

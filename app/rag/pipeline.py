@@ -56,19 +56,31 @@ def cmd_crawl(args: argparse.Namespace) -> None:
     print(f"저장: {written}개 신규 → {out_path}")
 
 
+def _merge_into_packages_json(new_packages: list[dict]) -> dict[str, dict]:
+    """새로 파싱한 패키지들을 기존 packages.json과 합친다. 같은 package_name이 이미
+    있으면 버전을 비교해 더 높은 쪽만 채택한다(select_better_version) — 방금 파싱한
+    쪽을 무조건 최신으로 보고 덮어쓰면, 이미 더 높은 버전이 packages.json에 있었는데
+    이번 실행이 낮은 버전만 발견한 경우 오히려 퇴보한다.
+    """
+    from .sources.jar_parser import select_better_version
+
+    existing: dict[str, dict] = {}
+    if config.PACKAGES_JSON.exists():
+        for pkg in json.loads(config.PACKAGES_JSON.read_text(encoding="utf-8")):
+            existing[pkg["package_name"]] = pkg
+    for pkg in new_packages:
+        name = pkg["package_name"]
+        existing[name] = pkg if name not in existing else select_better_version(existing[name], pkg)
+    return existing
+
+
 def cmd_parse_jars(args: argparse.Namespace) -> None:
     from .sources.jar_parser import parse_packages
 
     packages = parse_packages([Path(p) for p in args.paths], preferred_locale=args.jar_locale)
     config.PACKAGES_JSON.parent.mkdir(parents=True, exist_ok=True)
 
-    existing: dict[str, dict] = {}
-    if config.PACKAGES_JSON.exists():
-        for pkg in json.loads(config.PACKAGES_JSON.read_text(encoding="utf-8")):
-            existing[pkg["package_name"]] = pkg
-    for pkg in packages:
-        existing[pkg["package_name"]] = pkg
-
+    existing = _merge_into_packages_json(packages)
     config.PACKAGES_JSON.write_text(
         json.dumps(list(existing.values()), ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -94,12 +106,7 @@ def cmd_harvest_github(args: argparse.Namespace) -> None:
     jar_dir = Path(stats["jar_dir"])
     if any(jar_dir.glob("*.jar")):
         packages = parse_packages([jar_dir], preferred_locale=args.jar_locale)
-        existing: dict[str, dict] = {}
-        if config.PACKAGES_JSON.exists():
-            for pkg in json.loads(config.PACKAGES_JSON.read_text(encoding="utf-8")):
-                existing[pkg["package_name"]] = pkg
-        for pkg in packages:
-            existing[pkg["package_name"]] = pkg
+        existing = _merge_into_packages_json(packages)
         config.PACKAGES_JSON.write_text(
             json.dumps(list(existing.values()), ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -471,6 +478,15 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # Windows 콘솔 기본 코드페이지(cp949 등)는 em-dash(—)/en-dash(–) 같은 문자를
+    # 인코딩 못 해 print()가 UnicodeEncodeError로 죽는다(실측: 크롤링한 문서 내용을
+    # 그대로 출력하는 search 명령에서 재현됨 — 외부 문서 텍스트는 어떤 특수문자가
+    # 들어있을지 통제할 수 없다). UTF-8로 강제하고, 그래도 콘솔이 못 그리는 문자는
+    # errors="replace"로 안전하게 대체해 최소한 크래시는 나지 않게 한다.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(prog="python -m app.rag.pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
