@@ -174,7 +174,11 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
     original_flow, original_violations = flow, violations
 
     emit({"event": "stage", "stage": "verifying",
-          "message": f"검수 위반 {len(violations)}건 교정 중"})
+          "message": f"검수 위반 {len(violations)}건 교정 중",
+          # 관측 전용(RPA-105): "위반 N건"의 실체 — 규칙 코드·위치 (표시 문구 불변)
+          "data": {"violations": [
+              {"rule": v.get("rule"), "location": v.get("location")} for v in violations
+          ]}})
 
     # 1단계: 단계별 문법 위반(R1~R6) 국소 교정 — 위반 있는 단계만 LLM에 넘긴다.
     repaired = False

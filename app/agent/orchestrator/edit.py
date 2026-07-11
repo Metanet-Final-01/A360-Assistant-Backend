@@ -29,7 +29,7 @@ from .generate import UserCatalog, extract_user_catalog
 from .harness import verify_and_repair
 from .render import dump_json, render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
-from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources
+from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources, tool_calls_data
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,8 @@ async def edit_node(state: TurnState) -> dict:
     while getattr(response, "tool_calls", None) and rounds < _MAX_TOOL_ROUNDS:
         rounds += 1
         emit({"event": "stage", "stage": "searching",
-              "message": describe_tool_calls(response.tool_calls)})
+              "message": describe_tool_calls(response.tool_calls),
+              "data": tool_calls_data(response.tool_calls)})  # data는 관측 전용(RPA-105)
         messages.append(response)
         messages.extend(execute_tool_calls(tools, response))
         # 마지막 라운드는 도구 없이 강제 마무리 — 무한 검색을 끊는다.
