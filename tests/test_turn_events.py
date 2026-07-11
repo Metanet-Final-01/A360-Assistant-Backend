@@ -181,6 +181,8 @@ def test_disconnect_same_iteration_as_done_still_persists(monkeypatch):
     n, persists, saves, lines = _setup_disconnect(monkeypatch, events, [True])
 
     assert len(persists) == 1, "같은 반복 끊김이어도 done은 저장돼야 함"
+    # done이 마지막 이벤트여도 최종 전송 전 끊김 체크가 돌아 전송은 생략된다 (CodeRabbit #165)
+    assert not any('"done"' in ln for ln in lines), "끊긴 클라이언트에 done 전송 생략"
     assert saves[0][-1]["kind"] == "done"
 
 

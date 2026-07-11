@@ -923,6 +923,13 @@ async def agent_turn(
                     if event.event in ("stage", "error"):  # token/partial은 볼륨 때문에 제외
                         _tev(event.event, event.stage, event.message, event.data)
                     yield event.to_sse()
+            # done이 마지막 이벤트면 루프가 끊김 체크 없이 끝난다(선처리 continue) — 최종
+            # 전송 전에 한 번 더 확인해, 죽은 클라이언트로의 yield(전송 예외 → turn_events
+            # 적재 누락)를 막는다 (CodeRabbit #165). 저장은 그대로 진행된다.
+            if not disconnected and await request.is_disconnected():
+                logger.info("클라이언트 끊김 — 응답 전송 생략: session=%s", session_key)
+                _tev("error", "agent", "클라이언트 연결 끊김 — 전송 생략")
+                disconnected = True
             if result_data is not None:
                 final = _persist_turn_result(
                     session_key, rec_analysis_id, document_id, message, result_data
