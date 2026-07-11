@@ -41,7 +41,17 @@ def start_scheduler() -> bool:
             interval = int(os.getenv("ROLLUP_INTERVAL_MINUTES", "60"))
         except ValueError:
             interval = 60
-        _scheduler = BackgroundScheduler(daemon=True)
+        from apscheduler.executors.pool import ThreadPoolExecutor
+
+        # 단일 워커 + max_instances=1 — 캐치업과 주기 잡(또는 밀린 주기 잡끼리)이 같은
+        # 날짜를 동시에 DELETE→INSERT 하는 프로세스 내 경쟁을 원천 차단(CodeRabbit #164).
+        # 프로세스 간(팀원 여러 명) 경쟁은 단일 트랜잭션 + PK가 한 승자를 보장하고,
+        # 패자는 다음 주기에 멱등 재집계되므로 안전.
+        _scheduler = BackgroundScheduler(
+            daemon=True,
+            executors={"default": ThreadPoolExecutor(1)},
+            job_defaults={"max_instances": 1, "coalesce": True},
+        )
         _scheduler.add_job(_rollup_job, "interval", minutes=max(1, interval), id="metrics_rollup")
         # 시작 캐치업 — 서버가 꺼져 있던 날들의 집계 공백을 메운다 (별도 스레드, 기동 안 막음)
         _scheduler.add_job(_catchup_job, id="rollup_catchup")

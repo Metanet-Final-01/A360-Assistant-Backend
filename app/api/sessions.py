@@ -871,10 +871,21 @@ async def agent_turn(
         tev: list[dict] = []
 
         def _tev(kind: str, stage: str | None = None, message: str | None = None, data: dict | None = None):
+            # detail은 항상 "유효한 JSON"이어야 한다 — 문자열을 그대로 자르면 중간에서 끊겨
+            # 파싱 불가 JSON이 저장된다(CodeRabbit #164). 과대 payload는 preview 마커 객체로
+            # 대체해 잘라도 유효 JSON을 유지한다.
+            detail = None
+            if data:
+                detail = json.dumps(data, ensure_ascii=False, default=str)
+                if len(detail) > 4000:
+                    detail = json.dumps(
+                        {"_truncated": True, "size": len(detail), "preview": detail[:2000]},
+                        ensure_ascii=False,
+                    )
             tev.append({
                 "seq": len(tev), "kind": kind, "stage": stage,
                 "message": (message or "")[:512] or None,
-                "detail": json.dumps(data, ensure_ascii=False, default=str)[:4000] if data else None,
+                "detail": detail,
                 "elapsed_ms": int((time.perf_counter() - turn_t0) * 1000),
             })
 
@@ -889,21 +900,24 @@ async def agent_turn(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
             ):
                 async for event in stream_turn(message, agent_context):
+                    # done은 끊김 체크보다 먼저 잡는다 (CodeRabbit #164) — 같은 반복에서
+                    # 끊김이 감지되면 이미 완료된 작업(전체 LLM 비용 지출됨)이 저장 없이
+                    # 버려지는 누락이 생긴다. done을 먼저 확보하면 그 케이스가 "done 후
+                    # 끊김 = 저장 + 전송만 생략" 경로로 안전하게 합류한다.
+                    if event.event == "done":
+                        result_data = event.data or {}
+                        continue  # done은 저장 후 최종 메타와 함께 다시 낸다
                     # 클라이언트 끊김 체크 (RPA-106) — 탭 닫기·네트워크 단절 후에도 에이전트
                     # 스트림을 계속 소비하면 이후 노드 LLM 호출이 허공에 계속 나간다(비용 낭비).
                     # 이터레이션을 멈추면 astream이 더 진행하지 않으므로 진행 중이던 호출 1건만
                     # 완료되고 끝. BaseHTTPMiddleware 조합에선 Starlette 자동 취소가 보장되지
                     # 않아 이벤트 경계마다 명시적으로 확인한다.
-                    # done 전 끊김 → 미완성 턴 폐기(저장 안 함). done 후 끊김 → 작업이 이미
-                    # 완료됐으므로 저장은 하되 전송만 생략 — 이력에 남아 재전송 중복을 막는다.
+                    # done 전 끊김 → 미완성 턴 폐기(저장 안 함). done 후 끊김 → 저장 + 전송만 생략.
                     if await request.is_disconnected():
                         logger.info("클라이언트 끊김 — 턴 중단: session=%s", session_key)
                         _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
                         disconnected = True
                         break
-                    if event.event == "done":
-                        result_data = event.data or {}
-                        continue  # done은 저장 후 최종 메타와 함께 다시 낸다
                     if event.event == "error":
                         saw_error = True  # 에이전트가 이미 error를 흘림 — 중복 error 안 냄
                     if event.event in ("stage", "error"):  # token/partial은 볼륨 때문에 제외
