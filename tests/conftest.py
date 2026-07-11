@@ -42,3 +42,6 @@ def _isolate_observability_db(monkeypatch):
     obs._engine = None
     obs._sessionmaker = None
     obs._url_cached = None
+    # 롤업 스케줄러(RPA-104)도 테스트에선 끈다 — TestClient lifespan마다 배치가 돌면
+    # 느려지고 로컬 DB에 집계 쓰레기가 쌓인다.
+    monkeypatch.setenv("METRICS_ROLLUP_ENABLED", "false")

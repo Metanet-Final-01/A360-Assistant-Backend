@@ -13,6 +13,7 @@ import uuid
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -293,4 +294,49 @@ class RequestMetric(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[str] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True  # 일별 롤업 스캔 키
+    )
+
+
+class MetricsDaily(Base):
+    """일별 요청 성능 집계 (RPA-104) — request_metrics를 (일자×method×path)로 피벗한 롤업.
+
+    Streamlit(별도 레포)이 raw 대신 이걸 읽는다 — 빠르고, raw는 retention으로 정리해도
+    집계본은 장기 보관. APScheduler가 주기적으로 멱등 재집계(DELETE+INSERT)한다.
+    """
+
+    __tablename__ = "metrics_daily"
+
+    day: Mapped[str] = mapped_column(Date, primary_key=True)
+    method: Mapped[str] = mapped_column(String(10), primary_key=True)
+    path: Mapped[str] = mapped_column(String(255), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    err_4xx: Mapped[int] = mapped_column(Integer, default=0)
+    err_5xx: Mapped[int] = mapped_column(Integer, default=0)
+    p50_ms: Mapped[int | None] = mapped_column(Integer)
+    p95_ms: Mapped[int | None] = mapped_column(Integer)
+    avg_ms: Mapped[int | None] = mapped_column(Integer)
+    max_ms: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class UsageDaily(Base):
+    """일별 LLM 사용량 집계 (RPA-104) — llm_usage를 (일자×component×purpose×model)로 롤업.
+
+    비용 대시보드의 "날짜별 purpose 비용" 피벗 원천. 규칙은 MetricsDaily와 동일(멱등 재집계).
+    """
+
+    __tablename__ = "usage_daily"
+
+    day: Mapped[str] = mapped_column(Date, primary_key=True)
+    component: Mapped[str] = mapped_column(String(30), primary_key=True)
+    purpose: Mapped[str] = mapped_column(String(50), primary_key=True)
+    model: Mapped[str] = mapped_column(String(100), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
