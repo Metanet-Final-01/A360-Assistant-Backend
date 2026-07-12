@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app import models
 from app.api.auth import get_current_user
@@ -208,7 +208,6 @@ def turn_events(
 ) -> dict:
     """에이전트 턴 노드 타임라인(RPA-105 turn_events) 조회 — 어떤 노드를 얼마 만에 탔고
     어디서 실패했나. session_id를 지정하면 그 세션의 턴만, 순서(seq)대로 반환한다."""
-    q = select(models.TurnEvent).limit(limit)
     if session_id:
         try:
             sid = uuid.UUID(session_id)
@@ -216,11 +215,21 @@ def turn_events(
             raise HTTPException(
                 400, detail={"code": "INVALID_ID", "message": "session_id 형식이 올바르지 않습니다."}
             ) from None
-        q = q.where(models.TurnEvent.session_id == sid).order_by(
-            models.TurnEvent.request_id, models.TurnEvent.seq
+        # request_id는 uuid4라 시간과 무관하다 — order_by(request_id, seq)에 바로
+        # limit을 걸면 최신 턴이 아니라 사전순으로 앞선 임의의 턴만 잘릴 수 있다
+        # (CodeRabbit 지적). created_at(시간축)으로 먼저 최근 limit건을 고르고,
+        # 화면에 보여줄 턴 진행 순서(request_id, seq)는 바깥 쿼리에서 별도로 맞춘다.
+        recent = (
+            select(models.TurnEvent)
+            .where(models.TurnEvent.session_id == sid)
+            .order_by(models.TurnEvent.created_at.desc(), models.TurnEvent.id.desc())
+            .limit(limit)
+            .subquery()
         )
+        recent_event = aliased(models.TurnEvent, recent)
+        q = select(recent_event).order_by(recent_event.request_id, recent_event.seq)
     else:
-        q = q.order_by(models.TurnEvent.created_at.desc())
+        q = select(models.TurnEvent).order_by(models.TurnEvent.created_at.desc()).limit(limit)
     rows = db.execute(q).scalars().all()
     return {
         "events": [
