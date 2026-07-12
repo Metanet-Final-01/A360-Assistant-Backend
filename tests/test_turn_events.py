@@ -160,12 +160,66 @@ def test_disconnect_after_done_persists_but_skips_send(monkeypatch):
         ProgressEvent(event="done", data={"type": "answer", "answer": "a", "sources": []}),
         ProgressEvent(event="stage", stage="tail", message="후속"),
     ]
-    n, persists, saves, lines = _setup_disconnect(monkeypatch, events, [False, True])
+    # done 반복은 끊김 체크를 소비하지 않으므로(선처리), 첫 체크=후속 stage에서 끊김 감지
+    n, persists, saves, lines = _setup_disconnect(monkeypatch, events, [True])
 
     assert len(persists) == 1, "done을 받았으므로 저장돼야 함"
     assert not any('"event": "done"' in ln or '"event":"done"' in ln for ln in lines), \
         "끊긴 클라이언트에 done 전송은 생략"
     assert saves[0][-2]["kind"] == "error" and saves[0][-1]["kind"] == "done"  # 끊김 기록 + done 기록
+
+
+def test_disconnect_same_iteration_as_done_still_persists(monkeypatch):
+    """done과 같은 반복에서 끊김이 감지돼도 완료 결과는 저장된다 (CodeRabbit #164).
+
+    done 이벤트를 소비하는 시점에 이미 끊겨 있어도(첫 체크부터 True) done을 먼저
+    처리하므로 result_data가 확보된다 — 전체 비용이 지출된 작업의 저장 누락 방지."""
+    from app.schemas import ProgressEvent
+
+    events = [ProgressEvent(event="done", data={"type": "answer", "answer": "a", "sources": []})]
+    # 모든 체크가 True(=이미 끊김) — 그래도 done이 먼저 처리돼야 함
+    n, persists, saves, lines = _setup_disconnect(monkeypatch, events, [True])
+
+    assert len(persists) == 1, "같은 반복 끊김이어도 done은 저장돼야 함"
+    # done이 마지막 이벤트여도 최종 전송 전 끊김 체크가 돌아 전송은 생략된다 (CodeRabbit #165)
+    assert not any('"done"' in ln for ln in lines), "끊긴 클라이언트에 done 전송 생략"
+    assert saves[0][-1]["kind"] == "done"
+
+
+def test_tev_detail_truncation_keeps_valid_json(monkeypatch):
+    """과대 data도 detail은 항상 유효 JSON — 문자열 중간 절단으로 파싱 불가가 되면 안 됨."""
+    import json as _json
+
+    from app.schemas import ProgressEvent
+
+    saves = []
+    big = {"blob": "가" * 6000}  # 직렬화 시 4000자 초과
+    _run_turn(monkeypatch, [
+        ProgressEvent(event="stage", stage="routing", message="요청 분석 중", data=big),
+        ProgressEvent(event="done", data={"type": "answer", "answer": "a", "sources": []}),
+    ], saves)
+
+    _, _, rows = saves[0]
+    parsed = _json.loads(rows[0]["detail"])   # 절단됐어도 반드시 파싱돼야 함
+    assert parsed.get("_truncated") is True and parsed["size"] > 4000
+    assert "preview" in parsed
+
+
+def test_scheduler_serializes_jobs(monkeypatch):
+    """롤업 잡들이 단일 워커·max_instances=1로 직렬 실행된다 (동시 DELETE→INSERT 방지)."""
+    from app.core import scheduler
+
+    monkeypatch.setenv("METRICS_ROLLUP_ENABLED", "true")
+    # 잡이 실제로 돌지 않게 rollup을 no-op으로
+    monkeypatch.setattr("app.services.rollup.run_rollup", lambda days_back=1: None)
+    try:
+        assert scheduler.start_scheduler() is True
+        job = scheduler._scheduler.get_job("metrics_rollup")
+        assert job.max_instances == 1
+        exec_ = scheduler._scheduler._executors["default"]
+        assert exec_._pool._max_workers == 1
+    finally:
+        scheduler.stop_scheduler()
 
 
 def test_save_turn_events_best_effort(monkeypatch):
