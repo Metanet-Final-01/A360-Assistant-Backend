@@ -1,5 +1,6 @@
 """임베딩 생성. Anthropic은 임베딩 API가 없어 Voyage AI(공식 권장) 또는 OpenAI를 사용한다."""
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -114,6 +115,97 @@ def post_with_retry(url: str, headers: dict, payload: dict, retries: int = 5) ->
     raise RuntimeError(f"external API failed after {retries} retries: {url} ({detail})")
 
 
+async def post_with_retry_async(
+    url: str, headers: dict, payload: dict, retries: int = 5, client: httpx.AsyncClient | None = None
+) -> dict:
+    """post_with_retry의 비동기 버전 — /api/rag/search 전용 경로(embed_query_async/
+    rerank_async)에서 쓴다.
+
+    client를 넘기면(정상 경로 — app/rag/store/pool.py의 앱 전역 재사용 클라이언트) 그걸
+    그대로 쓰고 여기서 닫지 않는다 — 매 호출마다 새 AsyncClient를 열고 닫던 게 부하
+    테스트로 확인된 진짜 병목(연결 재사용 부재) 중 하나였다. client가 없으면(단독
+    테스트 등) 이 호출 범위에서만 쓰고 닫는 임시 클라이언트로 폴백한다."""
+    if client is not None:
+        return await _post_with_retry(client, url, headers, payload, retries)
+    async with httpx.AsyncClient(timeout=60.0) as owned_client:
+        return await _post_with_retry(owned_client, url, headers, payload, retries)
+
+
+async def _post_with_retry(client: httpx.AsyncClient, url: str, headers: dict, payload: dict, retries: int) -> dict:
+    last_status = None
+    last_body = ""
+    for attempt in range(retries):
+        started_at = datetime.now(timezone.utc)
+        started = time.perf_counter()
+        try:
+            resp = await client.post(url, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
+            log_event(
+                "external_api_attempt",
+                url=url,
+                attempt=attempt + 1,
+                retries=retries,
+                status="error",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                started_at=started_at.isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+            if attempt == retries - 1:
+                raise RuntimeError(f"external API request failed: {url} {type(exc).__name__}: {exc}")
+            await asyncio.sleep(2**attempt)
+            continue
+
+        last_status = resp.status_code
+        last_body = resp.text[:500]
+        if resp.status_code == 429 or resp.status_code >= 500:
+            wait = float(resp.headers.get("retry-after", 2**attempt))
+            log_event(
+                "external_api_attempt",
+                url=url,
+                attempt=attempt + 1,
+                retries=retries,
+                status="retry",
+                status_code=resp.status_code,
+                response_preview=last_body,
+                wait_seconds=wait,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                started_at=started_at.isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+            await asyncio.sleep(wait)
+            continue
+        if resp.status_code >= 400:
+            log_event(
+                "external_api_attempt",
+                url=url,
+                attempt=attempt + 1,
+                retries=retries,
+                status="error",
+                status_code=resp.status_code,
+                response_preview=last_body,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                started_at=started_at.isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+        resp.raise_for_status()
+        log_event(
+            "external_api_attempt",
+            url=url,
+            attempt=attempt + 1,
+            retries=retries,
+            status="ok",
+            status_code=resp.status_code,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            started_at=started_at.isoformat(),
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return resp.json()
+    detail = f"status={last_status} body={last_body}" if last_status else "no response"
+    raise RuntimeError(f"external API failed after {retries} retries: {url} ({detail})")
+
+
 def _embed_voyage(texts: list[str]) -> list[list[float]]:
     if not config.VOYAGE_API_KEY:
         raise RuntimeError("VOYAGE_API_KEY 환경변수가 필요합니다")
@@ -165,3 +257,34 @@ def embed_query(text: str) -> list[float]:
         _record_embed_usage(data)
         return data["data"][0]["embedding"]
     return _embed_openai([text])[0]
+
+
+@log_call(
+    "embed_query",
+    capture_args=("text",),
+    capture_result=lambda r: {"provider": config.EMBEDDING_PROVIDER, "dim": len(r)},
+)
+async def embed_query_async(text: str, client: httpx.AsyncClient | None = None) -> list[float]:
+    """embed_query의 비동기 버전 — /api/rag/search 전용 경로. client는 app/rag/store/
+    pool.py의 앱 전역 재사용 클라이언트(연결 재사용, 매 호출 새 클라이언트 방지)."""
+    if config.EMBEDDING_PROVIDER == "voyage":
+        if not config.VOYAGE_API_KEY:
+            raise RuntimeError("VOYAGE_API_KEY 환경변수가 필요합니다")
+        data = await post_with_retry_async(
+            "https://api.voyageai.com/v1/embeddings",
+            {"Authorization": f"Bearer {config.VOYAGE_API_KEY}"},
+            {"model": config.EMBEDDING_MODEL, "input": [text], "input_type": "query"},
+            client=client,
+        )
+        _record_embed_usage(data)
+        return data["data"][0]["embedding"]
+    if not config.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
+    data = await post_with_retry_async(
+        "https://api.openai.com/v1/embeddings",
+        {"Authorization": f"Bearer {config.OPENAI_API_KEY}"},
+        {"model": config.EMBEDDING_MODEL, "input": [text]},
+        client=client,
+    )
+    _record_embed_usage(data)
+    return data["data"][0]["embedding"]

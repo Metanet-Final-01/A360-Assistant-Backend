@@ -1,5 +1,6 @@
 """OpenSearch BM25 키워드 검색. pgvector와 별도로 rag_documents를 동일 id로 색인한다."""
 
+import httpx
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 
@@ -50,6 +51,16 @@ def connect() -> OpenSearch:
     return OpenSearch(**kwargs)
 
 
+def connect_async() -> httpx.AsyncClient:
+    """/api/rag/search 전용 비동기 경로. opensearchpy는 이 환경에 async 클라이언트
+    extra(aiohttp)가 안 깔려 있어(opensearchpy[async] 미설치) 쓸 수 없다 — OpenSearch가
+    순수 REST API라, opensearchpy 없이 httpx.AsyncClient로 _search를 직접 호출한다.
+    적재(ingest)·debug 엔드포인트는 그대로 동기 connect()+opensearchpy를 쓴다."""
+    auth = (config.OPENSEARCH_USERNAME, config.OPENSEARCH_PASSWORD) if config.OPENSEARCH_USERNAME else None
+    verify = config.OPENSEARCH_HOST.startswith("https")
+    return httpx.AsyncClient(base_url=config.OPENSEARCH_HOST, auth=auth, verify=verify, timeout=30.0)
+
+
 def ensure_index(client: OpenSearch) -> None:
     if not client.indices.exists(index=config.OPENSEARCH_INDEX):
         client.indices.create(index=config.OPENSEARCH_INDEX, body=_INDEX_BODY)
@@ -88,9 +99,8 @@ def bulk_index(client: OpenSearch, documents: list[dict]) -> int:
     return success
 
 
-@log_call("bm25_search", capture_args=("query", "size"), capture_result=lambda r: {"count": len(r)})
-def keyword_search(client: OpenSearch, query: str, size: int) -> list[dict]:
-    body = {
+def _keyword_search_body(query: str, size: int) -> dict:
+    return {
         "size": size,
         "query": {
             "multi_match": {
@@ -100,9 +110,20 @@ def keyword_search(client: OpenSearch, query: str, size: int) -> list[dict]:
             }
         },
     }
-    resp = client.search(index=config.OPENSEARCH_INDEX, body=body)
-    results = []
-    for hit in resp["hits"]["hits"]:
-        src = hit["_source"]
-        results.append({**src, "score": hit["_score"]})
-    return results
+
+
+def _keyword_search_results(resp_json: dict) -> list[dict]:
+    return [{**hit["_source"], "score": hit["_score"]} for hit in resp_json["hits"]["hits"]]
+
+
+@log_call("bm25_search", capture_args=("query", "size"), capture_result=lambda r: {"count": len(r)})
+def keyword_search(client: OpenSearch, query: str, size: int) -> list[dict]:
+    resp = client.search(index=config.OPENSEARCH_INDEX, body=_keyword_search_body(query, size))
+    return _keyword_search_results(resp)
+
+
+@log_call("bm25_search", capture_args=("query", "size"), capture_result=lambda r: {"count": len(r)})
+async def keyword_search_async(client: httpx.AsyncClient, query: str, size: int) -> list[dict]:
+    resp = await client.post(f"/{config.OPENSEARCH_INDEX}/_search", json=_keyword_search_body(query, size))
+    resp.raise_for_status()
+    return _keyword_search_results(resp.json())
