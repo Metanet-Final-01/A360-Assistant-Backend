@@ -9,11 +9,11 @@
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app import models
 from app.api.auth import get_current_user
@@ -120,6 +120,128 @@ def audit_logs(
                 "path": r.path,
                 "status_code": r.status_code,
                 "latency_ms": r.latency_ms,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/metrics-daily")
+def metrics_daily(
+    days: int = Query(7, ge=1, le=90, description="조회 기간(일)"),
+    method: str | None = Query(None, description="GET/POST 등 필터"),
+    path: str | None = Query(None, description="정규화된 경로 부분일치 (예: /api/sessions)"),
+    db: Session = Depends(get_obs_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """일별 요청 성능 롤업(RPA-104 metrics_daily) 조회 — Ops 대시보드가 raw 대신 이걸 읽는다."""
+    since = date.today() - timedelta(days=days)
+    q = select(models.MetricsDaily).where(models.MetricsDaily.day >= since).order_by(
+        models.MetricsDaily.day.desc(), models.MetricsDaily.calls.desc()
+    )
+    if method:
+        q = q.where(models.MetricsDaily.method == method.upper())
+    if path:
+        q = q.where(models.MetricsDaily.path.contains(path))
+    rows = db.execute(q).scalars().all()
+    return {
+        "rows": [
+            {
+                "day": r.day.isoformat() if r.day else None,
+                "method": r.method,
+                "path": r.path,
+                "calls": r.calls,
+                "err_4xx": r.err_4xx,
+                "err_5xx": r.err_5xx,
+                "p50_ms": r.p50_ms,
+                "p95_ms": r.p95_ms,
+                "avg_ms": r.avg_ms,
+                "max_ms": r.max_ms,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/usage-daily")
+def usage_daily(
+    days: int = Query(30, ge=1, le=365, description="조회 기간(일)"),
+    component: str | None = Query(None),
+    model: str | None = Query(None),
+    db: Session = Depends(get_obs_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """일별 LLM 사용량 롤업(RPA-104 usage_daily) 조회 — 비용/토큰 추이용."""
+    since = date.today() - timedelta(days=days)
+    q = select(models.UsageDaily).where(models.UsageDaily.day >= since).order_by(
+        models.UsageDaily.day.desc()
+    )
+    if component:
+        q = q.where(models.UsageDaily.component == component)
+    if model:
+        q = q.where(models.UsageDaily.model == model)
+    rows = db.execute(q).scalars().all()
+    return {
+        "rows": [
+            {
+                "day": r.day.isoformat() if r.day else None,
+                "component": r.component,
+                "purpose": r.purpose,
+                "model": r.model,
+                "calls": r.calls,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "cost_usd": round(float(r.cost_usd), 6) if r.cost_usd is not None else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/turn-events")
+def turn_events(
+    session_id: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_obs_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """에이전트 턴 노드 타임라인(RPA-105 turn_events) 조회 — 어떤 노드를 얼마 만에 탔고
+    어디서 실패했나. session_id를 지정하면 그 세션의 턴만, 순서(seq)대로 반환한다."""
+    if session_id:
+        try:
+            sid = uuid.UUID(session_id)
+        except ValueError:
+            raise HTTPException(
+                400, detail={"code": "INVALID_ID", "message": "session_id 형식이 올바르지 않습니다."}
+            ) from None
+        # request_id는 uuid4라 시간과 무관하다 — order_by(request_id, seq)에 바로
+        # limit을 걸면 최신 턴이 아니라 사전순으로 앞선 임의의 턴만 잘릴 수 있다
+        # (CodeRabbit 지적). created_at(시간축)으로 먼저 최근 limit건을 고르고,
+        # 화면에 보여줄 턴 진행 순서(request_id, seq)는 바깥 쿼리에서 별도로 맞춘다.
+        recent = (
+            select(models.TurnEvent)
+            .where(models.TurnEvent.session_id == sid)
+            .order_by(models.TurnEvent.created_at.desc(), models.TurnEvent.id.desc())
+            .limit(limit)
+            .subquery()
+        )
+        recent_event = aliased(models.TurnEvent, recent)
+        q = select(recent_event).order_by(recent_event.request_id, recent_event.seq)
+    else:
+        q = select(models.TurnEvent).order_by(models.TurnEvent.created_at.desc()).limit(limit)
+    rows = db.execute(q).scalars().all()
+    return {
+        "events": [
+            {
+                "session_id": str(r.session_id) if r.session_id else None,
+                "request_id": r.request_id,
+                "seq": r.seq,
+                "kind": r.kind,
+                "stage": r.stage,
+                "message": r.message,
+                "detail": r.detail,
+                "elapsed_ms": r.elapsed_ms,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
