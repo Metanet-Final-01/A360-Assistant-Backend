@@ -31,7 +31,7 @@ def mask_pii(text: str | None) -> str | None:
     return masked
 
 
-def mask_fields(data: dict, keys: tuple[str, ...]) -> dict:
+def mask_fields(data: dict | None, keys: tuple[str, ...]) -> dict | None:
     """dict에서 지정한 자유 텍스트 키들만 마스킹한 새 dict를 반환(원본 불변).
 
     step_id·route 같은 구조적 값은 건드리지 않고, reason·query 등 사용자 텍스트가
