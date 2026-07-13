@@ -128,12 +128,16 @@ def echo(payload: EchoRequest) -> dict[str, str]:
     }
 
 
-def _check_db(session_factory) -> bool:
-    """SELECT 1 왕복 성공 여부 — 실패 원인은 로그로만 (health 응답은 ok/fail 단순 유지)."""
+def _check_db(open_session) -> bool:
+    """SELECT 1 왕복 성공 여부 — 실패 원인은 로그로만 (health 응답은 ok/fail 단순 유지).
+
+    open_session은 세션을 '만들어서' 반환하는 콜러블 — 팩토리/엔진 생성 실패까지
+    try 안에서 잡혀야 /health가 500이 아니라 degraded로 응답한다 (CodeRabbit #177).
+    """
     try:
         from sqlalchemy import text
 
-        with session_factory() as s:
+        with open_session() as s:
             s.execute(text("SELECT 1"))
         return True
     except Exception as e:  # noqa: BLE001 — 어떤 실패든 "fail"로 보고하는 게 목적
@@ -153,8 +157,8 @@ def health(response: Response) -> dict:
     from app.core.observability_db import observability_sessionmaker
 
     checks = {
-        "database": "ok" if _check_db(app_db.SessionLocal) else "fail",
-        "observability_database": "ok" if _check_db(observability_sessionmaker()) else "fail",
+        "database": "ok" if _check_db(lambda: app_db.SessionLocal()) else "fail",
+        "observability_database": "ok" if _check_db(lambda: observability_sessionmaker()()) else "fail",
     }
     if checks["database"] == "fail":
         status = "unhealthy"

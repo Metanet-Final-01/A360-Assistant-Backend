@@ -124,7 +124,7 @@ def audit_logs(
         q = (
             select(models.AuditLog)
             .where(models.AuditLog.created_at > _parse_since(since))
-            .order_by(models.AuditLog.created_at.asc())
+            .order_by(models.AuditLog.created_at.asc(), models.AuditLog.id.asc())
             .limit(limit)
         )
     else:

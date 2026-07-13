@@ -53,6 +53,20 @@ def test_health_app_db_down_503(monkeypatch):
     assert r.json()["checks"]["database"] == "fail"
 
 
+def test_health_obs_factory_creation_failure_degraded_not_500(monkeypatch):
+    """관측 DB 엔진/팩토리 생성 자체가 터져도 500이 아니라 degraded (CodeRabbit #177)."""
+
+    def _boom():
+        raise RuntimeError("engine init failed")
+
+    monkeypatch.setattr("app.db.SessionLocal", _factory(True))
+    monkeypatch.setattr("app.core.observability_db.observability_sessionmaker", _boom)
+    with TestClient(app) as c:
+        r = c.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "degraded"
+
+
 def test_health_obs_db_down_degraded_but_200(monkeypatch):
     """관측 DB만 죽으면 본 기능은 산다 — UP이되 degraded로 구분."""
     _patch(monkeypatch, obs_ok=False)
