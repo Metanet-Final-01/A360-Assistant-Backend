@@ -46,6 +46,22 @@ def test_collect_violations_attaches_step_id():
     assert violations[0]["step_id"] == "step-1"
 
 
+def test_verify_event_carries_full_violation_detail(monkeypatch):
+    """관측 이벤트가 위반의 7필드(message=사람이 읽는 사유 포함)를 다 남긴다 (RPA-129).
+    사용자 표시 문구(이벤트 message)는 '위반 N건'으로 불변."""
+    events = []
+    monkeypatch.setattr(harness_mod, "emit", lambda ev: events.append(ev))
+    monkeypatch.setattr(harness_mod, "chat_json",
+                        lambda *a, **k: Recommendation.model_validate(_BROKEN_FLOW))  # 안 줄어듦
+    verify_and_repair(_BROKEN_FLOW, _CATALOG)
+    verifying = [e for e in events if e.get("stage") == "verifying" and e.get("data")]
+    assert verifying, "위반 있을 때 verifying data 이벤트가 있어야"
+    v = verifying[0]["data"]["violations"][0]
+    assert set(v) == {"rule", "location", "message", "step_id", "package", "action", "param"}
+    assert v["rule"] == "R1" and v["message"]        # 사람이 읽는 사유가 남는다
+    assert "교정 중" in verifying[0]["message"]        # 표시 문구는 불변
+
+
 def test_clean_flow_skips_repair(monkeypatch):
     calls = []
     monkeypatch.setattr(harness_mod, "chat_json", lambda *a, **k: calls.append(1))

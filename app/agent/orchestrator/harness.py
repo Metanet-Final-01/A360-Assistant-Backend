@@ -175,9 +175,12 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
 
     emit({"event": "stage", "stage": "verifying",
           "message": f"검수 위반 {len(violations)}건 교정 중",
-          # 관측 전용(RPA-105): "위반 N건"의 실체 — 규칙 코드·위치 (표시 문구 불변)
+          # 관측 전용(RPA-105/129): "위반 N건"의 실체. 표시 문구는 위 message 그대로 불변 —
+          # data엔 Violation.as_dict()가 이미 만드는 7필드(message=사람이 읽는 사유 포함)를
+          # 다 남긴다(예전엔 rule/location 2개만 남겨 "무엇이 왜 틀렸나"를 재구성 못 했음).
           "data": {"violations": [
-              {"rule": v.get("rule"), "location": v.get("location")} for v in violations
+              {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
+              for v in violations
           ]}})
 
     # 1단계: 단계별 문법 위반(R1~R6) 국소 교정 — 위반 있는 단계만 LLM에 넘긴다.
