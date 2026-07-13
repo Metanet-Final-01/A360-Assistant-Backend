@@ -70,7 +70,9 @@ def _opt_label(o: object) -> object:
 # 세션을 여는/닫는 액션 — 현행 카탈로그(llm_agent 소싱) 표기다(RPA-141: 구 JAR 표기
 # Excel_MS/OpenSpreadsheet 등은 카탈로그에 없어 R7/R8이 한 번도 발화하지 못했다).
 # 현 카탈로그의 open 계열은 세션 이름 파라미터가 없고 세션을 '리턴'한다(cloudExcelOpen 등)
-# — 그래서 이름 없는 열림도 추적한다(아래 _ANON). 사용/닫기 액션은 sessionName을 받는다.
+# — 그래서 이름 없는 열림도 추적한다(아래 _ANON). 사용/닫기의 세션 참조는 패키지마다 다르다:
+# Excel advanced·Word는 sessionName 파라미터를 받고, Browser는 세션 파라미터가 아예 없어
+# (close는 target만 필수) 이름 없는 열림·닫힘이 _ANON 매칭으로 짝지어진다.
 SESSION_OPENERS: frozenset[tuple[str, str]] = frozenset(
     {
         ("Excel advanced", "cloudExcelOpen"),
