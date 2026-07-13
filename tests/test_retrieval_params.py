@@ -27,6 +27,19 @@ def test_from_config_reads_config_values(monkeypatch):
     assert p.vector_weight == 1.0 and p.bm25_weight == 1.0  # 가중치 기본은 동일
 
 
+@pytest.mark.parametrize("bad", [
+    {"candidate_pool_size": 0, "rerank_candidates": 20, "rrf_k": 60},
+    {"candidate_pool_size": 50, "rerank_candidates": 0, "rrf_k": 60},
+    {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": 0},   # 분모 0 위험
+    {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": -1},
+    {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": 60, "vector_weight": -0.1},
+])
+def test_invalid_params_rejected_at_construction(bad):
+    """스윕이 넘긴 잘못된 그리드 값은 생성 시점에 fail-fast (CodeRabbit #192)."""
+    with pytest.raises(ValueError):
+        RetrievalParams(**bad)
+
+
 # --- 가중 RRF ---
 
 def test_rrf_default_weights_unchanged():

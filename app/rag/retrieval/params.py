@@ -33,6 +33,20 @@ class RetrievalParams:
     vector_weight: float = 1.0
     bm25_weight: float = 1.0
 
+    def __post_init__(self) -> None:
+        # 탐색(sweep)이 잘못된 그리드 값을 넘기면 여기서 즉시 걸러 fail-fast한다 —
+        # 특히 rrf_k<1은 최상위 순위(rank=1)에서 분모 k+rank가 0 이하가 돼 RRF가 깨진다.
+        if self.candidate_pool_size < 1:
+            raise ValueError(f"candidate_pool_size는 1 이상이어야 합니다: {self.candidate_pool_size}")
+        if self.rerank_candidates < 1:
+            raise ValueError(f"rerank_candidates는 1 이상이어야 합니다: {self.rerank_candidates}")
+        if self.rrf_k < 1:
+            raise ValueError(f"rrf_k는 1 이상이어야 합니다(0 이하면 분모가 0이 될 수 있음): {self.rrf_k}")
+        if self.vector_weight < 0 or self.bm25_weight < 0:
+            raise ValueError(
+                f"가중치는 음수일 수 없습니다: vector={self.vector_weight}, bm25={self.bm25_weight}"
+            )
+
     @classmethod
     def from_config(cls) -> "RetrievalParams":
         """현재 .env(config) 값으로 기본 파라미터를 복원한다 — params 미지정 시의 기존 동작."""
