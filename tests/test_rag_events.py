@@ -23,22 +23,31 @@ class _FakeSession:
         pass
 
 
-def test_persist_masks_query_preview_and_adds_config(monkeypatch):
-    """검색어 preview 마스킹 + hybrid_search엔 설정 스냅샷(chunk_size 등) 포함."""
+def test_mask_record_masks_preview_and_error():
+    """검색어 preview와 error_message의 자유 텍스트를 마스킹한 복사본 반환(원본 불변)."""
+    record = {
+        "request_id": "r1", "event": "embed_query",
+        "args": {"query": {"len": 20, "preview": "문의 user@ex.com 관련"}},
+        "error_message": "실패: 010-1234-5678 응답 없음",
+    }
+    masked = obs._mask_record(record)
+    assert masked["args"]["query"]["preview"] == "문의 [EMAIL] 관련"
+    assert "[NUM]" in masked["error_message"]
+    assert record["args"]["query"]["preview"] == "문의 user@ex.com 관련"  # 원본 불변(깊은 복사)
+
+
+def test_persist_adds_config_for_search(monkeypatch):
+    """hybrid_search엔 설정 스냅샷(chunk_size 등) 포함, record는 이미 마스킹된 것을 받는다."""
     fake = _FakeSession()
     monkeypatch.setattr("app.core.observability_db.observability_sessionmaker", lambda: (lambda: fake))
     record = {
         "request_id": "abc123", "event": "hybrid_search", "function": "search",
-        "status": "ok", "duration_ms": 1726.68,
-        "args": {"query": {"len": 20, "preview": "문의 user@ex.com 관련"}},
-        "result": {"count": 5},
+        "status": "ok", "duration_ms": 1726.68, "result": {"count": 5},
     }
     obs._persist_rag_event(record)
-    assert len(fake.added) == 1
     row = fake.added[0]
     assert row.request_id == "abc123" and row.event == "hybrid_search" and row.duration_ms == 1726.68
     detail = json.loads(row.detail)
-    assert detail["args"]["query"]["preview"] == "문의 [EMAIL] 관련"       # 마스킹됨
     assert detail["config"]["chunk_size"] and detail["config"]["rerank_model"]  # 설정 스냅샷
 
 
@@ -59,12 +68,13 @@ def test_persist_is_best_effort(monkeypatch):
     obs._persist_rag_event({"request_id": "r1", "event": "embed_query"})  # 예외 없이 넘어가야
 
 
-def test_write_log_still_writes_jsonl(tmp_path, monkeypatch):
-    """_write_log는 JSONL 기록을 유지하면서 관측 적재를 추가로 호출한다."""
+def test_write_log_masks_jsonl_and_calls_persist(tmp_path, monkeypatch):
+    """_write_log는 JSONL을 마스킹해 기록하고(원문 유출 방지) 관측 적재도 호출한다."""
     monkeypatch.setattr(obs.config, "LOG_DIR", tmp_path)
     called = {}
     monkeypatch.setattr(obs, "_persist_rag_event", lambda rec: called.setdefault("rec", rec))
-    obs._write_log({"request_id": "r1", "event": "embed_query"})
-    files = list(tmp_path.glob("*.jsonl"))
-    assert files and "r1" in files[0].read_text(encoding="utf-8")  # JSONL 여전히 기록
-    assert called["rec"]["request_id"] == "r1"                     # 관측 적재도 호출
+    obs._write_log({"request_id": "r1", "event": "embed_query",
+                    "args": {"q": {"len": 5, "preview": "메일 a@b.com"}}})
+    text = list(tmp_path.glob("*.jsonl"))[0].read_text(encoding="utf-8")
+    assert "r1" in text and "[EMAIL]" in text and "a@b.com" not in text  # JSONL도 마스킹
+    assert called["rec"]["args"]["q"]["preview"] == "메일 [EMAIL]"        # persist엔 마스킹본 전달
