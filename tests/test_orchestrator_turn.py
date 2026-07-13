@@ -146,7 +146,7 @@ def test_generate_without_analysis_runs_analyze_first_and_returns_both(monkeypat
             assert inputs["analysis"]["steps"], "analyze 산출물이 주입돼야 함"
             yield ("values", {"recommendation": _CLEAN_FLOW})
 
-    monkeypatch.setattr(generate_mod, "get_recommend_graph", lambda: _FakeRecommendGraph())
+    monkeypatch.setattr(generate_mod, "build_agent_graph", lambda sink: _FakeRecommendGraph())
     data = _done(_collect("흐름도 만들어줘", dict(_CTX)))
     assert data["type"] == "recommendation"
     assert data["updated_recommendation"]["steps"][0]["step_id"] == "step-1"
@@ -167,7 +167,7 @@ def test_generate_with_existing_analysis_skips_analyze(monkeypatch):
         async def astream(self, inputs, **kwargs):
             yield ("values", {"recommendation": _CLEAN_FLOW})
 
-    monkeypatch.setattr(generate_mod, "get_recommend_graph", lambda: _FakeRecommendGraph())
+    monkeypatch.setattr(generate_mod, "build_agent_graph", lambda sink: _FakeRecommendGraph())
     ctx = dict(_CTX, analysis=_ANALYSIS.model_dump())
     data = _done(_collect("흐름도 만들어줘", ctx))
     assert data["type"] == "recommendation"

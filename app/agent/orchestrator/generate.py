@@ -21,9 +21,8 @@ from app.schemas import Recommendation
 
 from .. import config
 from ..analysis import _has_text, analyze, analyze_text
-from ..recommend.graph import get_graph as get_recommend_graph
+from ..recommend.graph import build_agent_graph
 from ..recommend.stream import emit
-from ..verify.catalog import get_catalog
 from .harness import verify_and_repair
 from .jsonio import chat_json
 from .render import analysis_brief, chat_task_brief, render_compact, render_history
@@ -102,12 +101,17 @@ def _flow_answer(flow: dict, violations: list[dict]) -> str:
 
 
 async def _generate_a360(state: TurnState) -> dict:
-    """기존 recommend 서브그래프 실행 + 최종 harness. 내부 진행 이벤트는 중계한다."""
+    """에이전트형 recommend 서브그래프 실행. 검수는 그래프 내부 verify 노드가 수행한다.
+
+    내부 진행 이벤트(stage/searching/verifying)를 오케스트레이터 스트림으로 중계하고,
+    최종 상태에서 흐름도·잔여 위반을 뽑는다 (근거 sources는 finalize가 이미 부착).
+    """
+    sink: list[dict] = []  # 검색 히트 누적 → finalize가 액션별 근거로 부착
+    graph = build_agent_graph(sink)
     inputs = {"analysis": state["analysis"], "constraints": []}
     final_state: dict = {}
-    async for mode, chunk in get_recommend_graph().astream(
-        inputs, stream_mode=["custom", "values"],
-        config={"max_concurrency": config.MAX_LLM_CONCURRENCY},
+    async for mode, chunk in graph.astream(
+        inputs, stream_mode=["custom", "values"], config={"recursion_limit": 100},
     ):
         if mode == "custom":
             emit(chunk)
@@ -115,13 +119,13 @@ async def _generate_a360(state: TurnState) -> dict:
             final_state = chunk
 
     flow = final_state.get("recommendation") or Recommendation(steps=[]).model_dump()
-    result = verify_and_repair(flow, get_catalog())
+    violations = final_state.get("violations") or []
     return {
         "turn_type": TYPE_RECOMMENDATION,
-        "recommendation_out": result["flow"],
-        "violations": result["violations"],
-        "answer": _flow_answer(result["flow"], result["violations"]),
-        "sources": _collect_sources(result["flow"]),
+        "recommendation_out": flow,
+        "violations": violations,
+        "answer": _flow_answer(flow, violations),
+        "sources": _collect_sources(flow),
     }
 
 
