@@ -52,15 +52,16 @@ def _mask_record(record: dict) -> dict:
     """자유 텍스트(검색어 preview·error_message)를 마스킹한 복사본 반환 (RPA-128).
 
     JSONL·관측 DB **둘 다에 쓰기 전에** 공통 적용 — 한쪽만 마스킹하면 다른 쪽에 원문이
-    남는다(CodeRabbit #188). 마스킹 실패가 로깅을 죽이면 안 되니 실패 시 원본 유지.
+    남는다(CodeRabbit #188). 마스킹 모듈을 못 불러오면 **fail-closed**: 원문 유지가
+    아니라 자유 텍스트 필드를 통째로 대체해 유출 가능성을 차단한다(관측성보다 안전 우선).
     """
     import copy
 
+    r = copy.deepcopy(record)
     try:
         from app.core.masking import mask_pii
-    except Exception:  # noqa: BLE001
-        return record
-    r = copy.deepcopy(record)
+    except Exception:  # noqa: BLE001 — 마스킹 불가 시 자유 텍스트를 아예 제거(fail-closed)
+        mask_pii = lambda _t: "[REDACTED]"  # noqa: E731
     args = r.get("args")
     if isinstance(args, dict):
         for v in args.values():
