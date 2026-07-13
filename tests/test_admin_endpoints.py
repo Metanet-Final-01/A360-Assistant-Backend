@@ -139,6 +139,19 @@ def test_llm_usage_stats_user_group_stringifies_uuid():
     assert str(uid) in keys and None in keys  # UUID는 문자열로, 시스템(NULL)은 None
 
 
+def test_llm_usage_stats_group_by_session(monkeypatch):
+    """세션별 비용 축(대시보드 #6, RPA-124) — session_id도 UUID라 문자열화."""
+    sid = uuid.uuid4()
+    db = FakeDB(agg_rows=[_agg(sid, 4, 400, 80, 0.02)])
+    app.dependency_overrides[get_obs_db] = lambda: db
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/llm-usage/stats", params={"group_by": "session"})
+    assert r.status_code == 200
+    assert r.json()["group_by"] == "session"
+    assert str(sid) in [b["key"] for b in r.json()["breakdown"]]
+
+
 def test_llm_usage_stats_requires_auth():
     app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     _auth(HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "x"}))
@@ -151,7 +164,7 @@ def test_llm_usage_stats_invalid_group_by_422():
     app.dependency_overrides[get_obs_db] = lambda: FakeDB()
     _auth()
     with TestClient(app) as c:
-        r = c.get("/api/admin/llm-usage/stats", params={"group_by": "session"})
+        r = c.get("/api/admin/llm-usage/stats", params={"group_by": "purpose"})  # 화이트리스트 밖
     assert r.status_code == 422
 
 

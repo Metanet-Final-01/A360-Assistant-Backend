@@ -80,13 +80,14 @@ _GROUP_COLS = {
     "component": models.LlmUsage.component,
     "model": models.LlmUsage.model,
     "user": models.LlmUsage.user_id,
+    "session": models.LlmUsage.session_id,  # 세션별 비용 리포트(대시보드 #6)
 }
 
 
 @router.get("/llm-usage/stats")
 def llm_usage_stats(
     days: int = Query(30, ge=1, le=365, description="집계 기간(일)"),
-    group_by: str = Query("component", pattern="^(component|model|user)$"),
+    group_by: str = Query("component", pattern="^(component|model|user|session)$"),
     db: Session = Depends(get_obs_db),
     user: models.User = Depends(require_admin),
 ) -> dict:
