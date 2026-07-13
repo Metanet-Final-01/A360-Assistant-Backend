@@ -37,6 +37,23 @@ def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
     return user
 
 
+def _parse_since(value: str) -> datetime:
+    """증분 수집 커서(ISO8601) 파싱 — naive면 UTC로 간주, 형식 오류는 400.
+
+    백오피스 수집기가 '마지막으로 받은 created_at'을 그대로 되돌려주는 용도라
+    응답의 isoformat()과 왕복 가능해야 한다.
+    """
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            400, detail={"code": "INVALID_SINCE", "message": "since는 ISO8601 형식이어야 합니다."}
+        ) from None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
 # group_by 화이트리스트 — 임의 컬럼 주입을 막고 3축(component/model/user)만 허용
 _GROUP_COLS = {
     "component": models.LlmUsage.component,
@@ -93,11 +110,25 @@ def audit_logs(
     method: str | None = Query(None, description="GET/POST 등 필터"),
     status_code: int | None = Query(None),
     user_id: str | None = Query(None),
+    since: str | None = Query(None, description="ISO8601 — 이 시각 이후만 (증분 수집 커서)"),
     db: Session = Depends(get_obs_db),
     user: models.User = Depends(require_admin),
 ) -> dict:
-    """최근 감사 로그(변경성 요청, 최신순) — method/status_code/user_id 필터. forensics·모니터링용."""
-    q = select(models.AuditLog).order_by(models.AuditLog.created_at.desc()).limit(limit)
+    """감사 로그(변경성 요청) — method/status_code/user_id 필터. forensics·모니터링용.
+
+    since 지정 시 그 이후를 **오름차순**으로 준다 — 수집기가 마지막 created_at을
+    다음 since로 쓰는 커서 방식이라, 최신순이면 limit에 걸렸을 때 중간이 유실된다.
+    미지정이면 기존대로 최신순 limit건 (화면 조회용).
+    """
+    if since:
+        q = (
+            select(models.AuditLog)
+            .where(models.AuditLog.created_at > _parse_since(since))
+            .order_by(models.AuditLog.created_at.asc(), models.AuditLog.id.asc())
+            .limit(limit)
+        )
+    else:
+        q = select(models.AuditLog).order_by(models.AuditLog.created_at.desc()).limit(limit)
     if method:
         q = q.where(models.AuditLog.method == method.upper())
     if status_code is not None:
@@ -242,6 +273,47 @@ def turn_events(
                 "message": r.message,
                 "detail": r.detail,
                 "elapsed_ms": r.elapsed_ms,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/request-metrics")
+def request_metrics(
+    since: str | None = Query(None, description="ISO8601 — 이 시각 이후만 (증분 수집 커서)"),
+    limit: int = Query(500, ge=1, le=2000),
+    method: str | None = Query(None, description="GET/POST 등 필터"),
+    path: str | None = Query(None, description="정규화된 경로 부분일치 (예: /api/sessions)"),
+    db: Session = Depends(get_obs_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """raw 요청 메트릭(RPA-103 request_metrics) 조회 — 롤업(최대 60분 지연)을 보완하는
+    "오늘 실시간" 패널용. audit-logs와 같은 커서 규칙: since 지정 시 오름차순(증분 수집),
+    미지정 시 최신순 limit건. id는 수집기 중복 제거용."""
+    q = select(models.RequestMetric)
+    if since:
+        q = q.where(models.RequestMetric.created_at > _parse_since(since)).order_by(
+            models.RequestMetric.created_at.asc(), models.RequestMetric.id.asc()
+        )
+    else:
+        q = q.order_by(models.RequestMetric.created_at.desc(), models.RequestMetric.id.desc())
+    if method:
+        q = q.where(models.RequestMetric.method == method.upper())
+    if path:
+        q = q.where(models.RequestMetric.path.contains(path))
+    rows = db.execute(q.limit(limit)).scalars().all()
+    return {
+        "rows": [
+            {
+                "id": r.id,
+                "request_id": r.request_id,
+                "user_id": str(r.user_id) if r.user_id else None,
+                "method": r.method,
+                "path": r.path,
+                "status_code": r.status_code,
+                "latency_ms": r.latency_ms,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows

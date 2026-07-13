@@ -222,3 +222,57 @@ def test_turn_events_requires_auth():
     with TestClient(app) as c:
         r = c.get("/api/admin/turn-events")
     assert r.status_code == 401
+
+
+# --- request-metrics (RPA-117) ---
+
+def test_request_metrics_returns_rows():
+    from datetime import datetime, timezone
+
+    rows = [SimpleNamespace(id=7, request_id="abc123", user_id=None, method="GET",
+                            path="/api/sessions/:id", status_code=200, latency_ms=45,
+                            created_at=datetime(2026, 7, 13, 3, 0, tzinfo=timezone.utc))]
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB(scalar_rows=rows)
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/request-metrics", params={"method": "get", "limit": 100})
+    assert r.status_code == 200
+    row = r.json()["rows"][0]
+    assert row["id"] == 7 and row["path"] == "/api/sessions/:id" and row["latency_ms"] == 45
+    assert row["created_at"].startswith("2026-07-13T03:00")  # 수집기가 다음 since로 되돌려주는 값
+
+
+def test_request_metrics_accepts_since_roundtrip():
+    """응답의 created_at(isoformat)을 그대로 since로 되돌려도 400이 안 난다 (커서 왕복)."""
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/request-metrics", params={"since": "2026-07-13T03:00:00+00:00"})
+    assert r.status_code == 200
+
+
+def test_request_metrics_invalid_since_400():
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/request-metrics", params={"since": "어제쯤"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "INVALID_SINCE"
+
+
+def test_request_metrics_requires_auth():
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth(HTTPException(401, detail={"code": "UNAUTHORIZED", "message": "x"}))
+    with TestClient(app) as c:
+        r = c.get("/api/admin/request-metrics")
+    assert r.status_code == 401
+
+
+def test_audit_logs_invalid_since_400():
+    """audit-logs의 증분 커서도 같은 파서를 탄다 (RPA-117)."""
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/audit-logs", params={"since": "not-a-date"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "INVALID_SINCE"
