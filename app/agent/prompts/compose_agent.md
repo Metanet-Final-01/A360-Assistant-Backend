@@ -59,13 +59,31 @@
         {
           "order": 1,
           "package": "Browser",
-          "action": "openAction",
+          "action": "browserPackageOpenAction",
           "label": "네이버 접속",
           "parameters": [
             {"name": "url", "value": "https://finance.naver.com", "value_source": "llm"}
           ],
           "children": [],
           "rationale": "'네이버 접속' 업무를 브라우저 열기 액션으로 수행"
+        }
+      ]
+    },
+    {
+      "step_id": "step-2",
+      "label": "브라우저 정리",
+      "description": "작업을 마친 브라우저 탭을 닫는다",
+      "actions": [
+        {
+          "order": 1,
+          "package": "Browser",
+          "action": "browserPackageCloseAction",
+          "label": "브라우저 닫기",
+          "parameters": [
+            {"name": "target", "value": "탭", "value_source": "llm"}
+          ],
+          "children": [],
+          "rationale": "여는 액션을 썼으므로 흐름 끝에 닫기로 정리(규칙 5)"
         }
       ]
     }

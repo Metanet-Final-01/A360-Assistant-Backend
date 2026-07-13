@@ -305,7 +305,13 @@ def build_agent_graph(sink: list[dict]):
                 "repair_round": rr, "tool_rounds": 0,  # repair 패스마다 도구 예산 재충전
                 "messages": [HumanMessage(content=_render_violations(actionable))],
             }
-        # 마지막 라운드(또는 남은 위반이 R3뿐): 하네스 국소 교정을 최후 방어로 실행.
+        if not actionable:
+            # 남은 위반이 R3(사용자 입력 필요)뿐 — 에이전트도 하네스도 고칠 대상이 아니다.
+            # 하네스에 넘기면 교정 LLM이 null을 임의 값으로 채운 판본이 '위반 감소'로
+            # 채택될 수 있어(지어낸 값 유입) 원본을 그대로 확정한다. R3는 위반 목록에
+            # 남아 화면·신뢰도에 쓴다.
+            return {"flow": flow, "violations": violations, "repair_round": rr, "tool_rounds": 0}
+        # 재작성 예산 소진 + 에이전트가 못 고친 위반 잔존: 하네스 국소 교정을 최후 방어로.
         # (하네스가 자체 stage 이벤트를 방출한다 — 중복 emit 없음.)
         result = verify_and_repair(flow, get_catalog())
         return {
