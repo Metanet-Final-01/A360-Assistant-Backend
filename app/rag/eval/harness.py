@@ -55,12 +55,22 @@ def evaluate(gold: list[GoldQuery], search_fn: SearchFn, k: int = 5) -> EvalRepo
         docs = search_fn(gq.query)
         keys = [doc_key(d) for d in docs]
         hits = [key in gq.relevant for key in keys]
+        # recall은 '고유 정답 키'를 세야 한다: 같은 (package, action) 문서가 여러 번
+        # 반환되면(청크 분할 등) hits가 모두 True라 정답 수보다 많이 집계돼 recall>1이 된다.
+        # 첫 등장만 True로 표시해 상위 k 내 '서로 다른 정답'만 센다. RR·hit은 중복에 무해하므로
+        # 원래 hits를 그대로 쓴다(첫 정답 순위·존재 여부는 중복이 바꾸지 않는다).
+        seen_relevant: set = set()
+        recall_hits: list[bool] = []
+        for key, is_relevant in zip(keys, hits):
+            recall_hits.append(is_relevant and key not in seen_relevant)
+            if is_relevant:
+                seen_relevant.add(key)
         rank = metrics.first_relevant_rank(hits)
         per_query.append(QueryEval(
             query=gq.query,
             rank=rank,
             reciprocal_rank=metrics.reciprocal_rank(hits),
-            recall_at_k=metrics.recall_at_k(hits, len(gq.relevant), k),
+            recall_at_k=metrics.recall_at_k(recall_hits, len(gq.relevant), k),
             hit_at_k=metrics.hit_at_k(hits, k),
             retrieved=[_key_str(key) for key in keys[:k]],
         ))

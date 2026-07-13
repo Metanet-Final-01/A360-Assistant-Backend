@@ -76,6 +76,19 @@ def test_evaluate_counts_miss_as_zero():
     assert report.per_query[0].rank is None
 
 
+def test_evaluate_recall_counts_distinct_relevant_not_duplicates():
+    """같은 액션 문서가 여러 번 반환돼도 recall은 1을 넘지 않고 고유 정답만 센다 (CodeRabbit #194).
+
+    정답 2개(Open·Set) 중 Open이 청크로 3번 반환 + Set은 누락 → recall@5 = 1/2.
+    RR·hit은 원래 hits 기준(첫 정답 1위)이라 중복에 영향 없다."""
+    gold = [GoldQuery("dup", frozenset({("Excel_MS", "OpenSpreadsheet"), ("Excel_MS", "SetCell")}))]
+    docs = [_doc("Excel_MS", "OpenSpreadsheet")] * 3 + [_doc("File", "downloadTo")]
+    report = evaluate(gold, lambda q: docs, k=5)
+    assert report.recall_at_k == 0.5           # 고유 정답 1/2, 중복으로 부풀지 않음
+    assert report.hit_at_k == 1.0
+    assert report.mrr == 1.0                    # 첫 정답이 1위
+
+
 def test_evaluate_respects_k_for_recall_and_hit():
     """정답이 k 밖(6위)에 있으면 hit@5=0이지만 rank·RR은 전체 순위로 잡힌다."""
     gold = [GoldQuery("깊은 정답", frozenset({("Excel_MS", "ProtectWorkbook")}))]
