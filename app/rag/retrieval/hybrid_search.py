@@ -66,6 +66,21 @@ def _fuse_candidates(vector_hits: list[dict], bm25_hits: list[dict], bm25_error:
     ]
 
 
+def _candidate_summary(item: dict) -> dict:
+    """관측 로그용 후보 요약(RPA-129) — 어떤 문서가 몇 점으로 뽑혔나. 카탈로그 콘텐츠라
+    PII 아님(검색어와 달리 마스킹 불필요). 점수는 rerank 우선, 없으면 RRF."""
+    score = item.get("rerank_score")
+    if score is None:
+        score = item.get("rrf_score")
+    return {
+        "title": item.get("title"),
+        "package": item.get("package"),
+        "action": item.get("action"),
+        "score": round(score, 4) if isinstance(score, (int, float)) else None,
+        "source": item.get("retrieval_source"),
+    }
+
+
 @log_call(
     "hybrid_search",
     capture_args=("query", "limit", "mode"),
@@ -73,6 +88,8 @@ def _fuse_candidates(vector_hits: list[dict], bm25_hits: list[dict], bm25_error:
         "count": len(r),
         "retrieval_sources": [item.get("retrieval_source") for item in r],
         "reranked": any("rerank_score" in item for item in r),
+        # 실제로 뭐가 뽑혔나(상위 5) — "왜 이 스텝만 uncovered인지" 재구성·추천 근거(FR-11)
+        "candidates": [_candidate_summary(item) for item in r[:5]],
     },
 )
 def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank") -> list[dict]:
