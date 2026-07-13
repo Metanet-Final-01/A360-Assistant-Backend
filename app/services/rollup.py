@@ -138,13 +138,46 @@ def rollup_usage_day(session_factory, day: date) -> int:
     return len(aggs)
 
 
-def purge_old_metrics(session_factory, retention_days: int) -> int:
-    """retention_days 지난 request_metrics raw를 삭제한다 (집계본은 유지). 삭제 행 수 반환."""
+def _purge_old(session_factory, model, retention_days: int) -> int:
+    """created_at이 retention_days 지난 raw 행을 삭제. retention_days<=0이면 영구 보관(삭제 0).
+
+    테이블 성격별로 다른 보관기간을 준다(정책 문서 참고): 집계본이 있는 raw는 짧게,
+    forensic 감사로그는 길게/영구. 삭제 행 수 반환."""
+    if retention_days <= 0:
+        return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     with session_factory() as s:
-        result = s.execute(delete(models.RequestMetric).where(models.RequestMetric.created_at < cutoff))
+        result = s.execute(delete(model).where(model.created_at < cutoff))
         s.commit()
     return result.rowcount or 0
+
+
+def purge_old_metrics(session_factory, retention_days: int) -> int:
+    """retention_days 지난 request_metrics raw를 삭제한다 (집계본은 유지). 삭제 행 수 반환."""
+    return _purge_old(session_factory, models.RequestMetric, retention_days)
+
+
+# 테이블별 보관기간(일) — env 오버라이드. 근거는 docs/관측_운영_정책.md.
+#  request_metrics: 30 (metrics_daily 집계본 있음), turn_events: 30 (고volume 디버그),
+#  llm_usage: 90 (usage_daily 집계본 있음, 비용 재조회 여지), audit_logs: 365 (forensic, 0=영구).
+_RETENTION = (
+    ("METRICS_RETENTION_DAYS", "30", lambda: models.RequestMetric, "request_metrics"),
+    ("TURN_EVENTS_RETENTION_DAYS", "30", lambda: models.TurnEvent, "turn_events"),
+    ("LLM_USAGE_RETENTION_DAYS", "90", lambda: models.LlmUsage, "llm_usage"),
+    ("AUDIT_RETENTION_DAYS", "365", lambda: models.AuditLog, "audit_logs"),
+)
+
+
+def purge_all_raw(session_factory) -> None:
+    """모든 raw 관측 테이블의 보관기간 정리(멱등, best-effort). 실패는 경고만."""
+    for env_key, default, model_fn, label in _RETENTION:
+        try:
+            days = int(os.getenv(env_key, default))
+            purged = _purge_old(session_factory, model_fn(), days)
+            if purged:
+                logger.info("%s retention: %d행 삭제 (>%d일)", label, purged, days)
+        except Exception:  # noqa: BLE001 — 한 테이블 실패가 나머지 정리를 막으면 안 됨
+            logger.warning("%s retention 정리 실패 (다음 주기 재시도)", label, exc_info=True)
 
 
 def run_rollup(days_back: int = 1) -> None:
@@ -164,10 +197,4 @@ def run_rollup(days_back: int = 1) -> None:
             logger.info("롤업 완료 %s: metrics %d행, usage %d행", day, m, u)
         except Exception:  # noqa: BLE001 — 롤업 실패가 스케줄러를 죽이면 안 됨
             logger.warning("롤업 실패 %s (다음 주기에 재시도)", day, exc_info=True)
-    try:
-        retention = int(os.getenv("METRICS_RETENTION_DAYS", "30"))
-        purged = purge_old_metrics(sf, retention)
-        if purged:
-            logger.info("request_metrics retention: %d행 삭제 (>%d일)", purged, retention)
-    except Exception:  # noqa: BLE001
-        logger.warning("retention 정리 실패 (다음 주기에 재시도)", exc_info=True)
+    purge_all_raw(sf)  # 테이블별 보관기간 정리 (request_metrics·turn_events·llm_usage·audit_logs)
