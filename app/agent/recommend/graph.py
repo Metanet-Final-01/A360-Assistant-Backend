@@ -50,6 +50,16 @@ SEARCH_SOURCE_TYPES = ["action_schema", "bot_example"]
 _VALID_VALUE_SOURCE = {"schema_default", "llm", "user"}
 _VALID_DIRECTION = {"input", "output", "local"}
 
+# 에이전트 재작성으로 해소할 수 없는 위반 — 재생성(self-repair) 트리거에서 제외한다(RPA-141).
+# R3(필수인데 값 없음)는 프롬프트가 "모르면 value=null + 사용자 입력 필요"를 지시한 결과라
+# 되먹여도 고칠 수 없고, 매 라운드 재생성만 유발한다. 위반 목록에는 남겨 화면·신뢰도에 쓴다.
+NON_ACTIONABLE_RULES = frozenset({"R3"})
+
+
+def _actionable(violations: list[dict]) -> list[dict]:
+    """에이전트가 스스로 고칠 수 있는 위반만 추린다 — 재생성 여부·되먹임 메시지의 기준."""
+    return [v for v in violations if v.get("rule") not in NON_ACTIONABLE_RULES]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 헬퍼
@@ -206,7 +216,7 @@ def _attach_sources(flow: dict, sink: list[dict]) -> dict:
 
 def build_agent_graph(sink: list[dict]):
     """검색 히트를 누적할 sink를 받아 컴파일된 에이전트 그래프를 만든다 (run당 1개)."""
-    from ..orchestrator.harness import verify_and_repair
+    from ..orchestrator.harness import collect_violations, verify_and_repair
     from ..orchestrator.tools import (
         build_kb_tools,
         describe_tool_calls,
@@ -255,8 +265,11 @@ def build_agent_graph(sink: list[dict]):
     def verify_node(state: RecommendState) -> dict:
         """에이전트 최종 출력을 파싱·검수한다.
 
-        파싱 실패나 위반이 남고 재시도 여유(MAX_REPAIR_ROUNDS)가 있으면 교정 지시를
-        compose_agent로 되먹인다(self-repair). tool_rounds는 repair 패스마다 재충전한다.
+        중간 라운드(재작성 여유가 있고 에이전트가 고칠 수 있는 위반이 남음)에는 위반을
+        측정만 해서 compose_agent로 되먹인다 — 국소 LLM 교정 산출물은 재작성되면 어차피
+        버려지므로, 하네스 교정은 마지막 라운드에만 최후 방어로 실행한다(RPA-141).
+        R3(사용자 입력 필요 null)는 되먹여도 에이전트가 고칠 수 없어 재작성 트리거에서
+        뺀다. tool_rounds는 repair 패스마다 재충전한다.
         """
         ai = state["messages"][-1]
         rr = state.get("repair_round", 0) + 1
@@ -274,19 +287,41 @@ def build_agent_graph(sink: list[dict]):
                     f"출력이 올바른 Recommendation JSON이 아니다({e}). "
                     "코드펜스·설명 없이 JSON 객체 하나만 다시 출력하라."))]
             return update
-        # 검수 하네스가 자체 stage 이벤트를 방출한다(중복 emit 없음).
+
+        emit({"event": "stage", "stage": "verifying", "message": "흐름도 검수 중"})
+        violations = collect_violations(flow, get_catalog())
+        actionable = _actionable(violations)
+        if actionable and rr <= MAX_REPAIR_ROUNDS:
+            # 중간 라운드: 교정 없이 위반만 되먹인다 — 에이전트가 도구로 스스로 고친다.
+            emit({"event": "stage", "stage": "verifying",
+                  "message": f"검수 위반 {len(actionable)}건 — 흐름도 재작성 요청",
+                  # 관측 전용(RPA-105/129): 위반 상세 7필드 (표시 문구 불변)
+                  "data": {"violations": [
+                      {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
+                      for v in actionable
+                  ]}})
+            return {
+                "flow": flow, "violations": violations,
+                "repair_round": rr, "tool_rounds": 0,  # repair 패스마다 도구 예산 재충전
+                "messages": [HumanMessage(content=_render_violations(actionable))],
+            }
+        if not actionable:
+            # 남은 위반이 R3(사용자 입력 필요)뿐 — 에이전트도 하네스도 고칠 대상이 아니다.
+            # 하네스에 넘기면 교정 LLM이 null을 임의 값으로 채운 판본이 '위반 감소'로
+            # 채택될 수 있어(지어낸 값 유입) 원본을 그대로 확정한다. R3는 위반 목록에
+            # 남아 화면·신뢰도에 쓴다.
+            return {"flow": flow, "violations": violations, "repair_round": rr, "tool_rounds": 0}
+        # 재작성 예산 소진 + 에이전트가 못 고친 위반 잔존: 하네스 국소 교정을 최후 방어로.
+        # (하네스가 자체 stage 이벤트를 방출한다 — 중복 emit 없음.)
         result = verify_and_repair(flow, get_catalog())
-        update = {
+        return {
             "flow": result["flow"], "violations": result["violations"],
-            "repair_round": rr, "tool_rounds": 0,  # repair 패스마다 도구 예산 재충전
+            "repair_round": rr, "tool_rounds": 0,
         }
-        if result["violations"] and rr <= MAX_REPAIR_ROUNDS:
-            update["messages"] = [HumanMessage(content=_render_violations(result["violations"]))]
-        return update
 
     def route_after_verify(state: RecommendState) -> str:
-        """verify 뒤 분기: 위반이 남고 재시도 여유가 있으면 compose_agent(self-repair), 아니면 finalize."""
-        if state.get("violations") and state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS:
+        """verify 뒤 분기: 에이전트가 고칠 수 있는 위반이 남고 여유가 있으면 재작성, 아니면 finalize."""
+        if _actionable(state.get("violations") or []) and state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS:
             return "compose_agent"
         return "finalize"
 

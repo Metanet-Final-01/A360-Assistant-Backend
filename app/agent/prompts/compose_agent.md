@@ -27,7 +27,8 @@
        정직하게 남긴다. 억지로 채우지 마라.
 
 [시퀀스 규칙]
-5. 작업 항목당 핵심 액션 1~2개만. 로깅·대기·세션 정리 같은 부가 액션은 넣지 않는다.
+5. 작업 항목당 핵심 액션 1~2개만. 로깅·대기 같은 부가 액션은 넣지 않는다.
+   단, 여는 액션(Excel 열기·브라우저 열기 등)을 썼으면 흐름 끝에 닫는 액션으로 정리한다.
 6. 반복·조건이 필요하고 카탈로그에 Loop/If가 있으면 컨테이너로 쓰고 본문 액션을 children에
    넣는다. children은 컨테이너 액션(Loop/If/Step 등)에만 넣는다.
 7. order는 각 step의 actions 안에서 1부터. label은 흐름도 박스에 그대로 표시되니 "무엇을
@@ -58,13 +59,31 @@
         {
           "order": 1,
           "package": "Browser",
-          "action": "openAction",
+          "action": "browserPackageOpenAction",
           "label": "네이버 접속",
           "parameters": [
             {"name": "url", "value": "https://finance.naver.com", "value_source": "llm"}
           ],
           "children": [],
           "rationale": "'네이버 접속' 업무를 브라우저 열기 액션으로 수행"
+        }
+      ]
+    },
+    {
+      "step_id": "step-2",
+      "label": "브라우저 정리",
+      "description": "작업을 마친 브라우저 탭을 닫는다",
+      "actions": [
+        {
+          "order": 1,
+          "package": "Browser",
+          "action": "browserPackageCloseAction",
+          "label": "브라우저 닫기",
+          "parameters": [
+            {"name": "target", "value": "탭", "value_source": "llm"}
+          ],
+          "children": [],
+          "rationale": "여는 액션을 썼으므로 흐름 끝에 닫기로 정리(규칙 5)"
         }
       ]
     }

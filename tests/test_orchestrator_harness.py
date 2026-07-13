@@ -178,12 +178,15 @@ def test_localized_repair_fixes_each_scattered_step(monkeypatch):
 
 
 def _web_open(name):
-    """열기만 하고 닫지 않는 세션 액션(R1~R6은 clean, 세션은 미종료 → R8)."""
+    """열기만 하고 닫지 않는 세션 액션(R1~R6은 clean, 세션은 미종료 → R8).
+
+    RPA-141: 세션 opener 상수가 현행 카탈로그 표기로 바뀌어 Excel advanced를 쓴다.
+    """
     return {
-        "order": 1, "package": "WebAutomation", "action": "StartSessionWebAutomation",
-        "label": "세션 시작", "children": [],
+        "order": 1, "package": "Excel advanced", "action": "cloudExcelOpen",
+        "label": "통합 문서 열기", "children": [],
         "parameters": [
-            {"name": "browserType", "value": "Chrome", "value_source": "llm"},
+            {"name": "fileSource", "value": "C:/a.xlsx", "value_source": "llm"},
             {"name": "sessionName", "value": name, "value_source": "llm"},
         ],
     }
