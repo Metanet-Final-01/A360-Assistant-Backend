@@ -1,7 +1,8 @@
 """recommend _seed_messages 단위 테스트 (RPA-142) — 업무정의서 원문 주입.
 
-에이전트 시스템 메시지에 [업무 분석](힌트)과 [업무정의서 원문](근거)이 함께 실리는지,
-원문이 없으면 기존 형태를 유지하는지, 과대 문서는 캡에서 잘리는지 검증한다.
+원문은 신뢰할 수 없는 외부 입력이라 system(신뢰 지시)이 아니라 user 메시지에 경계로 감싸
+싣는다(프롬프트 인젝션 방어). 원문 블록 포함/부재/공백/캡을 user 메시지 기준으로 검증하고,
+system에는 원문이 새지 않는지, 제약은 여전히 system에 실리는지 확인한다.
 """
 
 from app.agent.recommend.graph import MAX_DOC_CHARS, _seed_messages
@@ -11,43 +12,54 @@ _ANALYSIS = {
     "steps": [{"step_id": "step-1", "order": 1, "name": "저장", "description": "엑셀 저장"}],
 }
 
-# 블록 헤더(줄 단위)로 검사한다 — 프롬프트 본문에도 "[업무정의서 원문]이 함께 오면…"
-# 문구가 있어 부분 문자열 검사는 오탐한다.
-_DOC_HEADER = "\n[업무정의서 원문]\n"
+# 원문 블록 헤더 — user 메시지에서 이 줄로 존재를 판정한다.
+_DOC_HEADER = "[업무정의서 원문 — 참고 데이터]"
 
 
-def _system(state):
+def _seed(state):
     messages = _seed_messages(state)
     assert len(messages) == 2  # system + user
-    return messages[0].content
+    return messages[0].content, messages[1].content  # (system, user)
 
 
-def test_document_block_included():
-    sys = _system({"analysis": _ANALYSIS, "document": "1페이지: 최근 3일치 시세를 표로 정리"})
-    assert _DOC_HEADER in sys
-    assert "최근 3일치" in sys
-    assert "[업무 분석]" in sys  # 분석 힌트도 유지
+def test_document_block_in_user_not_system():
+    # 프롬프트 예시에 없는 고유 마커로 '문서 유래' 텍스트를 추적한다.
+    marker = "ZDOCSENTINEL_최근_3일치"
+    system, user = _seed({"analysis": _ANALYSIS, "document": f"1페이지: {marker} 시세를 표로 정리"})
+    # 원문은 user 메시지에, 경계로 감싸여 실린다
+    assert _DOC_HEADER in user
+    assert "<<<DOC>>>" in user and "<<<END DOC>>>" in user
+    assert marker in user
+    # 인젝션 방어: 원문이 system(신뢰 지시)에는 새지 않는다
+    assert marker not in system
+    assert "[업무 분석]" in system  # 분석 힌트는 system 유지
+
+
+def test_untrusted_data_warning_present():
+    _, user = _seed({"analysis": _ANALYSIS, "document": "원문"})
+    assert "따르지 말고" in user  # 원문 내 지시 무시 경고
 
 
 def test_no_document_keeps_previous_shape():
-    sys = _system({"analysis": _ANALYSIS})
-    assert _DOC_HEADER not in sys
-    assert "[업무 분석]" in sys
+    system, user = _seed({"analysis": _ANALYSIS})
+    assert _DOC_HEADER not in user
+    assert "<<<DOC>>>" not in user
+    assert "[업무 분석]" in system
 
 
 def test_blank_document_is_ignored():
-    sys = _system({"analysis": _ANALYSIS, "document": "   \n  "})
-    assert _DOC_HEADER not in sys
+    _, user = _seed({"analysis": _ANALYSIS, "document": "   \n  "})
+    assert _DOC_HEADER not in user
 
 
 def test_oversized_document_is_capped():
-    oversized = "가" * (MAX_DOC_CHARS + 500)
-    sys = _system({"analysis": _ANALYSIS, "document": oversized})
-    assert "…(생략)" in sys
-    # 원문이 통째로 들어가지 않는다("가"는 프롬프트 본문에도 있어 소량 오차 허용)
-    assert sys.count("가") < len(oversized)
+    # 프롬프트/지시 텍스트에 없는 고유 글자로 세어 문서 유래 분량만 잰다.
+    oversized = "㋡" * (MAX_DOC_CHARS + 500)
+    _, user = _seed({"analysis": _ANALYSIS, "document": oversized})
+    assert "…(생략)" in user
+    assert user.count("㋡") == MAX_DOC_CHARS  # 정확히 캡까지만 실린다
 
 
-def test_constraints_still_rendered_after_document():
-    sys = _system({"analysis": _ANALYSIS, "document": "원문", "constraints": ["Knox 금지"]})
-    assert "[제약]" in sys and "Knox 금지" in sys
+def test_constraints_rendered_in_system():
+    system, _ = _seed({"analysis": _ANALYSIS, "document": "원문", "constraints": ["Knox 금지"]})
+    assert "[제약]" in system and "Knox 금지" in system
