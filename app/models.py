@@ -366,3 +366,22 @@ class TurnEvent(Base):
     detail: Mapped[str | None] = mapped_column(Text)  # 이벤트 data JSON (route·query·violations 등)
     elapsed_ms: Mapped[int] = mapped_column(Integer)  # 턴 시작 기준 경과
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RagEvent(Base):
+    """RAG 파이프라인 단계 로그 (RPA-128) — embed/search/rerank 단계별 소요·파라미터를
+    관측 DB에 중앙화. 로컬 JSONL(app/rag/logs)과 같은 내용이되 유실 방지·중앙화·대시보드
+    조회용. 검색어 preview는 마스킹(app/core/masking). detail에 RAG 설정 스냅샷(chunk_size·
+    모델·RRF 등)을 담아 "이 검색이 어떤 설정으로 돌았나"를 가시화한다. FK 없음(관측 전용).
+    """
+
+    __tablename__ = "rag_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    request_id: Mapped[str | None] = mapped_column(String(32), index=True)  # 같은 검색 흐름 묶음 키
+    event: Mapped[str] = mapped_column(String(40))  # embed_query|bm25_search|voyage_rerank|hybrid_search|http_request
+    function: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[str | None] = mapped_column(String(20))  # ok | error
+    duration_ms: Mapped[float | None] = mapped_column(Float)
+    detail: Mapped[str | None] = mapped_column(Text)  # JSON: args·result·config (query preview 마스킹)
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

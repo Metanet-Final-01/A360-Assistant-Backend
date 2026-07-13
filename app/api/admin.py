@@ -341,3 +341,35 @@ def request_metrics(
             for r in rows
         ]
     }
+
+
+@router.get("/rag-events")
+def rag_events(
+    request_id: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_obs_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """RAG 파이프라인 단계 로그(RPA-128) 조회 — request_id로 한 검색 흐름의 단계별 소요·설정.
+    사건 추적 대시보드가 embed/search/rerank 병목을 보이는 데 쓴다."""
+    q = select(models.RagEvent).order_by(
+        models.RagEvent.created_at.desc(), models.RagEvent.id.desc()
+    )
+    if request_id:
+        q = q.where(models.RagEvent.request_id == request_id)
+    rows = db.execute(q.limit(limit)).scalars().all()
+    return {
+        "events": [
+            {
+                "id": r.id,
+                "request_id": r.request_id,
+                "event": r.event,
+                "function": r.function,
+                "status": r.status,
+                "duration_ms": r.duration_ms,
+                "detail": r.detail,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    }
