@@ -1,8 +1,11 @@
-"""app/agent/verify/checker.py 세션 생명주기 검사 R7~R8 단위 테스트 (RPA-71).
+"""app/agent/verify/checker.py 세션 생명주기 검사 R7~R8 단위 테스트 (RPA-71, RPA-141 현행화).
 
 카탈로그 없이(opener/closer는 상수) 전체 흐름도의 세션 순서·미종료를 검증한다:
 정상 브래킷, 열기 전 사용(R7), 닫은 후 사용(R7), 미종료(R8), 다중 세션 독립,
-컨테이너(children) 내부 순회, 단계 경계를 넘는 세션.
+컨테이너(children) 내부 순회, 단계 경계를 넘는 세션, 이름 없는 열림(_ANON).
+
+표기는 현행 카탈로그(llm_agent 소싱)를 따른다 — open 계열은 실제로는 세션 이름 파라미터
+없이 세션을 리턴하지만(cloudExcelOpen), 에이전트가 sessionName을 명시한 경우도 지원한다.
 """
 
 from app.agent.verify.checker import run_session_checks
@@ -10,19 +13,19 @@ from app.agent.verify.checker import run_session_checks
 
 def _sess(pkg, act, name):
     return {"package": pkg, "action": act,
-            "parameters": [{"name": "session", "value": name}], "children": []}
+            "parameters": [{"name": "sessionName", "value": name}], "children": []}
 
 
 def _open(name="Default"):
-    return _sess("Excel_MS", "OpenSpreadsheet", name)
+    return _sess("Excel advanced", "cloudExcelOpen", name)
 
 
 def _use(name="Default"):
-    return _sess("Excel_MS", "SetCell", name)
+    return _sess("Excel advanced", "excelAdvancedPackageSaveWorkbookAction", name)
 
 
 def _close(name="Default"):
-    return _sess("Excel_MS", "CloseSpreadsheet", name)
+    return _sess("Excel advanced", "excelAdvancedPackageCloseAction", name)
 
 
 def _step(step_id, actions):
@@ -98,8 +101,8 @@ def test_use_in_step_before_open_across_steps_is_r7():
 
 
 def test_container_children_are_traversed():
-    # Loop children 안의 SetCell도 세션 사용으로 잡힌다 (열기 전이면 R7)
-    loop = {"package": "Loop", "action": "loop.commands.start",
+    # Loop children 안의 세션 사용도 잡힌다 (열기 전이면 R7)
+    loop = {"package": "Loop", "action": "cloudUsingLoopAction",
             "parameters": [{"name": "iteratorType", "value": "N times"}],
             "children": [_use("S")]}
     steps = [_step("step-1", [loop])]
@@ -109,21 +112,20 @@ def test_container_children_are_traversed():
 
 def test_open_in_container_then_use_outside_is_ok_by_approximation():
     # 심볼릭 근사: children에서 연 세션도 선언 순서상 열린 것으로 본다
-    loop = {"package": "Loop", "action": "loop.commands.start",
+    loop = {"package": "Loop", "action": "cloudUsingLoopAction",
             "parameters": [{"name": "iteratorType", "value": "N times"}],
             "children": [_open("S")]}
     steps = [_step("step-1", [loop, _use("S"), _close("S")])]
     assert run_session_checks(steps) == []
 
 
-def test_webautomation_session_bracket():
+def test_word_session_bracket():
+    # Word도 open/close 상수로 추적된다 (sessionName 참조 사용 액션 포함)
     steps = [_step("step-1", [
-        _sess("WebAutomation", "StartSessionWebAutomation", "web"),
-        {"package": "WebAutomation", "action": "openpage",
-         "parameters": [{"name": "sessionName", "value": "web"}], "children": []},
-        _sess("WebAutomation", "EndSessionWebAutomation", "web"),
+        _sess("Word", "mswordOpenDocument", "doc"),
+        _sess("Word", "mswordReplaceText", "doc"),
+        _sess("Word", "mswordCloseDocument", "doc"),
     ])]
-    # 세션 파라미터 이름이 sessionName인 패키지도 추적된다
     assert run_session_checks(steps) == []
 
 
@@ -143,19 +145,18 @@ def test_r7_double_close():
 
 
 def test_same_name_different_package_are_independent():
-    # Excel 세션 "Default"와 WebAutomation 세션 "Default"는 별개 — 서로 덮어쓰지 않는다.
+    # Excel 세션 "Default"와 Word 세션 "Default"는 별개 — 서로 덮어쓰지 않는다.
     steps = [_step("step-1", [
-        _open("Default"),                 # Excel_MS Default 열림
-        _use("Default"),                  # Excel_MS Default 사용 (정상)
-        {"package": "WebAutomation", "action": "openpage",  # Web Default — 안 열림 (R7)
-         "parameters": [{"name": "sessionName", "value": "Default"}], "children": []},
+        _open("Default"),                                  # Excel advanced Default 열림
+        _use("Default"),                                   # Excel advanced Default 사용 (정상)
+        _sess("Word", "mswordReplaceText", "Default"),     # Word Default — 안 열림 (R7)
     ])]
     v = run_session_checks(steps)
-    assert sorted(x.rule for x in v) == ["R7", "R8"]  # Web R7(미개시) + Excel R8(미종료)
-    web_r7 = next(x for x in v if x.rule == "R7")
-    assert web_r7.package == "WebAutomation"
+    assert sorted(x.rule for x in v) == ["R7", "R8"]  # Word R7(미개시) + Excel R8(미종료)
+    word_r7 = next(x for x in v if x.rule == "R7")
+    assert word_r7.package == "Word"
     excel_r8 = next(x for x in v if x.rule == "R8")
-    assert excel_r8.package == "Excel_MS"
+    assert excel_r8.package == "Excel advanced"
 
 
 def test_same_name_same_package_reopen_is_ok():
@@ -172,4 +173,42 @@ def test_action_without_session_param_is_ignored():
         {"package": "String", "action": "assign",
          "parameters": [{"name": "value", "value": "x"}], "children": []},
     ])]
+    assert run_session_checks(steps) == []
+
+
+# --- 이름 없는 열림 (_ANON) — 현행 open은 세션을 리턴하고 이름 파라미터가 없다 (RPA-141) ---
+
+def _open_anon():
+    """세션 이름 없이 여는 현행 open — cloudExcelOpen은 sessionName 파라미터가 없다."""
+    return {"package": "Excel advanced", "action": "cloudExcelOpen",
+            "parameters": [{"name": "fileSource", "value": "C:/a.xlsx"}], "children": []}
+
+
+def _close_anon():
+    return {"package": "Excel advanced", "action": "excelAdvancedPackageCloseAction",
+            "parameters": [], "children": []}
+
+
+def test_anonymous_open_covers_named_use():
+    # 이름 없는 열림은 같은 패키지의 이름 참조를 관대하게 커버한다(리턴 세션을 변수로 받아
+    # 쓰는 패턴이라 문자열 매칭 불가 — 오탐 방지 우선).
+    steps = [_step("step-1", [_open_anon(), _use("Session1"), _close("Session1")])]
+    assert run_session_checks(steps) == []
+
+
+def test_anonymous_open_without_close_is_r8():
+    steps = [_step("step-1", [_open_anon(), _use("S")])]
+    v = run_session_checks(steps)
+    assert [x.rule for x in v] == ["R8"]
+    assert "이름 미지정" in v[0].message
+
+
+def test_anonymous_close_pops_named_open():
+    # 이름 없는 close는 그 패키지의 아무 열림이나 닫는 걸로 본다
+    steps = [_step("step-1", [_open("S"), _use("S"), _close_anon()])]
+    assert run_session_checks(steps) == []
+
+
+def test_anonymous_bracket_ok():
+    steps = [_step("step-1", [_open_anon(), _use("S"), _close_anon()])]
     assert run_session_checks(steps) == []
