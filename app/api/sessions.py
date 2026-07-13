@@ -574,8 +574,9 @@ def _persist_turn_result(
 
     산출물(analysis_result/updated_recommendation)은 **type과 무관하게 non-null이면 모두 저장**한다:
     "분석 없이 바로 흐름도" 턴은 type="recommendation"이지만 분석을 선행 수행해 analysis_result도
-    함께 오고, 흐름도의 step_id가 그 분석본을 참조하므로 분석이 저장 안 되면 참조가 끊긴다.
-    이때 흐름도는 이번 턴에 새로 저장한 분석의 id에 귀속시켜 무결성을 지킨다.
+    함께 오고, 추천 버전은 그 분석본에 **버전 단위 FK(analysis_id)로 귀속**(provenance)되므로 분석이
+    저장 안 되면 그 FK가 끊긴다. 이때 흐름도는 이번 턴에 새로 저장한 분석의 id에 귀속시켜 무결성을
+    지킨다. (흐름도 step_id는 이제 분석을 참조하지 않는 지역 id다 — 귀속은 오직 버전 단위.)
     계약 위반(알 수 없는 type, 선언한 산출물 누락, 저장할 문서 없음)은 성공 done으로 내보내지
     않고 ValueError로 올려 상위 SSE 핸들러가 error로 매핑한다 (CodeRabbit). 주 산출물 저장 실패도
     상위로 전파하고, 대화 기록만 best-effort로 삼킨다.

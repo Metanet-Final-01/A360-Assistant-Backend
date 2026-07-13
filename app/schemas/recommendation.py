@@ -55,9 +55,21 @@ class RecommendedAction(BaseModel):
 
 
 class StepRecommendation(BaseModel):
-    """업무 단계 하나에 대한 액션 시퀀스. step_id는 AnalysisResult.steps[].step_id 참조."""
+    """추천 흐름도의 한 단계(액션 묶음). 에이전트가 업무를 재구성해 만든 자기완결적 단위다.
 
-    step_id: str
+    step_id는 흐름도 내부의 지역 식별자다 — 더는 AnalysisResult.steps[].step_id를 참조하지 않는다
+    (에이전트가 분석 단계를 합치거나 쪼갠다). label/description으로 이 단계가 스스로를 설명하므로
+    흐름도만으로 렌더할 수 있다.
+
+    ⚠️ label/description은 반드시 선택(str|None). 필수로 하면 agent 검수 하네스의 국소 교정 중간
+    산출물(label 누락)이 Recommendation 검증에 걸려 교정 루프가 무력화된다(정준환 실측 회귀).
+    최종 저장·렌더 직전 agent `_coerce_flow`가 label을 step_id로 폴백해 채운다 — 스키마는 관대하게,
+    실제 데이터엔 항상 존재.
+    """
+
+    step_id: str = Field(description="흐름도 내부 지역 id, 예: 'step-1'")
+    label: str | None = Field(None, description="단계 제목(사람이 읽는)")
+    description: str | None = Field(None, description="이 단계가 무엇을 하는지 한 줄 설명")
     actions: list[RecommendedAction]
 
 
