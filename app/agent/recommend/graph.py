@@ -1,114 +1,64 @@
-"""recommend 그래프 배선과 공개 진입점.
+"""recommend 그래프 — 에이전트형 흐름도 생성 (RPA-27 후속).
 
-    plan ──Send(단계별 병렬)──▶ step(shortlist→compose→check) ──▶ assemble ──▶ END
+업무 정의(analysis)를 받아, LLM 에이전트가 KB 도구(search_kb/get_action_schema)로 실제
+카탈로그를 조사하며 실행 가능한 A360 흐름도 전체를 설계한다. 기존의 "단계 분해 → 단계별
+1:1 액션 매핑(plan→step)"을 폐기했다 — 단계에 맞는 액션이 없으면 통째로 skip되고, 검색이
+후보를 못 올리면 compose가 환각하던 구조적 약점 때문이다.
 
-step은 단일 노드 안에서 shortlist→compose→check를 순차 실행한다(서브그래프 대신) —
-Send로 단계마다 병렬 인스턴스가 뜨고, 결과는 operator.add로 step_results에 합쳐진다.
-sync 노드라 astream이 executor로 돌려 이벤트 루프를 막지 않는다. 진행 이벤트는
-get_stream_writer(custom 모드)로, 최종 Recommendation은 values 모드로 뽑아 done에 싣는다.
+    START → compose_agent ⇄ tools   (ReAct: 필요한 액션을 스스로 검색·확정)
+                 │
+              verify (R1~R8 검수 + 국소교정) ─(위반·여유)→ compose_agent  (self-repair)
+                 │(통과 / 재시도 소진)
+              finalize (근거 sources 부착·정규화) → END
 
-범위(RPA-27a): 코어 시퀀스 생성 + R1~R6 정적 검수. 검수 위반 기반 repair 루프와
-단계 간 dryrun(R7~R8)은 후속(RPA-27b).
+검수 하네스(verify_and_repair)가 루프 게이트다: R1(액션 존재)이 폐쇄어휘를 강제하고,
+위반은 다시 에이전트에 되먹여 스스로 고치게 한다. 정말 없는 기능은 notes로 정직하게 남는다.
+sink(검색 히트)는 run 단위로 누적돼 finalize에서 액션별 RagSource로 부착된다.
 """
 
+import json
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
-from app.schemas import ProgressEvent
+from app.core.llm import UsageCallbackHandler
+from app.schemas import ProgressEvent, Recommendation
 
 from .. import config
-from ..verify.catalog import get_catalog
-from .assemble import assemble_node
-from .check import check
-from .compose import compose
-from .plan import fan_out, plan_node
-from .shortlist import shortlist
-from .state import RecommendState, new_step_result
+from .state import RecommendState
 from .stream import emit
 
 logger = logging.getLogger(__name__)
 
+_PROMPT = (
+    Path(__file__).resolve().parent.parent / "prompts" / "compose_agent.md"
+).read_text(encoding="utf-8")
 
-def step_node(state: dict) -> dict:
-    """한 업무 단계 → 액션 시퀀스. shortlist→compose→check를 순차 실행한다.
+# 도구 왕복 상한 — 초과 시 도구 없이 최종 JSON을 강제해 무한 탐색을 끊는다.
+MAX_TOOL_ROUNDS = 6
+# 검수 위반 → 재작성 반복 상한.
+MAX_REPAIR_ROUNDS = 2
+# recommend 검색은 액션 후보 메뉴용 — 문서 페이지·패키지 개요 오염을 막는다.
+SEARCH_SOURCE_TYPES = ["action_schema", "bot_example"]
 
-    parse 실패(ValueError)는 그 단계만 빈 결과로 저하시키고 계속 진행한다.
-    인프라 실패(RuntimeError: 키 미설정·인증·rate limit)는 그대로 올려
-    recommend()가 단일 error 이벤트로 처리하게 한다.
-    """
-    step = state["step"]
-    order = state.get("order", 0)
-    constraints = state.get("constraints") or []
-    step_id = step.get("step_id") or f"step-{order}"
-    label = step.get("name") or step_id
-
-    emit({"event": "stage", "stage": "searching",
-          "message": f"[{label}] 관련 A360 액션 검색 중",
-          "data": {"step_id": step_id}})  # 관측 전용(RPA-105) — 표시 문구 불변
-
-    sl = shortlist(step, constraints)
-    emit({"event": "stage", "stage": "composing",
-          "message": f"[{label}] 액션 시퀀스 구성 중",
-          # 관측 전용(RPA-105): 카탈로그 커버리지 — 후보 수·검색 약한 substep 수
-          "data": {"step_id": step_id, "candidates": len(sl.get("menu") or []),
-                   "uncovered": len(sl.get("uncovered") or [])}})
-    try:
-        out = compose(step, sl, constraints)
-        actions = [a.model_dump() for a in out.actions]
-        variables_used = out.variables_used
-        needs_input, gaps, notes = out.needs_input, out.gaps, out.notes_candidates
-    except ValueError as e:  # 스키마 파싱 실패(교정 후에도) — 이 단계만 저하
-        logger.warning("step %s compose 실패: %s", step_id, e)
-        actions, variables_used = [], []
-        needs_input, gaps, notes = [], [f"{step_id} 추천 생성 실패: {e}"], []
-
-    catalog = get_catalog()
-    chk = check(actions, catalog, sl.get("source_map", {}))
-
-    emit({"event": "partial", "data": {"step_id": step_id, "actions": chk["actions"]}})
-
-    result = new_step_result(
-        step_id=step_id, order=order, actions=chk["actions"],
-        variables_used=variables_used, needs_input=needs_input, gaps=gaps,
-        notes_candidates=notes, confidence=chk["confidence"], violations=chk["violations"],
-    )
-    return {"step_results": [result]}
+# 에이전트가 흔히 슬립하는 enum 필드의 허용값 — 벗어나면 안전값으로 강등한다.
+_VALID_VALUE_SOURCE = {"schema_default", "llm", "user"}
+_VALID_DIRECTION = {"input", "output", "local"}
 
 
-def route_plan(state: RecommendState):
-    """단계가 있으면 병렬 fan-out, 없으면 곧장 assemble로 (빈 추천안)."""
-    sends = fan_out(state)
-    return sends or "assemble"
+# ─────────────────────────────────────────────────────────────────────────────
+# 헬퍼
+# ─────────────────────────────────────────────────────────────────────────────
 
+def _make_llm():
+    from langchain_openai import ChatOpenAI
 
-def build_graph():
-    g = StateGraph(RecommendState)
-    g.add_node("plan", plan_node)
-    g.add_node("step", step_node)
-    g.add_node("assemble", assemble_node)
-    g.add_edge(START, "plan")
-    g.add_conditional_edges("plan", route_plan, ["step", "assemble"])
-    g.add_edge("step", "assemble")
-    g.add_edge("assemble", END)
-    return g.compile()
-
-
-_graph = None
-
-
-def _get_graph():
-    global _graph
-    if _graph is None:
-        _graph = build_graph()
-    return _graph
-
-
-def get_graph():
-    """컴파일된 recommend 그래프의 공개 접근자 — 오케스트레이터(RPA-65)가 서브그래프로 쓴다."""
-    return _get_graph()
+    return ChatOpenAI(model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY, stream_usage=True)
 
 
 def _to_dict(analysis: Any) -> dict:
@@ -118,28 +68,262 @@ def _to_dict(analysis: Any) -> dict:
     return dict(analysis)
 
 
+def _seed_messages(state: RecommendState) -> list:
+    """첫 진입 시 system(프롬프트+업무 분석 힌트)·user(지시) 메시지를 만든다."""
+    from ..orchestrator.render import analysis_brief
+
+    analysis = state.get("analysis") or {}
+    constraints = state.get("constraints") or []
+    system = f"{_PROMPT}\n\n[업무 분석]\n{analysis_brief(analysis)}"
+    if constraints:
+        system += "\n\n[제약]\n" + "\n".join(f"- {c}" for c in constraints)
+    user = (
+        "위 업무를 자동화하는 A360 흐름도를 설계하라. 먼저 필요한 기능들을 도구로 "
+        "조사(search_kb → get_action_schema)해 실제 액션·스펙을 확인한 뒤, 확인된 "
+        "액션만으로 최종 Recommendation JSON을 출력하라."
+    )
+    return [SystemMessage(content=system), HumanMessage(content=user)]
+
+
+def _coerce_action(a: dict) -> None:
+    """액션 dict의 흔한 타입/enum 슬립을 제자리 보정한다 (재귀).
+
+    핵심은 value_source 강등이다 — 에이전트가 필수값을 모를 때 value=null과 함께
+    value_source에 "null"/None을 넣으면 Recommendation 검증이 깨져 흐름도 전체가
+    폐기된다(0단계 버그). 유효 literal이 아니면 "llm"으로 강등해 살린다.
+    """
+    params = a.get("parameters")
+    if not isinstance(params, list):
+        a["parameters"] = params = []
+    for p in params:
+        if isinstance(p, dict) and p.get("value_source") not in _VALID_VALUE_SOURCE:
+            p["value_source"] = "llm"
+    children = a.get("children")
+    if not isinstance(children, list):
+        a["children"] = children = []
+    for c in children:
+        if isinstance(c, dict):
+            _coerce_action(c)
+
+
+def _coerce_flow(obj: dict) -> dict:
+    """Recommendation 검증 직전, 에이전트 출력의 슬립을 제자리 보정한다.
+
+    finalize에서 단 하나의 검증 오류로 흐름도 전체가 빈 추천으로 폐기되던 문제를 막는다.
+    """
+    steps = obj.get("steps")
+    if not isinstance(steps, list):
+        obj["steps"] = steps = []
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        if not isinstance(step.get("label"), str) or not step.get("label"):
+            step["label"] = step.get("step_id") or f"step-{i + 1}"
+        actions = step.get("actions")
+        if not isinstance(actions, list):
+            step["actions"] = actions = []
+        for a in actions:
+            if isinstance(a, dict):
+                _coerce_action(a)
+    variables = obj.get("variables")
+    if not isinstance(variables, list):
+        obj["variables"] = variables = []
+    for v in variables:
+        if isinstance(v, dict) and v.get("direction") not in _VALID_DIRECTION:
+            v["direction"] = "local"
+    notes = obj.get("notes")
+    if isinstance(notes, list):
+        obj["notes"] = " · ".join(str(n) for n in notes) or None
+    elif notes is not None and not isinstance(notes, str):
+        obj["notes"] = str(notes)
+    return obj
+
+
+def _parse_flow(content: str) -> dict:
+    """에이전트 최종 출력에서 Recommendation 흐름도 dict를 뽑는다.
+
+    코드펜스·설명이 섞여도 최외곽 JSON 객체만 파싱한다. 실패 시 ValueError.
+    """
+    text = (content or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("JSON 객체를 찾지 못함")
+    try:
+        obj = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON 파싱 실패: {e}") from e
+    if not isinstance(obj, dict) or "steps" not in obj:
+        raise ValueError("최상위에 steps 키가 있는 JSON 객체가 아님")
+    # 검수 위반이 없어 교정을 안 거쳐도 finalize에서 Recommendation 검증이 깨지지 않게 정규화.
+    return _coerce_flow(obj)
+
+
+def _render_violations(violations: list[dict]) -> str:
+    """검수 위반을 self-repair용 사용자 메시지로 렌더한다."""
+    lines = [
+        "검수에서 다음 위반이 발견됐다. 반영해 흐름도를 고쳐라 — 카탈로그에 없는 액션은 "
+        "search_kb/get_action_schema로 올바른 액션·스펙을 찾아 교체하고, 정말 없으면 notes로 옮겨라:"
+    ]
+    for v in violations[:20]:
+        lines.append(f"- [{v.get('rule')}] {v.get('location') or '-'}: {v.get('message')}")
+    lines.append("고친 전체 Recommendation JSON 하나만 다시 출력하라(코드펜스·설명 없이).")
+    return "\n".join(lines)
+
+
+def _attach_sources(flow: dict, sink: list[dict]) -> dict:
+    """검색 히트(sink)에서 (package, action)별 최고 점수 근거를 액션에 부착한다 (FR-11)."""
+    best: dict[tuple, dict] = {}
+    for h in sink:
+        key = (h.get("package_name"), h.get("action_name"))
+        if not key[0] or not key[1]:
+            continue
+        cur = best.get(key)
+        if cur is None or (h.get("score") or 0) > (cur.get("score") or 0):
+            best[key] = h
+
+    def walk(actions: list[dict]) -> None:
+        for a in actions:
+            hit = best.get((a.get("package"), a.get("action")))
+            if hit and not a.get("sources"):
+                a["sources"] = [{
+                    "source_type": hit.get("source_type") or "action_schema",
+                    "title": hit.get("title") or f"{a.get('package')}/{a.get('action')}",
+                    "url": hit.get("url"),
+                    "score": hit.get("score"),
+                }]
+            walk(a.get("children") or [])
+
+    for step in flow.get("steps", []):
+        walk(step.get("actions") or [])
+    return flow
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 그래프 배선 (run 단위 — sink를 노드 클로저로 공유)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_agent_graph(sink: list[dict]):
+    """검색 히트를 누적할 sink를 받아 컴파일된 에이전트 그래프를 만든다 (run당 1개)."""
+    from ..orchestrator.harness import verify_and_repair
+    from ..orchestrator.tools import (
+        build_kb_tools,
+        describe_tool_calls,
+        execute_tool_calls,
+        tool_calls_data,
+    )
+    from ..verify.catalog import get_catalog
+
+    base_llm = _make_llm()
+    tools = build_kb_tools(sink, source_types=SEARCH_SOURCE_TYPES)
+    runnable = base_llm.bind_tools(tools)
+    # 이 그래프의 LLM 호출을 purpose="turn_generate"로 귀속 기록한다 (RPA-73).
+    usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_generate")]}
+
+    async def compose_agent(state: RecommendState) -> dict:
+        existing = state.get("messages") or []
+        seed = [] if existing else _seed_messages(state)
+        convo = list(existing) + seed
+        tool_rounds = state.get("tool_rounds", 0)
+        emit({"event": "stage", "stage": "recommending", "message": "액션 탐색·흐름도 구성 중"})
+        # 도구 예산 소진 시 도구 없이 최종 JSON을 강제한다.
+        target = base_llm if tool_rounds >= MAX_TOOL_ROUNDS else runnable
+        ai = await target.ainvoke(convo, config=usage_config)
+        update: dict = {"messages": seed + [ai]}
+        if getattr(ai, "tool_calls", None):
+            update["tool_rounds"] = tool_rounds + 1
+        return update
+
+    def tools_node(state: RecommendState) -> dict:
+        ai = state["messages"][-1]
+        emit({"event": "stage", "stage": "searching",
+              "message": describe_tool_calls(ai.tool_calls),
+              "data": tool_calls_data(ai.tool_calls)})  # data는 관측 전용(RPA-105)
+        return {"messages": execute_tool_calls(tools, ai)}
+
+    def route_after_agent(state: RecommendState) -> str:
+        last = state["messages"][-1]
+        return "tools" if getattr(last, "tool_calls", None) else "verify"
+
+    def verify_node(state: RecommendState) -> dict:
+        ai = state["messages"][-1]
+        rr = state.get("repair_round", 0) + 1
+        try:
+            flow = _parse_flow(ai.content)
+        except ValueError as e:
+            logger.warning("흐름도 JSON 파싱 실패: %s", e)
+            update = {
+                "flow": {"steps": []},
+                "violations": [{"rule": "FORMAT", "location": "-", "message": str(e)}],
+                "repair_round": rr, "tool_rounds": 0,
+            }
+            if rr <= MAX_REPAIR_ROUNDS:
+                update["messages"] = [HumanMessage(content=(
+                    f"출력이 올바른 Recommendation JSON이 아니다({e}). "
+                    "코드펜스·설명 없이 JSON 객체 하나만 다시 출력하라."))]
+            return update
+        # 검수 하네스가 자체 stage 이벤트를 방출한다(중복 emit 없음).
+        result = verify_and_repair(flow, get_catalog())
+        update = {
+            "flow": result["flow"], "violations": result["violations"],
+            "repair_round": rr, "tool_rounds": 0,  # repair 패스마다 도구 예산 재충전
+        }
+        if result["violations"] and rr <= MAX_REPAIR_ROUNDS:
+            update["messages"] = [HumanMessage(content=_render_violations(result["violations"]))]
+        return update
+
+    def route_after_verify(state: RecommendState) -> str:
+        if state.get("violations") and state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS:
+            return "compose_agent"
+        return "finalize"
+
+    def finalize_node(state: RecommendState) -> dict:
+        flow = _attach_sources(state.get("flow") or {"steps": []}, sink)
+        # 안전망: verify 하네스가 되돌린 flow에도 enum/타입 슬립이 남을 수 있어,
+        # 검증 직전 한 번 더 정규화한다(단일 오류로 흐름도 전체가 폐기되던 문제 방지).
+        flow = _coerce_flow(flow)
+        try:
+            rec = Recommendation.model_validate(flow)
+        except ValidationError as e:
+            logger.warning("최종 흐름도 정규화 실패, 빈 추천안: %s", e)
+            rec = Recommendation(steps=[])
+        return {"recommendation": rec.model_dump(), "violations": state.get("violations", [])}
+
+    g = StateGraph(RecommendState)
+    g.add_node("compose_agent", compose_agent)
+    g.add_node("tools", tools_node)
+    g.add_node("verify", verify_node)
+    g.add_node("finalize", finalize_node)
+    g.add_edge(START, "compose_agent")
+    g.add_conditional_edges("compose_agent", route_after_agent, ["tools", "verify"])
+    g.add_edge("tools", "compose_agent")
+    g.add_conditional_edges("verify", route_after_verify, ["compose_agent", "finalize"])
+    g.add_edge("finalize", END)
+    return g.compile()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 공개 진입점
+# ─────────────────────────────────────────────────────────────────────────────
+
 async def recommend(
     analysis: Any, constraints: list[str] | None = None
 ) -> AsyncIterator[ProgressEvent]:
     """AnalysisResult → A360 추천안(Recommendation) 스트림 (INTERFACES §4 ②).
 
-    yield: stage(recommending/searching) → partial(step별 결과) → done(recommendation).
-    OPENAI_API_KEY 미설정·인증·rate limit 등은 error 이벤트로 흘린다(백엔드가 SSE로 전달).
-    Agent는 stateless — 저장·버전은 백엔드 몫이고 이 함수는 입력→산출물만 책임진다.
+    yield: stage(recommending/searching/verifying) → done(recommendation).
+    OPENAI_API_KEY 미설정·인증·rate limit 등은 error 이벤트로 흘린다.
     """
     if not config.OPENAI_API_KEY:
         yield ProgressEvent(event="error", message="OPENAI_API_KEY 환경변수가 필요합니다")
         return
 
-    inputs: RecommendState = {
-        "analysis": _to_dict(analysis),
-        "constraints": constraints or [],
-    }
+    sink: list[dict] = []
+    graph = build_agent_graph(sink)
+    inputs: RecommendState = {"analysis": _to_dict(analysis), "constraints": constraints or []}
     final_state: dict = {}
     try:
-        async for mode, chunk in _get_graph().astream(
-            inputs, stream_mode=["custom", "values"],
-            config={"max_concurrency": config.MAX_LLM_CONCURRENCY},
+        async for mode, chunk in graph.astream(
+            inputs, stream_mode=["custom", "values"], config={"recursion_limit": 100},
         ):
             if mode == "custom":
                 yield ProgressEvent(**chunk)
@@ -149,12 +333,8 @@ async def recommend(
         yield ProgressEvent(event="error", message=str(e))
         return
     except Exception:  # noqa: BLE001 — 예기치 못한 실패도 스트림을 죽이지 않는다
-        # 원인은 서버 로그로만 남기고, 사용자에겐 내부 정보(경로·라이브러리 메시지)를 노출하지 않는다.
         logger.exception("recommend 실패")
         yield ProgressEvent(event="error", message="추천 생성 중 오류가 발생했습니다")
         return
 
-    yield ProgressEvent(
-        event="done",
-        data={"recommendation": final_state.get("recommendation")},
-    )
+    yield ProgressEvent(event="done", data={"recommendation": final_state.get("recommendation")})

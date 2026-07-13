@@ -99,7 +99,13 @@ def _repair_one_step(step: dict, catalog: CatalogLookup) -> tuple[list[dict], bo
         return actions, False
 
     step_id = step.get("step_id")
-    mini_flow = {"steps": [{"step_id": step_id, "actions": actions}]}
+    # label/description도 실어 교정 LLM이 단계 문맥을 보고, 출력에 그대로 되싣게 한다
+    # (검증 안정성 + 교정 정확도). 채택 시엔 원본 step에 new_actions만 병합하므로 원본
+    # label이 보존된다.
+    mini_flow = {"steps": [{
+        "step_id": step_id, "label": step.get("label"),
+        "description": step.get("description"), "actions": actions,
+    }]}
     violation_dicts = []
     for v in violations:
         d = v.as_dict()

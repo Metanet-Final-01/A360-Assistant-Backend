@@ -16,8 +16,13 @@ from ..verify.catalog import get_catalog
 _SEARCH_LIMIT = 5
 
 
-def build_kb_tools(sources_sink: list[dict]):
-    """KB 툴 2개를 만든다. 검색 히트 원본은 sources_sink에 누적된다."""
+def build_kb_tools(sources_sink: list[dict], source_types: list[str] | None = None):
+    """KB 툴 2개를 만든다. 검색 히트 원본은 sources_sink에 누적된다.
+
+    source_types를 주면 search_kb가 그 소스 타입만 검색한다 — recommend(에이전트 흐름도
+    생성)는 액션 후보만 필요하므로 ["action_schema", "bot_example"]로 좁혀 문서 페이지·
+    패키지 개요 오염을 막는다. qa는 문서까지 봐야 하므로 None(전체)로 둔다.
+    """
     retriever = get_retriever()
     catalog = get_catalog()
 
@@ -28,7 +33,7 @@ def build_kb_tools(sources_sink: list[dict]):
         A360 패키지/액션의 존재·용도·사용법 등 사실 확인이 필요할 때 쓴다.
         결과는 JSON 배열(제목·패키지·액션·본문·점수)이다.
         """
-        hits = retriever.search(query, limit=_SEARCH_LIMIT)
+        hits = retriever.search(query, limit=_SEARCH_LIMIT, source_types=source_types)
         sources_sink.extend(hits)
         return json.dumps(
             [

@@ -12,8 +12,10 @@ from app.services.rag import search_actions
 class HybridRetriever:
     """pgvector + OpenSearch 하이브리드(RRF) + Voyage Reranker 기반 실제 검색기."""
 
-    def search(self, query: str, limit: int = 4) -> list[dict]:
-        return search_actions(query, k=limit)
+    def search(
+        self, query: str, limit: int = 4, source_types: list[str] | None = None
+    ) -> list[dict]:
+        return search_actions(query, k=limit, source_types=source_types)
 
 
 def get_hybrid_retriever() -> HybridRetriever:

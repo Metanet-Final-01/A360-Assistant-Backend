@@ -45,6 +45,15 @@ CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
 # RADIO/SELECT처럼 값이 정해진 선택지 안에 있어야 하는 타입 (R4 대상).
 _ENUM_TYPES = {"RADIO", "SELECT"}
 
+
+def _opt_value(o: object) -> object:
+    """옵션 원소에서 value를 뽑는다 — 파서가 dict로 정규화 못 한 문자열 옵션도 견딘다."""
+    return o.get("value") if isinstance(o, dict) else o
+
+
+def _opt_label(o: object) -> object:
+    return o.get("label") if isinstance(o, dict) else o
+
 # --- 세션 생명주기 (R7~R8) ---
 # 세션을 여는/닫는 액션. 세션 이름은 아래 SESSION_PARAM_NAMES 파라미터 값으로 식별한다.
 # 세션 파라미터로 이름을 갖는 대표 패키지만 추적한다(Email 등 이름 없는 연결은 제외).
@@ -139,14 +148,14 @@ def _check_parameters(action: dict, spec: dict, location: str) -> list[Violation
         value = provided.get("value")
         # R4: enum 타입은 값이 options 안에 있어야
         if pspec.get("type") in _ENUM_TYPES and "options" in pspec:
-            allowed = {o.get("value") for o in pspec["options"]} | {o.get("label") for o in pspec["options"]}
+            allowed = {_opt_value(o) for o in pspec["options"]} | {_opt_label(o) for o in pspec["options"]}
             if value not in allowed:
                 violations.append(
                     Violation(
                         "R4", location,
                         f"'{name}' 값 '{value}'은(는) 허용된 선택지가 아닙니다.",
                         package=pkg, action=act, param=name,
-                        spec_excerpt={"options": [o.get("value") for o in pspec["options"]]},
+                        spec_excerpt={"options": [_opt_value(o) for o in pspec["options"]]},
                     )
                 )
         # R5: NUMBER/BOOLEAN 형식 (경량)

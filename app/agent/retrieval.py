@@ -16,9 +16,15 @@ from typing import Protocol
 
 
 class Retriever(Protocol):
-    """검색 구현이 따라야 하는 계약. score 내림차순으로 최대 limit개를 반환한다."""
+    """검색 구현이 따라야 하는 계약. score 내림차순으로 최대 limit개를 반환한다.
 
-    def search(self, query: str, limit: int = 4) -> list[dict]: ...
+    source_types를 주면 그 소스 타입만 반환한다 (예: ["action_schema", "bot_example"] —
+    shortlist가 문서 페이지·패키지 개요를 걸러 액션 후보만 받을 때 쓴다). None이면 전체.
+    """
+
+    def search(
+        self, query: str, limit: int = 4, source_types: list[str] | None = None
+    ) -> list[dict]: ...
 
 
 def _make_retriever() -> Retriever:
