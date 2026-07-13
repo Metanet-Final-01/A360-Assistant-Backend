@@ -11,7 +11,9 @@ class SourceEvidence(BaseModel):
 
 
 class WorkStep(BaseModel):
-    """업무 단계 하나. step_id는 추천·수정·채점에서 참조하는 안정 식별자."""
+    """업무 단계 하나. step_id는 이 분석 내부의 안정 식별자다(피드백 등이 특정 단계를 지목할 때 참조).
+
+    추천 흐름도는 이제 자체 지역 step_id를 쓰며 이 값을 참조하지 않는다(에이전트가 단계를 재구성)."""
 
     step_id: str = Field(description="안정 식별자, 예: 'step-1'")
     order: int
