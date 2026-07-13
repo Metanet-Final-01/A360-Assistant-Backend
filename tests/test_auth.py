@@ -133,8 +133,9 @@ def _mem_engine():
     return engine
 
 
-def test_register_seed_email_promoted_to_admin(monkeypatch):
-    """ADMIN_EMAILS 시드 이메일로 가입하면 is_admin=True, 아니면 False (승격은 시드에만)."""
+def test_register_never_grants_admin_even_for_seed_email(monkeypatch):
+    """공개 가입은 시드 이메일이어도 is_admin을 부여하지 않는다 — 시드 선점 권한상승 차단
+    (CodeRabbit #179). 승격은 운영자 기동 백필로만."""
     engine = _mem_engine()
     TestingSession = sessionmaker(bind=engine)
 
@@ -147,16 +148,13 @@ def test_register_seed_email_promoted_to_admin(monkeypatch):
 
     app.dependency_overrides[get_db] = _get_db
     monkeypatch.setenv("JWT_SECRET", "test-secret")
-    monkeypatch.setenv("ADMIN_EMAILS", "Boss@Gmail.com")  # 대소문자 무시 확인
+    monkeypatch.setenv("ADMIN_EMAILS", "Boss@Gmail.com")  # 시드에 있어도
     try:
         with TestClient(app) as c:
             c.post("/api/auth/register", json={"email": "boss@gmail.com", "password": "pw12345678"})
-            c.post("/api/auth/register", json={"email": "peon@gmail.com", "password": "pw12345678"})
         with TestingSession() as s:
             boss = s.scalar(select(models.User).where(models.User.email == "boss@gmail.com"))
-            peon = s.scalar(select(models.User).where(models.User.email == "peon@gmail.com"))
-            assert boss.is_admin is True
-            assert peon.is_admin is False
+            assert boss.is_admin is False  # 가입만으로는 절대 관리자가 아니다
     finally:
         app.dependency_overrides.clear()
 
