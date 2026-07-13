@@ -59,9 +59,11 @@ def test_roundtrip_preserves_label_description_and_params():
     dumped = rec.model_dump()
     assert dumped["steps"][0]["label"] == "열기" and dumped["steps"][0]["description"] == "스프레드시트 연다"
     assert dumped["steps"][1]["label"] == "반복"
-    # 중첩 액션·파라미터 보존
+    # 중첩 액션·파라미터 보존 (value_source="user"는 챗봇 수정 보존의 기준 — 반드시 왕복돼야)
     child = dumped["steps"][1]["actions"][0]["children"][0]
-    assert child["action"] == "SetCell" and child["parameters"][0]["value"] == "A1"
+    assert child["action"] == "SetCell"
+    assert child["parameters"][0]["value"] == "A1"
+    assert child["parameters"][0]["value_source"] == "user"
 
 
 def test_step_id_is_not_bound_to_analysis():

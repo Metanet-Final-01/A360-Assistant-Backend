@@ -48,7 +48,7 @@ Recommendation
 **계층 4단계:**
 
 ```
-steps[]               ─ 업무 단계 (AnalysisResult.steps[].step_id 참조)
+steps[]               ─ 흐름도 단계 (에이전트가 재구성한 자기완결적 단위; step_id=흐름도 지역 id, label/description 보유)
  └─ actions[]         ─ 그 단계를 자동화하는 A360 액션 (순서대로 실행)
      ├─ parameters[]  ─ 액션 설정값 (카탈로그 파라미터 name 그대로)
      └─ children[]    ─ Loop/If 컨테이너의 본문 (재귀 — A360 봇 트리와 1:1)
@@ -61,7 +61,7 @@ steps[]               ─ 업무 단계 (AnalysisResult.steps[].step_id 참조)
   "schema_version": "1.0",
   "steps": [
     {
-      "step_id": "step-1",
+      "step_id": "step-1", "label": "네이버 증권 접속", "description": "금 시세 페이지를 브라우저로 연다",
       "actions": [
         {
           "order": 1,
@@ -78,7 +78,7 @@ steps[]               ─ 업무 단계 (AnalysisResult.steps[].step_id 참조)
       ]
     },
     {
-      "step_id": "step-3",
+      "step_id": "step-3", "label": "엑셀 가공", "description": "3일치 시세를 반복 처리한다",
       "actions": [
         { "order": 1, "package": "Excel_MS", "action": "OpenSpreadsheet", "label": "열기",
           "parameters": [{ "name": "session", "value": "Default", "value_source": "schema_default" }] },
@@ -111,7 +111,8 @@ steps[]               ─ 업무 단계 (AnalysisResult.steps[].step_id 참조)
 
 | 필드 | 이유 |
 |---|---|
-| `step_id` | 분석 결과의 단계 참조 — 추천이 어느 업무 단계에서 나왔는지 (FR-09) |
+| `step_id` | 흐름도 내부 지역 id — 더는 분석 단계를 참조하지 않는다(에이전트가 단계를 합치거나 쪼갬). 추천의 분석 귀속은 버전 단위(analysis_id FK) |
+| `steps[].label`/`steps[].description` | 단계가 스스로를 설명(흐름도만으로 렌더). 둘 다 선택 — agent가 최종 렌더 직전 step_id로 폴백 |
 | `package`/`action`/`parameters` | FR-10. **카탈로그 표기 그대로** — 골드셋 문자열 매칭 기준 |
 | `parameters[].value_source` | `schema_default`(카탈로그 기본값)/`llm`(추론)/`user`(사용자 지정). 챗봇 수정 시 user 값은 보존 |
 | `children` | Loop/If/Step 본문 (A360 봇 JSON 트리와 1:1) |
