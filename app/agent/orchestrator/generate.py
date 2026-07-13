@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from app.schemas import Recommendation
 
 from .. import config
-from ..analysis import _has_text, analyze, analyze_text
+from ..analysis import _format_document, _has_text, analyze, analyze_text
 from ..recommend.graph import build_agent_graph
 from ..recommend.stream import emit
 from .harness import verify_and_repair
@@ -108,7 +108,11 @@ async def _generate_a360(state: TurnState) -> dict:
     """
     sink: list[dict] = []  # 검색 히트 누적 → finalize가 액션별 근거로 부착
     graph = build_agent_graph(sink)
-    inputs = {"analysis": state["analysis"], "constraints": []}
+    # 업무정의서 원문도 함께 싣는다(RPA-142) — 분석은 힌트, 원문이 근거. 채팅 서술 경로
+    # (parsed_doc 없음/텍스트 없음)면 None으로 기존 동작 유지.
+    parsed = state.get("parsed_doc")
+    document = _format_document(parsed) if parsed and _has_text(parsed) else None
+    inputs = {"analysis": state["analysis"], "constraints": [], "document": document}
     final_state: dict = {}
     async for mode, chunk in graph.astream(
         inputs, stream_mode=["custom", "values"], config={"recursion_limit": 100},

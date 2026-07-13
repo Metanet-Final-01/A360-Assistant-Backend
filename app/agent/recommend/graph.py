@@ -45,6 +45,9 @@ MAX_TOOL_ROUNDS = 6
 MAX_REPAIR_ROUNDS = 2
 # recommend 검색은 액션 후보 메뉴용 — 문서 페이지·패키지 개요 오염을 막는다.
 SEARCH_SOURCE_TYPES = ["action_schema", "bot_example"]
+# 시스템 메시지에 싣는 업무정의서 원문 상한 — 업무정의서는 보통 몇 페이지라 이 안에 다
+# 들어가고, 비정상적으로 큰 문서의 토큰 폭주만 막는다(초과분은 꼬리라 손실 적음, RPA-142).
+MAX_DOC_CHARS = 12000
 
 # 에이전트가 흔히 슬립하는 enum 필드의 허용값 — 벗어나면 안전값으로 강등한다.
 _VALID_VALUE_SOURCE = {"schema_default", "llm", "user"}
@@ -80,12 +83,18 @@ def _to_dict(analysis: Any) -> dict:
 
 
 def _seed_messages(state: RecommendState) -> list:
-    """첫 진입 시 system(프롬프트+업무 분석 힌트)·user(지시) 메시지를 만든다."""
+    """첫 진입 시 system(프롬프트+업무 분석 힌트+원문)·user(지시) 메시지를 만든다."""
     from ..orchestrator.render import analysis_brief
 
     analysis = state.get("analysis") or {}
     constraints = state.get("constraints") or []
     system = f"{_PROMPT}\n\n[업무 분석]\n{analysis_brief(analysis)}"
+    document = (state.get("document") or "").strip()
+    if document:
+        # 분석은 힌트, 원문이 근거(RPA-142) — 분석이 떨군 디테일을 에이전트가 직접 본다.
+        if len(document) > MAX_DOC_CHARS:
+            document = document[:MAX_DOC_CHARS] + "\n…(생략)"
+        system += f"\n\n[업무정의서 원문]\n{document}"
     if constraints:
         system += "\n\n[제약]\n" + "\n".join(f"- {c}" for c in constraints)
     user = (
@@ -356,10 +365,12 @@ def build_agent_graph(sink: list[dict]):
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def recommend(
-    analysis: Any, constraints: list[str] | None = None
+    analysis: Any, constraints: list[str] | None = None, parsed_doc: dict | None = None
 ) -> AsyncIterator[ProgressEvent]:
     """AnalysisResult → A360 추천안(Recommendation) 스트림 (INTERFACES §4 ②).
 
+    parsed_doc(documents.parsed_content)을 주면 업무정의서 원문을 에이전트 입력에
+    함께 싣는다 — 분석이 떨군 디테일을 원문에서 직접 확인한다(RPA-142).
     yield: stage(recommending/searching/verifying) → done(recommendation).
     OPENAI_API_KEY 미설정·인증·rate limit 등은 error 이벤트로 흘린다.
     """
@@ -367,9 +378,18 @@ async def recommend(
         yield ProgressEvent(event="error", message="OPENAI_API_KEY 환경변수가 필요합니다")
         return
 
+    document: str | None = None
+    if parsed_doc:
+        from ..analysis import _format_document, _has_text
+
+        if _has_text(parsed_doc):
+            document = _format_document(parsed_doc)
+
     sink: list[dict] = []
     graph = build_agent_graph(sink)
-    inputs: RecommendState = {"analysis": _to_dict(analysis), "constraints": constraints or []}
+    inputs: RecommendState = {
+        "analysis": _to_dict(analysis), "constraints": constraints or [], "document": document,
+    }
     final_state: dict = {}
     try:
         async for mode, chunk in graph.astream(

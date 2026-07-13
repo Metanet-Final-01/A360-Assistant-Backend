@@ -15,6 +15,9 @@ class RecommendState(TypedDict, total=False):
 
     analysis: dict  # AnalysisResult.model_dump() — 단계는 '고정 경계'가 아니라 힌트로 쓴다
     constraints: list[str]
+    # 업무정의서 원문(페이지 태깅 조립 텍스트, RPA-142). 분석이 떨군 디테일(수치·형식·조건)을
+    # 에이전트가 직접 확인하는 근거다 — "분석은 힌트, 원문이 근거". 채팅 서술 경로면 None.
+    document: str | None
 
     messages: Annotated[list, add_messages]  # 에이전트 대화(system·user·AI·tool)
     tool_rounds: int  # compose_agent가 도구를 부른 왕복 수 (MAX_TOOL_ROUNDS 상한)
