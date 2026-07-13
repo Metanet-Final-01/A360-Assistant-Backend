@@ -89,10 +89,14 @@ def test_recommend_produces_valid_recommendation(monkeypatch):
     rec = events[-1].data["recommendation"]
     step_ids = [s["step_id"] for s in rec["steps"]]
     assert step_ids == ["step-1", "step-3"]   # order로 재정렬됨(병렬 도착 무관)
-    # 액션이 실려 있고 카탈로그 검수를 통과(위반 없음)해 confidence가 높다
+    # confidence는 액션별 RAG 검색 근거(score)로 산정된다 — 액션마다 다르다.
+    # openpage는 검색 score 0.9, CreateSpreadsheet는 0.8로 히트했다.
     web = rec["steps"][0]["actions"][0]
     assert web["package"] == "WebAutomation" and web["action"] == "openpage"
     assert web["confidence"] == 0.9
+    excel = rec["steps"][1]["actions"][0]
+    assert excel["package"] == "Excel_MS" and excel["action"] == "CreateSpreadsheet"
+    assert excel["confidence"] == 0.8   # score가 낮은 액션은 신뢰도도 낮다(액션별 차등)
     # sources가 shortlist source_map에서 부착됨
     assert web["sources"] and web["sources"][0]["title"] == "Open Page"
 
