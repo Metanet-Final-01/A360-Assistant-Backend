@@ -33,6 +33,57 @@ def get_request_id() -> str | None:
     return _request_id_var.get()
 
 
+# hybrid_search 이벤트에 함께 남길 RAG 설정 스냅샷 — "이 검색이 어떤 설정으로 돌았나"
+# (chunk_size·모델·RRF 등)를 관측에서 바로 보게 한다. 값은 config가 env로 결정.
+def _rag_config_snapshot() -> dict:
+    return {
+        "chunk_size": config.CHUNK_SIZE,
+        "chunk_overlap": config.CHUNK_OVERLAP,
+        "embedding_model": config.EMBEDDING_MODEL,
+        "embedding_dim": config.EMBEDDING_DIM,
+        "rerank_model": config.RERANK_MODEL,
+        "rrf_k": config.RRF_K,
+        "candidate_pool": config.HYBRID_CANDIDATE_POOL_SIZE,
+        "rerank_candidates": config.HYBRID_RERANK_CANDIDATES,
+    }
+
+
+def _persist_rag_event(record: dict) -> None:
+    """관측 DB(Neon)에 RAG 이벤트를 best-effort로 적재 — 로컬 JSONL과 별개로 중앙화(RPA-128).
+
+    검색어 preview 등 자유 텍스트는 마스킹, hybrid_search엔 설정 스냅샷을 얹는다.
+    적재 실패가 검색을 죽이면 안 되므로 예외는 삼킨다.
+    """
+    try:
+        from app import models
+        from app.core.masking import mask_pii
+        from app.core.observability_db import observability_sessionmaker
+
+        detail = {k: v for k, v in record.items()
+                  if k not in ("request_id", "event", "function", "status", "duration_ms")}
+        # args/result 안의 문자열 preview에 사용자 검색어가 섞일 수 있어 마스킹
+        args = detail.get("args")
+        if isinstance(args, dict):
+            for v in args.values():
+                if isinstance(v, dict) and isinstance(v.get("preview"), str):
+                    v["preview"] = mask_pii(v["preview"])
+        if record.get("event") == "hybrid_search":
+            detail["config"] = _rag_config_snapshot()
+
+        with observability_sessionmaker()() as db:
+            db.add(models.RagEvent(
+                request_id=record.get("request_id"),
+                event=str(record.get("event"))[:40],
+                function=(record.get("function") or None) and str(record["function"])[:120],
+                status=(record.get("status") or None) and str(record["status"])[:20],
+                duration_ms=record.get("duration_ms"),
+                detail=json.dumps(detail, ensure_ascii=False, default=str),
+            ))
+            db.commit()
+    except Exception:  # noqa: BLE001 — 관측 적재 실패가 검색을 죽이면 안 됨
+        pass
+
+
 def _write_log(record: dict) -> None:
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = config.LOG_DIR / f"rag-{datetime.now(timezone.utc):%Y-%m-%d}.jsonl"
@@ -40,6 +91,7 @@ def _write_log(record: dict) -> None:
     with _write_lock:  # 여러 스레드(동시 검색 요청)가 같은 파일에 append할 때 줄이 섞이지 않게
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(line)
+    _persist_rag_event(record)  # 로컬 JSONL과 별개로 관측 DB에도 중앙화(RPA-128)
 
 
 def log_event(event: str, **fields) -> None:

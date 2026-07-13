@@ -286,6 +286,20 @@ def test_request_metrics_returns_rows():
     assert row["created_at"].startswith("2026-07-13T03:00")  # 수집기가 다음 since로 되돌려주는 값
 
 
+def test_rag_events_returns_rows():
+    """RAG 파이프라인 단계 로그 조회(RPA-128) — request_id로 필터."""
+    rows = [SimpleNamespace(id=3, request_id="abc123", event="hybrid_search", function="search",
+                            status="ok", duration_ms=1726.68, detail='{"result":{"count":5}}',
+                            created_at=None)]
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB(scalar_rows=rows)
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/rag-events", params={"request_id": "abc123"})
+    assert r.status_code == 200
+    ev = r.json()["events"][0]
+    assert ev["event"] == "hybrid_search" and ev["duration_ms"] == 1726.68 and ev["request_id"] == "abc123"
+
+
 def test_request_metrics_accepts_since_roundtrip():
     """응답의 created_at(isoformat)을 그대로 since로 되돌려도 400이 안 난다 (커서 왕복)."""
     app.dependency_overrides[get_obs_db] = lambda: FakeDB()
