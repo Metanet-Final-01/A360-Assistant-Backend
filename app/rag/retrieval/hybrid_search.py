@@ -8,33 +8,48 @@ mode:
 
 import asyncio
 
-from .. import config
 from ..observability import log_call
 from ..store import db, opensearch_client
 from .embed import embed_query, embed_query_async
+from .params import RetrievalParams
 from .rerank import rerank as voyage_rerank
 from .rerank import rerank_async as voyage_rerank_async
 
 
-def reciprocal_rank_fusion(rank_lists: list[list[str]], k: int) -> dict[str, float]:
+def reciprocal_rank_fusion(
+    rank_lists: list[list[str]], k: int, weights: list[float] | None = None
+) -> dict[str, float]:
     """rank_lists: 각 검색 방식(branch)의 결과 id를 순위(1위부터)대로 나열한 리스트들.
 
-    score(d) = sum over branches containing d of 1 / (k + rank_in_branch(d)).
+    score(d) = sum over branches containing d of weight_branch / (k + rank_in_branch(d)).
     특정 branch 결과에 없는 문서는 그 branch의 항을 0으로 취급한다(페널티 없음).
+    weights 미지정 시 모든 branch를 1.0으로 동일 가중(기존 동작). 지정 시 branch 수와
+    길이가 같아야 한다 — 어긋나면 zip이 조용히 잘라 신호가 유실되므로 명시적으로 막는다.
     """
+    if weights is None:
+        weights = [1.0] * len(rank_lists)
+    elif len(weights) != len(rank_lists):
+        raise ValueError(
+            f"weights 길이({len(weights)})가 rank_lists 개수({len(rank_lists)})와 다릅니다"
+        )
     scores: dict[str, float] = {}
-    for ids in rank_lists:
+    for ids, weight in zip(rank_lists, weights):
         for index, doc_id in enumerate(ids):
             rank = index + 1
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+            scores[doc_id] = scores.get(doc_id, 0.0) + weight / (k + rank)
     return scores
 
 
-def _fuse_candidates(vector_hits: list[dict], bm25_hits: list[dict], bm25_error: str | None) -> list[dict]:
+def _fuse_candidates(
+    vector_hits: list[dict], bm25_hits: list[dict], bm25_error: str | None, params: RetrievalParams
+) -> list[dict]:
     """RRF 융합 + 후보 리스트 조립 — sync/async 두 검색 경로가 공유하는 순수 로직(I/O 없음)."""
     vector_ids = [h["id"] for h in vector_hits]
     bm25_ids = [h["id"] for h in bm25_hits]
-    rrf_scores = reciprocal_rank_fusion([vector_ids, bm25_ids], k=config.RRF_K)
+    rrf_scores = reciprocal_rank_fusion(
+        [vector_ids, bm25_ids], k=params.rrf_k,
+        weights=[params.vector_weight, params.bm25_weight],
+    )
 
     dense_rank = {doc_id: i + 1 for i, doc_id in enumerate(vector_ids)}
     bm25_rank = {doc_id: i + 1 for i, doc_id in enumerate(bm25_ids)}
@@ -51,7 +66,7 @@ def _fuse_candidates(vector_hits: list[dict], bm25_hits: list[dict], bm25_error:
         return "hybrid_bm25_only"
 
     fused_ids = sorted(rrf_scores.keys(), key=lambda d: (-rrf_scores[d], d))
-    fused_ids = [d for d in fused_ids if d in lookup][: config.HYBRID_RERANK_CANDIDATES]
+    fused_ids = [d for d in fused_ids if d in lookup][: params.rerank_candidates]
     return [
         {
             **lookup[doc_id],
@@ -75,13 +90,17 @@ def _fuse_candidates(vector_hits: list[dict], bm25_hits: list[dict], bm25_error:
         "reranked": any("rerank_score" in item for item in r),
     },
 )
-def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank") -> list[dict]:
+def search(
+    pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank",
+    params: RetrievalParams | None = None,
+) -> list[dict]:
+    params = params or RetrievalParams.from_config()
     try:
         query_embedding = embed_query(query)
     except RuntimeError as e:
         raise RuntimeError(f"임베딩 설정 오류: {e}")
 
-    pool = config.HYBRID_CANDIDATE_POOL_SIZE
+    pool = params.candidate_pool_size
     vector_hits = db.search(pg_conn, query_embedding, limit=pool if mode != "vector" else limit)
 
     if mode == "vector":
@@ -96,7 +115,7 @@ def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_r
         # 단, 저하 여부를 결과에 남겨야 "BM25가 원래 안 잡힌 건지 장애로 빠진 건지" 구분 가능하다.
         bm25_error = str(e)
 
-    candidates = _fuse_candidates(vector_hits, bm25_hits, bm25_error)
+    candidates = _fuse_candidates(vector_hits, bm25_hits, bm25_error, params)
 
     if mode == "hybrid" or not candidates:
         return [{**c, "reranked": False} for c in candidates[:limit]]
@@ -127,7 +146,7 @@ def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_r
 )
 async def search_async(
     pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank",
-    http_client=None,
+    http_client=None, params: RetrievalParams | None = None,
 ) -> list[dict]:
     """search()의 비동기 버전 — /api/rag/search 전용. 벡터 검색(임베딩→pgvector)과
     BM25 검색은 서로 입력이 다른 독립 조회라(BM25는 임베딩이 필요 없다) asyncio.gather로
@@ -137,7 +156,8 @@ async def search_async(
     http_client는 app/rag/store/pool.py의 앱 전역 재사용 httpx.AsyncClient(임베딩/
     리랭크 외부 API용) — 매 요청 새 클라이언트를 열고 닫던 게 부하테스트로 확인된
     진짜 병목이라 여기로 그대로 흘려보낸다."""
-    pool = config.HYBRID_CANDIDATE_POOL_SIZE
+    params = params or RetrievalParams.from_config()
+    pool = params.candidate_pool_size
 
     async def _vector_branch() -> list[dict]:
         try:
@@ -158,7 +178,7 @@ async def search_async(
 
     vector_hits, (bm25_hits, bm25_error) = await asyncio.gather(_vector_branch(), _bm25_branch())
 
-    candidates = _fuse_candidates(vector_hits, bm25_hits, bm25_error)
+    candidates = _fuse_candidates(vector_hits, bm25_hits, bm25_error, params)
 
     if mode == "hybrid" or not candidates:
         return [{**c, "reranked": False} for c in candidates[:limit]]
