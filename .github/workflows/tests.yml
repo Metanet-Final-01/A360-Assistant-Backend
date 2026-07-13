@@ -6,11 +6,18 @@ on:
   push:
     branches: [main, dev]
 
+permissions:
+  contents: read
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # PR의 파이썬 코드를 실행하는 잡 — 체크아웃 토큰을 .git/config에 남기지 않아
+          # 코드가 토큰을 읽어 유출하는 것 방지(RPA-121).
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
