@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -128,10 +128,47 @@ def echo(payload: EchoRequest) -> dict[str, str]:
     }
 
 
+def _check_db(session_factory) -> bool:
+    """SELECT 1 왕복 성공 여부 — 실패 원인은 로그로만 (health 응답은 ok/fail 단순 유지)."""
+    try:
+        from sqlalchemy import text
+
+        with session_factory() as s:
+            s.execute(text("SELECT 1"))
+        return True
+    except Exception as e:  # noqa: BLE001 — 어떤 실패든 "fail"로 보고하는 게 목적
+        logger.warning("health 체크 실패: %s", e)
+        return False
+
+
 @app.get("/api/health")
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "healthy"}
+def health(response: Response) -> dict:
+    """의존성 체크 포함 헬스 (RPA-117) — 백오피스 생존 감시 probe의 대상.
+
+    - 앱 DB 실패 → 503 unhealthy: 서비스가 사실상 동작 불가라 probe가 DOWN으로 봐야 한다.
+    - 관측 DB 실패 → 200 degraded: 본 기능은 살아 있으니 UP이되, "반쯤 죽은" 상태를 구분.
+    """
+    import app.db as app_db
+    from app.core.observability_db import observability_sessionmaker
+
+    checks = {
+        "database": "ok" if _check_db(app_db.SessionLocal) else "fail",
+        "observability_database": "ok" if _check_db(observability_sessionmaker()) else "fail",
+    }
+    if checks["database"] == "fail":
+        status = "unhealthy"
+        response.status_code = 503
+    elif checks["observability_database"] == "fail":
+        status = "degraded"
+    else:
+        status = "healthy"
+    return {
+        "status": status,
+        "checks": checks,
+        # 관측 DB가 공유(Neon)인지 로컬 폴백인지 — 폴백이면 위 체크는 앱 DB와 동일 대상
+        "observability_shared": bool(os.getenv("OBSERVABILITY_DATABASE_URL")),
+    }
 
 
 _STATIC_DIR = Path(__file__).parent / "static"
