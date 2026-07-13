@@ -29,18 +29,29 @@ from .catalog import CatalogLookup
 
 # 본문(children)을 가질 수 있는 컨테이너 액션. A360에는 임의 병합점이 없어
 # 분기/반복 블록이 끝나면 다음 형제로 이어진다 — 컨테이너만 children을 갖는다.
-CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
+#
+# 판정은 패키지 단위다(RPA-141): 카탈로그가 llm_agent 소싱으로 바뀌며 액션명이 문서 슬러그
+# 기반 camelCase가 됐고(예: Error handler/errorHandlerTry, Loop/cloudUsingLoopAction),
+# Loop 패키지엔 iterator 변형이 20여 개라 (package, action) 열거는 표기가 바뀔 때마다
+# 헛위반(R6)을 만든다 — 실제로 구 봇 JSON 표기(ErrorHandler/try)가 전부 불일치해
+# 에이전트가 Loop/If/Try를 올바르게 써도 재생성을 유발했다. A360에서 본문을 갖는 건
+# 이 제어 흐름 패키지들뿐이므로 패키지로 판정하고, 본문이 없는 게 명백한 액션만 뺀다.
+CONTAINER_PACKAGES: frozenset[str] = frozenset(
+    {"Loop", "If", "Step", "Error handler", "Trigger loop"}
+)
+# 컨테이너 패키지 소속이지만 본문(children)을 갖지 않는 액션 — 제어 이동/신호뿐이다.
+NON_CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("Loop", "loop.commands.start"),
-        ("If", "if"),
-        ("If", "else"),
-        ("If", "elseIf"),
-        ("Step", "step"),
-        ("ErrorHandler", "try"),
-        ("ErrorHandler", "catch"),
-        ("ErrorHandler", "finally"),
+        ("Loop", "loopPackageBreakAction"),
+        ("Loop", "loopPackageContinueAction"),
+        ("Error handler", "errorHandlerThrow"),
     }
 )
+
+
+def is_container(package: str | None, action: str | None) -> bool:
+    """이 액션이 children(본문)을 가질 수 있는 컨테이너인지 판정한다 — R6 기준."""
+    return package in CONTAINER_PACKAGES and (package, action) not in NON_CONTAINER_ACTIONS
 
 # RADIO/SELECT처럼 값이 정해진 선택지 안에 있어야 하는 타입 (R4 대상).
 _ENUM_TYPES = {"RADIO", "SELECT"}
@@ -56,24 +67,29 @@ def _opt_label(o: object) -> object:
     return o.get("label") if isinstance(o, dict) else o
 
 # --- 세션 생명주기 (R7~R8) ---
-# 세션을 여는/닫는 액션. 세션 이름은 아래 SESSION_PARAM_NAMES 파라미터 값으로 식별한다.
-# 세션 파라미터로 이름을 갖는 대표 패키지만 추적한다(Email 등 이름 없는 연결은 제외).
-# 실제 카탈로그에 세션 패키지가 늘면 여기에 (package, action)을 추가한다.
+# 세션을 여는/닫는 액션 — 현행 카탈로그(llm_agent 소싱) 표기다(RPA-141: 구 JAR 표기
+# Excel_MS/OpenSpreadsheet 등은 카탈로그에 없어 R7/R8이 한 번도 발화하지 못했다).
+# 현 카탈로그의 open 계열은 세션 이름 파라미터가 없고 세션을 '리턴'한다(cloudExcelOpen 등)
+# — 그래서 이름 없는 열림도 추적한다(아래 _ANON). 사용/닫기 액션은 sessionName을 받는다.
 SESSION_OPENERS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("Excel_MS", "OpenSpreadsheet"),
-        ("Excel_MS", "CreateSpreadsheet"),
-        ("WebAutomation", "StartSessionWebAutomation"),
+        ("Excel advanced", "cloudExcelOpen"),
+        ("Excel advanced", "excelAdvancedPackageCreateWorkbookAction"),
+        ("Browser", "browserPackageOpenAction"),
+        ("Word", "mswordOpenDocument"),
     }
 )
 SESSION_CLOSERS: frozenset[tuple[str, str]] = frozenset(
     {
-        ("Excel_MS", "CloseSpreadsheet"),
-        ("WebAutomation", "EndSessionWebAutomation"),
+        ("Excel advanced", "excelAdvancedPackageCloseAction"),
+        ("Browser", "browserPackageCloseAction"),
+        ("Word", "mswordCloseDocument"),
     }
 )
 # 세션 이름을 담는 파라미터 이름 (패키지별 표기 차이).
 SESSION_PARAM_NAMES = ("session", "sessionName")
+# 이름 없는 열림(세션을 리턴하는 open)의 세션 키 — 같은 패키지의 이름 참조를 관대하게 덮는다.
+_ANON = "__anon__"
 
 
 @dataclass
@@ -214,7 +230,7 @@ def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[V
         violations.extend(_check_parameters(action, spec, location))
 
     # R6: children은 컨테이너 액션에만
-    if children and (pkg, act) not in CONTAINER_ACTIONS:
+    if children and not is_container(pkg, act):
         violations.append(
             Violation(
                 "R6", location,
@@ -275,15 +291,34 @@ def run_session_checks(steps: list[dict]) -> list[Violation]:
     steps: Recommendation.steps[] (각 {step_id, actions[]}). 카탈로그는 쓰지 않는다 —
     opener/closer는 (package, action) 상수로 판정하고, 세션 이름은 파라미터 값으로 좁는다.
 
-    세션은 (package, name)으로 식별한다 — Excel_MS 세션 "Default"와 WebAutomation 세션
-    "Default"는 다른 세션이므로 이름만으로 키를 잡으면 서로 덮어쓴다.
+    세션은 (package, name)으로 식별한다 — Excel 세션 "Default"와 Browser 세션 "Default"는
+    다른 세션이므로 이름만으로 키를 잡으면 서로 덮어쓴다. 현 카탈로그의 open 계열은 세션
+    이름 파라미터 없이 세션을 리턴하므로(cloudExcelOpen 등) 이름 없는 열림은 _ANON으로
+    추적하고, 같은 패키지의 이름 참조를 관대하게 커버한다(리턴 세션을 변수로 받아 쓰는
+    패턴이라 문자열 매칭이 불가능하다 — 오탐 방지가 우선).
 
-    R7: 열려 있지 않은 세션을 참조(열기 전/닫은 후 사용) 또는 열린 적 없는 세션을 닫음
-        (close-before-open / double-close — 닫을 대상이 없다).
-    R8: 순회가 끝났는데 닫히지 않은 채 남은 세션(리소스 누수).
+    R7: 그 패키지에 열림이 전혀 없는데 세션을 참조하거나, 닫을 열림이 없는데 닫음
+        (close-before-open / double-close).
+    R8: 순회가 끝났는데 닫히지 않은 채 남은 열림(리소스 누수).
     """
-    opened: dict[tuple[str, str], tuple[str | None, str]] = {}  # (package, name) -> (step_id, location)
+    # (package, name|_ANON) -> 열림 스택 [(step_id, location)] — 같은 키 중복 열림도 센다.
+    opened: dict[tuple[str, str], list[tuple[str | None, str]]] = {}
     violations: list[Violation] = []
+
+    def _pop_open(pkg: str, name: str | None) -> bool:
+        """닫기 대상 열림을 찾아 pop한다 — 이름 일치 → _ANON → (이름 없는 close면) 아무 열림."""
+        candidates = [(pkg, name)] if name else []
+        candidates.append((pkg, _ANON))
+        if name is None:  # 이름 없는 close는 그 패키지의 아무 열림이나 닫는 걸로 본다
+            candidates.extend(k for k in opened if k[0] == pkg)
+        for key in candidates:
+            stack = opened.get(key)
+            if stack:
+                stack.pop()
+                if not stack:
+                    opened.pop(key)
+                return True
+        return False
 
     for step in steps:
         step_id = step.get("step_id")
@@ -291,23 +326,19 @@ def run_session_checks(steps: list[dict]) -> list[Violation]:
             pkg = action.get("package")
             key = (pkg, action.get("action"))
             name = _session_name(action)
-            if name is None:
-                continue  # 세션 무관 액션 (세션 이름 없음)
-            sess = (pkg, name)
             if key in SESSION_OPENERS:
-                opened[sess] = (step_id, location)
+                opened.setdefault((pkg, name or _ANON), []).append((step_id, location))
             elif key in SESSION_CLOSERS:
-                if sess in opened:
-                    opened.pop(sess)
-                else:
+                if not _pop_open(pkg, name):
+                    shown = name or "(이름 미지정)"
                     violations.append(
                         Violation(
                             "R7", location,
-                            f"세션 '{name}'을(를) 열지 않았는데 닫으려 합니다 (닫을 세션이 없습니다).",
+                            f"세션 '{shown}'을(를) 열지 않았는데 닫으려 합니다 (닫을 세션이 없습니다).",
                             package=pkg, action=action.get("action"), step_id=step_id,
                         )
                     )
-            elif sess not in opened:
+            elif name is not None and (pkg, name) not in opened and (pkg, _ANON) not in opened:
                 violations.append(
                     Violation(
                         "R7", location,
@@ -317,12 +348,14 @@ def run_session_checks(steps: list[dict]) -> list[Violation]:
                     )
                 )
 
-    for (pkg, name), (step_id, location) in opened.items():
-        violations.append(
-            Violation(
-                "R8", location,
-                f"세션 '{name}'을(를) 연 뒤 닫지 않았습니다 (닫는 액션이 없습니다).",
-                package=pkg, step_id=step_id,
+    for (pkg, name), stack in opened.items():
+        shown = name if name != _ANON else "(이름 미지정)"
+        for step_id, location in stack:
+            violations.append(
+                Violation(
+                    "R8", location,
+                    f"세션 '{shown}'을(를) 연 뒤 닫지 않았습니다 (닫는 액션이 없습니다).",
+                    package=pkg, step_id=step_id,
+                )
             )
-        )
     return violations
