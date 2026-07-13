@@ -84,6 +84,50 @@ def test_rollup_usage_day(monkeypatch):
     assert fake.added[0].purpose == "verify" and fake.added[0].input_tokens == 1000
 
 
+# --- retention (RPA-123) ---
+
+from types import SimpleNamespace
+
+from app import models
+
+
+class _PurgeSession:
+    def __init__(self, rowcount): self.rowcount = rowcount; self.deleted = []
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, stmt): self.deleted.append(stmt); return SimpleNamespace(rowcount=self.rowcount)
+    def commit(self): pass
+
+
+def test_purge_retention_zero_is_permanent():
+    """retention<=0이면 영구 보관 — DELETE 실행 자체를 안 한다."""
+    s = _PurgeSession(9)
+    n = rollup._purge_old(lambda: s, models.RequestMetric, 0)
+    assert n == 0 and s.deleted == []
+
+
+def test_purge_deletes_when_positive():
+    """retention>0이면 cutoff 이전 행 삭제, 삭제 건수 반환."""
+    s = _PurgeSession(3)
+    n = rollup._purge_old(lambda: s, models.TurnEvent, 30)
+    assert n == 3 and len(s.deleted) == 1
+
+
+def test_purge_all_raw_covers_all_tables_and_is_best_effort(monkeypatch):
+    """4개 raw 테이블 전부 정리 시도 + 한 테이블 실패가 나머지를 막지 않는다."""
+    calls = []
+
+    def _fake_purge(sf, model, days):
+        calls.append(model.__name__)
+        if model is models.LlmUsage:
+            raise RuntimeError("boom")  # 하나 실패시켜도
+        return 1
+
+    monkeypatch.setattr(rollup, "_purge_old", _fake_purge)
+    rollup.purge_all_raw(lambda: None)  # 예외 없이 끝나야 함
+    assert set(calls) == {"RequestMetric", "TurnEvent", "LlmUsage", "AuditLog"}  # 전부 시도
+
+
 # --- 스케줄러 게이트 ---
 
 def test_scheduler_disabled_by_env(monkeypatch):

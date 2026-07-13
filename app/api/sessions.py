@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from app import models
 from app.api.auth import assert_session_owner, get_current_user, get_optional_user
 from app.core.llm import usage_context
+from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
 from app.schemas import ProgressEvent, Recommendation
 
@@ -876,7 +877,9 @@ async def agent_turn(
             # 대체해 잘라도 유효 JSON을 유지한다.
             detail = None
             if data:
-                detail = json.dumps(data, ensure_ascii=False, default=str)
+                # 사용자 업무 텍스트가 섞일 수 있는 자유 텍스트 키만 PII 마스킹(RPA-123) —
+                # reason(라우팅 근거)·query(검색어). step_id·route 등 구조값은 그대로.
+                detail = json.dumps(mask_fields(data, ("reason", "query")), ensure_ascii=False, default=str)
                 if len(detail) > 4000:
                     detail = json.dumps(
                         {"_truncated": True, "size": len(detail), "preview": detail[:2000]},
@@ -884,7 +887,7 @@ async def agent_turn(
                     )
             tev.append({
                 "seq": len(tev), "kind": kind, "stage": stage,
-                "message": (message or "")[:512] or None,
+                "message": mask_pii((message or "")[:512]) or None,
                 "detail": detail,
                 "elapsed_ms": int((time.perf_counter() - turn_t0) * 1000),
             })
