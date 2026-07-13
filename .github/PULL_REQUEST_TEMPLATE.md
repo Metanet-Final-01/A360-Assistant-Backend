@@ -2,9 +2,12 @@
 
 ## 관련 이슈
 
-<!-- Jira: RPA-12 / GitHub 이슈: #12 -->
+<!-- Jira: RPA-12 / GitHub 미러 이슈: Closes #12 -->
 
 - Jira:
+- GitHub Issue: Closes #
+
+<!-- GitHub 미러 이슈가 아직 없거나 Closes로 닫지 않는 경우, 이유를 적어주세요. -->
 
 ## 무엇을 왜 변경했나요?
 
@@ -26,6 +29,8 @@
 
 ## 체크리스트
 
+- [ ] PR 제목에 Jira 키가 포함되어 있습니다. 예: `feat(rag): 액션 검색 개선 (RPA-12)`
+- [ ] GitHub 미러 이슈를 `Closes #번호`로 연결했습니다.
 - [ ] 스스로 diff를 리뷰했습니다 (디버그 코드/불필요한 주석 제거)
 - [ ] 시크릿·개인정보가 포함되지 않았습니다
 - [ ] 관련 문서(.env.example, README, docs/)를 갱신했습니다 (해당 시)
