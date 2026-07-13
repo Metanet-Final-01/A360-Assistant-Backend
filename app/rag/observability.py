@@ -69,10 +69,55 @@ def log_call(event: str, capture_args: tuple[str, ...] = (), capture_result=None
     def decorator(func):
         signature = inspect.signature(func)
 
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def _args_summary(args, kwargs) -> dict:
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
+            return {name: _summarize(bound.arguments.get(name)) for name in capture_args}
+
+        # 비동기 검색 경로(app/rag/retrieval/*_async, store/*_async — RAG_ASYNC_SEARCH)에도
+        # 같은 로깅을 붙이려면 async def를 그대로 삼키면 안 된다(await 없이 호출하면
+        # 코루틴 객체가 result로 잡혀 capture_result가 깨진다) — 데코레이팅 시점에
+        # iscoroutinefunction으로 분기해 별도 async wrapper를 반환한다.
+        if inspect.iscoroutinefunction(func):
+
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                started_at = datetime.now(timezone.utc)
+                start = time.perf_counter()
+                record = {
+                    "request_id": get_request_id(),
+                    "event": event,
+                    "function": func.__qualname__,
+                    "started_at": started_at.isoformat(),
+                    "args": _args_summary(args, kwargs),
+                }
+                try:
+                    result = await func(*args, **kwargs)
+                except Exception as exc:
+                    record.update(
+                        status="error",
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                        duration_ms=round((time.perf_counter() - start) * 1000, 2),
+                        ended_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    _write_log(record)
+                    raise
+
+                record.update(
+                    status="ok",
+                    duration_ms=round((time.perf_counter() - start) * 1000, 2),
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                )
+                if capture_result:
+                    record["result"] = capture_result(result)
+                _write_log(record)
+                return result
+
+            return async_wrapper
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
             started_at = datetime.now(timezone.utc)
             start = time.perf_counter()
 
@@ -81,7 +126,7 @@ def log_call(event: str, capture_args: tuple[str, ...] = (), capture_result=None
                 "event": event,
                 "function": func.__qualname__,
                 "started_at": started_at.isoformat(),
-                "args": {name: _summarize(bound.arguments.get(name)) for name in capture_args},
+                "args": _args_summary(args, kwargs),
             }
             try:
                 result = func(*args, **kwargs)

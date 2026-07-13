@@ -35,6 +35,14 @@ def connect() -> psycopg.Connection:
     return psycopg.connect(config.database_dsn())
 
 
+async def connect_async() -> psycopg.AsyncConnection:
+    """/api/rag/search 전용 비동기 경로 — 검색 API가 동기 라우트라 요청마다 스레드풀
+    슬롯을 하나씩 점유해 동시 요청 시 대기열이 쌓이던 문제(부하테스트로 확인) 대응.
+    적재(ingest)·debug 엔드포인트는 그대로 동기 connect()를 쓴다(둘 다 이 문제의
+    대상이 아니었음)."""
+    return await psycopg.AsyncConnection.connect(config.database_dsn())
+
+
 def ensure_schema(conn: psycopg.Connection) -> None:
     with conn.cursor() as cur:
         cur.execute(_DDL)
@@ -96,21 +104,31 @@ def upsert_documents(conn: psycopg.Connection, documents: list[dict], embeddings
     return len(documents)
 
 
+_SEARCH_SQL = """
+    SELECT id, source_type, package_name, action_name, title, url, content,
+           parent_id, chunk_index,
+           1 - (embedding <=> %s::vector) AS score
+    FROM rag_documents
+    WHERE embedding IS NOT NULL
+    ORDER BY embedding <=> %s::vector
+    LIMIT %s
+"""
+
+
 @log_call("vector_search", capture_args=("limit",), capture_result=lambda r: {"count": len(r)})
 def search(conn: psycopg.Connection, query_embedding: list[float], limit: int = 5) -> list[dict]:
     vector = "[" + ",".join(f"{x:.7f}" for x in query_embedding) + "]"
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, source_type, package_name, action_name, title, url, content,
-                   parent_id, chunk_index,
-                   1 - (embedding <=> %s::vector) AS score
-            FROM rag_documents
-            WHERE embedding IS NOT NULL
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """,
-            (vector, vector, limit),
-        )
+        cur.execute(_SEARCH_SQL, (vector, vector, limit))
         columns = [d.name for d in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+@log_call("vector_search", capture_args=("limit",), capture_result=lambda r: {"count": len(r)})
+async def search_async(conn: psycopg.AsyncConnection, query_embedding: list[float], limit: int = 5) -> list[dict]:
+    vector = "[" + ",".join(f"{x:.7f}" for x in query_embedding) + "]"
+    async with conn.cursor() as cur:
+        await cur.execute(_SEARCH_SQL, (vector, vector, limit))
+        columns = [d.name for d in cur.description]
+        rows = await cur.fetchall()
+        return [dict(zip(columns, row)) for row in rows]

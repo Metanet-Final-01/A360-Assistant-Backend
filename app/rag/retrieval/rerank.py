@@ -2,9 +2,11 @@
 
 import logging
 
+import httpx
+
 from .. import config
 from ..observability import log_call
-from .embed import post_with_retry
+from .embed import post_with_retry, post_with_retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,38 @@ def rerank(query: str, documents: list[str], top_k: int) -> list[dict]:
             "documents": documents,
             "top_k": min(top_k, len(documents)),
         },
+    )
+    _record_rerank_usage(data)
+    results = data["data"]
+    results.sort(key=lambda r: r["relevance_score"], reverse=True)
+    return results
+
+
+@log_call(
+    "voyage_rerank",
+    capture_args=("query", "documents", "top_k"),
+    capture_result=lambda r: {"model": config.RERANK_MODEL, "count": len(r)},
+)
+async def rerank_async(
+    query: str, documents: list[str], top_k: int, client: httpx.AsyncClient | None = None
+) -> list[dict]:
+    """rerank의 비동기 버전 — /api/rag/search 전용 경로. client는 app/rag/store/pool.py의
+    앱 전역 재사용 클라이언트."""
+    if not config.VOYAGE_API_KEY:
+        raise RuntimeError("VOYAGE_API_KEY 환경변수가 필요합니다 (rerank)")
+    if not documents:
+        return []
+
+    data = await post_with_retry_async(
+        _RERANK_URL,
+        {"Authorization": f"Bearer {config.VOYAGE_API_KEY}"},
+        {
+            "model": config.RERANK_MODEL,
+            "query": query,
+            "documents": documents,
+            "top_k": min(top_k, len(documents)),
+        },
+        client=client,
     )
     _record_rerank_usage(data)
     results = data["data"]

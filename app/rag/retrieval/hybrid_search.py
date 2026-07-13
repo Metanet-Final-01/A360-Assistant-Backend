@@ -6,11 +6,14 @@ mode:
   hybrid_rerank — hybrid 결과를 Voyage rerank-2.5-lite로 재정렬 (기본값)
 """
 
+import asyncio
+
 from .. import config
 from ..observability import log_call
 from ..store import db, opensearch_client
-from .embed import embed_query
+from .embed import embed_query, embed_query_async
 from .rerank import rerank as voyage_rerank
+from .rerank import rerank_async as voyage_rerank_async
 
 
 def reciprocal_rank_fusion(rank_lists: list[list[str]], k: int) -> dict[str, float]:
@@ -25,6 +28,42 @@ def reciprocal_rank_fusion(rank_lists: list[list[str]], k: int) -> dict[str, flo
             rank = index + 1
             scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
     return scores
+
+
+def _fuse_candidates(vector_hits: list[dict], bm25_hits: list[dict], bm25_error: str | None) -> list[dict]:
+    """RRF 융합 + 후보 리스트 조립 — sync/async 두 검색 경로가 공유하는 순수 로직(I/O 없음)."""
+    vector_ids = [h["id"] for h in vector_hits]
+    bm25_ids = [h["id"] for h in bm25_hits]
+    rrf_scores = reciprocal_rank_fusion([vector_ids, bm25_ids], k=config.RRF_K)
+
+    dense_rank = {doc_id: i + 1 for i, doc_id in enumerate(vector_ids)}
+    bm25_rank = {doc_id: i + 1 for i, doc_id in enumerate(bm25_ids)}
+
+    # 콘텐츠 조회용 lookup: 두 branch 모두에서 온 필드를 합치되, pgvector 쪽이 스키마 전체(parent_id 등)를 갖고 있으니 우선한다.
+    lookup: dict[str, dict] = {h["id"]: h for h in bm25_hits}
+    lookup.update({h["id"]: h for h in vector_hits})
+
+    def _retrieval_source(doc_id: str) -> str:
+        if doc_id in dense_rank and doc_id in bm25_rank:
+            return "hybrid_both"
+        if doc_id in dense_rank:
+            return "hybrid_dense_only"
+        return "hybrid_bm25_only"
+
+    fused_ids = sorted(rrf_scores.keys(), key=lambda d: (-rrf_scores[d], d))
+    fused_ids = [d for d in fused_ids if d in lookup][: config.HYBRID_RERANK_CANDIDATES]
+    return [
+        {
+            **lookup[doc_id],
+            "dense_rank": dense_rank.get(doc_id),
+            "bm25_rank": bm25_rank.get(doc_id),
+            "rrf_score": rrf_scores[doc_id],
+            "retrieval_source": _retrieval_source(doc_id),
+            "bm25_available": bm25_error is None,
+            **({"bm25_error": bm25_error} if bm25_error else {}),
+        }
+        for doc_id in fused_ids
+    ]
 
 
 @log_call(
@@ -57,38 +96,7 @@ def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_r
         # 단, 저하 여부를 결과에 남겨야 "BM25가 원래 안 잡힌 건지 장애로 빠진 건지" 구분 가능하다.
         bm25_error = str(e)
 
-    vector_ids = [h["id"] for h in vector_hits]
-    bm25_ids = [h["id"] for h in bm25_hits]
-    rrf_scores = reciprocal_rank_fusion([vector_ids, bm25_ids], k=config.RRF_K)
-
-    dense_rank = {doc_id: i + 1 for i, doc_id in enumerate(vector_ids)}
-    bm25_rank = {doc_id: i + 1 for i, doc_id in enumerate(bm25_ids)}
-
-    # 콘텐츠 조회용 lookup: 두 branch 모두에서 온 필드를 합치되, pgvector 쪽이 스키마 전체(parent_id 등)를 갖고 있으니 우선한다.
-    lookup: dict[str, dict] = {h["id"]: h for h in bm25_hits}
-    lookup.update({h["id"]: h for h in vector_hits})
-
-    def _retrieval_source(doc_id: str) -> str:
-        if doc_id in dense_rank and doc_id in bm25_rank:
-            return "hybrid_both"
-        if doc_id in dense_rank:
-            return "hybrid_dense_only"
-        return "hybrid_bm25_only"
-
-    fused_ids = sorted(rrf_scores.keys(), key=lambda d: (-rrf_scores[d], d))
-    fused_ids = [d for d in fused_ids if d in lookup][: config.HYBRID_RERANK_CANDIDATES]
-    candidates = [
-        {
-            **lookup[doc_id],
-            "dense_rank": dense_rank.get(doc_id),
-            "bm25_rank": bm25_rank.get(doc_id),
-            "rrf_score": rrf_scores[doc_id],
-            "retrieval_source": _retrieval_source(doc_id),
-            "bm25_available": bm25_error is None,
-            **({"bm25_error": bm25_error} if bm25_error else {}),
-        }
-        for doc_id in fused_ids
-    ]
+    candidates = _fuse_candidates(vector_hits, bm25_hits, bm25_error)
 
     if mode == "hybrid" or not candidates:
         return [{**c, "reranked": False} for c in candidates[:limit]]
@@ -100,6 +108,67 @@ def search(pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_r
         reranked = voyage_rerank(query, rerank_inputs, top_k=min(limit, len(candidates)))
     except RuntimeError as e:
         # VOYAGE_API_KEY 미설정 등 — 재정렬 없이 RRF 순서 그대로 반환하되, 폴백 여부와 사유를 명시한다
+        return [{**c, "reranked": False, "rerank_fallback_reason": str(e)} for c in candidates[:limit]]
+
+    return [
+        {**candidates[item["index"]], "rerank_score": item["relevance_score"], "reranked": True}
+        for item in reranked
+    ]
+
+
+@log_call(
+    "hybrid_search",
+    capture_args=("query", "limit", "mode"),
+    capture_result=lambda r: {
+        "count": len(r),
+        "retrieval_sources": [item.get("retrieval_source") for item in r],
+        "reranked": any("rerank_score" in item for item in r),
+    },
+)
+async def search_async(
+    pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank",
+    http_client=None,
+) -> list[dict]:
+    """search()의 비동기 버전 — /api/rag/search 전용. 벡터 검색(임베딩→pgvector)과
+    BM25 검색은 서로 입력이 다른 독립 조회라(BM25는 임베딩이 필요 없다) asyncio.gather로
+    동시에 돌린다 — 스레드풀 대기만 없애는 게 아니라 임베딩+BM25 두 단계의 지연시간을
+    겹쳐서 실제 critical path도 줄인다(sync 버전은 완전 순차).
+
+    http_client는 app/rag/store/pool.py의 앱 전역 재사용 httpx.AsyncClient(임베딩/
+    리랭크 외부 API용) — 매 요청 새 클라이언트를 열고 닫던 게 부하테스트로 확인된
+    진짜 병목이라 여기로 그대로 흘려보낸다."""
+    pool = config.HYBRID_CANDIDATE_POOL_SIZE
+
+    async def _vector_branch() -> list[dict]:
+        try:
+            query_embedding = await embed_query_async(query, client=http_client)
+        except RuntimeError as e:
+            raise RuntimeError(f"임베딩 설정 오류: {e}") from e
+        return await db.search_async(pg_conn, query_embedding, limit=pool if mode != "vector" else limit)
+
+    if mode == "vector":
+        vector_hits = await _vector_branch()
+        return [{**h, "retrieval_source": "vector"} for h in vector_hits[:limit]]
+
+    async def _bm25_branch() -> tuple[list[dict], str | None]:
+        try:
+            return await opensearch_client.keyword_search_async(os_client, query, size=pool), None
+        except Exception as e:  # noqa: BLE001 — sync 버전과 동일하게 BM25 실패는 저하만, 전체 실패 아님
+            return [], str(e)
+
+    vector_hits, (bm25_hits, bm25_error) = await asyncio.gather(_vector_branch(), _bm25_branch())
+
+    candidates = _fuse_candidates(vector_hits, bm25_hits, bm25_error)
+
+    if mode == "hybrid" or not candidates:
+        return [{**c, "reranked": False} for c in candidates[:limit]]
+
+    rerank_inputs = [f"{c['title']}\n\n{c['content']}" for c in candidates]
+    try:
+        reranked = await voyage_rerank_async(
+            query, rerank_inputs, top_k=min(limit, len(candidates)), client=http_client
+        )
+    except RuntimeError as e:
         return [{**c, "reranked": False, "rerank_fallback_reason": str(e)} for c in candidates[:limit]]
 
     return [

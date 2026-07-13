@@ -54,8 +54,13 @@ async def lifespan(app: FastAPI):
     from app.core.scheduler import start_scheduler, stop_scheduler
 
     start_scheduler()
+    # /api/rag/search 전용 커넥션 풀(부하테스트로 확인된 요청별-신규연결 병목 대응)
+    from app.rag.store.pool import close_pools, open_pools
+
+    await open_pools()
     yield
     stop_scheduler()
+    await close_pools()
 
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
