@@ -56,6 +56,7 @@ _VALID_DIRECTION = {"input", "output", "local"}
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_llm():
+    """compose_agent용 ChatOpenAI 클라이언트를 만든다(사용량 스트리밍 on)."""
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY, stream_usage=True)
@@ -182,6 +183,7 @@ def _attach_sources(flow: dict, sink: list[dict]) -> dict:
             best[key] = h
 
     def walk(actions: list[dict]) -> None:
+        """액션 트리를 재귀 순회하며 (package, action) 검색 히트를 sources로 부착한다."""
         for a in actions:
             hit = best.get((a.get("package"), a.get("action")))
             if hit and not a.get("sources"):
@@ -220,6 +222,10 @@ def build_agent_graph(sink: list[dict]):
     usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_generate")]}
 
     async def compose_agent(state: RecommendState) -> dict:
+        """LLM 한 턴: KB 도구를 호출하거나(탐색) 최종 Recommendation JSON을 출력한다.
+
+        도구 예산(MAX_TOOL_ROUNDS) 소진 시 도구 없이 최종 JSON을 강제해 무한 탐색을 끊는다.
+        """
         existing = state.get("messages") or []
         seed = [] if existing else _seed_messages(state)
         convo = list(existing) + seed
@@ -234,6 +240,7 @@ def build_agent_graph(sink: list[dict]):
         return update
 
     def tools_node(state: RecommendState) -> dict:
+        """직전 AI 메시지의 tool_calls(search_kb/get_action_schema)를 실행해 결과를 대화에 되돌린다."""
         ai = state["messages"][-1]
         emit({"event": "stage", "stage": "searching",
               "message": describe_tool_calls(ai.tool_calls),
@@ -241,10 +248,16 @@ def build_agent_graph(sink: list[dict]):
         return {"messages": execute_tool_calls(tools, ai)}
 
     def route_after_agent(state: RecommendState) -> str:
+        """compose_agent 뒤 분기: 도구 호출이 있으면 tools, 없으면(최종 JSON 출력) verify."""
         last = state["messages"][-1]
         return "tools" if getattr(last, "tool_calls", None) else "verify"
 
     def verify_node(state: RecommendState) -> dict:
+        """에이전트 최종 출력을 파싱·검수한다.
+
+        파싱 실패나 위반이 남고 재시도 여유(MAX_REPAIR_ROUNDS)가 있으면 교정 지시를
+        compose_agent로 되먹인다(self-repair). tool_rounds는 repair 패스마다 재충전한다.
+        """
         ai = state["messages"][-1]
         rr = state.get("repair_round", 0) + 1
         try:
@@ -272,11 +285,13 @@ def build_agent_graph(sink: list[dict]):
         return update
 
     def route_after_verify(state: RecommendState) -> str:
+        """verify 뒤 분기: 위반이 남고 재시도 여유가 있으면 compose_agent(self-repair), 아니면 finalize."""
         if state.get("violations") and state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS:
             return "compose_agent"
         return "finalize"
 
     def finalize_node(state: RecommendState) -> dict:
+        """흐름도에 근거(sources)를 부착하고 정규화·검증해 최종 Recommendation dict를 만든다."""
         flow = _attach_sources(state.get("flow") or {"steps": []}, sink)
         # 안전망: verify 하네스가 되돌린 flow에도 enum/타입 슬립이 남을 수 있어,
         # 검증 직전 한 번 더 정규화한다(단일 오류로 흐름도 전체가 폐기되던 문제 방지).

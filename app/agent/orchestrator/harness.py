@@ -72,6 +72,7 @@ def _spec_excerpts(violations: list[dict], catalog: CatalogLookup) -> str:
 
 
 def _repair_messages(flow: dict, violations: list[dict], catalog: CatalogLookup) -> list[dict]:
+    """검수 위반 목록·스펙 발췌를 담은 repair LLM용 (system, user) 메시지를 만든다."""
     violation_lines = "\n".join(
         f"- [{v['rule']}] {v.get('step_id')}/{v['location']}: {v['message']}" for v in violations
     )

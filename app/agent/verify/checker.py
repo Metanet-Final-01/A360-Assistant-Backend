@@ -52,6 +52,7 @@ def _opt_value(o: object) -> object:
 
 
 def _opt_label(o: object) -> object:
+    """옵션 원소에서 label을 뽑는다 — dict가 아닌 문자열 옵션도 견딘다."""
     return o.get("label") if isinstance(o, dict) else o
 
 # --- 세션 생명주기 (R7~R8) ---
@@ -89,6 +90,7 @@ class Violation:
     spec_excerpt: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
+        """위반을 repair 프롬프트·관측 로그용 dict로 직렬화한다."""
         return {
             "rule": self.rule,
             "location": self.location,
@@ -101,6 +103,7 @@ class Violation:
 
 
 def _is_empty(value) -> bool:
+    """값이 비었는지 판정한다 — None·빈 문자열(공백 포함)·빈 리스트/딕트."""
     if value is None:
         return True
     if isinstance(value, str):
@@ -177,6 +180,7 @@ def _check_parameters(action: dict, spec: dict, location: str) -> list[Violation
 
 
 def _is_number(value) -> bool:
+    """값이 숫자로 해석 가능한지 판정한다(bool은 숫자로 치지 않는다)."""
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):
@@ -189,6 +193,7 @@ def _is_number(value) -> bool:
 
 
 def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[Violation]:
+    """액션 하나를 R1(카탈로그 존재)·R2~R5(파라미터)·R6(children 컨테이너)로 검사하고 children을 재귀한다."""
     violations: list[Violation] = []
     pkg, act = action.get("package"), action.get("action")
     children = action.get("children") or []

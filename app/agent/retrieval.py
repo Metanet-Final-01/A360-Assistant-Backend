@@ -24,7 +24,9 @@ class Retriever(Protocol):
 
     def search(
         self, query: str, limit: int = 4, source_types: list[str] | None = None
-    ) -> list[dict]: ...
+    ) -> list[dict]:
+        """query로 최대 limit개 후보를 score 내림차순 반환한다. source_types로 소스 타입 제한."""
+        ...
 
 
 def _make_retriever() -> Retriever:
