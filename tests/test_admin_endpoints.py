@@ -42,43 +42,74 @@ def _agg(key, calls, i, o, cost):
     return SimpleNamespace(key=key, calls=calls, input_tokens=i, output_tokens=o, cost_usd=cost)
 
 
-# --- 관리자 게이트 (ADMIN_EMAILS 화이트리스트, CodeRabbit) ---
+# --- 관리자 게이트 (RPA-118: is_admin 속성 + 서비스 API 키) ---
+
+def _as_user(is_admin: bool):
+    """get_optional_user를 지정 사용자로 오버라이드 (require_admin이 이 의존성을 씀)."""
+    app.dependency_overrides[admin_api.get_optional_user] = (
+        lambda: SimpleNamespace(id=uuid.uuid4(), email="u@test.com", is_admin=is_admin)
+    )
+
 
 def test_non_admin_user_403(monkeypatch):
-    """화이트리스트에 없는 로그인 사용자는 403 — 전 사용자 데이터 열람 차단."""
-    monkeypatch.setenv("ADMIN_EMAILS", "admin@test.com")
+    """is_admin=False 로그인 사용자는 403 — 전 사용자 데이터 열람 차단."""
+    monkeypatch.delenv("OPS_API_KEY", raising=False)
     app.dependency_overrides[get_obs_db] = lambda: FakeDB()
-    app.dependency_overrides[admin_api.get_current_user] = (
-        lambda: SimpleNamespace(id=uuid.uuid4(), email="someone@test.com")
-    )
+    _as_user(is_admin=False)
     with TestClient(app) as c:
         r = c.get("/api/admin/llm-usage/stats")
     assert r.status_code == 403
     assert r.json()["detail"]["code"] == "FORBIDDEN"
 
 
-def test_admin_emails_unset_denies_all(monkeypatch):
-    """ADMIN_EMAILS 미설정이면 전부 차단 (fail-closed)."""
-    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+def test_anonymous_denied(monkeypatch):
+    """토큰도 API 키도 없으면 차단 (fail-closed)."""
+    monkeypatch.delenv("OPS_API_KEY", raising=False)
     app.dependency_overrides[get_obs_db] = lambda: FakeDB()
-    app.dependency_overrides[admin_api.get_current_user] = (
-        lambda: SimpleNamespace(id=uuid.uuid4(), email="anyone@test.com")
-    )
+    app.dependency_overrides[admin_api.get_optional_user] = lambda: None
     with TestClient(app) as c:
         r = c.get("/api/admin/audit-logs")
     assert r.status_code == 403
 
 
-def test_whitelisted_admin_passes(monkeypatch):
-    """화이트리스트 이메일(대소문자 무시)은 통과."""
-    monkeypatch.setenv("ADMIN_EMAILS", "Admin@Test.com, ops@test.com")
+def test_is_admin_user_passes(monkeypatch):
+    """is_admin=True 사용자는 통과 — 인가는 서버 속성으로 판정."""
+    monkeypatch.delenv("OPS_API_KEY", raising=False)
     app.dependency_overrides[get_obs_db] = lambda: FakeDB()
-    app.dependency_overrides[admin_api.get_current_user] = (
-        lambda: SimpleNamespace(id=uuid.uuid4(), email="admin@test.com")
-    )
+    _as_user(is_admin=True)
     with TestClient(app) as c:
         r = c.get("/api/admin/llm-usage/stats")
     assert r.status_code == 200
+
+
+def test_service_api_key_passes(monkeypatch):
+    """유효한 X-API-Key(머신 신원)는 사용자 토큰 없이 통과."""
+    monkeypatch.setenv("OPS_API_KEY", "s3cr3t-ops-key")
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    app.dependency_overrides[admin_api.get_optional_user] = lambda: None  # JWT 없음
+    with TestClient(app) as c:
+        r = c.get("/api/admin/llm-usage/stats", headers={"X-API-Key": "s3cr3t-ops-key"})
+    assert r.status_code == 200
+
+
+def test_service_api_key_wrong_403(monkeypatch):
+    """틀린 API 키는 403."""
+    monkeypatch.setenv("OPS_API_KEY", "s3cr3t-ops-key")
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    app.dependency_overrides[admin_api.get_optional_user] = lambda: None
+    with TestClient(app) as c:
+        r = c.get("/api/admin/audit-logs", headers={"X-API-Key": "wrong"})
+    assert r.status_code == 403
+
+
+def test_service_api_key_disabled_when_unset(monkeypatch):
+    """OPS_API_KEY 미설정이면 어떤 X-API-Key도 통과 못 함 (빈 키 우연 통과 방지)."""
+    monkeypatch.delenv("OPS_API_KEY", raising=False)
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+    app.dependency_overrides[admin_api.get_optional_user] = lambda: None
+    with TestClient(app) as c:
+        r = c.get("/api/admin/audit-logs", headers={"X-API-Key": ""})
+    assert r.status_code == 403
 
 
 # --- llm-usage/stats ---

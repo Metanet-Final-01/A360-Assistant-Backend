@@ -39,6 +39,16 @@ async def lifespan(app: FastAPI):
         logger.info("DB 마이그레이션 완료 (alembic head)")
     except Exception as e:  # noqa: BLE001
         logger.warning("DB 마이그레이션 실패 (앱은 계속 기동): %s", e)
+    # 관리자 부트스트랩(RPA-118) — ADMIN_EMAILS 시드 계정을 is_admin으로 백필(멱등).
+    # migration 직후 재로그인을 기다리지 않고 여기서 승격 (DB 미가동이면 경고만).
+    try:
+        from app.api.auth import backfill_seed_admins
+
+        promoted = backfill_seed_admins()
+        if promoted:
+            logger.info("관리자 부트스트랩: %d개 계정 승격", promoted)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("관리자 부트스트랩 실패 (앱은 계속 기동): %s", e)
     # tiktoken 인코더 워밍업(RPA-86) — 최초 get_encoding은 원격 BPE 다운로드라 요청 경로에서
     # 부르면 이벤트 루프를 막는다. 백그라운드 스레드로 미리 로드 (실패 시 문자 폴백으로 동작).
     import threading

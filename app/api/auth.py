@@ -54,6 +54,43 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def admin_seed_emails() -> set[str]:
+    """ADMIN_EMAILS(쉼표 구분) — is_admin을 부여할 부트스트랩 시드. 인가의 원천이 아니라
+    운영자가 지정한 '이 계정들을 관리자로 승격하라'는 씨앗일 뿐이다 (RPA-118)."""
+    import os
+
+    return {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+
+
+def bootstrap_admin(user: "models.User", db: Session) -> None:
+    """시드 이메일이면 is_admin을 True로 승격(멱등). register/기동 백필 공용."""
+    if not user.is_admin and user.email.lower() in admin_seed_emails():
+        user.is_admin = True
+        db.commit()
+
+
+def backfill_seed_admins() -> int:
+    """앱 기동 시 시드 이메일 기존 계정을 is_admin으로 백필(멱등). 승격 건수 반환.
+
+    migration 직후 is_admin이 전부 False라, 재로그인을 기다리지 않고 여기서 메운다.
+    DB 미가동이어도 앱 기동은 계속돼야 하므로 호출부에서 예외를 삼킨다.
+    """
+    from app.db import SessionLocal
+
+    seed = admin_seed_emails()
+    if not seed:
+        return 0
+    with SessionLocal() as db:
+        users = db.scalars(
+            select(models.User).where(models.User.email.in_(seed), models.User.is_admin.is_(False))
+        ).all()
+        for u in users:
+            u.is_admin = True
+        if users:
+            db.commit()
+        return len(users)
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     db: Session = Depends(get_db),
@@ -116,6 +153,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
     db.add(user)
     db.commit()
     db.refresh(user)
+    bootstrap_admin(user, db)  # 시드 이메일이면 즉시 관리자 승격 (env 재시작 불필요)
     return TokenResponse(access_token=create_access_token(user.id))
 
 
