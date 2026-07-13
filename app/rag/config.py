@@ -1,5 +1,9 @@
 import os
+import re
 from pathlib import Path
+
+# postgres/postgresql 스킴 뒤의 SQLAlchemy 드라이버 접미사(+psycopg, +psycopg2 등)를 벗긴다.
+_PG_DRIVER_SUFFIX = re.compile(r"^(postgres(?:ql)?)\+\w+://")
 
 # 프로젝트 루트의 .env를 있으면 로드 (python-dotenv 없거나 파일 없으면 조용히 통과)
 try:
@@ -74,6 +78,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 
 def database_dsn() -> str:
+    """RAG 저장소(pgvector) 접속 문자열.
+
+    RAG_DATABASE_URL이 있으면 그걸 우선한다 — RAG 코퍼스를 앱 DB(users/sessions)와 분리된
+    전용 공유 DB(Neon 등)에 둘 수 있게 한다(관측 DB의 OBSERVABILITY_DATABASE_URL과 같은
+    폴백 패턴). 미설정/빈값이면 기존 DATABASE_*(앱 DB와 동일)로 폴백 — 로컬 단독 개발 무변경.
+    """
+    url = os.getenv("RAG_DATABASE_URL")
+    if url:
+        # RAG store는 raw psycopg라 libpq URL(postgresql://)만 받는다 — SQLAlchemy용
+        # 'postgresql+psycopg://' 접두사를 그대로 넘기면 psycopg가 스킴을 못 읽는다.
+        # 관측 URL 형식을 복붙해도 동작하도록 드라이버 접미사(+psycopg 등)를 방어적으로 벗긴다.
+        return _PG_DRIVER_SUFFIX.sub(r"\1://", url, count=1)
     # os.getenv(key, default)는 .env에 키가 "빈 값"으로라도 존재하면 default를 안 쓴다 —
     # `or`로 빈 문자열도 default로 폴백되게 한다 (DATABASE_HOST= 처럼 빈 채로 커밋된 .env.example 대응).
     host = os.getenv("DATABASE_HOST") or "localhost"
