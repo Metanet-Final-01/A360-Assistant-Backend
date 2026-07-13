@@ -174,6 +174,26 @@ def test_generate_with_existing_analysis_skips_analyze(monkeypatch):
     assert data["analysis_result"] is None  # 이번 턴에 새로 만든 분석 없음
 
 
+def test_generate_passes_document_to_recommend_graph(monkeypatch):
+    """문서가 있으면 업무정의서 원문이 recommend 서브그래프 입력에 실린다 (RPA-142)."""
+    _set_api_key(monkeypatch)
+    _route(monkeypatch, "generate")
+    captured = {}
+
+    class _FakeRecommendGraph:
+        async def astream(self, inputs, **kwargs):
+            captured.update(inputs)
+            yield ("values", {"recommendation": _CLEAN_FLOW})
+
+    monkeypatch.setattr(generate_mod, "build_agent_graph", lambda sink: _FakeRecommendGraph())
+    parsed = {"pages": [{"page": 1, "blocks": [
+        {"type": "text", "text": "최근 3일치 시세를 표 테두리와 함께 정리한다"}]}]}
+    ctx = dict(_CTX, analysis=_ANALYSIS.model_dump(), parsed_doc=parsed)
+    data = _done(_collect("흐름도 만들어줘", ctx))
+    assert data["type"] == "recommendation"
+    assert "최근 3일치" in (captured.get("document") or "")  # 원문이 그래프 입력에 실림
+
+
 def test_edit_turn_returns_recommendation_with_change_summary(monkeypatch):
     _set_api_key(monkeypatch)
     _route(monkeypatch, "edit")
