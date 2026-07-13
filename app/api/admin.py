@@ -8,15 +8,16 @@
 
 import logging
 import os
+import secrets
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, aliased
 
 from app import models
-from app.api.auth import get_current_user
+from app.api.auth import get_optional_user
 from app.core.observability_db import get_obs_db
 
 logger = logging.getLogger(__name__)
@@ -24,17 +25,37 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
-def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
-    """ADMIN_EMAILS(쉼표 구분) 화이트리스트 게이트 — 미설정이면 전부 차단(fail-closed).
+def _service_key_ok(request: Request) -> bool:
+    """X-API-Key가 OPS_API_KEY와 일치하나 — 머신(M2M) 신원. 사람 로그인 재사용을 대체한다.
 
-    임의의 로그인 사용자가 다른 사용자의 user_id·요청 경로·사용량을 열람하지 못하게 한다.
+    OPS_API_KEY 미설정/빈값이면 이 경로는 비활성(fail-closed) — 빈 키가 우연히 통과하지 않게.
+    compare_digest로 타이밍 공격을 막는다.
     """
-    allowed = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
-    if user.email.lower() not in allowed:
-        raise HTTPException(
-            403, detail={"code": "FORBIDDEN", "message": "관리자만 접근할 수 있습니다."}
-        )
-    return user
+    ops_key = os.getenv("OPS_API_KEY", "").strip()
+    if not ops_key:
+        return False
+    provided = request.headers.get("X-API-Key", "")
+    return bool(provided) and secrets.compare_digest(provided, ops_key)
+
+
+def require_admin(
+    request: Request,
+    user: models.User | None = Depends(get_optional_user),
+) -> models.User | None:
+    """관리자 게이트 — 둘 중 하나면 통과, 아니면 403 (RPA-118).
+
+    ① 서비스 API 키(X-API-Key == OPS_API_KEY): ops-server 같은 머신 신원. 사람 계정을
+       빌려 로그인하는 안티패턴 대신 전용 자격을 쓴다.
+    ② is_admin=True 사용자의 JWT: 인가를 문자열 화이트리스트가 아니라 서버 속성으로 판정
+       (개방 가입으로 화이트리스트 이메일을 선점해도 is_admin이 없으면 무의미).
+    """
+    if _service_key_ok(request):
+        return None  # 머신 신원 — 사용자 객체 없음(엔드포인트는 user를 게이트로만 씀)
+    if user is not None and user.is_admin:
+        return user
+    raise HTTPException(
+        403, detail={"code": "FORBIDDEN", "message": "관리자만 접근할 수 있습니다."}
+    )
 
 
 def _parse_since(value: str) -> datetime:

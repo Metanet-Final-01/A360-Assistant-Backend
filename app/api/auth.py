@@ -54,6 +54,42 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def admin_seed_emails() -> set[str]:
+    """ADMIN_EMAILS(쉼표 구분) — is_admin을 부여할 부트스트랩 시드.
+
+    **운영자 신뢰 경계**: 이 값은 외부 입력이 아니라 운영자가 서버 설정으로 지정하는
+    프로비저닝 소스다. 승격은 오직 이 시드로만, 그것도 '서버 기동 시 백필'로만 일어난다
+    (공개 /register 같은 외부 요청으로는 절대 승격하지 않는다 — CodeRabbit #179).
+    운영자는 여기 넣는 이메일 계정을 본인이 직접 등록해 소유를 보장해야 한다."""
+    import os
+
+    return {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+
+
+def backfill_seed_admins() -> int:
+    """앱 기동 시 시드 이메일 기존 계정을 is_admin으로 백필(멱등). 승격 건수 반환.
+
+    **is_admin을 부여하는 유일한 경로**다(공개 가입은 부여하지 않는다). ADMIN_EMAILS는
+    운영자 설정이므로 외부 입력이 아니다 — 운영자가 신뢰하는 계정만 나열한다는 전제.
+    migration 직후 is_admin이 전부 False라 재로그인을 기다리지 않고 여기서 메운다.
+    DB 미가동이어도 앱 기동은 계속돼야 하므로 호출부에서 예외를 삼킨다.
+    """
+    from app.db import SessionLocal
+
+    seed = admin_seed_emails()
+    if not seed:
+        return 0
+    with SessionLocal() as db:
+        users = db.scalars(
+            select(models.User).where(models.User.email.in_(seed), models.User.is_admin.is_(False))
+        ).all()
+        for u in users:
+            u.is_admin = True
+        if users:
+            db.commit()
+        return len(users)
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     db: Session = Depends(get_db),
@@ -116,6 +152,9 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
     db.add(user)
     db.commit()
     db.refresh(user)
+    # 공개 가입은 관리자 권한을 절대 부여하지 않는다 — 시드 이메일을 선점한 공격자가
+    # 관리자가 되는 권한 상승을 막기 위함(CodeRabbit #179). 승격은 운영자 설정
+    # ADMIN_EMAILS 기반 기동 백필로만 일어난다(backfill_seed_admins).
     return TokenResponse(access_token=create_access_token(user.id))
 
 

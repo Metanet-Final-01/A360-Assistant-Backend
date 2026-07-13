@@ -2,7 +2,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -123,3 +123,67 @@ def test_expired_token_rejected(monkeypatch):
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "-1")  # 이미 만료된 토큰
     token = security.create_access_token("uid-1")
     assert security.decode_access_token(token) is None
+
+
+# --- 관리자 부트스트랩 (RPA-118) ---
+
+def _mem_engine():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    models.User.__table__.create(engine)
+    return engine
+
+
+def test_register_never_grants_admin_even_for_seed_email(monkeypatch):
+    """공개 가입은 시드 이메일이어도 is_admin을 부여하지 않는다 — 시드 선점 권한상승 차단
+    (CodeRabbit #179). 승격은 운영자 기동 백필로만."""
+    engine = _mem_engine()
+    TestingSession = sessionmaker(bind=engine)
+
+    def _get_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _get_db
+    monkeypatch.setenv("JWT_SECRET", "test-secret")
+    monkeypatch.setenv("ADMIN_EMAILS", "Boss@Gmail.com")  # 시드에 있어도
+    try:
+        with TestClient(app) as c:
+            c.post("/api/auth/register", json={"email": "boss@gmail.com", "password": "pw12345678"})
+        with TestingSession() as s:
+            boss = s.scalar(select(models.User).where(models.User.email == "boss@gmail.com"))
+            assert boss.is_admin is False  # 가입만으로는 절대 관리자가 아니다
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_backfill_seed_admins_promotes_existing_idempotent(monkeypatch):
+    """기동 백필 — 시드 이메일 기존 계정을 승격, 재실행 시 0(멱등)."""
+    from app.api import auth as auth_mod
+
+    engine = _mem_engine()
+    TestingSession = sessionmaker(bind=engine)
+    with TestingSession() as s:
+        s.add(models.User(email="boss@gmail.com", password_hash="x", is_admin=False))
+        s.add(models.User(email="peon@gmail.com", password_hash="x", is_admin=False))
+        s.commit()
+    monkeypatch.setattr("app.db.SessionLocal", TestingSession)
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@gmail.com")
+
+    assert auth_mod.backfill_seed_admins() == 1  # boss만 승격
+    with TestingSession() as s:
+        assert s.scalar(select(models.User).where(models.User.email == "boss@gmail.com")).is_admin is True
+        assert s.scalar(select(models.User).where(models.User.email == "peon@gmail.com")).is_admin is False
+    assert auth_mod.backfill_seed_admins() == 0  # 멱등 — 다시 승격할 것 없음
+
+
+def test_backfill_no_seed_is_noop(monkeypatch):
+    """ADMIN_EMAILS 미설정이면 아무도 승격하지 않는다 (DB 접근도 안 함)."""
+    from app.api import auth as auth_mod
+
+    monkeypatch.delenv("ADMIN_EMAILS", raising=False)
+    # SessionLocal을 건드리면 실패하도록 — 시드 없으면 호출 전에 반환해야 함
+    monkeypatch.setattr("app.db.SessionLocal", lambda: (_ for _ in ()).throw(AssertionError("DB 접근 금지")))
+    assert auth_mod.backfill_seed_admins() == 0

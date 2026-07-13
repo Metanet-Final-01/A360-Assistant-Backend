@@ -22,6 +22,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -38,6 +39,9 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    # 관리자 여부 — 인가의 서버 속성(원천). 문자열 화이트리스트가 아니라 이 값으로 게이트한다
+    # (RPA-118). ADMIN_EMAILS는 이 값을 세팅하는 부트스트랩 시드로만 쓴다.
+    is_admin: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
