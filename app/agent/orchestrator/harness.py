@@ -19,7 +19,7 @@ from pathlib import Path
 
 from app.schemas import Recommendation
 
-from ..recommend.stream import emit
+from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
 from ..verify.checker import run_checks, run_session_checks
 from .jsonio import chat_json
@@ -49,6 +49,43 @@ def collect_violations(flow: dict, catalog: CatalogLookup) -> list[dict]:
     for v in run_session_checks(flow.get("steps", [])):
         violations.append(v.as_dict())
     return violations
+
+
+def attach_confidence(flow: dict, sink: list[dict], violations: list[dict]) -> None:
+    """액션별 신뢰도(FR-12)를 RAG 소스 점수 + 검수 위반으로 산정해 제자리에 채운다 (RPA-116).
+
+    compose는 confidence를 내지 않고 '검수가 채운다'는 계약의 이행 — best 소스 유사도를
+    기준값으로, 위반이면 감점한다(특히 R1=카탈로그 부재는 환각 가능성이라 아주 낮게).
+    sink는 검색 히트(package_name/action_name/score), violations는 step_id+location을 싣는다.
+    생성(finalize)·수정(edit) 양쪽이 이 함수로 신뢰도를 채운다.
+    """
+    best: dict[tuple, float] = {}
+    for h in sink:
+        pkg, act = h.get("package_name"), h.get("action_name")
+        if pkg and act:
+            best[(pkg, act)] = max(best.get((pkg, act), 0.0), h.get("score") or 0.0)
+    viol: dict[tuple, str | None] = {}
+    for v in violations:
+        loc = (v.get("step_id"), v.get("location"))
+        if loc[1] and (loc not in viol or v.get("rule") == "R1"):  # R1(액션 부재)을 우선
+            viol[loc] = v.get("rule")
+
+    def _conf(score: float | None, rule: str | None) -> float:
+        if rule == "R1":  # 카탈로그에 없는 액션 — 환각 가능
+            return 0.2
+        base = score if score else 0.4  # 소스 못 찾음 → 중하
+        if rule:  # R2~R6 등 파라미터·구조 위반
+            base *= 0.75
+        return round(min(1.0, max(0.05, base)), 2)
+
+    def _walk(actions: list[dict], sid, base: str) -> None:
+        for i, a in enumerate(actions):
+            path = f"{base}[{i}]" if base else f"actions[{i}]"  # 위반 location 포맷과 일치
+            a["confidence"] = _conf(best.get((a.get("package"), a.get("action"))), viol.get((sid, path)))
+            _walk(a.get("children") or [], sid, f"{path}.children")
+
+    for step in flow.get("steps", []):
+        _walk(step.get("actions") or [], step.get("step_id"), "")
 
 
 def _spec_excerpts(violations: list[dict], catalog: CatalogLookup) -> str:
@@ -191,14 +228,29 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
           ]}})
 
     # 1단계: 단계별 문법 위반(R1~R6) 국소 교정 — 위반 있는 단계만 LLM에 넘긴다.
+    # 단계마다 누적 흐름도(고친 단계 + 남은 원본)를 프레임으로 흘려 점진 스트리밍한다 —
+    # 전체 재생성이 아니라 '단계별로 고쳐지는' 과정을 프론트가 실시간 렌더한다.
     repaired = False
     new_steps = []
-    for step in flow.get("steps", []):
+    all_steps = flow.get("steps", [])
+    total = len(all_steps)
+    for i, step in enumerate(all_steps):
+        # 위반 있는 단계만 LLM 국소 교정을 부른다(느림) — 그 직전에 '이 단계 수정 중' 프레임을
+        # active_step_id와 함께 방출해, 프론트가 해당 단계 박스를 붉게 강조·깜빡이고 그 위치로
+        # 스크롤하게 한다(어떤 액션을 고치는 중인지 사용자에게 보이게). 위반 없는 단계는 교정을
+        # 건너뛰므로(빠름) 강조 프레임도 내지 않아 깜빡임이 실제 수정 단계에만 머문다.
+        if run_checks(step.get("actions", []), catalog):
+            pending = {**flow, "steps": new_steps + all_steps[i:]}
+            emit_flow_frame(pending, collect_violations(pending, catalog),
+                            f"{i + 1}/{total} 단계 수정 중", active_step_id=step.get("step_id"))
         new_actions, did = _repair_one_step(step, catalog)
         if did:
             step = {**step, "actions": new_actions}  # step_id·order 등은 원본 보존
             repaired = True
         new_steps.append(step)
+        # 교정 결과 프레임(active_step_id 없음 → 강조 해제): 방금 단계까지 반영된 누적 흐름도.
+        partial = {**flow, "steps": new_steps + all_steps[i + 1:]}
+        emit_flow_frame(partial, collect_violations(partial, catalog), f"{i + 1}/{total} 단계 국소 수정")
     if repaired:
         flow = {**flow, "steps": new_steps}
         violations = collect_violations(flow, catalog)
@@ -207,6 +259,8 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
     if any(v["rule"] in _SESSION_RULES for v in violations):
         flow, violations, sess_repaired = _repair_sessions(flow, violations, catalog)
         repaired = repaired or sess_repaired
+        if sess_repaired:
+            emit_flow_frame(flow, violations, "세션 정합성 교정")
 
     # 전역 회귀 가드: 국소 교정이 R7~R8을 새로 만들어 전체 위반이 원본보다 늘었으면
     # (단계별·세션별 채택 기준으로는 못 잡는 경로) 모든 교정을 폐기하고 원본을 유지한다.

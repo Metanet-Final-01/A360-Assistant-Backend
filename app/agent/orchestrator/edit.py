@@ -1,15 +1,21 @@
-"""edit — 흐름도 수정 브랜치 노드 (RPA-65).
+"""edit — 흐름도 수정 브랜치 노드 (RPA-65, 연산 기반 재설계).
 
-산출(generate)이 결정론 shortlist 파이프라인을 쓰는 것과 달리, 수정은 요청이
-국소적이라 KB 접근을 LLM 재량의 툴 호출로 둔다: 새 액션 표기가 필요하면 search_kb,
-파라미터 스펙이 필요하면 get_action_schema를 불러 확인한 뒤 수정안을 낸다.
+산출(generate)이 결정론 shortlist 파이프라인을 쓰는 것과 달리, 수정은 요청이 국소적이라
+KB 접근을 LLM 재량의 툴 호출로 둔다: 새 액션 표기가 필요하면 search_kb, 파라미터 스펙이
+필요하면 get_action_schema를 불러 확인한다.
 
-value_source="user" 값 보존은 프롬프트 규칙으로 지시한다(경로 기반 구조 대조는
-액션 이동·삭제와 구분이 안 돼 결정론 강제가 오히려 위험 — 프롬프트 + 검수로 방어).
-LLM이 "수정 없음"(recommendation=null)을 선택하면 type="answer"로 내려간다 —
-intake가 qa로 거르지 못한 경계 케이스의 안전망이자 type 정확성 원칙의 이행.
+★ 근본 재설계: LLM이 '수정된 흐름도 전체'를 다시 출력하지 않는다. 큰 흐름도를 한 글자도 안
+틀리고 재출력하라는 요구는 (1) 원본을 그대로 되뱉는 게으른 에코(change_summary만 그럴듯)와
+(2) 스크립트 파라미터의 따옴표·개행 오이스케이프로 인한 JSON 파손을 필연적으로 부른다.
+대신 LLM은 노드 id를 참조하는 **작은 수정 연산(EditOps)만** 내고, edit_ops가 현재 흐름도에
+결정론적으로 적용한다 — 손대지 않은 노드는 원본 그대로라 파라미터·value_source가 자동
+보존되고(예전엔 프롬프트 규칙에만 의존), 에코할 원본이 없어 무변경 저장이 원천 차단된다.
+
+LLM이 '수정 없음'(operations=[])을 택하거나 연산이 흐름도를 실제로 바꾸지 못하면(존재하지
+않는 id 등) type="answer"로 정직하게 저하한다 — 가짜 성공으로 무변경 버전을 저장하지 않는다.
 """
 
+import copy
 import json
 import logging
 import re
@@ -17,17 +23,18 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from app.core.llm import UsageCallbackHandler
-from app.schemas import Recommendation
 
 from .. import config
-from ..recommend.stream import emit
+from ..recommend.graph import _coerce_flow
+from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import get_catalog
+from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
 from .generate import UserCatalog, extract_user_catalog
-from .harness import verify_and_repair
-from .render import dump_json, render_compact, render_history
+from .harness import attach_confidence, verify_and_repair
+from .render import render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
 from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources, tool_calls_data
 
@@ -40,11 +47,11 @@ _MAX_TOOL_ROUNDS = 4
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$")
 
-
-class EditOutput(BaseModel):
-    recommendation: Recommendation | None = None
-    change_summary: str = ""
-    answer: str = ""
+# 연산이 흐름도를 실제로 바꾸지 못했을 때(무효과/무변경) 정직하게 내보내는 답변.
+_CANT_APPLY = (
+    "요청하신 변경을 흐름도에 실제로 반영하지 못했어요. 어느 단계의 무엇을 어떻게 바꿀지 "
+    "조금 더 구체적으로 알려주시면 다시 시도할게요."
+)
 
 
 def _make_llm() -> ChatOpenAI:
@@ -55,15 +62,94 @@ def _make_llm() -> ChatOpenAI:
     return ChatOpenAI(model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY, stream_usage=True)
 
 
-def _parse_output(text: str) -> EditOutput:
-    """LLM 출력(코드펜스 허용)을 EditOutput으로 파싱한다."""
-    return EditOutput.model_validate(json.loads(_FENCE.sub("", text.strip())))
+def _parse_ops(text: str) -> EditOps:
+    """LLM 출력을 EditOps로 관대하게 파싱한다 — 최외곽 { } 추출 + strict=False.
+
+    연산의 set_params 값 등에 스크립트(개행·따옴표)가 실릴 수 있어 제어문자를 허용한다.
+    흐름도 전체가 아니라 작은 연산 목록이라 파손 위험 자체가 작다.
+    """
+    stripped = _FENCE.sub("", text.strip())
+    start, end = stripped.find("{"), stripped.rfind("}")
+    raw = stripped[start : end + 1] if start != -1 and end > start else stripped
+    return EditOps.model_validate(json.loads(raw, strict=False))
 
 
-def _build_messages(state: TurnState) -> list:
-    """현재 흐름도·압축·이력·수정 요청을 담은 edit 프롬프트 메시지를 만든다."""
+def _canon_actions(actions: list) -> list:
+    """액션 트리를 비교용 정규형으로 축약한다 — 검수가 채우는 휘발 필드(confidence/sources/
+    rationale)는 빼고 package/action/label/order/parameters/children만 남긴다. 수정 전후를
+    이 형태로 비교해 '실제로 무엇이 바뀌었는지'를 본다(무변경 판정)."""
+    return [
+        {
+            "o": a.get("order"), "p": a.get("package"), "a": a.get("action"), "l": a.get("label"),
+            "params": [(p.get("name"), p.get("value"), p.get("value_source")) for p in (a.get("parameters") or [])],
+            "children": _canon_actions(a.get("children") or []),
+        }
+        for a in actions
+    ]
+
+
+def _is_noop_edit(out_flow: dict, in_flow: dict) -> bool:
+    """수정 결과가 입력 흐름도와 실질적으로 동일한지 — 연산이 순효과 0인 경우까지 잡는다.
+
+    단계 메타(step_id/label)와 액션 트리(정규형)를 비교한다."""
+    def canon(flow: dict) -> list:
+        return [
+            {"id": s.get("step_id"), "l": s.get("label"), "actions": _canon_actions(s.get("actions") or [])}
+            for s in (flow.get("steps") or [])
+        ]
+    return canon(out_flow) == canon(in_flow)
+
+
+def _apply_to_flow(base: dict, ops: EditOps) -> tuple[dict, int, list[str]]:
+    """base(원본)의 사본에 id를 붙이고 ops를 적용한 뒤, id 제거·정규화·order 재정렬한 흐름도를
+    반환한다. (flow, 적용_수, 실패_사유들). base는 건드리지 않는다 — 재시도 때 같은 id를 다시
+    붙일 수 있어야(프롬프트에 보여준 id와 일치) 하기 때문이다."""
+    work = copy.deepcopy(base)
+    annotate_ids(work)
+    applied, errors = apply_edit_ops(work, ops.operations)
+    strip_ids(work)
+    work = _coerce_flow(work)  # 새 액션의 value_source 기본값·리스트 정규화
+    renumber(work)             # 형제마다 order 1..N
+    return work, applied, errors
+
+
+def _restore_user_values(result_flow: dict, applied_flow: dict) -> None:
+    """검수·교정(verify_and_repair)이 단계를 LLM으로 재생성하며 바꿨을 수 있는 사용자 지정 값을
+    되돌린다 (rule 3의 이행 — value_source="user" 값은 명시적 변경이 아니면 보존).
+
+    연산 적용 직후의 흐름도(applied_flow)는 손대지 않은 액션을 원본 그대로 보존하므로, 거기서
+    (step_id, package, action, param_name)별 user 파라미터를 모아 교정 결과(result_flow)에 다시
+    씌운다. 국소 교정은 위반 단계만 재생성하므로 대부분 no-op이고, 재생성된 단계에서만 복원된다."""
+    saved: dict[tuple, object] = {}
+
+    def collect(step_id, actions):
+        for a in actions:
+            for p in a.get("parameters") or []:
+                if p.get("value_source") == "user":
+                    saved[(step_id, a.get("package"), a.get("action"), p.get("name"))] = p.get("value")
+            collect(step_id, a.get("children") or [])
+
+    for s in applied_flow.get("steps", []):
+        collect(s.get("step_id"), s.get("actions") or [])
+    if not saved:
+        return
+
+    def restore(step_id, actions):
+        for a in actions:
+            for p in a.get("parameters") or []:
+                key = (step_id, a.get("package"), a.get("action"), p.get("name"))
+                if key in saved:
+                    p["value"], p["value_source"] = saved[key], "user"
+            restore(step_id, a.get("children") or [])
+
+    for s in result_flow.get("steps", []):
+        restore(s.get("step_id"), s.get("actions") or [])
+
+
+def _build_messages(state: TurnState, outline: str) -> list:
+    """현재 흐름도 구조(노드 id 포함)·압축·이력·수정 요청을 담은 edit 프롬프트 메시지를 만든다."""
     user_content = (
-        f"[현재 흐름도]\n{dump_json(state.get('recommendation'))}\n\n"
+        f"[현재 흐름도 구조 — 대괄호 안이 각 액션의 참조 id]\n{outline}\n\n"
         f"[이전 대화 압축 요약]\n{render_compact(state.get('compact'))}\n\n"
         f"[대화 이력]\n{render_history(state.get('history'))}\n\n"
         f"[수정 요청]\n{state.get('message', '')}"
@@ -71,10 +157,22 @@ def _build_messages(state: TurnState) -> list:
     return [SystemMessage(content=_PROMPT), HumanMessage(content=user_content)]
 
 
-async def edit_node(state: TurnState) -> dict:
-    """기존 흐름도 수정 브랜치 — 툴로 카탈로그를 확인하며 국소 수정안을 낸다.
+def _retry_message(errors: list[str], outline: str) -> str:
+    """연산이 무효과였을 때, 유효 id를 다시 보여주며 실제 반영을 강제하는 재요청."""
+    reason = (" — 사유: " + "; ".join(errors[:4])) if errors else ""
+    return (
+        f"직전 연산이 흐름도를 실제로 바꾸지 못했다{reason}. 아래 구조에 있는 노드 id만 정확히 "
+        "참조해 요청한 변경을 이루는 operations를 다시 출력하라. wrap의 targets는 같은 부모의 "
+        "'연속된 형제'여야 한다. 예: '엑셀 열기를 try로 감싸라'면 그 액션 id를 targets에 넣고 "
+        "container=Error handler/errorHandlerTry, siblings_after에 Catch·Finally를 둔다. "
+        f"설명·코드펜스 없이 JSON 하나만 출력하라.\n\n[현재 흐름도 구조]\n{outline}"
+    )
 
-    LLM이 '수정 없음'(recommendation=null)을 택하면 type="answer"로 저하한다.
+
+async def edit_node(state: TurnState) -> dict:
+    """기존 흐름도 수정 브랜치 — 툴로 카탈로그를 확인하고, 연산(EditOps)을 받아 결정론 적용한다.
+
+    LLM이 '수정 없음'을 택하거나 연산이 흐름도를 못 바꾸면 type="answer"로 저하한다.
     반환: {turn_type, recommendation_out?, change_summary?, violations, answer, sources}.
     """
     emit({"event": "stage", "stage": "refining", "message": "흐름도 수정 중"})
@@ -88,7 +186,13 @@ async def edit_node(state: TurnState) -> dict:
     # 생성해 귀속 context를 스냅샷하고 모든 ainvoke config에 얹는다(최상위 콜백 없음).
     usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_edit")]}
 
-    messages = _build_messages(state)
+    # 현재 흐름도에 임시 id를 붙여 아웃라인을 만든다 — LLM이 이 id로 수정 대상을 지목한다.
+    base = copy.deepcopy(state.get("recommendation") or {"steps": []})
+    annotated = copy.deepcopy(base)
+    annotate_ids(annotated)
+    outline = render_outline(annotated)
+
+    messages = _build_messages(state, outline)
     response = await runnable.ainvoke(messages, config=usage_config)
     rounds = 0
     while getattr(response, "tool_calls", None) and rounds < _MAX_TOOL_ROUNDS:
@@ -103,34 +207,54 @@ async def edit_node(state: TurnState) -> dict:
         response = await target.ainvoke(messages, config=usage_config)
 
     try:
-        out = _parse_output(response.text)
+        ops = _parse_ops(response.text)
     except (json.JSONDecodeError, ValidationError) as first_error:
-        logger.warning("edit 첫 출력 파싱 실패, 1회 교정: %s", first_error)
+        logger.warning("edit 연산 파싱 실패, 1회 교정: %s", first_error)
         messages.append(response)
         messages.append(HumanMessage(content=(
-            f"위 출력이 지정한 JSON 형식을 만족하지 못했습니다. 오류:\n{first_error}\n"
-            "설명 없이, 형식에 맞는 JSON 객체만 다시 출력하세요."
+            f"위 출력이 지정한 연산 JSON 형식을 만족하지 못했습니다. 오류:\n{first_error}\n"
+            "설명 없이, operations 배열을 담은 JSON 객체만 다시 출력하세요."
         )))
         response = await llm.ainvoke(messages, config=usage_config)  # 교정 턴은 도구 없이
         try:
-            out = _parse_output(response.text)
+            ops = _parse_ops(response.text)
         except (json.JSONDecodeError, ValidationError) as second_error:
-            # 수정안 산출 실패 — 턴을 죽이지 않고 답변으로 저하 (실제로 수정 안 했으니 type도 answer)
-            logger.warning("edit 출력 파싱 실패(교정 후에도): %s", second_error)
+            logger.warning("edit 연산 파싱 실패(교정 후에도): %s", second_error)
             return {
                 "turn_type": TYPE_ANSWER,
                 "answer": "요청하신 수정안을 만들지 못했어요. 어느 단계의 무엇을 바꿀지 조금 더 구체적으로 알려주시겠어요?",
                 "sources": sink_to_sources(sink),
             }
 
-    if out.recommendation is None:  # 수정 없음 — 질문 답변/되묻기
+    if not ops.operations:  # 수정 없음 — 질문 답변/되묻기 (type 정확성 원칙)
         return {
             "turn_type": TYPE_ANSWER,
-            "answer": out.answer or "흐름도를 바꾸지는 않았어요.",
+            "answer": ops.answer or "흐름도를 바꾸지는 않았어요.",
             "sources": sink_to_sources(sink),
         }
 
-    flow = out.recommendation.model_dump()
+    # 연산을 현재 흐름도에 적용한다. 아무것도 적용되지 않았거나(존재하지 않는 id 등) 순효과가
+    # 없으면(무변경) 유효 id를 다시 보여주며 1회 재요청하고, 그래도 안 바뀌면 정직하게 저하한다.
+    flow, applied, errors = _apply_to_flow(base, ops)
+    if applied == 0 or _is_noop_edit(flow, base):
+        logger.info("edit 연산 무효과 — 유효 id 재안내 후 1회 재요청 (사유 %s)", errors[:3])
+        messages.append(response)
+        messages.append(HumanMessage(content=_retry_message(errors, outline)))
+        response = await llm.ainvoke(messages, config=usage_config)  # 재요청은 도구 없이
+        try:
+            ops = _parse_ops(response.text)
+        except (json.JSONDecodeError, ValidationError) as e:
+            logger.warning("edit 재요청 연산 파싱 실패: %s", e)
+            return {"turn_type": TYPE_ANSWER, "answer": _CANT_APPLY, "sources": sink_to_sources(sink)}
+        if not ops.operations:
+            return {"turn_type": TYPE_ANSWER, "answer": ops.answer or _CANT_APPLY, "sources": sink_to_sources(sink)}
+        flow, applied, errors = _apply_to_flow(base, ops)
+        if applied == 0 or _is_noop_edit(flow, base):
+            logger.warning("edit 재요청 후에도 무변경 — 답변으로 저하")
+            return {"turn_type": TYPE_ANSWER, "answer": _CANT_APPLY, "sources": sink_to_sources(sink)}
+
+    # 라이브 렌더: 적용된 수정안을 즉시 프레임으로 흘려보낸다(추천 흐름도 상세 패널이 트리로 표시).
+    emit_flow_frame(flow, None, "수정안 구성")
     if is_a360:
         result = verify_and_repair(flow, get_catalog())
     else:
@@ -143,13 +267,19 @@ async def edit_node(state: TurnState) -> dict:
         else:
             result = {"flow": flow, "violations": [], "repaired": False}
 
-    answer = out.answer or (out.change_summary or "요청하신 대로 흐름도를 수정했어요.")
+    # 교정이 위반 단계를 재생성하며 바꿨을 수 있는 사용자 지정 값(value_source="user")을 복원한다.
+    _restore_user_values(result["flow"], flow)
+    # 액션별 신뢰도(FR-12/RPA-116)를 RAG 소스 점수·위반으로 산정해 채운다 — 수정 경로도 동일.
+    attach_confidence(result["flow"], sink, result["violations"])
+    # 라이브 렌더: 검수·교정 반영한 최종본을 "완료" 프레임으로 흘려보낸다(done 직전).
+    emit_flow_frame(result["flow"], result["violations"], "완료")
+    answer = ops.answer or (ops.change_summary or "요청하신 대로 흐름도를 수정했어요.")
     if result["violations"]:
         answer += f" (검수에서 해소하지 못한 위반 {len(result['violations'])}건이 있어요.)"
     return {
         "turn_type": TYPE_RECOMMENDATION,
         "recommendation_out": result["flow"],
-        "change_summary": out.change_summary or None,
+        "change_summary": ops.change_summary or None,
         "violations": result["violations"],
         "answer": answer,
         "sources": sink_to_sources(sink),

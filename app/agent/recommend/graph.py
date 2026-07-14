@@ -7,15 +7,20 @@
 
     START → compose_agent ⇄ tools   (ReAct: 필요한 액션을 스스로 검색·확정)
                  │
-              verify (R1~R8 검수 + 국소교정) ─(위반·여유)→ compose_agent  (self-repair)
-                 │(통과 / 재시도 소진)
+              verify (파싱·검수)  ─(JSON 파싱 실패)→ compose_agent  (재출력 1회)
+                 │
+              localized_repair (위반 있는 단계만 국소 교정 R1~R6 + 세션 R7~R8, 단계별 스트리밍)
+                 │
               finalize (근거 sources 부착·정규화) → END
 
-검수 하네스(verify_and_repair)가 루프 게이트다: R1(액션 존재)이 폐쇄어휘를 강제하고,
-위반은 다시 에이전트에 되먹여 스스로 고치게 한다. 정말 없는 기능은 notes로 정직하게 남는다.
+전체 재생성(verify→compose 되먹임)은 지양한다 — 위반은 verify_and_repair가 위반 있는 단계
+서브트리만 국소 수정하고, 단계마다 누적 흐름도를 프레임으로 흘려 점진 스트리밍한다. compose로
+되돌리는 건 JSON 파싱 실패 1회뿐(위반 교정이 아니라 파싱 가능한 출력을 얻기 위함).
+R1(액션 존재)이 폐쇄어휘를 강제하고, 정말 없는 기능은 notes로 정직하게 남는다.
 sink(검색 히트)는 run 단위로 누적돼 finalize에서 액션별 RagSource로 부착된다.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -31,13 +36,18 @@ from app.schemas import ProgressEvent, Recommendation
 
 from .. import config
 from .state import RecommendState
-from .stream import emit
+from .stream import emit, emit_flow_frame
 
 logger = logging.getLogger(__name__)
 
 _PROMPT = (
     Path(__file__).resolve().parent.parent / "prompts" / "compose_agent.md"
 ).read_text(encoding="utf-8")
+
+# 초안 흐름도를 단계별로 '드러내는' 프레임 사이 지연(초). compose가 흐름도 전체를 한 번에
+# 출력하므로(단일 LLM 호출), 이 지연이 없으면 네트워크가 프레임을 한 번에 밀어내 점진 노출
+# 효과가 안 보인다 — 사람이 흐름도가 그려지는 걸 인지할 만큼만 짧게 준다.
+_REVEAL_DELAY = 0.18
 
 # 도구 왕복 상한 — 초과 시 도구 없이 최종 JSON을 강제해 무한 탐색을 끊는다.
 MAX_TOOL_ROUNDS = 6
@@ -132,13 +142,19 @@ def _fence_document(document: str) -> str:
     return document
 
 
-def _coerce_action(a: dict) -> None:
+def _coerce_action(a: dict, order: int = 1) -> None:
     """액션 dict의 흔한 타입/enum 슬립을 제자리 보정한다 (재귀).
 
     핵심은 value_source 강등이다 — 에이전트가 필수값을 모를 때 value=null과 함께
     value_source에 "null"/None을 넣으면 Recommendation 검증이 깨져 흐름도 전체가
     폐기된다(0단계 버그). 유효 literal이 아니면 "llm"으로 강등해 살린다.
+
+    order(필수 int)도 여기서 채운다 — 에이전트가 Try/Catch/Finally·If/Else로 액션을
+    감쌀 때 새로 만든 자식에 order를 자주 빠뜨리는데, 단 하나만 없어도 검증이 깨진다.
+    형제 인덱스(order 인자)로 폴백해 채운다(edit 경로도 이 함수로 같은 보정을 받는다).
     """
+    if not isinstance(a.get("order"), int):
+        a["order"] = order
     params = a.get("parameters")
     if not isinstance(params, list):
         a["parameters"] = params = []
@@ -148,9 +164,9 @@ def _coerce_action(a: dict) -> None:
     children = a.get("children")
     if not isinstance(children, list):
         a["children"] = children = []
-    for c in children:
+    for i, c in enumerate(children):
         if isinstance(c, dict):
-            _coerce_action(c)
+            _coerce_action(c, i + 1)
 
 
 def _coerce_flow(obj: dict) -> dict:
@@ -169,9 +185,9 @@ def _coerce_flow(obj: dict) -> dict:
         actions = step.get("actions")
         if not isinstance(actions, list):
             step["actions"] = actions = []
-        for a in actions:
+        for i, a in enumerate(actions):
             if isinstance(a, dict):
-                _coerce_action(a)
+                _coerce_action(a, i + 1)
     variables = obj.get("variables")
     if not isinstance(variables, list):
         obj["variables"] = variables = []
@@ -252,7 +268,7 @@ def _attach_sources(flow: dict, sink: list[dict]) -> dict:
 
 def build_agent_graph(sink: list[dict]):
     """검색 히트를 누적할 sink를 받아 컴파일된 에이전트 그래프를 만든다 (run당 1개)."""
-    from ..orchestrator.harness import collect_violations, verify_and_repair
+    from ..orchestrator.harness import attach_confidence, collect_violations, verify_and_repair
     from ..orchestrator.tools import (
         build_kb_tools,
         describe_tool_calls,
@@ -298,14 +314,16 @@ def build_agent_graph(sink: list[dict]):
         last = state["messages"][-1]
         return "tools" if getattr(last, "tool_calls", None) else "verify"
 
-    def verify_node(state: RecommendState) -> dict:
-        """에이전트 최종 출력을 파싱·검수한다.
+    async def verify_node(state: RecommendState) -> dict:
+        """에이전트 출력을 파싱·검수한다.
 
-        중간 라운드(재작성 여유가 있고 에이전트가 고칠 수 있는 위반이 남음)에는 위반을
-        측정만 해서 compose_agent로 되먹인다 — 국소 LLM 교정 산출물은 재작성되면 어차피
-        버려지므로, 하네스 교정은 마지막 라운드에만 최후 방어로 실행한다(RPA-141).
-        R3(사용자 입력 필요 null)는 되먹여도 에이전트가 고칠 수 없어 재작성 트리거에서
-        뺀다. tool_rounds는 repair 패스마다 재충전한다.
+        위반이 있어도 '전체 재생성'(compose 되먹임)을 하지 않는다 — 다음 localized_repair
+        노드가 위반 있는 단계만 국소 수정하고, 그 과정을 단계별 프레임으로 스트리밍한다
+        (RPA — 전체 재생성 지양). 여기서 compose로 되돌리는 건 JSON 파싱 실패(FORMAT)뿐 —
+        '위반 교정'이 아니라 '파싱 가능한 출력'을 얻기 위한 1회 재시도다.
+
+        초안은 단계별로 점진 노출한다 — compose가 흐름도 전체를 한 번에 출력해도(단일 LLM
+        호출), 사용자에겐 흐름도가 한 단계씩 그려지는 것처럼 보이게 한다(스트리밍 UX).
         """
         ai = state["messages"][-1]
         rr = state.get("repair_round", 0) + 1
@@ -327,43 +345,43 @@ def build_agent_graph(sink: list[dict]):
         emit({"event": "stage", "stage": "verifying", "message": "흐름도 검수 중"})
         violations = collect_violations(flow, get_catalog())
         actionable = _actionable(violations)
-        if actionable and rr <= MAX_REPAIR_ROUNDS:
-            # 중간 라운드: 교정 없이 위반만 되먹인다 — 에이전트가 도구로 스스로 고친다.
-            emit({"event": "stage", "stage": "verifying",
-                  "message": f"검수 위반 {len(actionable)}건 — 흐름도 재작성 요청",
-                  # 관측 전용(RPA-105/129): 위반 상세 7필드 (표시 문구 불변)
-                  "data": {"violations": [
-                      {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
-                      for v in actionable
-                  ]}})
-            return {
-                "flow": flow, "violations": violations,
-                "repair_round": rr, "tool_rounds": 0,  # repair 패스마다 도구 예산 재충전
-                "messages": [HumanMessage(content=_render_violations(actionable))],
-            }
-        if not actionable:
-            # 남은 위반이 R3(사용자 입력 필요)뿐 — 에이전트도 하네스도 고칠 대상이 아니다.
-            # 하네스에 넘기면 교정 LLM이 null을 임의 값으로 채운 판본이 '위반 감소'로
-            # 채택될 수 있어(지어낸 값 유입) 원본을 그대로 확정한다. R3는 위반 목록에
-            # 남아 화면·신뢰도에 쓴다.
-            return {"flow": flow, "violations": violations, "repair_round": rr, "tool_rounds": 0}
-        # 재작성 예산 소진 + 에이전트가 못 고친 위반 잔존: 하네스 국소 교정을 최후 방어로.
-        # (하네스가 자체 stage 이벤트를 방출한다 — 중복 emit 없음.)
-        result = verify_and_repair(flow, get_catalog())
-        return {
-            "flow": result["flow"], "violations": result["violations"],
-            "repair_round": rr, "tool_rounds": 0,
-        }
+        # 라이브 렌더 — 점진 노출: 단계를 하나씩 드러내 흐름도가 '그려지는' 것처럼 보이게 한다.
+        # 프레임 사이 짧은 지연이 없으면 네트워크가 한꺼번에 밀어내 효과가 안 보인다. 마지막
+        # 단계는 아래 초안 프레임이 위반 강조와 함께 그리므로 여기선 그 직전까지만 노출한다.
+        steps = flow.get("steps") or []
+        for i in range(len(steps) - 1):
+            emit_flow_frame({**flow, "steps": steps[: i + 1]}, None, f"흐름도 구성 {i + 1}/{len(steps)}")
+            await asyncio.sleep(_REVEAL_DELAY)
+        # 초안 전체(+위반 강조) — 이후 localized_repair가 위반 단계만 국소 수정하며 점진 스트리밍.
+        emit_flow_frame(flow, violations, f"초안 · 위반 {len(actionable)}건" if actionable else "초안 검수 통과")
+        return {"flow": flow, "violations": violations, "repair_round": rr, "tool_rounds": 0}
 
     def route_after_verify(state: RecommendState) -> str:
-        """verify 뒤 분기: 에이전트가 고칠 수 있는 위반이 남고 여유가 있으면 재작성, 아니면 finalize."""
-        if _actionable(state.get("violations") or []) and state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS:
-            return "compose_agent"
+        """verify 뒤 분기: JSON 파싱 실패면 compose 재출력(1회), 고칠 위반이 있으면 국소 수정,
+        아니면 finalize. 전체 재생성 없음 — 위반은 localized_repair가 단계별로 고친다."""
+        flow = state.get("flow") or {}
+        violations = state.get("violations") or []
+        if (not flow.get("steps")
+                and any(v.get("rule") == "FORMAT" for v in violations)
+                and state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS):
+            return "compose_agent"  # 파싱 실패 → JSON 재출력 1회
+        if _actionable(violations):
+            return "localized_repair"
         return "finalize"
 
+    def localized_repair_node(state: RecommendState) -> dict:
+        """전체 재생성 대신 국소 수정 — 위반 있는 단계만 그 서브트리로 고치고(R1~R6), 남은
+        세션 위반(R7~R8)만 전체로 교정한다. verify_and_repair가 단계마다 누적 흐름도를
+        프레임으로 흘려 점진 스트리밍한다(전체 재작성이 아니라 단계별로 고쳐지는 과정)."""
+        result = verify_and_repair(state.get("flow") or {"steps": []}, get_catalog())
+        return {"flow": result["flow"], "violations": result["violations"]}
+
     def finalize_node(state: RecommendState) -> dict:
-        """흐름도에 근거(sources)를 부착하고 정규화·검증해 최종 Recommendation dict를 만든다."""
+        """흐름도에 근거(sources)·신뢰도를 부착하고 정규화·검증해 최종 Recommendation dict를 만든다."""
         flow = _attach_sources(state.get("flow") or {"steps": []}, sink)
+        # 액션별 신뢰도(FR-12/RPA-116)를 RAG 소스 점수·위반으로 산정해 채운다 — compose는
+        # 안 내고 검수가 채운다는 계약. 프론트가 confidence로 신뢰도 뱃지를 그린다.
+        attach_confidence(flow, sink, state.get("violations") or [])
         # 안전망: verify 하네스가 되돌린 flow에도 enum/타입 슬립이 남을 수 있어,
         # 검증 직전 한 번 더 정규화한다(단일 오류로 흐름도 전체가 폐기되던 문제 방지).
         flow = _coerce_flow(flow)
@@ -372,17 +390,22 @@ def build_agent_graph(sink: list[dict]):
         except ValidationError as e:
             logger.warning("최종 흐름도 정규화 실패, 빈 추천안: %s", e)
             rec = Recommendation(steps=[])
-        return {"recommendation": rec.model_dump(), "violations": state.get("violations", [])}
+        rec_dict = rec.model_dump()
+        # 라이브 렌더: 근거 부착까지 끝난 최종 스냅샷을 "완료" 프레임으로 흘려보낸다(done 직전).
+        emit_flow_frame(rec_dict, state.get("violations", []), "완료")
+        return {"recommendation": rec_dict, "violations": state.get("violations", [])}
 
     g = StateGraph(RecommendState)
     g.add_node("compose_agent", compose_agent)
     g.add_node("tools", tools_node)
     g.add_node("verify", verify_node)
+    g.add_node("localized_repair", localized_repair_node)
     g.add_node("finalize", finalize_node)
     g.add_edge(START, "compose_agent")
     g.add_conditional_edges("compose_agent", route_after_agent, ["tools", "verify"])
     g.add_edge("tools", "compose_agent")
-    g.add_conditional_edges("verify", route_after_verify, ["compose_agent", "finalize"])
+    g.add_conditional_edges("verify", route_after_verify, ["compose_agent", "localized_repair", "finalize"])
+    g.add_edge("localized_repair", "finalize")
     g.add_edge("finalize", END)
     return g.compile()
 
