@@ -19,6 +19,10 @@ from sqlalchemy.orm import Session, aliased
 from app import models
 from app.api.auth import get_optional_user
 from app.core.observability_db import get_obs_db
+from app.db import get_db
+from app.rag.retrieval.params import RetrievalParams
+from app.schemas.retrieval import RetrievalParamsUpdate
+from app.services import retrieval_params as rp_service
 
 logger = logging.getLogger(__name__)
 
@@ -372,4 +376,87 @@ def rag_events(
             }
             for r in rows
         ]
+    }
+
+
+def _params_payload(p: RetrievalParams) -> dict:
+    """RetrievalParams → 응답 dict (필드명은 .env·DB·API가 동일하게 쓴다)."""
+    return {
+        "candidate_pool_size": p.candidate_pool_size,
+        "rerank_candidates": p.rerank_candidates,
+        "rrf_k": p.rrf_k,
+        "vector_weight": p.vector_weight,
+        "bm25_weight": p.bm25_weight,
+    }
+
+
+@router.get("/retrieval-params")
+def get_retrieval_params(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """현재 활성 검색 파라미터 (RPA-149). DB 오버라이드가 있으면 그 값(source=db), 없으면
+    .env 기본값(source=config)을 준다 — ops 슬라이더가 이 값을 프리필한다.
+
+    검색 경로가 실제로 쓰는 값과 일치시키려고 DB 조회는 이 라우트가 직접 한다(캐시 우회) —
+    관리자가 방금 바꾼 값을 캐시 TTL 때문에 옛 값으로 보여주면 혼란스럽기 때문.
+    """
+    row = (
+        db.query(models.RetrievalParamOverride)
+        .order_by(models.RetrievalParamOverride.id.desc())
+        .first()
+    )
+    if row is None:
+        return {
+            "source": "config",
+            **_params_payload(RetrievalParams.from_config()),
+            "updated_by": None,
+            "updated_at": None,
+        }
+    return {
+        "source": "db",
+        "candidate_pool_size": row.candidate_pool_size,
+        "rerank_candidates": row.rerank_candidates,
+        "rrf_k": row.rrf_k,
+        "vector_weight": row.vector_weight,
+        "bm25_weight": row.bm25_weight,
+        "updated_by": row.updated_by,
+        "updated_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+@router.put("/retrieval-params")
+def put_retrieval_params(
+    body: RetrievalParamsUpdate,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(require_admin),
+) -> dict:
+    """검색 파라미터 갱신 (RPA-149) — 재시작 없이 다음 검색부터 반영.
+
+    검증은 새로 짜지 않고 RetrievalParams(**body) 생성에 위임한다(단일 진실) — 범위(1 이상)·
+    nan/inf·음수 위반은 __post_init__이 ValueError를 던지고, 여기서 400으로 변환한다. append-only로
+    한 행을 추가하고(감사 이력) 캐시를 무효화해 즉시 반영한다. updated_by는 사람 관리자면 이메일,
+    ops-server(X-API-Key)면 user가 None이라 "service"로 남긴다.
+    """
+    try:
+        RetrievalParams(**body.model_dump())  # 값 검증 재사용 — 통과해야만 저장
+    except ValueError as e:
+        raise HTTPException(
+            400, detail={"code": "INVALID_PARAMS", "message": str(e)}
+        ) from None
+
+    row = models.RetrievalParamOverride(
+        **body.model_dump(),
+        updated_by=user.email if user is not None else "service",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    rp_service.bust_cache()  # 다음 load_active_params()가 DB를 다시 읽게 — 무중단 반영
+    logger.info("검색 파라미터 갱신 by=%s params=%s", row.updated_by, _params_payload(RetrievalParams(**body.model_dump())))
+    return {
+        "source": "db",
+        **_params_payload(RetrievalParams(**body.model_dump())),
+        "updated_by": row.updated_by,
+        "updated_at": row.created_at.isoformat() if row.created_at else None,
     }

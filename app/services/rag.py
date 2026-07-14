@@ -7,6 +7,7 @@ wrapper다. Agent 쪽(app/agent/retrieval.py의 Retriever 구현체)은 이 함�
 
 from app.rag.retrieval.hybrid_search import search as _hybrid_search
 from app.rag.store import db, opensearch_client
+from app.services.retrieval_params import load_active_params
 
 
 def search_actions(
@@ -28,7 +29,8 @@ def search_actions(
     try:
         os_client = opensearch_client.connect()
         fetch_limit = k * 3 if source_types else k
-        results = _hybrid_search(conn, os_client, query, limit=fetch_limit)
+        # 활성 파라미터(DB 오버라이드 또는 .env 폴백)를 주입 — 재시작 없이 튜닝 반영 (RPA-149).
+        results = _hybrid_search(conn, os_client, query, limit=fetch_limit, params=load_active_params())
     finally:
         conn.close()
 
