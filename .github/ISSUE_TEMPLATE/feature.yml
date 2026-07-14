@@ -3,6 +3,19 @@ description: "새 기능 또는 개선 작업"
 title: "[feat] "
 labels: ["기능"]
 body:
+  - type: dropdown
+    id: author
+    attributes:
+      label: 작성자 (실제 요청/작성자)
+      description: Jira 미러·자동화로 만들면 GitHub 계정 작성자와 실제 요청자가 다를 수 있어 명시합니다.
+      options:
+        - 홍승민 (백엔드·DB·RAG)
+        - 정준환 (Agent·LLM)
+        - 김동환 (RAG 검색)
+        - 김민석 (프론트)
+        - 기타
+    validations:
+      required: false
   - type: input
     id: jira
     attributes:
