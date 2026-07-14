@@ -11,9 +11,28 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _safe_name(filename: str) -> str:
+    """사용자 제어 filename을 마지막 경로 요소로 축소해 경로 순회(../)를 차단한다.
+
+    filename은 업로드 요청의 file.filename에서 오고 validate_upload는 확장자·매직바이트만
+    검사하므로, '../../x'·'..\\x' 같은 값이 그대로 넘어온다. 이를 base / key로 조합하면
+    UPLOAD_DIR(또는 S3 key 프리픽스) 밖으로 탈출할 수 있다. os.path.basename만으론 POSIX에서
+    '\\'를 구분자로 안 보므로, '\\'를 '/'로 먼저 바꿔 Windows 구분자까지 벗긴다. basename은
+    '..'·'.'을 그대로 돌려주므로(빈 문자열이 아님) 이들까지 명시적으로 폴백해 상위 경로 탈출을 막는다.
+    """
+    name = os.path.basename(filename.replace("\\", "/"))
+    if name in ("", ".", ".."):
+        return "unnamed"
+    return name
+
+
 def save(session_id: str, doc_id: str, filename: str, content: bytes) -> str:
-    """저장 후 storage_path를 반환한다 (s3://... 또는 로컬 경로)."""
-    key = f"documents/{session_id}/{doc_id}/{filename}"
+    """저장 후 storage_path를 반환한다 (s3://... 또는 로컬 경로).
+
+    filename은 저장 경로/S3 key 구성 전에 _safe_name으로 정제한다(경로 순회 차단). 원본
+    filename은 표시용 메타데이터로 documents.filename에 따로 보존되므로 여기서 축소해도 무방하다.
+    """
+    key = f"documents/{session_id}/{doc_id}/{_safe_name(filename)}"
     bucket = os.getenv("DOCUMENT_BUCKET", "").strip()
     if bucket:
         import boto3  # 로컬 개발에서는 불필요하므로 지연 import
