@@ -177,16 +177,21 @@ def record_usage(
     latency_ms: int | None = None,
     session_id: uuid.UUID | None = None,
     ctx: UsageContext | None = None,
+    request_id: str | None = None,
 ) -> None:
     """llm_usage에 한 건 기록한다. 귀속 정보는 ctx(명시) 또는 현재 ContextVar에서 온다.
 
     session_id를 명시로 주면 ctx의 session_id보다 우선한다.
+    request_id를 명시로 주면 그것을, 아니면 현재 ContextVar에서 읽는다 — 워커 스레드에서
+    도는 콜백(UsageCallbackHandler)은 ContextVar가 전파 안 되므로 생성 시점 스냅샷을 명시로
+    넘겨야 request_id가 유실되지 않는다(ctx와 동일한 스레드 경계 문제, RPA-158).
     기록 실패가 호출을 실패시키면 안 되므로 예외는 삼킨다.
     """
     ctx = ctx or current_usage_context()
     try:
         from app.core.observability_db import observability_sessionmaker
         from app.models import LlmUsage
+        from app.rag.observability import get_request_id
 
         # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 미설정이면 앱 DB 폴백
         with observability_sessionmaker()() as db:
@@ -202,6 +207,9 @@ def record_usage(
                     output_tokens=output_tokens,
                     cost_usd=cost_usd(input_tokens, output_tokens, model),
                     latency_ms=latency_ms,
+                    # request_id로 audit/turn/rag와 턴 단위 비용 조인 (RPA-158). 명시값(콜백의
+                    # 생성-시점 스냅샷) 우선, 없으면 현재 ContextVar — 워커 스레드 유실 방지.
+                    request_id=request_id if request_id is not None else get_request_id(),
                 )
             )
             db.commit()
@@ -224,11 +232,16 @@ class UsageCallbackHandler(BaseCallbackHandler):
        ContextVar가 그 스레드까지 안 갈 수 있다. 그래서 __init__(콜백 생성 시점,
        usage_context 안=요청 스레드)에서 ContextVar를 스냅샷으로 잡아두고,
        on_llm_end는 그 스냅샷을 쓴다 → 스레드 무관하게 정확히 귀속된다.
+       usage_context(ctx)뿐 아니라 request_id도 같은 ContextVar라 함께 스냅샷한다(RPA-158) —
+       안 그러면 워커 스레드의 agent/streaming 사용량이 request_id NULL로 남아 턴 조인이 깨진다.
     """
 
     def __init__(self, purpose: str = "chat") -> None:
         super().__init__()
+        from app.rag.observability import get_request_id
+
         self._ctx = current_usage_context()  # 생성 시점 스냅샷 (요청 스레드)
+        self._request_id = get_request_id()  # request_id도 요청 스레드에서 스냅샷 (RPA-158)
         self._purpose = purpose
         self._started = time.monotonic()
 
@@ -245,6 +258,7 @@ class UsageCallbackHandler(BaseCallbackHandler):
             output_tokens=output_tokens,
             latency_ms=latency_ms,
             ctx=self._ctx,
+            request_id=self._request_id,  # 생성-시점 스냅샷 (워커 스레드 유실 방지, RPA-158)
         )
 
 

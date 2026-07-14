@@ -238,6 +238,9 @@ class LlmUsage(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float | None] = mapped_column(Float)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+    # 같은 요청(턴)을 묶는 키 (RPA-158) — audit_logs·turn_events·rag_events와 동일 request_id로
+    # 조인해 "이 턴이 얼마 들었나"를 재구성한다. 없으면(백그라운드 등) NULL.
+    request_id: Mapped[str | None] = mapped_column(String(32), index=True)
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
