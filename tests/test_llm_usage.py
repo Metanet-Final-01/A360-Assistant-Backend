@@ -92,6 +92,30 @@ def test_record_usage_captures_request_id(monkeypatch):
     assert captured["request_id"] == rid
 
 
+def test_callback_snapshots_request_id_for_worker_thread(monkeypatch):
+    """콜백은 생성 시점(요청 스레드)에 request_id를 스냅샷해, on_llm_end가 워커 스레드에서
+    돌아 ContextVar가 전파 안 돼도 request_id가 유실되지 않아야 한다 (RPA-158, CodeRabbit #224).
+    """
+    import threading
+
+    import app.core.llm as llm
+    from app.rag.observability import new_request_id
+
+    captured = {}
+    monkeypatch.setattr(llm, "record_usage", lambda **kw: captured.update(kw))
+
+    rid = new_request_id()  # 요청 스레드에서 설정
+    handler = llm.UsageCallbackHandler(purpose="chat")  # 여기서 스냅샷
+
+    result = _llm_result(usage_metadata={"input_tokens": 1, "output_tokens": 1})
+    # 워커 스레드에서 on_llm_end 실행 — 새 스레드엔 ContextVar가 전파되지 않는다
+    t = threading.Thread(target=lambda: handler.on_llm_end(result))
+    t.start()
+    t.join()
+
+    assert captured["request_id"] == rid  # 스냅샷 덕에 유실 없음
+
+
 # --- UsageCallbackHandler: 스트리밍 토큰 0 버그 방지 (핵심) ---
 
 def _llm_result(usage_metadata=None, llm_output=None):
