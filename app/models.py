@@ -385,3 +385,26 @@ class RagEvent(Base):
     duration_ms: Mapped[float | None] = mapped_column(Float)
     detail: Mapped[str | None] = mapped_column(Text)  # JSON: args·result·config (query preview 마스킹)
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RetrievalParamOverride(Base):
+    """검색 파라미터 런타임 오버라이드 (RPA-149) — 무중단 튜닝의 단일 진실 공급원.
+
+    config는 import 시점에 상수로 고정돼 값 변경 = 재시작이다. 이 테이블은 admin API가 쓰고
+    검색 경로가 읽어, 재시작 없이 RRF·후보풀·가중치를 조정한다. **append-only·최신행 우선** —
+    행마다 updated_by/created_at을 남겨 "누가 언제 뭘 바꿨나" 감사 이력을 겸한다. 활성값은
+    가장 최근 행(id DESC). 행이 하나도 없으면 검색은 from_config(.env)로 폴백한다(로컬 무변경).
+    값 검증은 app/rag/retrieval/params.py의 RetrievalParams.__post_init__을 재사용한다(단일 진실).
+    """
+
+    __tablename__ = "retrieval_params"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    candidate_pool_size: Mapped[int] = mapped_column(Integer)
+    rerank_candidates: Mapped[int] = mapped_column(Integer)
+    rrf_k: Mapped[int] = mapped_column(Integer)
+    vector_weight: Mapped[float] = mapped_column(Float)
+    bm25_weight: Mapped[float] = mapped_column(Float)
+    # 변경 주체 — 사람 관리자면 이메일, ops-server(X-API-Key)면 "service". 감사용.
+    updated_by: Mapped[str | None] = mapped_column(String(320))
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

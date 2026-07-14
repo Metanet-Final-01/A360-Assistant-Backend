@@ -31,6 +31,7 @@ async def rag_search(
     """
     from app.rag.retrieval.hybrid_search import search_async as hybrid_search_async
     from app.rag.store import pool as rag_pool
+    from app.services.retrieval_params import load_active_params
 
     # request_id는 log_http_requests 미들웨어가 이미 생성해둠 — 여기서 다시 만들지 않는다
     # 공개 엔드포인트라 내부 예외 문자열은 클라이언트에 노출하지 않는다(정보 누출 방지) —
@@ -47,6 +48,7 @@ async def rag_search(
                 results = await hybrid_search_async(
                     conn, rag_pool.get_opensearch_client(), q, limit=limit, mode=mode,
                     http_client=rag_pool.get_external_client(),
+                    params=load_active_params(),  # DB 오버라이드/.env 폴백 — 무중단 튜닝 (RPA-149)
                 )
             except Exception as e:  # RuntimeError뿐 아니라 OpenSearch/psycopg 등 어떤 예외도 표준화
                 logger.exception("RAG 하이브리드 검색 실패")
