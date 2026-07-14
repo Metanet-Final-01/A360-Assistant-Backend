@@ -9,11 +9,14 @@ services:
       - path: .env
         required: false
     environment:
-      # 컨테이너 내부 네트워킹만 오버라이드 — .env는 호스트 CLI용(localhost/외부 포트)이라
-      # 컨테이너 안에서는 서비스명·내부 포트로 고정해야 한다 (env_file 값을 여기서 덮어씀).
+      # 앱 DB(users/sessions)만 로컬 컨테이너로 오버라이드 — .env는 호스트 CLI용(localhost/외부
+      # 포트)이라 컨테이너 안에선 서비스명·내부 포트로 고정한다. RAG 코퍼스(RAG_DATABASE_URL)·
+      # 관측 DB(OBSERVABILITY_DATABASE_URL)는 .env의 공유 Neon 값을 그대로 쓴다(여기서 안 덮음).
       DATABASE_HOST: db
       DATABASE_PORT: "5432"           # 컨테이너↔db는 내부 5432 (호스트 매핑 포트 5433과 무관)
-      OPENSEARCH_HOST: http://opensearch:9200
+      # OPENSEARCH_HOST는 오버라이드하지 않는다 — RAG BM25 색인은 공유 Bonsai에 있으므로
+      # 컨테이너도 .env의 Bonsai(OPENSEARCH_HOST/USERNAME/PASSWORD)를 그대로 써야 한다 (RPA-160).
+      # 로컬 opensearch로 붙고 싶으면 아래 opensearch 서비스를 프로파일로 띄우고 .env를 로컬로 둔다.
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
@@ -40,9 +43,13 @@ services:
       timeout: 5s
       retries: 10
 
+  # 완전 로컬 검색 모드용(opt-in) — 기본 `docker compose up`에선 안 뜬다. 공유 데모는 Bonsai를
+  # 쓰므로 이 서비스가 필요 없고, 예전엔 이게 안 떠 있는데 backend가 여길 가리켜 BM25가 죽었다(RPA-160).
+  # 로컬 검색을 쓰려면: `docker compose --profile local-opensearch up` + .env OPENSEARCH_HOST를 로컬로.
   opensearch:
     image: opensearchproject/opensearch:2.13.0
     container_name: a360-opensearch
+    profiles: ["local-opensearch"]
     environment:
       discovery.type: single-node
       plugins.security.disabled: "true"
