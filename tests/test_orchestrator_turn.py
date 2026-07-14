@@ -35,6 +35,15 @@ _CLEAN_FLOW = {
     "variables": [], "notes": None,
 }
 
+# edit LLM 출력 픽스처(연산 기반) — n1(=_CLEAN_FLOW의 유일한 액션 String/assign)의 value 파라미터를
+# 바꾸는 set_params 하나. 입력과 달라져 무변경 가드를 통과하고, String/assign은 유지돼 검수도 통과.
+def _edit_ops_json(change_summary="정리", answer="수정"):
+    return json.dumps({
+        "operations": [{"op": "set_params", "target": "n1",
+                        "parameters": [{"name": "value", "value": "y", "value_source": "llm"}]}],
+        "change_summary": change_summary, "answer": answer,
+    }, ensure_ascii=False)
+
 _ANALYSIS = AnalysisResult(
     summary="테스트 업무",
     steps=[{"step_id": "step-1", "order": 1, "name": "저장", "description": "엑셀 저장"}],
@@ -197,11 +206,7 @@ def test_generate_passes_document_to_recommend_graph(monkeypatch):
 def test_edit_turn_returns_recommendation_with_change_summary(monkeypatch):
     _set_api_key(monkeypatch)
     _route(monkeypatch, "edit")
-    edited = json.dumps({
-        "recommendation": _CLEAN_FLOW,
-        "change_summary": "저장 단계 세션명을 Default로 정리",
-        "answer": "수정했어요.",
-    }, ensure_ascii=False)
+    edited = _edit_ops_json("저장 단계 세션명을 Default로 정리", "수정했어요.")
     monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(edited)]))
     ctx = dict(_CTX, recommendation=_CLEAN_FLOW, analysis=_ANALYSIS.model_dump())
     data = _done(_collect("세션명 정리해줘", ctx))
@@ -214,8 +219,7 @@ def test_edit_no_change_returns_answer_type(monkeypatch):
     """LLM이 수정 없음(recommendation=null)을 고르면 type은 answer — type 정확성 원칙."""
     _set_api_key(monkeypatch)
     _route(monkeypatch, "edit")
-    no_change = json.dumps({"recommendation": None, "change_summary": "", "answer": "그 단계는 이미 있어요."},
-                           ensure_ascii=False)
+    no_change = json.dumps({"operations": [], "answer": "그 단계는 이미 있어요."}, ensure_ascii=False)
     monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(no_change)]))
     ctx = dict(_CTX, recommendation=_CLEAN_FLOW)
     data = _done(_collect("루프 있어?", ctx))
@@ -227,8 +231,7 @@ def test_edit_other_solution_verifies_via_user_catalog(monkeypatch):
     """타 솔루션 edit도 대화에서 UserCatalog를 재추출해 검수한다 (RPA-96, a360과 대칭)."""
     _set_api_key(monkeypatch)
     _route(monkeypatch, "edit")
-    edited = json.dumps({"recommendation": _CLEAN_FLOW, "change_summary": "정리", "answer": "수정"},
-                        ensure_ascii=False)
+    edited = _edit_ops_json("정리", "수정")
     monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(edited)]))
 
     from app.agent.orchestrator.generate import (
@@ -255,8 +258,7 @@ def test_edit_other_solution_skips_verify_without_catalog(monkeypatch):
     """카탈로그를 추출하지 못하면(액션 없음) 검수 기준이 없어 생략한다."""
     _set_api_key(monkeypatch)
     _route(monkeypatch, "edit")
-    edited = json.dumps({"recommendation": _CLEAN_FLOW, "change_summary": "", "answer": "수정"},
-                        ensure_ascii=False)
+    edited = _edit_ops_json("", "수정")
     monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(edited)]))
 
     from app.agent.orchestrator.generate import CatalogExtraction
@@ -362,8 +364,7 @@ def test_qa_llm_tagged_turn_qa(monkeypatch):
 def test_edit_llm_tagged_turn_edit(monkeypatch):
     _set_api_key(monkeypatch)
     _route(monkeypatch, "edit")
-    edited = json.dumps({"recommendation": _CLEAN_FLOW, "change_summary": "정리", "answer": "수정"},
-                        ensure_ascii=False)
+    edited = _edit_ops_json("정리", "수정")
     captured = {}
     monkeypatch.setattr(edit_mod, "_make_llm",
                         lambda: _CallbackSpyInvokeLLM(captured, _Chunk(edited)))

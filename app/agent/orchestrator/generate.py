@@ -12,6 +12,7 @@ generate_node는 solution(세션 확정 키)으로 카탈로그 소스를 가른
 양쪽 모두 마지막에 공유 verify harness(R1~R6 + repair)를 통과한다.
 """
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -22,13 +23,17 @@ from app.schemas import Recommendation
 from .. import config
 from ..analysis import _format_document, _has_text, analyze, analyze_text
 from ..recommend.graph import build_agent_graph
-from ..recommend.stream import emit
+from ..recommend.stream import emit, emit_analysis_frame
 from .harness import verify_and_repair
 from .jsonio import chat_json
 from .render import analysis_brief, chat_task_brief, render_compact, render_history
 from .state import TYPE_ANALYSIS, TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
 
 logger = logging.getLogger(__name__)
+
+# 분석 결과를 단계별로 '드러내는' 프레임 사이 지연(초) — 흐름도 초안 노출과 같은 이유
+# (지연이 없으면 네트워크가 한꺼번에 밀어내 점진 노출이 안 보인다).
+_ANALYSIS_REVEAL_DELAY = 0.15
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _CATALOG_PROMPT = (_PROMPT_DIR / "other_catalog.md").read_text(encoding="utf-8")
@@ -39,7 +44,7 @@ _COMPOSE_PROMPT = (_PROMPT_DIR / "other_compose.md").read_text(encoding="utf-8")
 # analyze 노드
 # ─────────────────────────────────────────────────────────────────────────────
 
-def analyze_node(state: TurnState) -> dict:
+async def analyze_node(state: TurnState) -> dict:
     """업무 서술(문서 또는 채팅) → AnalysisResult. 소스를 여기서 정규화한다.
 
     이후 파이프라인(generate)은 입력이 문서였는지 채팅이었는지 모른다.
@@ -52,7 +57,17 @@ def analyze_node(state: TurnState) -> dict:
     else:
         result = analyze_text(chat_task_brief(state))
     d = result.model_dump()
-    emit({"event": "partial", "data": {"analysis": d}})
+
+    # 분석도 스트리밍 — analyze는 결과 전체를 한 번에 내지만(단일 LLM 호출), 요약 → 단계 하나씩
+    # → 확인필요 순으로 점진 노출해 분석 결과가 채워지는 과정을 라이브로 보여준다(업로드 패널이
+    # kind="analysis" 프레임마다 다시 그린다). 마지막 프레임에만 ambiguities(확인필요)를 싣는다.
+    steps = d.get("steps") or []
+    emit_analysis_frame({**d, "steps": [], "ambiguities": []}, "업무 요약 정리")
+    await asyncio.sleep(_ANALYSIS_REVEAL_DELAY)
+    for i in range(len(steps)):
+        emit_analysis_frame({**d, "steps": steps[: i + 1], "ambiguities": []}, f"업무 단계 분석 {i + 1}/{len(steps)}")
+        await asyncio.sleep(_ANALYSIS_REVEAL_DELAY)
+    emit_analysis_frame(d, "분석 완료")
 
     n = len(d.get("steps", []))
     answer = f"업무를 {n}개 단계로 분해했어요."

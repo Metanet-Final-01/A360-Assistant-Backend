@@ -35,10 +35,41 @@
 [시퀀스 규칙]
 5. 작업 항목당 핵심 액션 1~2개만. 로깅·대기 같은 부가 액션은 넣지 않는다.
    단, 여는 액션(Excel 열기·브라우저 열기 등)을 썼으면 흐름 끝에 닫는 액션으로 정리한다.
-6. 반복·조건이 필요하고 카탈로그에 Loop/If가 있으면 컨테이너로 쓰고 본문 액션을 children에
-   넣는다. children은 컨테이너 액션(Loop/If/Step 등)에만 넣는다.
+6. 구조는 컨테이너(children에 본문을 담는 액션)로 표현한다 — children은 컨테이너 액션에만 넣는다:
+   · Loop: 반복 본문을 children에.
+   · If / Else If / Else: 각 분기 본문을 각 If-패키지 액션의 children에 넣고, 같은 actions 배열에 형제로 나란히 둔다.
+   · Error handler(Try/Catch/Finally): 오류 처리가 필요하면 나중에 덧붙이지 말고 **생성 시점에** 아래 [예외 처리 구조]대로 감싼다.
 7. order는 각 step의 actions 안에서 1부터. label은 흐름도 박스에 그대로 표시되니 "무엇을
    하는지"를 사람 말로 짧게(예: "'국내 금' 클릭").
+
+[A360는 Java 기반 — 타입·예외 처리가 엄격하다]
+- 변수 타입을 정확히 지정한다: STRING / NUMBER / BOOLEAN / DATETIME / TABLE / LIST / DICTIONARY / SESSION 등.
+  타입이 어긋나면 봇이 실행 시 깨진다(예: 웹·엑셀에서 뽑은 표=TABLE, 반복 카운터=NUMBER, 파일 경로=STRING).
+- 실패 가능성이 있는 작업(파일 열기, 웹 이동·추출, 외부 호출, 메일 발송 등)에 오류 처리가 필요하면
+  처음부터 Error handler로 감싸 구조를 정한다.
+
+[예외 처리 구조 — Error handler(Try/Catch/Finally)]
+Try·Catch·Finally는 하나로 감싸지 않고 같은 actions 배열에 형제로 나란히 둔다(errorHandlerTry,
+errorHandlerCatch, errorHandlerFinally — 정확한 이름·파라미터는 get_action_schema로 확인).
+⚠ Error handler를 쓰면 **Try와 Catch를 반드시 함께** 둔다(Finally는 선택) — A360에서 Try 단독은
+유효하지 않다(Try 다음엔 Catch가 와야 한다). 보호할 작업이 있으면 errorHandlerTry, 오류 대응은
+errorHandlerCatch로 항상 쌍을 이룬다. 각 섹션의 본문은 그 액션의 children에 넣는다:
+- Try  children: 보호할(실패 가능성 있는) 실제 작업 액션들.
+- Catch children: 오류가 났을 때의 복구·기록 액션들(오류가 없으면 실행되지 않음).
+- Finally children: 오류 여부와 무관하게 **항상 실행**되는 마무리 정리(파일·브라우저 닫기, 세션 정리 등).
+⚠ 배치 규칙 — 각 액션이 어느 섹션(또는 블록 밖)에 있어야 하는지 생성 시점에 정한다:
+- 보호가 필요한 작업만 Try에 넣는다.
+- 오류와 무관한 **일반 후속 작업**은 Try/Catch/Finally 어디에도 넣지 말고, Error handler 블록이 끝난
+  **다음 형제 액션(top-level)**으로 이어간다. 특히 Finally에는 '마무리 정리'만 넣는다 — 일반 업무를
+  Finally에 넣으면 오류 시에도 실행돼 의미가 틀어진다.
+- 각 섹션은 비어도 되지만(children=[]) 없는 기능을 지어내 채우지 않는다.
+예(엑셀 열기를 오류 처리로 감싸고, 그 뒤 작업은 블록 밖으로) — 배치 구조만 보여주는 의사코드다
+(복사용 JSON 아님, 실제 파라미터·정확한 action 이름은 get_action_schema로 채운다). 한 step의
+actions 배열을 순서대로:
+  1) Error handler / errorHandlerTry     "엑셀 열기 시도"   children: [ Excel advanced / cloudExcelOpen ]
+  2) Error handler / errorHandlerCatch   "오류 기록"        children: [ 복구·기록 액션 ]
+  3) Error handler / errorHandlerFinally "파일 정리"        children: [ Excel advanced / cloudExcelClose ]
+  4) Excel advanced / (후속 액션)                           — Try/Catch/Finally 블록 밖 top-level 형제
 
 [파라미터 값 규칙]
 8. value_source: 문서 명시값→그 값("llm"), 카탈로그 기본값→기본값("schema_default"),
