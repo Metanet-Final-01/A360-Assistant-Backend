@@ -121,9 +121,19 @@ def ensure_observability_schema() -> bool:
     if not url:
         return False
     try:
+        from sqlalchemy import text
+
         sm = observability_sessionmaker()
-        _observability_metadata().create_all(sm.kw["bind"])
-        logger.info("관측 DB 스키마 확인 완료 (audit_logs·llm_usage)")
+        bind = sm.kw["bind"]
+        _observability_metadata().create_all(bind)
+        # create_all은 없는 테이블만 만들고 기존 테이블 ALTER는 안 한다. 후속 컬럼 추가는
+        # idempotent ALTER로 기존 관측 DB에도 보장한다 (RPA-158, Postgres IF NOT EXISTS).
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS request_id VARCHAR(32)"))
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_llm_usage_request_id ON llm_usage (request_id)")
+            )
+        logger.info("관측 DB 스키마 확인 완료 (audit_logs·llm_usage, request_id 보장)")
         return True
     except Exception as e:  # noqa: BLE001 — 관측 DB 장애가 앱 기동을 막으면 안 된다
         logger.warning("관측 DB 스키마 준비 실패 (앱은 계속, 기록은 폴백 없이 유실될 수 있음): %s", e)

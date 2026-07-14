@@ -187,6 +187,7 @@ def record_usage(
     try:
         from app.core.observability_db import observability_sessionmaker
         from app.models import LlmUsage
+        from app.rag.observability import get_request_id
 
         # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 미설정이면 앱 DB 폴백
         with observability_sessionmaker()() as db:
@@ -202,6 +203,8 @@ def record_usage(
                     output_tokens=output_tokens,
                     cost_usd=cost_usd(input_tokens, output_tokens, model),
                     latency_ms=latency_ms,
+                    # 현재 요청의 request_id를 붙여 audit/turn/rag와 턴 단위로 조인 가능 (RPA-158)
+                    request_id=get_request_id(),
                 )
             )
             db.commit()

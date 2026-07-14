@@ -68,6 +68,30 @@ def test_record_usage_uses_context(monkeypatch):
     assert captured["input_tokens"] == 10 and captured["output_tokens"] == 5
 
 
+def test_record_usage_captures_request_id(monkeypatch):
+    """record_usage가 현재 request_id를 붙여 audit/turn/rag와 턴 단위 비용 조인을 가능케 한다 (RPA-158)."""
+    captured = {}
+
+    class _FakeDB:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def add(self, row): captured.update(vars(row))
+        def commit(self): pass
+
+    import app.core.observability_db as obs
+    monkeypatch.setattr(obs, "observability_sessionmaker", lambda: (lambda: _FakeDB()))
+    monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
+
+    class _Row:
+        def __init__(self, **kw): self.__dict__.update(kw)
+    monkeypatch.setattr("app.models.LlmUsage", _Row)
+
+    from app.rag.observability import new_request_id
+    rid = new_request_id()  # 현재 요청 컨텍스트에 request_id 설정
+    record_usage(purpose="chat", model="m", input_tokens=1, output_tokens=1)
+    assert captured["request_id"] == rid
+
+
 # --- UsageCallbackHandler: 스트리밍 토큰 0 버그 방지 (핵심) ---
 
 def _llm_result(usage_metadata=None, llm_output=None):
