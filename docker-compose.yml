@@ -14,9 +14,13 @@ services:
       # 관측 DB(OBSERVABILITY_DATABASE_URL)는 .env의 공유 Neon 값을 그대로 쓴다(여기서 안 덮음).
       DATABASE_HOST: db
       DATABASE_PORT: "5432"           # 컨테이너↔db는 내부 5432 (호스트 매핑 포트 5433과 무관)
-      # OPENSEARCH_HOST는 오버라이드하지 않는다 — RAG BM25 색인은 공유 Bonsai에 있으므로
-      # 컨테이너도 .env의 Bonsai(OPENSEARCH_HOST/USERNAME/PASSWORD)를 그대로 써야 한다 (RPA-160).
-      # 로컬 opensearch로 붙고 싶으면 아래 opensearch 서비스를 프로파일로 띄우고 .env를 로컬로 둔다.
+      # OPENSEARCH는 로컬로 안 덮는다 — RAG BM25 색인은 공유 Bonsai에 있으므로 컨테이너도 .env의
+      # Bonsai(OPENSEARCH_HOST/USERNAME/PASSWORD)를 써야 한다 (RPA-160). 로컬 검색은 아래 opensearch
+      # 서비스를 프로파일로 띄우고 .env OPENSEARCH_HOST를 로컬로 두면 된다.
+      # ⚠️ 필수 강제: env_file(.env)이 required:false라 .env가 없거나 OPENSEARCH_HOST가 비면
+      #    config가 localhost:9200으로 폴백해 BM25가 또 조용히 죽는다(CodeRabbit #226). 그래서
+      #    여기서 .env 값을 required 치환으로 명시 — 없으면 `docker compose up`이 즉시 실패한다.
+      OPENSEARCH_HOST: ${OPENSEARCH_HOST:?.env에 OPENSEARCH_HOST(공유 Bonsai URL)를 설정하세요}
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
