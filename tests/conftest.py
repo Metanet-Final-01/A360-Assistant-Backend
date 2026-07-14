@@ -45,3 +45,27 @@ def _isolate_observability_db(monkeypatch):
     # 롤업 스케줄러(RPA-104)도 테스트에선 끈다 — TestClient lifespan마다 배치가 돌면
     # 느려지고 로컬 DB에 집계 쓰레기가 쌓인다.
     monkeypatch.setenv("METRICS_ROLLUP_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_rag_shared_infra(monkeypatch):
+    """테스트가 공유 RAG 인프라(Neon 코퍼스·Bonsai)를 절대 때리지 않게 격리한다 (RPA-157).
+
+    관측 DB(위 fixture)만 격리돼 있고 RAG store는 안 돼 있어, .env에 RAG_DATABASE_URL·
+    OPENSEARCH_HOST(공유 크레덴셜)가 있으면 lifespan의 open_pools()가 min_size=2로 **기동
+    시점에 공유 Neon에 실제 커넥션을 연다** — 로컬 pytest가 팀 데모 데이터를 오염시킬 표면.
+    관측 DB와 대칭으로 막는다: RAG store 연결을 전부 localhost로 저하시켜, 개별 테스트가
+    모킹을 빠뜨려도 shared가 아니라 로컬(있으면 접속, 없으면 fail-open)로 떨어지게 한다.
+
+    - RAG_DATABASE_URL: database_dsn()이 참조 시점에 읽는 env → delenv면 DATABASE_*(로컬)로 폴백.
+    - OPENSEARCH_*: config 상수라 import 시점 고정 → 속성 자체를 로컬로 monkeypatch(env 삭제로는 안 됨).
+
+    RAG 라우팅/DSN 파싱 자체를 검증하는 테스트(test_rag_config.py)는 자기 setenv/monkeypatch로
+    다시 지정하므로 영향 없다(function-scoped monkeypatch라 이 fixture 뒤에 덮어씀).
+    """
+    import app.rag.config as rag_config
+
+    monkeypatch.delenv("RAG_DATABASE_URL", raising=False)
+    monkeypatch.setattr(rag_config, "OPENSEARCH_HOST", "http://localhost:9200")
+    monkeypatch.setattr(rag_config, "OPENSEARCH_USERNAME", "")
+    monkeypatch.setattr(rag_config, "OPENSEARCH_PASSWORD", "")
