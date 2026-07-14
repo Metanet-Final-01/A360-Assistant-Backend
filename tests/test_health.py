@@ -26,11 +26,14 @@ def _factory(ok=True):
     return _S
 
 
-def _patch(monkeypatch, app_ok=True, obs_ok=True):
+def _patch(monkeypatch, app_ok=True, obs_ok=True, os_ok=True):
     monkeypatch.setattr("app.db.SessionLocal", _factory(app_ok))
     monkeypatch.setattr(
         "app.core.observability_db.observability_sessionmaker", lambda: _factory(obs_ok)
     )
+    # OpenSearch 도달성 체크는 실제 네트워크(RPA-156)라 테스트에선 스텁 — conftest가 host를
+    # localhost로 격리하므로 스텁 안 하면 항상 fail로 잡힌다.
+    monkeypatch.setattr("app.main._check_opensearch", lambda: os_ok)
 
 
 def test_health_all_ok(monkeypatch):
@@ -40,7 +43,21 @@ def test_health_all_ok(monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "healthy"
-    assert body["checks"] == {"database": "ok", "observability_database": "ok"}
+    assert body["checks"] == {
+        "database": "ok",
+        "observability_database": "ok",
+        "opensearch": "ok",
+    }
+
+
+def test_health_opensearch_down_degraded_but_200(monkeypatch):
+    """OpenSearch(BM25)만 죽으면 dense 검색은 산다 — UP이되 degraded로 구분 (RPA-156)."""
+    _patch(monkeypatch, os_ok=False)
+    with TestClient(app) as c:
+        r = c.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "degraded"
+    assert r.json()["checks"]["opensearch"] == "fail"
 
 
 def test_health_app_db_down_503(monkeypatch):

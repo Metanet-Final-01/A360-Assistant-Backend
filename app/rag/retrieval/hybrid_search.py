@@ -7,6 +7,7 @@ mode:
 """
 
 import asyncio
+import logging
 
 from ..observability import log_call
 from ..store import db, opensearch_client
@@ -14,6 +15,8 @@ from .embed import embed_query, embed_query_async
 from .params import RetrievalParams
 from .rerank import rerank as voyage_rerank
 from .rerank import rerank_async as voyage_rerank_async
+
+logger = logging.getLogger(__name__)
 
 
 def reciprocal_rank_fusion(
@@ -130,6 +133,9 @@ def search(
     except Exception as e:
         # BM25는 보강 신호이므로, OpenSearch가 응답하지 않으면 벡터 단독 검색으로 저하시킨다.
         # 단, 저하 여부를 결과에 남겨야 "BM25가 원래 안 잡힌 건지 장애로 빠진 건지" 구분 가능하다.
+        # 무음 저하 방지(RPA-156): 결과 필드뿐 아니라 로그로도 남겨 "조용히 dense-only로 도는" 상태를
+        # 운영이 알아채게 한다 — Bonsai가 살아있어도 앱-전역 클라이언트가 죽으면 여기로 빠진다.
+        logger.warning("BM25 검색 실패 — dense-only로 저하: %s", e)
         bm25_error = str(e)
 
     candidates = _fuse_candidates(vector_hits, bm25_hits, bm25_error, params)
@@ -191,6 +197,7 @@ async def search_async(
         try:
             return await opensearch_client.keyword_search_async(os_client, query, size=pool), None
         except Exception as e:  # noqa: BLE001 — sync 버전과 동일하게 BM25 실패는 저하만, 전체 실패 아님
+            logger.warning("BM25 검색 실패(async) — dense-only로 저하: %s", e)  # 무음 저하 방지(RPA-156)
             return [], str(e)
 
     vector_hits, (bm25_hits, bm25_error) = await asyncio.gather(_vector_branch(), _bm25_branch())

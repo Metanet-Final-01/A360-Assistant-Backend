@@ -160,6 +160,36 @@ def _check_db(open_session) -> bool:
         return False
 
 
+def _check_opensearch() -> bool:
+    """OpenSearch(BM25) 도달성 — 얕은 _cluster/health 핑(짧은 타임아웃, RPA-156).
+
+    BM25는 보강 신호라 실패해도 degraded(본 검색은 dense로 동작)다. 신선 요청으로 '인프라
+    도달성'을 본다 — 앱-전역 클라이언트가 죽어 dense-only로 저하되는 건 여기선 못 잡지만
+    (그건 검색 경로의 BM25 실패 로그가 잡는다), Bonsai 자체가 내려간 건 이걸로 드러난다.
+    """
+    import httpx
+
+    import app.rag.config as rag_config
+
+    host = rag_config.OPENSEARCH_HOST
+    auth = (
+        (rag_config.OPENSEARCH_USERNAME, rag_config.OPENSEARCH_PASSWORD)
+        if rag_config.OPENSEARCH_USERNAME
+        else None
+    )
+    try:
+        r = httpx.get(
+            f"{host.rstrip('/')}/_cluster/health",
+            auth=auth,
+            timeout=3.0,
+            verify=host.startswith("https"),
+        )
+        return r.status_code == 200
+    except Exception as e:  # noqa: BLE001 — 어떤 실패든 "fail"로 보고
+        logger.warning("opensearch health 체크 실패: %s", e)
+        return False
+
+
 @app.get("/api/health")
 @app.get("/health")
 def health(response: Response) -> dict:
@@ -174,11 +204,13 @@ def health(response: Response) -> dict:
     checks = {
         "database": "ok" if _check_db(lambda: app_db.SessionLocal()) else "fail",
         "observability_database": "ok" if _check_db(lambda: observability_sessionmaker()()) else "fail",
+        # BM25(OpenSearch) 도달성 — 실패해도 dense 검색은 살아 degraded (RPA-156)
+        "opensearch": "ok" if _check_opensearch() else "fail",
     }
     if checks["database"] == "fail":
         status = "unhealthy"
         response.status_code = 503
-    elif checks["observability_database"] == "fail":
+    elif checks["observability_database"] == "fail" or checks["opensearch"] == "fail":
         status = "degraded"
     else:
         status = "healthy"
