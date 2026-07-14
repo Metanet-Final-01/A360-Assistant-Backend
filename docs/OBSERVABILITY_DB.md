@@ -22,7 +22,7 @@
 | 테이블 | 답할 수 있는 질문 |
 |---|---|
 | **llm_usage** | 세션별/사용자별 비용은? 임베딩 vs 리랭커 vs 챗 비용 비중은? 어느 모델이 제일 비싼가? |
-| **audit_logs** | 누가 이 문서를 삭제/수정했나? 403/404 접근 시도가 있었나? (성공·실패 모두 기록) |
+| **audit_logs** | 누가 이 문서를 삭제/수정했나? (변경성 요청 **POST/PUT/PATCH/DELETE만** 기록 — 성공·실패 상태코드 모두). GET 포함 전체 요청·접근 시도는 `request_metrics` 참조 |
 | **request_metrics** | 엔드포인트별 p95 지연은? 어느 API가 느린가? 에러율 추이는? |
 | **turn_events** | 어떤 노드에서 몇 ms 걸렸나? 어디서 실패했나? 왜 edit로 라우팅됐나? |
 | **rag_events** | 이 검색이 어떤 chunk_size·RRF로 돌았나? 느린 단계는 embed냐 rerank냐? 실패한 검색은? |
@@ -30,7 +30,7 @@
 
 ## 3. 거버넌스 재구성 — "누가·언제·무슨 근거·얼마 비용"
 
-`audit_logs`·`turn_events`·`rag_events`는 **`request_id`로 한 턴을 묶어** 누가(user_id)·언제·무슨 근거(라우팅 reason)·어떤 검색 흐름까지 재구성 가능하다. **끊기는 곳은 "얼마 비용"** — 아래 갭 참고.
+`audit_logs`·`turn_events`·`rag_events`는 **`request_id`가 남은 요청에 한해** 한 턴을 묶어 누가(user_id)·언제·무슨 근거(라우팅 reason)·어떤 검색 흐름까지 재구성 가능하다. 단 `request_id`·`user_id`는 nullable이라 — 백그라운드 호출이나 미들웨어 JWT 디코드가 빠진 요청(G3)은 연결이 끊기거나 익명으로 남아 **모든 턴이 완전 재구성되는 건 아니다**. 그리고 **비용은 아예 끊긴다** — 아래 갭 참고.
 
 ## 4. 알려진 갭 (2026-07-14 감사 실측)
 
@@ -44,5 +44,7 @@
 
 ## 5. 데이터 품질 (검증됨)
 
-- **롤업 멱등·정합**: 마감된 날은 raw와 완전 일치, 재집계(DELETE+INSERT) 안전. 당일 불일치는 버그가 아니라 롤업 lag(G5).
-- **안정성**: 관측 기간 5xx 0건, turn error율 낮음.
+> 근거: 2026-07-14 관측 Neon 직접 쿼리(기간 2026-07-10~14). 재현하려면 아래 쿼리를 관측 DB에 실행.
+
+- **롤업 멱등·정합**: 마감된 날은 raw와 완전 일치(예: `usage_daily` 07-13 calls 2544 = `SELECT count(*) FROM llm_usage WHERE created_at::date='2026-07-13'`; cost 합도 동일). 재집계(DELETE+INSERT) 안전. 당일 불일치(예 07-14 524 vs raw 547)는 버그가 아니라 롤업 lag(G5).
+- **안정성**: 관측 기간 `request_metrics`에서 status_code≥500 **0건**(`SELECT count(*) FROM request_metrics WHERE status_code>=500`), `turn_events` kind='error' 소수(관측 턴 대비 낮음).

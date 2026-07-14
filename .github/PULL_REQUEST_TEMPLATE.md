@@ -35,4 +35,4 @@
 - [ ] 시크릿·개인정보가 포함되지 않았습니다
 - [ ] 관련 문서(.env.example, README, docs/)를 갱신했습니다 (해당 시)
 - [ ] 테스트를 추가/갱신했습니다 (해당 시)
-- [ ] **AI 생성/수정 코드**: 죽은 config·폐기 API 부활이 없고, live(호출·DB·응답)로 증명했습니다 — [CONVENTIONS.md §8](../docs/CONVENTIONS.md)
+- [ ] **AI 생성/수정 코드 (코드 변경 시)**: 죽은 config·폐기 API 부활이 없고, live(호출·DB·응답)로 증명했습니다 — [CONVENTIONS.md §8](../docs/CONVENTIONS.md). 문서 전용 PR은 해당 없음.
