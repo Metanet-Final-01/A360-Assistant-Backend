@@ -234,6 +234,10 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
     new_steps = []
     all_steps = flow.get("steps", [])
     total = len(all_steps)
+    # 누적 흐름도의 현재 위반 — 실제로 바뀐 단계에서만 다시 계산한다. 단계를 안 고치면(did=False)
+    # 누적 흐름도 내용이 직전 프레임과 동일하므로 위반 목록도 그대로다. 매 스텝 전체 재스캔(O(N²))
+    # 대신 교정된 단계 수만큼만(O(N)) 재계산하면서도 스텝별 프레임은 그대로 흘린다.
+    current_violations = violations
     for i, step in enumerate(all_steps):
         # 위반 있는 단계만 LLM 국소 교정을 부른다(느림) — 그 직전에 '이 단계 수정 중' 프레임을
         # active_step_id와 함께 방출해, 프론트가 해당 단계 박스를 붉게 강조·깜빡이고 그 위치로
@@ -241,7 +245,7 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
         # 건너뛰므로(빠름) 강조 프레임도 내지 않아 깜빡임이 실제 수정 단계에만 머문다.
         if run_checks(step.get("actions", []), catalog):
             pending = {**flow, "steps": new_steps + all_steps[i:]}
-            emit_flow_frame(pending, collect_violations(pending, catalog),
+            emit_flow_frame(pending, current_violations,
                             f"{i + 1}/{total} 단계 수정 중", active_step_id=step.get("step_id"))
         new_actions, did = _repair_one_step(step, catalog)
         if did:
@@ -250,7 +254,9 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
         new_steps.append(step)
         # 교정 결과 프레임(active_step_id 없음 → 강조 해제): 방금 단계까지 반영된 누적 흐름도.
         partial = {**flow, "steps": new_steps + all_steps[i + 1:]}
-        emit_flow_frame(partial, collect_violations(partial, catalog), f"{i + 1}/{total} 단계 국소 수정")
+        if did:  # 바뀐 단계에서만 전체 위반을 다시 계산한다(안 바뀌면 위반 목록 불변).
+            current_violations = collect_violations(partial, catalog)
+        emit_flow_frame(partial, current_violations, f"{i + 1}/{total} 단계 국소 수정")
     if repaired:
         flow = {**flow, "steps": new_steps}
         violations = collect_violations(flow, catalog)

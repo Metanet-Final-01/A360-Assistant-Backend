@@ -19,6 +19,7 @@ import copy
 import json
 import logging
 import re
+from collections import defaultdict
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -91,13 +92,19 @@ def _canon_actions(actions: list) -> list:
 def _is_noop_edit(out_flow: dict, in_flow: dict) -> bool:
     """수정 결과가 입력 흐름도와 실질적으로 동일한지 — 연산이 순효과 0인 경우까지 잡는다.
 
-    단계 메타(step_id/label)와 액션 트리(정규형)를 비교한다."""
+    단계 메타(step_id/label)·액션 트리(정규형)에 더해 흐름도 수준 notes/variables까지 본다 —
+    set_flow만으로 메모·변수를 바꾸는 편집은 액션 트리가 그대로라, notes/variables를 빼면
+    항상 무변경으로 오판돼 실패 경로로 저하된다."""
     def canon(flow: dict) -> list:
         return [
             {"id": s.get("step_id"), "l": s.get("label"), "actions": _canon_actions(s.get("actions") or [])}
             for s in (flow.get("steps") or [])
         ]
-    return canon(out_flow) == canon(in_flow)
+    return (
+        canon(out_flow) == canon(in_flow)
+        and out_flow.get("notes") == in_flow.get("notes")
+        and out_flow.get("variables") == in_flow.get("variables")
+    )
 
 
 def _apply_to_flow(base: dict, ops: EditOps) -> tuple[dict, int, list[str]]:
@@ -118,32 +125,43 @@ def _restore_user_values(result_flow: dict, applied_flow: dict) -> None:
     되돌린다 (rule 3의 이행 — value_source="user" 값은 명시적 변경이 아니면 보존).
 
     연산 적용 직후의 흐름도(applied_flow)는 손대지 않은 액션을 원본 그대로 보존하므로, 거기서
-    (step_id, package, action, param_name)별 user 파라미터를 모아 교정 결과(result_flow)에 다시
-    씌운다. 국소 교정은 위반 단계만 재생성하므로 대부분 no-op이고, 재생성된 단계에서만 복원된다."""
+    user 파라미터를 모아 교정 결과(result_flow)에 다시 씌운다. 국소 교정은 위반 단계만
+    재생성하므로 대부분 no-op이고, 재생성된 단계에서만 복원된다.
+
+    키에 (step_id, package, action)의 '등장 순번(occ)'을 넣는다 — 한 단계에 같은 package/action
+    액션이 둘 이상 있고 각자 다른 user 값을 가지면, 순번이 없으면 collect가 나중 값으로 앞 값을
+    덮어써 restore가 서로 다른 입력을 하나로 뒤섞는다. 양쪽을 같은 전위 순회로 돌며 같은 순번을
+    매기므로 각 액션 인스턴스의 값이 제 자리로만 복원된다."""
     saved: dict[tuple, object] = {}
 
-    def collect(step_id, actions):
+    def collect(step_id, actions, occ):
         for a in actions:
+            sig = (a.get("package"), a.get("action"))
+            n = occ[sig]
+            occ[sig] = n + 1
             for p in a.get("parameters") or []:
                 if p.get("value_source") == "user":
-                    saved[(step_id, a.get("package"), a.get("action"), p.get("name"))] = p.get("value")
-            collect(step_id, a.get("children") or [])
+                    saved[(step_id, sig[0], sig[1], n, p.get("name"))] = p.get("value")
+            collect(step_id, a.get("children") or [], occ)
 
     for s in applied_flow.get("steps", []):
-        collect(s.get("step_id"), s.get("actions") or [])
+        collect(s.get("step_id"), s.get("actions") or [], defaultdict(int))
     if not saved:
         return
 
-    def restore(step_id, actions):
+    def restore(step_id, actions, occ):
         for a in actions:
+            sig = (a.get("package"), a.get("action"))
+            n = occ[sig]
+            occ[sig] = n + 1
             for p in a.get("parameters") or []:
-                key = (step_id, a.get("package"), a.get("action"), p.get("name"))
+                key = (step_id, sig[0], sig[1], n, p.get("name"))
                 if key in saved:
                     p["value"], p["value_source"] = saved[key], "user"
-            restore(step_id, a.get("children") or [])
+            restore(step_id, a.get("children") or [], occ)
 
     for s in result_flow.get("steps", []):
-        restore(s.get("step_id"), s.get("actions") or [])
+        restore(s.get("step_id"), s.get("actions") or [], defaultdict(int))
 
 
 def _build_messages(state: TurnState, outline: str) -> list:

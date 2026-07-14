@@ -63,13 +63,13 @@ errorHandlerCatch로 항상 쌍을 이룬다. 각 섹션의 본문은 그 액션
   **다음 형제 액션(top-level)**으로 이어간다. 특히 Finally에는 '마무리 정리'만 넣는다 — 일반 업무를
   Finally에 넣으면 오류 시에도 실행돼 의미가 틀어진다.
 - 각 섹션은 비어도 되지만(children=[]) 없는 기능을 지어내 채우지 않는다.
-예(엑셀 열기를 오류 처리로 감싸고, 그 뒤 작업은 블록 밖으로) — 한 step의 actions 배열:
-  {"order":1,"package":"Error handler","action":"errorHandlerTry","label":"엑셀 열기 시도",
-   "children":[{"order":1,"package":"Excel advanced","action":"cloudExcelOpen", ...}]},
-  {"order":2,"package":"Error handler","action":"errorHandlerCatch","label":"오류 기록","children":[ ... ]},
-  {"order":3,"package":"Error handler","action":"errorHandlerFinally","label":"파일 정리",
-   "children":[{"order":1,"package":"Excel advanced","action":"cloudExcelClose", ...}]},
-  {"order":4,"package":"Excel advanced","action":"...", ...}   ← 후속 작업은 블록 밖 형제로
+예(엑셀 열기를 오류 처리로 감싸고, 그 뒤 작업은 블록 밖으로) — 배치 구조만 보여주는 의사코드다
+(복사용 JSON 아님, 실제 파라미터·정확한 action 이름은 get_action_schema로 채운다). 한 step의
+actions 배열을 순서대로:
+  1) Error handler / errorHandlerTry     "엑셀 열기 시도"   children: [ Excel advanced / cloudExcelOpen ]
+  2) Error handler / errorHandlerCatch   "오류 기록"        children: [ 복구·기록 액션 ]
+  3) Error handler / errorHandlerFinally "파일 정리"        children: [ Excel advanced / cloudExcelClose ]
+  4) Excel advanced / (후속 액션)                           — Try/Catch/Finally 블록 밖 top-level 형제
 
 [파라미터 값 규칙]
 8. value_source: 문서 명시값→그 값("llm"), 카탈로그 기본값→기본값("schema_default"),

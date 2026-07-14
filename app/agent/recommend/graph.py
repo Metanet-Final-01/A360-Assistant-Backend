@@ -361,10 +361,17 @@ def build_agent_graph(sink: list[dict]):
         아니면 finalize. 전체 재생성 없음 — 위반은 localized_repair가 단계별로 고친다."""
         flow = state.get("flow") or {}
         violations = state.get("violations") or []
-        if (not flow.get("steps")
-                and any(v.get("rule") == "FORMAT" for v in violations)
-                and state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS):
-            return "compose_agent"  # 파싱 실패 → JSON 재출력 1회
+        # 파싱 실패 signature: steps가 비었고 FORMAT 위반이 있다(collect_violations는 FORMAT을
+        # 내지 않는다 — 파서가 직접 심는 마커다). 정상적인 빈 추천안(steps=[], FORMAT 없음)과 구분.
+        parse_failed = not flow.get("steps") and any(v.get("rule") == "FORMAT" for v in violations)
+        if parse_failed:
+            if state.get("repair_round", 0) <= MAX_REPAIR_ROUNDS:
+                return "compose_agent"  # 파싱 실패 → JSON 재출력 1회
+            # 재출력 예산까지 소진했는데도 파싱 실패 — localized_repair(빈 흐름도라 무효)·finalize로
+            # 흘리면 Recommendation(steps=[])가 '완료'로 저장돼 실패가 은폐된다. 에러로 끊는다
+            # (recommend()가 RuntimeError를 error 이벤트로 흘린다).
+            msg = next((v.get("message") for v in violations if v.get("rule") == "FORMAT"), "")
+            raise RuntimeError(f"흐름도 출력을 해석하지 못했습니다{f': {msg}' if msg else ''}")
         if _actionable(violations):
             return "localized_repair"
         return "finalize"
