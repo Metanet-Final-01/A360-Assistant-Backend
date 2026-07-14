@@ -27,6 +27,14 @@ def test_from_config_reads_config_values(monkeypatch):
     assert p.vector_weight == 1.0 and p.bm25_weight == 1.0  # 가중치 기본은 동일
 
 
+def test_from_config_reads_rrf_weights_from_env(monkeypatch):
+    """RRF 가중치도 config(env)에서 읽는다 — .env로 조절 가능 (RPA-147)."""
+    monkeypatch.setattr(config, "RRF_VECTOR_WEIGHT", 2.0)
+    monkeypatch.setattr(config, "RRF_BM25_WEIGHT", 0.5)
+    p = RetrievalParams.from_config()
+    assert p.vector_weight == 2.0 and p.bm25_weight == 0.5
+
+
 @pytest.mark.parametrize("bad", [
     {"candidate_pool_size": 0, "rerank_candidates": 20, "rrf_k": 60},
     {"candidate_pool_size": 50, "rerank_candidates": 0, "rrf_k": 60},
