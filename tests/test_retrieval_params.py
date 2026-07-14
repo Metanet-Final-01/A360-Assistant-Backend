@@ -27,17 +27,43 @@ def test_from_config_reads_config_values(monkeypatch):
     assert p.vector_weight == 1.0 and p.bm25_weight == 1.0  # 가중치 기본은 동일
 
 
+def test_from_config_reads_rrf_weights_from_env(monkeypatch):
+    """RRF 가중치도 config(env)에서 읽는다 — .env로 조절 가능 (RPA-147)."""
+    monkeypatch.setattr(config, "RRF_VECTOR_WEIGHT", 2.0)
+    monkeypatch.setattr(config, "RRF_BM25_WEIGHT", 0.5)
+    p = RetrievalParams.from_config()
+    assert p.vector_weight == 2.0 and p.bm25_weight == 0.5
+
+
 @pytest.mark.parametrize("bad", [
     {"candidate_pool_size": 0, "rerank_candidates": 20, "rrf_k": 60},
     {"candidate_pool_size": 50, "rerank_candidates": 0, "rrf_k": 60},
     {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": 0},   # 분모 0 위험
     {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": -1},
     {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": 60, "vector_weight": -0.1},
+    {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": 60, "vector_weight": float("nan")},  # #209
+    {"candidate_pool_size": 50, "rerank_candidates": 20, "rrf_k": 60, "bm25_weight": float("inf")},    # #209
 ])
 def test_invalid_params_rejected_at_construction(bad):
-    """스윕이 넘긴 잘못된 그리드 값은 생성 시점에 fail-fast (CodeRabbit #192)."""
+    """스윕이 넘긴 잘못된 그리드 값은 생성 시점에 fail-fast (CodeRabbit #192·#209 nan/inf)."""
     with pytest.raises(ValueError):
         RetrievalParams(**bad)
+
+
+def test_config_parses_rrf_weight_env_vars(monkeypatch):
+    """실제 env var 이름·float 파싱까지 검증 (config 상수 monkeypatch가 아니라 진짜 env, CodeRabbit #209).
+
+    env var 이름 오타·기본값·float() 파싱이 깨지면 여기서 잡힌다. 끝에 config를 재로드해 원복.
+    """
+    import importlib
+    monkeypatch.setenv("RRF_VECTOR_WEIGHT", "2.5")
+    monkeypatch.setenv("RRF_BM25_WEIGHT", "0.25")
+    try:
+        importlib.reload(config)
+        assert config.RRF_VECTOR_WEIGHT == 2.5 and config.RRF_BM25_WEIGHT == 0.25
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)  # 기본값(1.0)으로 원복 — 다른 테스트 오염 방지
 
 
 # --- 가중 RRF ---

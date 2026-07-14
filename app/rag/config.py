@@ -64,6 +64,9 @@ OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "")
 RRF_K = int(os.getenv("RRF_K", "60"))
 HYBRID_CANDIDATE_POOL_SIZE = int(os.getenv("HYBRID_CANDIDATE_POOL_SIZE", "50"))
 HYBRID_RERANK_CANDIDATES = int(os.getenv("HYBRID_RERANK_CANDIDATES", "20"))
+# RRF branch 가중치 — 벡터(의미)/BM25(키워드) 신호 비중 조절 (기본 1.0=동일 가중, RPA-147).
+RRF_VECTOR_WEIGHT = float(os.getenv("RRF_VECTOR_WEIGHT", "1.0"))
+RRF_BM25_WEIGHT = float(os.getenv("RRF_BM25_WEIGHT", "1.0"))
 RERANK_MODEL = os.getenv("RERANK_MODEL", "rerank-2.5-lite")
 
 # voyage(기본) 또는 openai. Anthropic은 임베딩 API가 없어 Voyage AI를 공식 권장함.
