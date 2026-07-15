@@ -142,6 +142,11 @@ def ensure_observability_schema() -> bool:
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_llm_usage_session_created "
                 "ON llm_usage (session_id, created_at)"))
+            # 전역 상한은 주체 필터 없이 created_at 범위만으로 합산한다 — 위 두 인덱스는 주체가
+            # 선행이라 range seek이 안 걸린다(#239 리뷰). 전용 인덱스가 없으면 전역 상한을 켜는
+            # 순간 매 턴 full scan이 된다.
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_llm_usage_created_at ON llm_usage (created_at)"))
         logger.info("관측 DB 스키마 확인 완료 (audit_logs·llm_usage, request_id·예산조회 인덱스 보장)")
         return True
     except Exception as e:  # noqa: BLE001 — 관측 DB 장애가 앱 기동을 막으면 안 된다

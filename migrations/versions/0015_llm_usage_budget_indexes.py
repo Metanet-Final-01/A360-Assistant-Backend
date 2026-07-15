@@ -24,14 +24,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # 주체별 상한 — 주체 + 기간
     op.create_index(
         "ix_llm_usage_user_created", "llm_usage", ["user_id", "created_at"], unique=False
     )
     op.create_index(
         "ix_llm_usage_session_created", "llm_usage", ["session_id", "created_at"], unique=False
     )
+    # 전역 상한 — 주체 필터 없이 기간만으로 합산한다. 위 두 인덱스는 주체가 선행이라 range
+    # seek이 안 걸리므로, 전용 인덱스가 없으면 전역 상한을 켜는 순간 매 턴 full scan (#239 리뷰).
+    op.create_index("ix_llm_usage_created_at", "llm_usage", ["created_at"], unique=False)
 
 
 def downgrade() -> None:
+    op.drop_index("ix_llm_usage_created_at", table_name="llm_usage")
     op.drop_index("ix_llm_usage_session_created", table_name="llm_usage")
     op.drop_index("ix_llm_usage_user_created", table_name="llm_usage")
