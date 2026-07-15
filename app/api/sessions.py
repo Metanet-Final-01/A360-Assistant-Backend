@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -422,14 +422,53 @@ def _get_agent_turn():
         return None
 
 
+def _get_agent_versions():
+    """app/agent의 버전 레지스트리를 lazy import한다 (미구현이면 None).
+
+    기대 계약 (Agent 담당 구현, RPA-167):
+        available_versions() -> [{"id": "v2", "label": "...", "description": "...", "default": True}, ...]
+        default_version() -> str            # env AGENT_VERSION 반영
+      버전 선택은 stream_agent_turn의 context에 "agent_version" 키로 전달한다
+      (operation/compact와 같은 패턴 — 있으면 그 버전, 없으면 서버 기본).
+
+    _get_agent_turn과 같은 lazy 스위치다 — agent가 export하는 순간 코드 변경 없이 활성화된다.
+    ⚠️ 버전 목록을 여기서 하드코딩(Literal["v1","v2"] 등)하면 안 된다: v3는 app/agent/v3/ 폴더만
+    생기고 registry가 자동 포함하므로, 동적으로 물어봐야 백엔드·프론트가 0 수정이 된다.
+    """
+    try:
+        from app.agent import available_versions, default_version  # noqa: PLC0415
+
+        return available_versions, default_version
+    except ImportError:
+        return None
+
+
 class AgentTurnRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000, description="사용자 메시지 (버튼이면 프론트가 합성)")
     # compact 버튼발 결정론 요청 — LLM 라우터를 우회하는 명시 신호 (기본 "chat")
     operation: str = Field("chat", pattern="^(chat|compact)$", description="chat | compact")
+    agent_version: str | None = Field(
+        None, description="에이전트 버전 (없으면 서버 기본). 유효값은 GET /api/agent/versions"
+    )
+
+    @field_validator("agent_version")
+    @classmethod
+    def _known_version(cls, v: str | None) -> str | None:
+        """레지스트리에 실제로 있는 버전인지 동적으로 검증한다 (v3 추가 시 코드 무변경)."""
+        if v is None:  # 서버 기본으로 처리 — 레지스트리가 없어도 기존 동작 그대로다
+            return v
+        registry = _get_agent_versions()
+        if registry is None:
+            raise ValueError("에이전트 버전 선택을 아직 쓸 수 없습니다 (버전 레지스트리 미배포)")
+        available_versions, _ = registry
+        if v not in {x["id"] for x in available_versions()}:
+            raise ValueError(f"알 수 없는 에이전트 버전: {v}")
+        return v
 
 
 def _assemble_turn_context(
-    session: models.AnalysisSession, db: Session, operation: str = "chat"
+    session: models.AnalysisSession, db: Session, operation: str = "chat",
+    agent_version: str | None = None,
 ) -> dict:
     """단일 턴에 필요한 full context를 세션에서 조립한다 (intent 없으니 재료를 다 준다).
 
@@ -484,6 +523,8 @@ def _assemble_turn_context(
         "agent_context": {
             "solution": session.solution,
             "operation": operation,
+            # None이면 에이전트가 서버 기본(env AGENT_VERSION)으로 처리한다 (RPA-167 계약)
+            "agent_version": agent_version,
             "history": history,
             "compact": compact.payload if compact else None,
             "analysis": analysis.result if analysis else None,
@@ -855,7 +896,11 @@ async def agent_turn(
         except Exception:  # noqa: BLE001 — 게이지 조회 실패는 자동 압축을 건너뛴다
             gauge = None
         if gauge and _needs_auto_compact(gauge, message):
-            compact_ctx = _assemble_turn_context(session, db, operation="compact")["agent_context"]
+            # agent_version을 여기도 넘긴다 — 자동 압축이 사용자가 고른 버전과 다른 버전으로
+            # 돌면 버전 혼선이 생긴다 (RPA-167 요청서 명시 회귀 주의사항).
+            compact_ctx = _assemble_turn_context(
+                session, db, operation="compact", agent_version=payload.agent_version
+            )["agent_context"]
             try:
                 with usage_context(
                     component="agent", actor_type="user", user_id=user_id, session_id=session_key
@@ -866,7 +911,9 @@ async def agent_turn(
             except Exception:  # noqa: BLE001 — 자동 압축 실패가 사용자 턴을 막지 않게
                 logger.warning("자동 compact 실패 (무시): session=%s", session_key, exc_info=True)
 
-    ctx = _assemble_turn_context(session, db, operation=payload.operation)
+    ctx = _assemble_turn_context(
+        session, db, operation=payload.operation, agent_version=payload.agent_version
+    )
     agent_context = ctx["agent_context"]
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
 
