@@ -83,6 +83,9 @@ def _canon_actions(actions: list) -> list:
         {
             "o": a.get("order"), "p": a.get("package"), "a": a.get("action"), "l": a.get("label"),
             "params": [(p.get("name"), p.get("value"), p.get("value_source")) for p in (a.get("parameters") or [])],
+            # 변수 연결(v3)도 비교한다 — produces/consumes만 바꾸는 편집이 무변경으로 오판되지 않게.
+            "prod": [(r.get("name"), r.get("role")) for r in (a.get("produces") or []) if isinstance(r, dict)],
+            "cons": [(r.get("name"), r.get("role")) for r in (a.get("consumes") or []) if isinstance(r, dict)],
             "children": _canon_actions(a.get("children") or []),
         }
         for a in actions
@@ -312,9 +315,12 @@ async def edit_node(state: TurnState) -> dict:
 
     # 연산을 현재 흐름도에 적용한다. 아무것도 적용되지 않았거나(존재하지 않는 id 등) 순효과가
     # 없으면(무변경) 유효 id를 다시 보여주며 1회 재요청하고, 그래도 안 바뀌면 정직하게 저하한다.
+    # 연산 일부만 적용되고 나머지가 실패한(errors 비어있지 않은) 경우도 '미완결'로 본다 —
+    # 실패한 연산을 삼키고 applied>0을 성공으로 처리하면 사용자가 요청한 수정 일부가 조용히
+    # 누락된다. 유효 id를 재안내해 1회 재요청하고, 재요청도 완결되지 않으면 정직하게 저하한다.
     flow, applied, errors = _apply_to_flow(base, ops)
-    if applied == 0 or _is_noop_edit(flow, base):
-        logger.info("edit 연산 무효과 — 유효 id 재안내 후 1회 재요청 (사유 %s)", errors[:3])
+    if applied == 0 or errors or _is_noop_edit(flow, base):
+        logger.info("edit 연산 미완결(적용 %d, 실패 %s) — 유효 id 재안내 후 1회 재요청", applied, errors[:3])
         messages.append(response)
         messages.append(HumanMessage(content=_retry_message(errors, outline)))
         response = await llm.ainvoke(messages, config=usage_config)  # 재요청은 도구 없이
@@ -326,8 +332,8 @@ async def edit_node(state: TurnState) -> dict:
         if not ops.operations:
             return {"turn_type": TYPE_ANSWER, "answer": ops.answer or _CANT_APPLY, "sources": sink_to_sources(sink)}
         flow, applied, errors = _apply_to_flow(base, ops)
-        if applied == 0 or _is_noop_edit(flow, base):
-            logger.warning("edit 재요청 후에도 무변경 — 답변으로 저하")
+        if applied == 0 or errors or _is_noop_edit(flow, base):
+            logger.warning("edit 재요청 후에도 미완결(적용 %d, 실패 %s) — 답변으로 저하", applied, errors[:3])
             return {"turn_type": TYPE_ANSWER, "answer": _CANT_APPLY, "sources": sink_to_sources(sink)}
 
     # 라이브 렌더: 적용된 수정안을 즉시 프레임으로 흘려보낸다(추천 흐름도 상세 패널이 트리로 표시).

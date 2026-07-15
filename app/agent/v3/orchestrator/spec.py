@@ -86,11 +86,16 @@ def build_flow_spec(state: dict, document: str | None) -> dict:
 
     d = spec.model_dump()
     # req_id 결정론 보정 — LLM이 빠뜨리거나 중복 내면 순번으로 다시 부여한다 (앵커 무결성).
+    # 대체값(req-N)이 기존 명시 id와 또 충돌할 수 있어, 비어 있는 번호까지 전진시킨다.
+    explicit = {r.get("req_id") for r in d.get("requirements") or [] if r.get("req_id")}
     seen: set[str] = set()
-    for i, r in enumerate(d.get("requirements") or []):
+    counter = 1
+    for r in d.get("requirements") or []:
         rid = r.get("req_id")
         if not rid or rid in seen:
-            rid = f"req-{i + 1}"
+            while f"req-{counter}" in seen or f"req-{counter}" in explicit:
+                counter += 1
+            rid = f"req-{counter}"
             r["req_id"] = rid
         seen.add(rid)
     emit_spec_frame(d, f"요구사항 {len(d.get('requirements') or [])}건 정형화")

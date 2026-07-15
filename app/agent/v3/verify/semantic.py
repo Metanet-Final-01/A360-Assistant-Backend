@@ -84,11 +84,27 @@ def run_semantic_check(spec: dict, flow: dict, *, purpose: str = "verify_semanti
         purpose=purpose,
         model_cls=CoverageReport,
     )
-    # 앵커 무결성: LLM이 스펙에 없는 req_id를 만들어내면 버린다 (환각 채점 차단).
+    # 앵커 무결성: LLM이 스펙에 없는 req_id를 만들어내면 버리고, 같은 req_id 중복은
+    # 첫 판정만 남긴다 (환각·중복 채점 차단).
     valid_ids = {r.get("req_id") for r in spec.get("requirements") or []}
-    report.entries = [e for e in report.entries if e.req_id in valid_ids]
+    deduped: list[CoverageEntry] = []
+    seen_ids: set[str] = set()
+    for e in report.entries:
+        if e.req_id in valid_ids and e.req_id not in seen_ids:
+            deduped.append(e)
+            seen_ids.add(e.req_id)
+    report.entries = deduped
     # priority는 스펙이 진실 원천 — LLM 출력값을 스펙 값으로 덮는다.
     prio = {r.get("req_id"): r.get("priority", "must") for r in spec.get("requirements") or []}
     for e in report.entries:
         e.priority = prio.get(e.req_id, e.priority)
+    # 채점 누락 보정: LLM이 빠뜨린 요구는 missing으로 채운다 — 누락을 빼고 계산하면
+    # must_coverage가 부풀고 하드 게이트도 새는(미채점 must 통과) 방향으로 왜곡된다.
+    for r in spec.get("requirements") or []:
+        rid = r.get("req_id")
+        if rid and rid not in seen_ids:
+            report.entries.append(CoverageEntry(
+                req_id=rid, priority=prio.get(rid, "must"), status="missing",
+                note="채점관이 이 요구를 판정하지 않음(누락) — 보수적으로 missing 처리",
+            ))
     return report

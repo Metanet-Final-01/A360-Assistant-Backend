@@ -101,14 +101,15 @@ def _guard_plan(tasks: list[str], state: TurnState) -> tuple[list[str], list[str
         plan = dedup
         notes.append("흐름도 없는 edit → generate 강등")
 
+    # 빈 계획(미지 task 전량 탈락 등) 폴백을 먼저 — 그래야 아래 edit 상향 가드까지 탄다.
+    if not plan:
+        plan = [ROUTE_QA]
+        notes.append("빈 계획 — qa 폴백")
+
     # 수정 명령이 qa 단일로 샌 경우 edit 상향 (RPA-98 가드 계승)
     if plan == [ROUTE_QA] and _looks_like_edit(state):
         plan = [ROUTE_EDIT]
         notes.append("흐름도 존재 + 수정 명령 — qa에서 edit로 상향")
-
-    if not plan:
-        plan = [ROUTE_QA]
-        notes.append("빈 계획 — qa 폴백")
     return plan, notes
 
 

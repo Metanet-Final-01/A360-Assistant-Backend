@@ -169,6 +169,14 @@ def run_simulation(spec: dict, flow: dict, *, purpose: str = "verify_simulate") 
         purpose=purpose,
         model_cls=SimulationReport,
     )
-    # 판정 무결성: 트레이서가 만들지 않은 경로 판정은 버린다.
+    # 판정 무결성: 트레이서가 만들지 않은 경로 판정은 버리고, 판정이 누락된 경로는
+    # 보수적으로 실패 처리한다 — 누락을 빼고 나누면 pass_rate가 부푼다(전량 누락 시 1.0).
     report.verdicts = [v for v in report.verdicts if v.trace_id in traces]
+    judged = {v.trace_id for v in report.verdicts}
+    for tid in traces:
+        if tid not in judged:
+            report.verdicts.append(TraceVerdict(
+                trace_id=tid, ok=False,
+                issues=["판정관이 이 경로를 판정하지 않음(누락) — 보수적으로 실패 처리"],
+            ))
     return report

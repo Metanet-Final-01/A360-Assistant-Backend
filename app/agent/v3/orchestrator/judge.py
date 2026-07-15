@@ -153,10 +153,13 @@ def judge_candidates(
     )
     winner = by_id[winner_row["candidate_id"]]
 
+    # 이식 지시는 LLM이 지목한 승자 기준으로 쓰였다 — 하드 게이트로 실제 승자가 달라졌으면
+    # 좌표·전제가 안 맞는 지시이므로 폐기한다 (엉뚱한 트리에 수술하는 것보다 무이식이 낫다).
+    llm_winner_matches = bool(llm_out) and llm_out.winner == winner.candidate_id
     transplant_findings = [
         Finding(layer="judge", severity="minor", location=t.to_location or None,
                 message=f"이식 지시: {t.instruction}", fix_hint=t.instruction)
-        for t in (llm_out.transplants if llm_out else [])
+        for t in (llm_out.transplants if llm_winner_matches else [])
         if t.instruction.strip()
     ][:5]
 

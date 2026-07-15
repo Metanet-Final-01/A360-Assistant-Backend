@@ -448,6 +448,93 @@ def test_repair_spec_excerpts_supplies_insertion_vocabulary():
     assert "Loop/cloudUsingLoopAction" not in dedup
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 코드리뷰(PR #249) 반영 회귀 잠금
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_r8_close_only_in_catch_still_leaks():
+    """catch에서만 닫는 세션 — 오류 경로 fork라 정상 경로 누수가 R8로 잡혀야 한다."""
+    steps = [{"step_id": "s1", "actions": [
+        _act("Error handler", "errorHandlerTry", children=[
+            _act("Excel advanced", "cloudExcelOpen", params=[_param("sessionName", "S")]),
+        ]),
+        _act("Error handler", "errorHandlerCatch", children=[
+            _act("Excel advanced", "excelAdvancedPackageCloseAction", params=[_param("sessionName", "S")]),
+        ]),
+    ]}]
+    violations = checker.run_session_checks(steps)
+    assert any(v.rule == "R8" for v in violations)
+
+
+def test_r8_close_in_finally_passes():
+    """표준 골격(열기 try / 닫기 finally)은 fork 후에도 깨끗해야 한다."""
+    steps = [{"step_id": "s1", "actions": [
+        _act("Error handler", "errorHandlerTry", children=[
+            _act("Excel advanced", "cloudExcelOpen", params=[_param("sessionName", "S")]),
+        ]),
+        _act("Error handler", "errorHandlerCatch"),
+        _act("Error handler", "errorHandlerFinally", children=[
+            _act("Excel advanced", "excelAdvancedPackageCloseAction", params=[_param("sessionName", "S")]),
+        ]),
+    ]}]
+    violations = checker.run_session_checks(steps)
+    assert not any(v.rule in ("R7", "R8") for v in violations)
+
+
+def test_r9_first_iteration_inside_loop():
+    """Loop 본문 안 '소비 후 생산' — 1회차 미정의 사용이 R9로 잡히고, 루프 뒤 소비는 관대."""
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Loop", "cloudUsingLoopAction", children=[
+            _act("String", "assign", params=[_param("value", "$x$")], consumes=[{"name": "x"}]),
+            _act("String", "assign", produces=[{"name": "x"}]),
+        ]),
+        _act("String", "assign", params=[_param("value", "$x$")], consumes=[{"name": "x"}]),
+    ]}], "variables": []}
+    violations = checker.run_dataflow_checks(flow, FakeCatalog())
+    r9 = [v for v in violations if v.rule == "R9"]
+    assert len(r9) == 1  # 루프 안 1회차 1건만 — 루프 뒤 소비는 maybe로 관대
+    assert "children" in (r9[0].location or "")
+
+
+def test_semantic_fills_missing_requirements(monkeypatch):
+    """L2가 요구를 빠뜨리면 missing으로 채워 must_coverage 부풀림·게이트 누수를 막는다."""
+    import app.agent.v3.verify.semantic as semantic_mod
+
+    spec = {"goal": "g", "requirements": [
+        {"req_id": "req-1", "priority": "should", "text": "a"},
+        {"req_id": "req-2", "priority": "must", "text": "b"},
+    ]}
+    fake_report = semantic_mod.CoverageReport(entries=[
+        semantic_mod.CoverageEntry(req_id="req-1", status="covered", evidence=["n1"]),
+        semantic_mod.CoverageEntry(req_id="req-9", status="covered", evidence=["n2"]),  # 환각 id
+    ])
+    monkeypatch.setattr(semantic_mod, "chat_json", lambda *a, **k: fake_report)
+    report = semantic_mod.run_semantic_check(spec, {"steps": []})
+    by_id = {e.req_id: e for e in report.entries}
+    assert set(by_id) == {"req-1", "req-2"}
+    assert by_id["req-2"].status == "missing" and by_id["req-2"].priority == "must"
+    assert report.must_coverage == 0.0
+    assert [e.req_id for e in report.hard_gate_failures()] == ["req-2"]
+
+
+def test_simulation_missing_verdicts_counted_as_fail(monkeypatch):
+    """판정관이 일부 경로만 판정하면 누락 경로는 실패로 채워 pass_rate 부풀림을 막는다."""
+    import app.agent.v3.verify.simulate as simulate_mod
+
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Message box", "messageBoxAction", params=[_param("message", "hi")]),
+    ]}]}
+    traces = simulate_mod.build_traces(flow)
+    assert len(traces) >= 2
+    fake = simulate_mod.SimulationReport(verdicts=[
+        simulate_mod.TraceVerdict(trace_id=next(iter(traces)), ok=True),
+    ])
+    monkeypatch.setattr(simulate_mod, "chat_json", lambda *a, **k: fake)
+    report = simulate_mod.run_simulation({"goal": "g"}, flow)
+    assert {v.trace_id for v in report.verdicts} == set(traces)
+    assert report.pass_rate == 1 / len(traces)
+
+
 def test_judge_hard_gate_and_llm_failure_fallback(monkeypatch):
     """LLM 심판이 죽어도 결정론 신호로 승자를 내고, 게이트 실패 후보는 승자 자격이 없다."""
     import app.agent.v3.orchestrator.judge as judge_mod

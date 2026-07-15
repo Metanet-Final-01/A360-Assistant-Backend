@@ -125,7 +125,8 @@ async def _generate_a360(state: TurnState) -> dict:
     """
     parsed = state.get("parsed_doc")
     document = _format_document(parsed) if parsed and _has_text(parsed) else None
-    spec = build_flow_spec(dict(state), document)
+    # build_flow_spec은 동기 LLM 호출 — 이벤트 루프를 막지 않게 스레드로 내린다.
+    spec = await asyncio.to_thread(build_flow_spec, dict(state), document)
     result = await generate_flow(state["analysis"], document, spec)
 
     flow = result.get("recommendation") or Recommendation(steps=[]).model_dump()

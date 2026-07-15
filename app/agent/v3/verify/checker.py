@@ -410,6 +410,13 @@ class _SessionWalker:
     def _snapshot(self) -> tuple[dict, set]:
         return ({k: list(v) for k, v in self.opened.items()}, set(self.maybe))
 
+    @staticmethod
+    def _merge_lenient(a: tuple[dict, set], b: tuple[dict, set]) -> tuple[dict, set]:
+        """두 상태의 관대 병합 — 양쪽에 다 있는 열림만 확정(짧은 스택), 나머지는 maybe."""
+        opened = {k: list(min((a[0][k], b[0][k]), key=len)) for k in set(a[0]) & set(b[0])}
+        maybe = a[1] | b[1] | (set(a[0]) ^ set(b[0]))
+        return opened, maybe
+
     def _restore(self, snap: tuple[dict, set]) -> None:
         self.opened = {k: list(v) for k, v in snap[0].items()}
         self.maybe = set(snap[1])
@@ -482,15 +489,31 @@ class _SessionWalker:
                 self._walk_if_group(group, path, step_id, in_finally)
                 continue
             if kind == "eh_group":
-                # try → catch → finally 순차 심볼릭 근사. catch는 try 완료 상태에서 잇는다 —
-                # 실제로는 try 도중 실패로 진입하지만, 세션 정합의 주 패턴(열기 try/닫기 finally)
-                # 판정에는 이 근사로 충분하고 fork 폭발을 피한다.
+                # try는 본선, catch는 오류 경로 fork로 걷는다 — catch 안의 닫기가 본선 상태를
+                # 바꾸면 'catch에서만 닫는' 결함(정상 경로 누수)이 R8에 안 잡힌다. catch fork의
+                # 시작 상태는 try 전/후의 관대 병합(공통=확정, 차이=maybe) — try가 어디까지
+                # 실행되고 실패했는지 모르므로 양끝 어느 쪽 상태든 오탐 없이 수용한다.
+                before_try = self._snapshot()
                 for idx, act in group:
                     role = _eh_role(act.get("action"))
-                    self.walk(
-                        act.get("children") or [], f"{path}[{idx}].children", step_id,
-                        in_finally=in_finally or role == "finally",
-                    )
+                    if role == "try":
+                        self.walk(act.get("children") or [], f"{path}[{idx}].children", step_id, in_finally)
+                after_try = self._snapshot()
+                fork_base = self._merge_lenient(before_try, after_try)
+                catch_maybe: set = set()
+                for idx, act in group:
+                    if _eh_role(act.get("action")) != "catch":
+                        continue
+                    self._restore(fork_base)
+                    self.walk(act.get("children") or [], f"{path}[{idx}].children", step_id, in_finally)
+                    got = self._snapshot()
+                    # catch에서 새로 연/바뀐 키는 이후 maybe로만 취급 (R7 오탐 방지)
+                    catch_maybe |= (set(got[0]) - set(after_try[0])) | got[1]
+                self._restore(after_try)
+                self.maybe |= catch_maybe
+                for idx, act in group:
+                    if _eh_role(act.get("action")) == "finally":
+                        self.walk(act.get("children") or [], f"{path}[{idx}].children", step_id, in_finally=True)
                 continue
             idx, act = group[0]
             location = f"{path}[{idx}]"
@@ -525,6 +548,18 @@ class _SessionWalker:
             present = [key in f[0] for f in finals]
             if all(present):
                 merged_opened[key] = min((f[0][key] for f in finals), key=len)
+                depths = {len(f[0][key]) for f in finals}
+                if len(depths) > 1:  # 전 분기 열림이지만 중첩 깊이가 다름 — 경로별 동작 상이
+                    pkg, name = key
+                    shown = name if name != _ANON else "(이름 미지정)"
+                    self.violations.append(
+                        Violation(
+                            "R7", f"{path}[{first_idx}]",
+                            f"If 분기 간 세션 '{shown}'({pkg})의 열림 중첩 수가 다릅니다 — "
+                            "일부 분기가 같은 세션을 추가로 열어, 병합 이후 닫기 횟수가 경로에 따라 달라집니다.",
+                            package=pkg, action=first_act.get("action"), step_id=step_id,
+                        )
+                    )
             else:
                 merged_maybe.add(key)
                 if any(present):  # 일부 분기에서만 열림/닫힘 — 상태 불일치
@@ -753,7 +788,15 @@ class _DataflowWalker:
                 if not children:
                     continue
                 if act.get("package") == "Loop":
-                    self.maybe |= self._scan_produces(children)  # 반복 2회차 정의 관대화
+                    # 1회차는 진입 상태 그대로 걸어 def-before-use(R9)를 실제로 검사하고,
+                    # 본문 산출은 0회전 가능성 때문에 확정(defined)이 아닌 maybe로 강등한다.
+                    # (선스캔 관대화는 1회차의 진짜 미정의 사용까지 삼켰다 — 0374 실측 교훈.)
+                    snap = self._snapshot()
+                    self.walk(children, f"{location}.children", step_id)
+                    after = self._snapshot()
+                    self.defined = set(snap[0])
+                    self.maybe = snap[1] | after[1] | (after[0] - snap[0])
+                    continue
                 self.walk(children, f"{location}.children", step_id)
 
     def report_dead_outputs(self, output_vars: set[str]) -> None:

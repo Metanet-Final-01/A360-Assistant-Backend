@@ -161,16 +161,27 @@ def _locate(flow: dict, node_id: str | None):
     return None
 
 
+def _var_refs(value) -> list[dict]:
+    """produces/consumes 스펙을 VarRef dict 목록으로 정규화한다 (이름 없는 원소는 버린다)."""
+    return [r for r in (value or []) if isinstance(r, dict) and r.get("name")]
+
+
 def _new_action(spec: dict | None, children: list[dict] | None = None) -> dict:
     """LLM 스펙에서 새 액션 dict를 만든다 — order는 이후 renumber가 채운다."""
     spec = spec or {}
-    return {
+    out = {
         "package": spec.get("package"),
         "action": spec.get("action"),
         "label": spec.get("label"),
         "parameters": spec.get("parameters") or [],
         "children": children if children is not None else (spec.get("children") or []),
     }
+    # 변수 연결(v3)은 삽입 시에도 보존한다 — 버리면 R9/R10이 새 액션을 못 본다.
+    if spec.get("produces"):
+        out["produces"] = _var_refs(spec.get("produces"))
+    if spec.get("consumes"):
+        out["consumes"] = _var_refs(spec.get("consumes"))
+    return out
 
 
 def _insert_at(parent: list[dict], node: dict, container: dict, position: str) -> bool:
@@ -281,7 +292,14 @@ def _apply_update(flow: dict, op: EditOp) -> bool:
         node["action"] = op.action_name
     if op.label is not None:
         node["label"] = op.label
-    return op.package is not None or op.action_name is not None or op.label is not None
+    if op.produces is not None:
+        node["produces"] = _var_refs(op.produces)
+    if op.consumes is not None:
+        node["consumes"] = _var_refs(op.consumes)
+    return any(
+        v is not None
+        for v in (op.package, op.action_name, op.label, op.produces, op.consumes)
+    )
 
 
 def _apply_set_flow(flow: dict, op: EditOp) -> bool:

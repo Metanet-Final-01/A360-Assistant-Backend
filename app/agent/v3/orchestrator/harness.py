@@ -40,7 +40,16 @@ _STOP_AFTER_NO_IMPROVE = 2  # 연속 무개선 종료 — 진동 방지
 # 질문 카드로 승격되는 규칙 — 교정 대상도, confidence 감점 대상도 아니다.
 CARD_RULES = frozenset({"R3"})
 # confidence 감점 대상 오류 규칙 (warning 등급 R10/R12는 감점하지 않는다).
-_PENALTY_RULES = frozenset({"R2", "R4", "R5", "R6", "R7", "R8", "R9", "R11"})
+_PENALTY_RULES = frozenset({"R2", "R4", "R5", "R6", "R7", "R8", "R9", "R11", "R13", "R14"})
+# 같은 위치에 위반이 겹칠 때의 우선순위 — R1(환각) > 오류 규칙 > 경고. 경고(R12 등)가
+# 오류(R7 등)를 가려 감점이 누락되는 것을 막는다.
+_RULE_RANK = {"R1": 3}
+
+
+def _rule_rank(rule: str | None) -> int:
+    if rule in _RULE_RANK:
+        return _RULE_RANK[rule]
+    return 2 if rule in _PENALTY_RULES else 1
 
 
 def collect_violations(flow: dict, catalog: CatalogLookup) -> list[dict]:
@@ -69,7 +78,7 @@ def attach_confidence(
                다중 후보의 공짜 앙상블 신호. None이면(수정 경로 등) 미적용.
     semantic : 소속 단계의 L2 status — covered ×1.0 / partial ×0.85 / violated ×0.6.
                None이면 미적용.
-    감점     : 오류 규칙(R2·R4~R9·R11)만 ×0.75. R3(카드)·warning(R10/R12)은 감점 없음.
+    감점     : 오류 규칙(R2·R4~R9·R11·R13·R14)만 ×0.75. R3(카드)·warning(R10/R12)은 감점 없음.
     """
     best: dict[tuple, float] = {}
     for h in sink:
@@ -83,8 +92,8 @@ def attach_confidence(
         if rule in CARD_RULES:
             continue  # 입력 대기 ≠ 결함
         loc = (v.get("step_id"), v.get("location"))
-        if loc[1] and (loc not in viol or rule == "R1"):  # R1(액션 부재)을 우선
-            viol[loc] = rule
+        if loc[1] and (loc not in viol or _rule_rank(rule) > _rule_rank(viol[loc])):
+            viol[loc] = rule  # 심각도 높은 규칙 우선 — 경고가 오류를 가리지 않게
 
     sem_factor = {"covered": 1.0, "partial": 0.85, "violated": 0.6}
 
@@ -244,7 +253,11 @@ def refine_flow(
 
     current = flow
     current_violations = violations
-    current_weight = weight(_error_findings(round_findings))
+    # 회귀 가드 비교축은 '정적 위반 가중합'만 쓴다 — extra(이식 지시 등)는 정적 재검증으로
+    # 소거를 판정할 수 없어, 합산하면 첫 라운드가 정적 결함을 새로 만들어도 통과해 버린다.
+    current_weight = weight(_error_findings(findings))
+    # extra만 있고 정적 위반이 0인 흐름도 개선(이식)은 '정적 악화 없음(<=)'이면 채택한다.
+    extras_pending = bool(_error_findings(list(extra_findings or [])))
     repaired = False
     no_improve = 0
 
@@ -287,11 +300,14 @@ def refine_flow(
         new_violations = collect_violations(work, catalog)
         new_findings, _ = from_violations_dicts(new_violations)
         new_weight = weight(_error_findings(new_findings))
-        if new_weight < current_weight:  # 회귀 가드 — 줄었을 때만 채택
+        # 회귀 가드 — 정적 가중합이 줄었을 때만 채택. 이식 지시가 걸려 있는 라운드는
+        # '정적 악화 없음(<=)'까지 허용한다 (이식은 정적 신호에 안 잡히는 개선이므로).
+        if new_weight < current_weight or (extras_pending and new_weight <= current_weight):
             current, current_violations = work, new_violations
             current_weight = new_weight
             repaired = True
             no_improve = 0
+            extras_pending = False  # 이식 지시는 1회 반영으로 소진 — 반복 강제하면 진동한다
             emit_flow_frame(current, current_violations, f"교정 라운드 {round_no} 적용")
             round_findings = new_findings  # 이후 라운드는 잔여 정적 위반만 (extra는 1회성)
             if not _error_findings(round_findings):

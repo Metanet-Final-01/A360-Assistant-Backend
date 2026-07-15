@@ -16,6 +16,7 @@ v2의 "compose ReAct 1후보 → 정적 검수 → 국소 교정"을 다음으�
 """
 
 import asyncio
+import copy
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -429,12 +430,20 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
     flow = _attach_sources(flow, sink)
 
     coverage = None
-    if refined["repaired"]:  # 흐름이 바뀌었을 때만 L2 재채점 (설계: 심판 시점+최종 시점 2회)
+    sim_rate = winner.sim_pass_rate
+    if refined["repaired"]:  # 흐름이 바뀌었을 때만 L2/L3 재채점 (설계: 심판 시점+최종 시점 2회)
         try:
             async with sem:
                 coverage = await asyncio.to_thread(run_semantic_check, spec, flow)
         except Exception as e:  # noqa: BLE001
             logger.warning("최종 L2 재채점 실패 — 승자 채점 재사용: %s", e)
+        # L3도 재실행 — 교정으로 구조가 바뀌었는데 교정 전 통과율을 쓰면 신뢰도가 낡는다.
+        from ..verify.simulate import run_simulation
+        try:
+            async with sem:
+                sim_rate = (await asyncio.to_thread(run_simulation, spec, flow)).pass_rate
+        except Exception as e:  # noqa: BLE001
+            logger.warning("최종 L3 재실행 실패 — 승자 통과율 재사용: %s", e)
     must_cov = coverage.must_coverage if coverage is not None else winner.must_coverage
 
     findings_final, r3_cards = from_violations_dicts(violations)
@@ -463,7 +472,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
     flow["flow_confidence"] = compute_flow_confidence(
         must_coverage=must_cov,
         findings=findings_final,
-        sim_pass_rate=winner.sim_pass_rate,
+        sim_pass_rate=sim_rate,
         blocking_cards=blocking_cards,
     )
 
@@ -471,7 +480,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
         "must_coverage": must_cov,
         "blockers": sum(1 for f in findings_final if f.severity == "blocker"),
         "warnings": sum(1 for f in findings_final if f.severity == "warning"),
-        "sim_pass_rate": winner.sim_pass_rate,
+        "sim_pass_rate": sim_rate,
         "cards": len(cards),
         "flow_confidence": flow["flow_confidence"],
     }, "최종 검증 요약")
@@ -480,8 +489,13 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
     try:
         rec = Recommendation.model_validate(flow)
     except ValidationError as e:
-        logger.warning("최종 흐름도 정규화 실패, 빈 추천안: %s", e)
-        rec = Recommendation(steps=[])
+        # 마지막 관문에서 전부 버리지 않는다 — 교정 전 승자 초안(직전 유효 후보)으로 강등 시도.
+        logger.warning("최종 흐름도 정규화 실패 — 승자 초안으로 강등 시도: %s", e)
+        try:
+            rec = Recommendation.model_validate(_coerce_flow(copy.deepcopy(winner.flow)))
+        except ValidationError as e2:
+            logger.warning("승자 초안도 정규화 실패, 빈 추천안: %s", e2)
+            rec = Recommendation(steps=[])
     rec_dict = rec.model_dump()
     emit_flow_frame(rec_dict, violations, "완료")
     return {"recommendation": rec_dict, "violations": violations}
@@ -519,7 +533,10 @@ async def recommend(
         result: dict
 
     async def _run(_state: _S) -> dict:
-        spec = build_flow_spec({"analysis": _to_dict(analysis), "message": ""}, document)
+        # 동기 LLM 호출 — 이벤트 루프 블로킹 방지 (파이프라인의 다른 LLM 호출과 동일 정책).
+        spec = await asyncio.to_thread(
+            build_flow_spec, {"analysis": _to_dict(analysis), "message": ""}, document
+        )
         if constraints:
             spec.setdefault("assumptions", []).extend(constraints)
         return {"result": await generate_flow(analysis, document, spec)}

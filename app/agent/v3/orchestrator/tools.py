@@ -6,12 +6,15 @@
 """
 
 import json
+import logging
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 
 from ..retrieval import get_retriever
 from ..verify.catalog import get_catalog
+
+logger = logging.getLogger(__name__)
 
 _SEARCH_LIMIT = 5
 
@@ -115,8 +118,10 @@ def execute_tool_calls(tools: list, ai_message) -> list[ToolMessage]:
         else:
             try:
                 content = fn.invoke(tc["args"])
-            except Exception as e:  # noqa: BLE001 — 도구 오류는 LLM에 알리고 계속
-                content = f"도구 실행 실패: {e}"
+            except Exception:  # noqa: BLE001 — 도구 오류는 LLM에 알리고 계속
+                # 예외 상세(접속 문자열 등 인프라 정보 가능)는 서버 로그에만 남긴다.
+                logger.warning("도구 %s 실행 실패", tc["name"], exc_info=True)
+                content = f"도구 실행 실패: {tc['name']} — 다른 질의나 방법으로 시도하세요."
         out.append(ToolMessage(content=str(content), tool_call_id=tc.get("id") or ""))
     return out
 

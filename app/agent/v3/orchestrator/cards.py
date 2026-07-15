@@ -224,6 +224,9 @@ def apply_card_values(flow: dict, values: dict[str, Any]) -> tuple[int, list[tup
         kind = card.get("kind")
 
         if kind == "missing_param":
+            if not card.get("targets"):  # 좌표 없는 카드 — 조용히 삼키면 응답이 증발한다
+                errors.append(f"{card_id}: 적용할 대상 좌표(targets)가 없는 카드")
+                continue
             ok_any = False
             for t in card.get("targets") or []:
                 step = steps_by_id.get(t.get("step_id"))
