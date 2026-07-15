@@ -116,8 +116,42 @@ feat(rag): 액션 요약본 동시 청킹 저장 추가 (RPA-12)
 - 시크릿(API 키, 비밀번호) 커밋 — `.env`는 절대 커밋하지 않고 `.env.example`만 갱신
 - `--force` push (본인 작업 브랜치에서 rebase 후는 `--force-with-lease` 허용)
 - 리뷰 없는 머지
+- **공유 DB에 pytest 실행 / TRUNCATE·리셋** — 아래 §7 참고
 
-## 7. 작업 흐름 — 트랙 A(AI 자동) / 트랙 B(수동)
+## 7. 공유 DB 규약 (RPA-90 / RPA-132 / RPA-186)
+
+DB가 셋이다. **공유는 팀원이 실시간으로 쓰고 있다 — 파괴적 작업 금지.**
+
+| DB | env | 기본 |
+|---|---|---|
+| 앱 (계정·세션·대화·추천) | `APP_DATABASE_URL` | **미설정 = 로컬 docker** |
+| 관측 (audit_logs·llm_usage) | `OBSERVABILITY_DATABASE_URL` | 공유 Neon |
+| RAG 코퍼스 | `RAG_DATABASE_URL` | 공유 Neon |
+
+### Alembic — 공유 앱 DB를 쓸 때
+
+공유 DB는 **head가 하나뿐**이라, 각자 마이그레이션을 올리면 남의 브랜치가 깨진다.
+
+1. 공유 DB에는 **`dev`에 머지된 리비전만** 적용한다. feature 브랜치 head를 올리지 말 것.
+2. **스키마를 건드리는 동안은 `APP_DATABASE_URL`을 끄고 로컬**에서 작업한다.
+3. 마이그레이션이 `dev`에 머지되면 **한 명이** 공유 DB에 1회 적용하고 팀에 공지한다.
+
+### 오염 방지 — "바라지 않고 확인한다"
+
+격리는 **메커니즘 + 검증**을 쌍으로 둔다. 메커니즘만 있으면 조용히 깨진다(실제로 2회 겪음).
+
+- **pytest**: `tests/conftest.py`가 import **전에** `APP_DATABASE_URL`을 제거하고,
+  `_assert_app_db_is_local`이 engine이 정말 로컬인지 fail-closed로 확인한다.
+  ⚠️ 앱 DB는 `app/db.py`가 **import 시점에 engine을 만든다** — 관측·RAG처럼 fixture에서
+  `delenv` 하는 방식은 **통하지 않는다**(이미 커넥션이 열린 뒤다).
+- **live 기동**: `manage.ps1`이 `scripts/check_smoke_isolation.py`로 검사한다.
+  env가 아니라 **`engine.url.host`를 본다** — "env가 비었다"와 "engine이 로컬을 본다"는
+  다른 명제이고, 물어야 할 건 후자다.
+
+가드를 추가·수정하면 **고의로 깨뜨려 빨간불을 확인**할 것. 안 깨지면 그건 가드가 아니다
+(2026-07-15: `load_dotenv` 미실행으로 **항상 LOCAL이라 답하던 가짜 가드**를 실제로 잡았다).
+
+## 8. 작업 흐름 — 트랙 A(AI 자동) / 트랙 B(수동)
 
 팀원마다 Claude Code 사용 여부가 다르므로 두 트랙을 모두 지원한다.
 **결과물 규칙(브랜치명·커밋·PR·리뷰)과 Jira Automation(미러 생성·상태 전환)은 두 트랙에서 완전히 동일하다.**
@@ -145,7 +179,7 @@ Jira 상태는 손대지 않아도 된다 — 브랜치 생성 시 "진행 중",
 - **GitHub 이슈를 직접 만들지 않는다** — Jira에서 이슈를 만들면 Automation이 GitHub 미러(`[RPA-N] ...`, `from-jira` 라벨)를 자동 생성한다
 - GitHub 미러 이슈를 직접 수정·닫지 않는다 (PR의 `Closes #`로 닫히는 것은 예외)
 
-## 8. AI 생성 코드 감사·리뷰 규약
+## 9. AI 생성 코드 감사·리뷰 규약
 
 이 저장소는 상당 부분이 AI(Claude/Cursor 등)로 작성됐다. **AI 코드는 사람과 다르게 틀린다** — 사람은 국소 오류(off-by-one, null 참조)를 내지만 AI는 **정합성(coherence) 오류**를 낸다: 그럴듯하지만 없는 API, 써놨지만 안 물린 config, 예전 설계를 설명하는 문서, 미묘하게 갈린 중복 로직, "있어 보여서" 덧댄 과잉 추상화. 따라서 리뷰는 *국소 정확성*이 아니라 **층간 정합성·죽은 참조**를 겨눈다.
 

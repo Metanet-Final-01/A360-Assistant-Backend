@@ -10,6 +10,20 @@ get_retriever` 참조는 그대로 두어도 최신 스텁을 받는다(get_retr
 호출 시점에 모듈 전역 팩토리를 부르기 때문).
 """
 
+import os
+
+# ⚠️ 이 두 줄은 **아래 import보다 먼저** 실행돼야 한다 (RPA-186). 순서를 바꾸지 말 것.
+#
+# 앱 DB는 관측·RAG DB와 달리 `app/db.py`가 **import 시점에 engine을 만든다**. 즉 .env에
+# APP_DATABASE_URL(공유 Neon)이 있으면 `app.db`가 import되는 순간 공유 DB에 커넥션이 열리고,
+# fixture로 env를 지워도 이미 늦다. 아래 `from app.agent...` import가 app.db를 끌고 오므로
+# 그 전에 env에서 뽑아내야 로컬 폴백으로 굳는다.
+#
+# 왜 중요한가: 테스트 63개 중 45개가 TestClient로 실제 SessionLocal을 쓴다. 격리가 없으면
+# 매 pytest 실행이 팀 공유 DB에 세션·문서·추천을 쓴다 — 2026-07-15 관측 DB 오염(47행)의
+# 확대판이다. 아래 _assert_app_db_is_local이 이 메커니즘이 깨졌는지 **확인**한다(바라지 않고).
+_SHARED_APP_DB_URL = os.environ.pop("APP_DATABASE_URL", None)
+
 import pytest
 
 from app.agent.v2 import retrieval as retrieval_mod
@@ -18,6 +32,32 @@ from app.agent.v3 import retrieval as retrieval_mod_v3
 from app.agent.v3.verify import catalog as catalog_mod_v3
 
 from tests.agent_stubs import FakeCatalog, FakeRetriever
+
+
+_LOCAL_DB_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _assert_app_db_is_local():
+    """테스트가 공유 앱 DB를 절대 못 보게 **확인**한다 (RPA-186) — fail-closed.
+
+    위 `os.environ.pop`이 격리 **메커니즘**이고, 이 가드는 그게 실제로 먹었는지 **검증**한다.
+    둘을 나눈 이유: 메커니즘은 import 순서에 의존해서 조용히 깨질 수 있다(누가 conftest 위쪽에
+    import를 추가하거나, 플러그인이 app.db를 먼저 끌어오면). 깨지면 팀 DB가 오염되므로
+    바라지 말고 확인한다 — `scripts/check_smoke_isolation.py`와 같은 철학이다.
+
+    ⚠️ engine.url.host를 본다. env를 보면 안 된다 — engine은 이미 import 시점에 굳었고,
+       "env가 비었다"와 "engine이 로컬을 본다"는 다른 명제다. 실제로 물어야 할 건 후자다.
+    """
+    import app.db
+
+    host = (app.db.engine.url.host or "").lower()
+    assert host in _LOCAL_DB_HOSTS, (
+        f"테스트가 원격 앱 DB({host})에 연결돼 있다 — 팀 공유 DB를 오염시킨다.\n"
+        f"conftest 최상단의 APP_DATABASE_URL pop이 app.db import보다 늦게 실행됐을 수 있다"
+        f"{' (APP_DATABASE_URL이 .env에 설정돼 있음)' if _SHARED_APP_DB_URL else ''}.\n"
+        f"import 순서를 확인할 것 — 이 가드가 깨진 채 돌면 매 pytest가 공유 DB에 쓴다."
+    )
 
 
 @pytest.fixture(autouse=True)

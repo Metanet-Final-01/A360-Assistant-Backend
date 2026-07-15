@@ -2,7 +2,7 @@
 
 **왜 필요한가**: 나머지 스위트는 `SessionLocal`을 통째로 mock해서 실제 DB 쓰기를 한 번도
 하지 않는다. 그래서 UNIQUE 제약·JSONB 왕복·CASCADE처럼 **DB가 실행하는 것**은 전혀 검증되지
-않는다. CONVENTIONS §8이 "스텁/Fake로만 통과한 경로는 별도 live smoke가 필요하다"고 요구하는
+않는다. CONVENTIONS §9가 "스텁/Fake로만 통과한 경로는 별도 live smoke가 필요하다"고 요구하는
 바로 그 구멍이다.
 
 **안전**: 여기가 쓰는 건 **앱 DB(각자 로컬 docker)** 뿐이다 — 공유 자원이 아니다. 게다가

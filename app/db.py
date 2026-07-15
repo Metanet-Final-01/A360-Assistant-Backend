@@ -13,7 +13,26 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 load_dotenv()
 
 
+def _normalize_sqlalchemy_url(url: str) -> str:
+    """libpq 형식(postgresql://)을 SQLAlchemy psycopg 드라이버 형식으로 맞춘다.
+
+    Neon 콘솔이 주는 문자열은 `postgresql://`라 그대로 붙이면 SQLAlchemy가 psycopg2를 찾는다.
+    이미 드라이버가 명시된 URL(`postgresql+psycopg://`)은 건드리지 않는다.
+    """
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
+
+
 def _database_url() -> str:
+    # 공유 앱 DB 토글 (RPA-186) — 설정 시 아래 DATABASE_* 조각 env를 통째로 대체한다.
+    # **미설정이 기본**이라 로컬 단독 개발은 기존과 동일하게 동작한다.
+    # ⚠️ 이 URL은 import 시점에 engine에 굳는다(아래 create_engine). 즉 테스트가 fixture로
+    #    env를 지워도 이미 늦다 — 격리는 tests/conftest.py **최상단**에서 import 전에 한다.
+    shared = os.getenv("APP_DATABASE_URL", "").strip()
+    if shared:
+        return _normalize_sqlalchemy_url(shared)
+
     host = os.getenv("DATABASE_HOST", "localhost")
     port = os.getenv("DATABASE_PORT", "5432")
     name = os.getenv("DATABASE_NAME", "a360")
