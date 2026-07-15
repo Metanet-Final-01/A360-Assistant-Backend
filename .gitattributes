@@ -1,6 +1,7 @@
-# Phase 0 files are content-addressed. Preserve their reviewed bytes across checkouts.
-/assurance/phase0/v1.10/** -text whitespace=cr-at-eol
+# Phase 0 frozen evidence is content-addressed. Preserve reviewed bytes across checkouts.
+/assurance/phase0/v1.10/evidence/frozen/** -text whitespace=cr-at-eol
+/assurance/phase0/v1.10/decisions/*.json -text
 
-# These frozen artifacts contain reviewed trailing spaces in transcripts/Markdown line breaks.
-/assurance/phase0/v1.10/contract.md whitespace=cr-at-eol,-blank-at-eol
-/assurance/phase0/v1.10/independent-review.md whitespace=cr-at-eol,-blank-at-eol
+# These original review transcripts contain reviewed trailing spaces and Markdown line breaks.
+/assurance/phase0/v1.10/evidence/frozen/claude-contract-v1.10.md whitespace=cr-at-eol,-blank-at-eol
+/assurance/phase0/v1.10/evidence/frozen/codex-independent-review-v1.10.md whitespace=cr-at-eol,-blank-at-eol

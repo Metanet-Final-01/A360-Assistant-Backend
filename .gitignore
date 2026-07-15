@@ -54,4 +54,4 @@ _archive_pre_agent_handoff/
 app/rag/_investigation_notes/
 
 # Phase 0 assurance verification outputs (generated, not contract source)
-/assurance/phase0/v1.10/phase0-v1.10-src/.out/
+/assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src/.out/

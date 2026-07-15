@@ -60,10 +60,10 @@ dependency digest는 `python -m pip freeze --all` 결과를 대소문자 구분 
 | `contract_self_test.py` | 66/66, mismatch 0, coverage PASS | fixture 기반 계약 검사이며 attestation이 아님 |
 | `vertical_paths.py` | 양쪽 positive path 성공, negative 전건 deny | `for_testing_only`와 승인 fixture를 쓴 테스트 경로 |
 | `selfattack.py` | 14건 중 4건 우회 재현 | 네 건 모두 보호 runner/writer가 필요한 D-16 잔여 위험으로 공개됨 |
-| `independent-check.py` | 5/5 | 수렴 조건과 알려진 수동 정책 목록 부채 재현 |
+| `codex-independent-check-v1.10.py` | 5/5 | 수렴 조건과 알려진 수동 정책 목록 부채 재현 |
 | 실행 원본 무결성, 실행 후 | 45/45 일치 | 실행으로 동결 원본이 변하지 않음 |
 
-검사에서 생성된 파일 33개는 `phase0-v1.10-src/.out/` 아래에만 존재하며 `.gitignore`로 제외했다.
+검사에서 생성된 파일 33개는 `frozen/phase0-v1.10-src/.out/` 아래에만 존재하며 `.gitignore`로 제외했다.
 수직 경로의 live repository 검사는 작업 트리가 dirty인 사실을 관찰하고 예상대로 `deny`했다.
 
 현재 제품 코드의 읽기 전용 대조에서는 `app/agent/v1`, `app/agent/v2`만 발견됐고 v3 구현은 없었다.
