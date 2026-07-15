@@ -411,3 +411,27 @@ class RetrievalParamOverride(Base):
     # 변경 주체 — 사람 관리자면 이메일, ops-server(X-API-Key)면 "service". 감사용.
     updated_by: Mapped[str | None] = mapped_column(String(320))
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class BudgetLimitOverride(Base):
+    """LLM 예산 상한의 런타임 오버라이드 — 모니터링에서 재시작 없이 조정한다 (RPA-173).
+
+    RPA-149(retrieval_params)와 **같은 패턴**: admin API가 쓰고 /turn 경로가 읽어, 재배포 없이
+    상한을 바꾼다. **append-only·최신행 우선** — 행마다 updated_by/created_at을 남겨 "누가 언제
+    상한을 얼마로 바꿨나" 감사 이력을 겸한다(예산은 서비스를 막는 값이라 이력이 특히 중요하다).
+    행이 하나도 없으면 .env(BUDGET_*_USD)로 폴백한다 — 오버라이드 없는 배포는 무변경.
+
+    **전부 아니면 전무**: 행이 있으면 4개 값이 통째로 env를 대체한다(일부만 오버라이드하는
+    혼합 규칙은 "지금 실제 상한이 얼마냐"를 추적 불가능하게 만든다). 특정 상한만 끄려면 NULL.
+    """
+
+    __tablename__ = "budget_limits"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # NULL = 그 상한 비활성 (env의 '미설정=비활성'과 같은 의미)
+    subject_daily_usd: Mapped[float | None] = mapped_column(Float)
+    subject_monthly_usd: Mapped[float | None] = mapped_column(Float)
+    global_daily_usd: Mapped[float | None] = mapped_column(Float)
+    global_monthly_usd: Mapped[float | None] = mapped_column(Float)
+    updated_by: Mapped[str | None] = mapped_column(String(320))
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

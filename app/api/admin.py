@@ -21,7 +21,9 @@ from app.api.auth import get_optional_user
 from app.core.observability_db import get_obs_db
 from app.db import get_db
 from app.rag.retrieval.params import RetrievalParams
+from app.schemas.budget import BudgetLimitsUpdate
 from app.schemas.retrieval import RetrievalParamsUpdate
+from app.services import budget as budget_service
 from app.services import retrieval_params as rp_service
 
 logger = logging.getLogger(__name__)
@@ -457,6 +459,81 @@ def put_retrieval_params(
     return {
         "source": "db",
         **_params_payload(RetrievalParams(**body.model_dump())),
+        "updated_by": row.updated_by,
+        "updated_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM 예산 상한 런타임 조정 (RPA-173) — retrieval-params(RPA-149)와 같은 패턴
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BUDGET_COLUMNS = ("subject_daily_usd", "subject_monthly_usd",
+                   "global_daily_usd", "global_monthly_usd")
+
+
+@router.get("/budget-limits")
+def get_budget_limits(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """현재 활성 예산 상한 (RPA-173). DB 오버라이드가 있으면 그 값(source=db), 없으면
+    .env 기본값(source=config)을 준다 — ops 화면이 이 값을 프리필한다.
+
+    /turn이 실제로 쓰는 값과 일치시키려고 DB 조회는 이 라우트가 직접 한다(캐시 우회) —
+    관리자가 방금 바꾼 값을 캐시 TTL 때문에 옛 값으로 보여주면 혼란스럽기 때문(RPA-149 규칙).
+    """
+    row = (
+        db.query(models.BudgetLimitOverride)
+        .order_by(models.BudgetLimitOverride.id.desc())
+        .first()
+    )
+    if row is None:
+        env = budget_service._env_limits()
+        return {
+            "source": "config",
+            "subject_daily_usd": env["subject_daily"],
+            "subject_monthly_usd": env["subject_monthly"],
+            "global_daily_usd": env["global_daily"],
+            "global_monthly_usd": env["global_monthly"],
+            "updated_by": None,
+            "updated_at": None,
+        }
+    return {
+        "source": "db",
+        **{c: getattr(row, c) for c in _BUDGET_COLUMNS},
+        "updated_by": row.updated_by,
+        "updated_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+@router.put("/budget-limits")
+def put_budget_limits(
+    body: BudgetLimitsUpdate,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(require_admin),
+) -> dict:
+    """예산 상한 갱신 (RPA-173) — 재배포 없이 다음 턴부터 반영.
+
+    값 검증은 BudgetLimitsUpdate가 한다(0·음수 거부, 월<일 거부) — Pydantic이 422로 떨군다.
+    append-only로 한 행을 추가하고(감사 이력) 캐시를 무효화해 즉시 반영한다. updated_by는 사람
+    관리자면 이메일, ops-server(X-API-Key)면 user가 None이라 "service".
+
+    ⚠️ 이 API는 **서비스를 막는 값**을 바꾼다 — 잘못 낮추면 정상 사용자가 429를 맞는다.
+    근거 없는 변경을 막으려면 scripts/budget_calibration_report.py로 실측 권장값을 먼저 뽑을 것.
+    """
+    row = models.BudgetLimitOverride(
+        **body.model_dump(),
+        updated_by=user.email if user is not None else "service",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    budget_service.bust_cache()  # 다음 check_budget()이 DB를 다시 읽게 — 무중단 반영
+    logger.info("예산 상한 갱신 by=%s limits=%s", row.updated_by, body.model_dump())
+    return {
+        "source": "db",
+        **{c: getattr(row, c) for c in _BUDGET_COLUMNS},
         "updated_by": row.updated_by,
         "updated_at": row.created_at.isoformat() if row.created_at else None,
     }

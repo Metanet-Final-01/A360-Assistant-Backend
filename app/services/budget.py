@@ -31,6 +31,7 @@ eventually-consistent soft cap이다. 정확한 강제가 필요해지면 예약
 
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,21 @@ from sqlalchemy import func, select
 from app import models
 
 logger = logging.getLogger(__name__)
+
+# 상한 이름 → env 키. 이 순서·이름이 DB 컬럼(budget_limits)과 1:1로 대응한다.
+_LIMIT_ENV = {
+    "subject_daily": "BUDGET_SUBJECT_DAILY_USD",
+    "subject_monthly": "BUDGET_SUBJECT_MONTHLY_USD",
+    "global_daily": "BUDGET_GLOBAL_DAILY_USD",
+    "global_monthly": "BUDGET_GLOBAL_MONTHLY_USD",
+}
+
+# DB 조회 주기 상한(초). 변경은 bust_cache()로 즉시 반영되므로, 이 TTL은 PUT을 안 거친 경로로
+# 바뀐 값을 늦게라도 반영하는 안전망 겸 부하 방어다 (RPA-149와 동일 규칙).
+_CACHE_TTL_SEC = 30.0
+
+# (monotonic 시각, {상한이름: 값|None}) — None이면 미로드. monotonic이라 시계 변경에 안 흔들린다.
+_cache: tuple[float, dict[str, float | None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +103,75 @@ def _limit(name: str) -> float | None:
     return value if value > 0 else None
 
 
+def _env_limits() -> dict[str, float | None]:
+    """.env 기반 상한 — DB 오버라이드가 없을 때의 폴백."""
+    return {key: _limit(env) for key, env in _LIMIT_ENV.items()}
+
+
+def _read_override() -> dict[str, float | None] | None:
+    """budget_limits 최신 행 → 상한 dict. **행이 없으면 None**.
+
+    ⚠️ 조회 실패는 None이 아니라 **예외를 올린다** — RPA-149의 retrieval_params는 둘을 None으로
+    합쳐도 됐지만(둘 다 config 폴백이 정답), 예산은 다르다: '행 없음'은 env 폴백이 정답이고,
+    '조회 실패'는 **관리자가 설정한 상한을 조용히 무력화**하는 것이라 구분해야 한다.
+    """
+    from app.db import SessionLocal
+
+    with SessionLocal() as db:
+        row = (
+            db.query(models.BudgetLimitOverride)
+            .order_by(models.BudgetLimitOverride.id.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        # 0·음수가 어쩌다 들어가 있어도(직접 SQL 등) None으로 저하 — env와 같은 규칙
+        return {
+            "subject_daily": _positive_or_none(row.subject_daily_usd),
+            "subject_monthly": _positive_or_none(row.subject_monthly_usd),
+            "global_daily": _positive_or_none(row.global_daily_usd),
+            "global_monthly": _positive_or_none(row.global_monthly_usd),
+        }
+
+
+def _positive_or_none(v: float | None) -> float | None:
+    return float(v) if v is not None and v > 0 else None
+
+
+def active_limits() -> dict[str, float | None]:
+    """현재 활성 상한. DB 오버라이드가 있으면 그걸, 없으면 .env를 준다 (RPA-173).
+
+    TTL 내 재호출은 캐시. /turn hot path에서 불리므로 DB 왕복을 최소화한다.
+
+    **조회 실패 시 이전 값을 지킨다** — retrieval_params는 실패 시 config로 저하해도 검색이
+    조금 덜 최적일 뿐이지만, 예산에서 같은 저하는 **관리자가 건 상한이 사라져 비용이 새는** 것이다.
+    캐시가 있으면 그 값을 유지하고(TTL 연장으로 DB 재시도 폭주 방지), 한 번도 못 읽었으면 env로
+    간다. env는 배포에 명시된 값이라 '아무 상한 없음'보다 안전한 기본이다.
+    """
+    global _cache
+    now = time.monotonic()
+    if _cache is not None and now - _cache[0] < _CACHE_TTL_SEC:
+        return _cache[1]
+    try:
+        override = _read_override()
+    except Exception:
+        if _cache is not None:
+            logger.warning("예산 상한 오버라이드 조회 실패 — 직전 값을 유지한다", exc_info=True)
+            _cache = (now, _cache[1])
+            return _cache[1]
+        logger.warning("예산 상한 오버라이드 조회 실패 — .env 값으로 폴백", exc_info=True)
+        override = None
+    limits = override if override is not None else _env_limits()
+    _cache = (now, limits)
+    return limits
+
+
+def bust_cache() -> None:
+    """캐시 무효화 — admin PUT 직후 호출해 다음 검사가 DB를 다시 읽게 한다(무중단 반영)."""
+    global _cache
+    _cache = None
+
+
 def _period_start(period: str, now: datetime) -> datetime:
     """일별=UTC 자정, 월별=UTC 월초."""
     if period == "daily":
@@ -122,11 +207,12 @@ def check_budget(subject: Subject, now: datetime | None = None) -> BudgetVerdict
 
     상한이 하나도 설정 안 됐으면 DB를 아예 안 읽는다 — 기능을 끈 배포에 쿼리 비용을 물리지 않는다.
     """
+    limits = active_limits()  # DB 오버라이드 우선, 없으면 .env (RPA-173)
     checks = [
-        ("subject", "daily", _limit("BUDGET_SUBJECT_DAILY_USD"), subject),
-        ("subject", "monthly", _limit("BUDGET_SUBJECT_MONTHLY_USD"), subject),
-        ("global", "daily", _limit("BUDGET_GLOBAL_DAILY_USD"), None),
-        ("global", "monthly", _limit("BUDGET_GLOBAL_MONTHLY_USD"), None),
+        ("subject", "daily", limits["subject_daily"], subject),
+        ("subject", "monthly", limits["subject_monthly"], subject),
+        ("global", "daily", limits["global_daily"], None),
+        ("global", "monthly", limits["global_monthly"], None),
     ]
     active = [c for c in checks if c[2] is not None]
     if not active:
