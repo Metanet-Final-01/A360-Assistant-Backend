@@ -43,6 +43,15 @@ def _tokens_at_turn(n: int) -> int:
     return BASE_TOKENS + DELTA_PER_TURN * n
 
 
+def _schema_max_message_len() -> int:
+    """AgentTurnRequest.message의 max_length를 스키마에서 읽는다 — 하드코딩하면 계약이 바뀌어도
+    테스트가 조용히 옛 값을 검증한다. metadata 순서(MinLen/MaxLen)에 의존하지 않게 탐색한다."""
+    for m in sessions_api.AgentTurnRequest.model_fields["message"].metadata:
+        if hasattr(m, "max_length"):
+            return m.max_length
+    raise AssertionError("message 필드에 max_length가 없다 — 단일 입력 상한이 사라졌다")
+
+
 def _message_of_tokens(target: int) -> str:
     """실제 추정기가 정확히 ~target 토큰으로 세는 메시지를 만든다.
 
@@ -85,15 +94,46 @@ def test_auto_compact_does_not_fire_in_normal_short_conversation(monkeypatch):
 # --- 오발동 방지: 아래 경계가 왜 6000인가 ---
 
 def test_largest_observed_single_message_does_not_trigger_compact(monkeypatch):
-    """관측 최대 단일 메시지(3,400tok)를 1턴째에 붙여넣어도 자동 compact가 돌면 안 된다.
+    """관측 최대 단일 메시지(3,400tok)를 붙여넣어도 자동 compact가 돌면 안 된다.
 
-    이게 LIMIT의 **아래 경계**다. LIMIT=3000이면 base(582)+3400=3982로 임계를 넘어 1턴째부터
-    선행 가드(RPA-86)가 compact를 돌린다 — 압축할 history가 없는데 비용($0.00843/콜)만 나간다.
+    LIMIT **아래 경계**의 관측 기반 근거. LIMIT=3000이면 base(582)+3400=3982로 임계를 넘어
+    선행 가드(RPA-86)가 compact를 돌린다 — 압축할 history가 없는데 비용만 나간다.
     """
     g = _gauge_with(monkeypatch, BASE_TOKENS)
     huge = _message_of_tokens(MAX_MESSAGE_TOKENS)
     assert sessions_api._needs_auto_compact(g, huge) is False, (
-        "관측 최대 크기의 단일 메시지가 1턴째 자동 compact를 유발한다 — LIMIT이 너무 낮다")
+        "관측 최대 크기의 단일 메시지가 자동 compact를 유발한다 — LIMIT이 너무 낮다")
+
+
+def test_schema_max_message_cannot_alone_trigger_compact(monkeypatch):
+    """**스키마가 허용하는 최대 입력**으로도 단일 입력만으론 임계를 못 넘는다 (RPA-172 live 정정).
+
+    처음엔 아래 경계를 '관측 최대 메시지(3,400)'로 잡았으나, 진짜 상한은 관측값이 아니라
+    **`AgentTurnRequest.message`의 max_length**다 — 관측은 표본이 바뀌면 변하지만 스키마는
+    계약이다. base(~772) + 4000 = 4,772가 한 턴에 들어올 수 있는 **최대치**이므로 LIMIT은 그
+    위여야 한다. 이 테스트가 깨지면 LIMIT을 낮췄거나 max_length를 올린 것이다 — 둘 다 1턴째
+    오발동을 부른다.
+    """
+    max_len = _schema_max_message_len()
+    g = _gauge_with(monkeypatch, BASE_TOKENS)
+    biggest_allowed = _message_of_tokens(max_len)  # 한글 1자≈1토큰이라 max_length가 곧 토큰 상한
+    assert sessions_api._needs_auto_compact(g, biggest_allowed) is False, (
+        f"스키마 최대 입력(max_length={max_len})만으로 자동 compact가 발동한다 — "
+        f"base({BASE_TOKENS})+{max_len}가 LIMIT({sessions_api._GAUGE_LIMIT_DEFAULT})을 넘는다")
+
+
+def test_history_plus_large_input_is_what_actually_triggers(monkeypatch):
+    """실제로 발동하는 건 "누적 history + 큰 입력"이다 (live 실측: 4턴째).
+
+    RPA-86 원래 문구("초대형 단일 입력이 당턴을 넘치게 하는 갭")와 달리, 단일 입력은 스키마가
+    막고 있어 위 테스트처럼 절대 못 넘긴다. history가 쌓인 뒤에야 큰 입력이 임계를 넘긴다 —
+    이게 look-ahead가 실제로 방어하는 시나리오다.
+    """
+    max_len = _schema_max_message_len()
+    grown = sessions_api._GAUGE_LIMIT_DEFAULT - max_len + 500  # history가 쌓인 상태
+    g = _gauge_with(monkeypatch, grown)
+    assert g["compact_required"] is False, "게이지 단독으론 아직 임계 미만이어야 검증이 의미 있다"
+    assert sessions_api._needs_auto_compact(g, _message_of_tokens(max_len)) is True
 
 
 def test_lookahead_still_fires_for_genuinely_oversized_input(monkeypatch):
