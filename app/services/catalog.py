@@ -83,6 +83,14 @@ class BackendCatalog:
         """(package, action)의 구조 스펙을 반환한다. 없으면 None."""
         return self._ensure_index().get((package, action))
 
+    def iter_action_schemas(self):
+        """전체 액션 스펙을 순회한다 — agent v3의 세션 레지스트리·라벨 인덱스 유도용.
+
+        인덱스는 이미 메모리 캐시라 추가 비용 없음. (v2 이하는 이 메서드를 쓰지 않으며,
+        테스트 스텁에 없어도 duck-typing 폴백으로 동작하도록 사용처가 getattr로 조회한다.)
+        """
+        yield from self._ensure_index().values()
+
 
 _backend_catalog: BackendCatalog | None = None
 
