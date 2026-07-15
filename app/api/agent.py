@@ -9,7 +9,9 @@
 
 from fastapi import APIRouter, HTTPException
 
-from app.api.sessions import _get_agent_versions
+# 심볼이 아니라 모듈로 참조한다 — lazy 스위치는 sessions의 _get_agent_turn과 한 쌍이라 거기 살고,
+# 여기서 심볼을 뜯어오면 테스트가 두 모듈을 각각 패치해야 한다(패치 누락 = 조용한 오검증).
+from app.api import sessions as sessions_api
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -24,7 +26,7 @@ def list_agent_versions() -> dict:
     레지스트리가 아직 배포 전이면(RPA-167 미랜딩) 503 — /turn이 에이전트 미구현 시 내는 것과
     같은 코드를 써서, 프론트가 "아직 준비 안 됨"을 한 가지 방식으로 다루게 한다.
     """
-    registry = _get_agent_versions()
+    registry = sessions_api._get_agent_versions()
     if registry is None:
         raise HTTPException(
             503,

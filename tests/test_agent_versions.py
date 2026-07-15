@@ -52,15 +52,24 @@ def test_versions_endpoint_lists_registry(registry):
     assert body["default"] == "v2"
 
 
-def test_versions_endpoint_503_before_registry_lands():
-    """RPA-167 랜딩 전엔 503 — /turn의 에이전트 미구현 응답과 같은 코드로 통일한다.
+def test_versions_endpoint_503_when_registry_absent(monkeypatch):
+    """레지스트리 부재 시 503 — /turn의 에이전트 미구현 응답과 같은 코드로 통일한다.
 
-    registry를 심지 않았으므로 실제 dev 상태(레지스트리 부재)를 그대로 탄다.
+    ⚠️ 부재를 **명시적으로** 심는다. "registry를 안 심었으니 지금 dev엔 없겠지"에 기대면 RPA-167이
+    머지되는 순간 이 테스트가 깨져 dev CI가 빨개진다(실측으로 잡음 — 시한폭탄이었다).
     """
+    monkeypatch.setattr(sessions_api, "_get_agent_versions", lambda: None)
     with TestClient(app) as c:
         r = c.get("/api/agent/versions")
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "AGENT_UNAVAILABLE"
+
+
+def test_version_rejected_when_registry_absent(monkeypatch):
+    """레지스트리가 없으면 버전 지정 요청을 거부한다 — 못 지킬 약속을 조용히 무시하지 않는다."""
+    monkeypatch.setattr(sessions_api, "_get_agent_versions", lambda: None)
+    with pytest.raises(ValueError):
+        sessions_api.AgentTurnRequest(message="안녕", agent_version="v1")
 
 
 # --- agent_version 검증 (동적 — 하드코딩 금지가 요청서 핵심 원칙) ---
