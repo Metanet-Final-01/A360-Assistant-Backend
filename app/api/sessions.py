@@ -24,6 +24,7 @@ from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
 from app.schemas import ProgressEvent, Recommendation
+from app.services import budget
 
 logger = logging.getLogger(__name__)
 
@@ -881,6 +882,19 @@ async def agent_turn(
         raise HTTPException(
             503, detail={"code": "AGENT_UNAVAILABLE", "message": "에이전트가 아직 준비되지 않았습니다."}
         )
+
+    # 예산 가드레일 (RPA-171) — 스트림 열기 전에 판정한다. 턴 중간에 끊으면 부분 상태가 남고,
+    # SSE는 이미 200으로 열린 뒤라 프론트가 HTTP 에러로 잡지 못한다(위 503과 같은 이유).
+    # 상한 미설정이면 no-op이라 기존 배포의 동작은 그대로다.
+    verdict = await run_in_threadpool(
+        budget.check_budget, budget.subject_of(user, session.id)
+    )
+    if verdict.exceeded:
+        logger.warning(
+            "예산 초과로 턴 차단 — scope=%s period=%s session=%s",
+            verdict.scope, verdict.period, session.id,
+        )
+        raise HTTPException(429, detail=budget.exceeded_detail(verdict))
 
     session_key = session.id
     user_id, message = (user.id if user else None), payload.message
