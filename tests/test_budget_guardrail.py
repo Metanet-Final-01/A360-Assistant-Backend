@@ -21,10 +21,18 @@ NOW = datetime(2026, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 @pytest.fixture(autouse=True)
 def _clear_budget_env(monkeypatch):
-    """상한 env를 매 테스트마다 초기화 — 개발자 .env가 테스트에 새어들지 않게."""
+    """상한 env·캐시를 매 테스트마다 초기화 — 개발자 .env와 앞 테스트가 새어들지 않게.
+
+    캐시(RPA-173 런타임 오버라이드)는 모듈 전역이라 안 비우면 앞 테스트가 넣은 상한이 남아
+    다음 테스트를 오염시킨다. DB 오버라이드도 없는 것으로 고정해 이 파일은 env 경로만 본다.
+    """
     for k in ("BUDGET_SUBJECT_DAILY_USD", "BUDGET_SUBJECT_MONTHLY_USD",
               "BUDGET_GLOBAL_DAILY_USD", "BUDGET_GLOBAL_MONTHLY_USD"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(budget, "_read_override", lambda: None)
+    budget.bust_cache()
+    yield
+    budget.bust_cache()
 
 
 def _spend(monkeypatch, amount: float):
