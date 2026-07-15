@@ -12,8 +12,8 @@ get_retriever` 참조는 그대로 두어도 최신 스텁을 받는다(get_retr
 
 import pytest
 
-from app.agent import retrieval as retrieval_mod
-from app.agent.verify import catalog as catalog_mod
+from app.agent.v2 import retrieval as retrieval_mod
+from app.agent.v2.verify import catalog as catalog_mod
 
 from tests.agent_stubs import FakeCatalog, FakeRetriever
 

@@ -8,7 +8,7 @@
 없이 세션을 리턴하지만(cloudExcelOpen), 에이전트가 sessionName을 명시한 경우도 지원한다.
 """
 
-from app.agent.verify.checker import run_session_checks
+from app.agent.v2.verify.checker import run_session_checks
 
 
 def _sess(pkg, act, name):

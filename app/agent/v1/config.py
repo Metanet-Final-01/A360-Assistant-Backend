@@ -5,7 +5,8 @@ from pathlib import Path
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    # parents[3] = 리포 루트 (이 파일은 app/agent/v1/config.py — 버전 폴더로 한 단계 깊다).
+    load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 except ImportError:
     pass
 

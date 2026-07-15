@@ -4,8 +4,8 @@
 이전 압축본의 decisions·verbatim이 LLM 출력에서 빠져도 코드(carry_over)가 되살린다.
 """
 
-from app.agent.orchestrator import compact as compact_mod
-from app.agent.orchestrator.compact import CompactContext, VerbatimBlock, carry_over, compact_node
+from app.agent.v2.orchestrator import compact as compact_mod
+from app.agent.v2.orchestrator.compact import CompactContext, VerbatimBlock, carry_over, compact_node
 
 
 def test_carry_over_restores_dropped_decisions_and_verbatim():

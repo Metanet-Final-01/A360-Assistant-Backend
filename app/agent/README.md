@@ -1,173 +1,61 @@
-# app/agent — Agent 오케스트레이터 (LangGraph)
+# app/agent — 서비스 에이전트 (버전별 모듈)
 
-업무정의서 질문에 답하는 LangGraph 기반 오케스트레이터.
-현재는 **retrieve(KB 검색) → generate(근거 기반 답변) 2노드 그래프**다 (RPA-11).
-검색은 스텁(`FakeRetriever`, 하드코딩 카탈로그 + 키워드 매칭)이며, 실제
-pgvector·하이브리드 검색은 RAG 담당 모듈 완성 후 교체한다 (아래 [검색 스텁 교체](#검색-스텁-교체-rag-담당-가이드) 참조).
-멀티턴은 백엔드가 대화 이력을 저장하고 호출 시 `history`로 주입하며 Agent는 stateless를 유지한다 (RPA-25).
-구조화 추천·검수 루프는 후속 이슈에서 진행한다.
+업무정의서를 분석하고 A360 자동화 흐름도를 생성·수정하는 LangGraph 에이전트다.
+**에이전트는 stateless** — 저장·버전·이력은 전부 백엔드가 한다(INTERFACES §1). 백엔드는
+`POST /api/sessions/{id}/turn`에서 공개 진입점 `stream_agent_turn` **하나만** import한다.
 
-## 공개 인터페이스 (백엔드 호출 계약)
+## 버전 구조 (RPA-167)
 
-agent는 FastAPI 엔드포인트를 소유하지 않는다. 백엔드가 아래 함수를 import해서 라우트에 붙인다.
+서비스 에이전트는 깃 이력상 두 아키텍처를 거쳤고, 이를 **버전 폴더로 완전 분리(벤더링)** 했다.
+각 버전은 orchestrator·recommend·verify·prompts까지 **자기 사본**을 가진 독립 구현이라, 한
+버전을 고쳐도 다른 버전에 영향이 없다.
 
-```python
-from app.agent import run_agent, stream_agent, AgentResult
-
-def run_agent(message: str, history: list[dict] | None = None) -> AgentResult: ...            # 완성 답변 한 번에
-async def stream_agent(message: str, history: list[dict] | None = None) -> AsyncIterator[str]: ...  # SSE용 토큰 스트림
-
-class AgentResult(BaseModel):
-    answer: str               # LLM 답변
-    sources: list[RagSource]  # 답변 근거 (검색 결과 없으면 빈 리스트)
+```
+app/agent/
+├── __init__.py   # 공개 디스패처 — stream_agent_turn/analyze/recommend 를 버전별로 위임
+├── registry.py   # vN 자동탐색 + available_versions()/default_version()/resolve_version()
+├── README.md
+├── v1/           # 단계분해 → 액션 1:1 매핑 (plan→shortlist→compose→assemble→check). 레거시
+│   ├── meta.py   #   registry가 읽는 경량 메타(label/description)
+│   └── __init__.py analysis.py config.py retrieval.py orchestrator/ recommend/ verify/ prompts/
+└── v2/           # agentic ReAct 루프 (compose_agent ⇄ tools → verify → finalize). 현재 기본
+    ├── meta.py
+    └── __init__.py analysis.py config.py retrieval.py orchestrator/ recommend/ verify/ prompts/
 ```
 
-출처 모델은 공유 도메인 스키마 `app.schemas.RagSource`를 그대로 쓴다
-(`source_type`/`title`/`url`/`score`) — 추천안(`Recommendation`)의 액션 출처와 같은 형태라
-프론트가 한 가지 모델만 다루면 된다.
+## 버전 선택 (요청 → 디스패치)
 
-- `message`: 사용자 질문 문자열
-- `history`(선택): 이전 대화 턴 `[{"role": "user"|"assistant", "content": str}]`. 백엔드가 세션 이력을 저장하고 호출 시 주입한다 — **Agent는 이력을 보관하지 않는다(stateless)**. 생략하면 단발 질의응답(기존 동작)과 동일하고, 현재 챗 라우트와 하위호환된다. `retrieve`는 최신 `message` 기준으로 동작한다(이력 기반 질의 재작성은 후속).
-- `run_agent`: `AgentResult` 반환 — `result.answer`로 답변 텍스트, `result.sources`로 근거 문서 접근. **동기 함수**라 `async def` 라우트에서 직접 부르면 이벤트 루프를 막는다 — 일반 `def` 라우트에서 쓰면 FastAPI가 스레드풀로 처리해서 안전.
-- `stream_agent`: async 제너레이터 — LLM이 생성하는 대로 답변 토큰(str)을 yield. SSE 응답에 이걸 쓴다. **sources는 토큰 스트림에 실리지 않는다** (`done` 이벤트의 `data`로 실을지는 후속 이슈에서 협의).
-- 둘 다 `OPENAI_API_KEY`가 없으면 `RuntimeError`를 던진다 (설정 오류 — 503으로 매핑 권장)
-
-### 단일 진입점 — `stream_agent_turn` (FR-13~16, 미구현·계약 확정)
-
-대화형 상호작용(분석/질문/흐름도 수정)을 **하나의 진입점**으로 합친다. 백엔드가
-`POST /api/sessions/{id}/turn`에서 이 함수를 lazy import해 붙인다 — export하는 순간 활성화된다.
+버전은 진입점 시그니처를 바꾸지 않고 **기존 `context` dict의 새 키 `agent_version`**으로 흘러온다
+(`operation`/`compact`와 같은 "확장 제안분 — 없으면 기본값" 패턴). 백엔드가 `AgentTurnRequest`로
+받은 값을 `context`에 실어주면, 디스패처가 그 버전 구현으로 위임한다.
 
 ```python
-async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[ProgressEvent]: ...
+from app.agent import stream_agent_turn
+async for event in stream_agent_turn(message, context):  # context["agent_version"] = "v1" | "v2" | None
+    ...
 ```
 
-- **intent는 받지 않는다.** 라우터가 `message`로 브랜치(analyze/edit/ask)를 판단한다.
-  버튼처럼 메시지가 없는 동작은 프론트가 합성 메시지를 넣어 보낸다.
-- `context`(백엔드가 세션에서 매 턴 조립해 전달 — agent는 stateless, DB 안 붙음):
-  ```python
-  {
-    "solution": str,            # "a360" | ... — 탈 그래프·RAG 카탈로그를 가르는 결정론적 키
-    "operation": "chat" | "compact",   # compact면 라우터 우회, 압축 노드 직행 (버튼발 결정론)
-    "history": [{"role", "content"}],  # 최신 compact 이후 대화 (그 이전은 compact가 대체)
-    "compact": CompactContext | None,  # 이전 압축본 — 매 턴 주입 + 재압축 입력
-    "analysis": AnalysisResult_dict | None,      # 최신 분석본
-    "recommendation": Recommendation_dict | None,  # 최신 흐름도 트리 (edit 대상)
-    "parsed_doc": dict | None,                   # 최신 문서 파싱본 (analyze 대비)
-  }
-  ```
-- 진행은 기존 규약대로 `stage/partial/token` ProgressEvent로 흘리고, **종료 `done` 이벤트의
-  `data`에 판별 유니온 결과**를 싣는다 (백엔드가 `type`으로 저장을 분기한다):
-  ```python
-  { "type": "answer" | "analysis" | "recommendation" | "compact",
-    "answer": str, "sources": [RagSource, ...],
-    "analysis_result": AnalysisResult_dict | None,        # type=="analysis"
-    "updated_recommendation": Recommendation_dict | None, # type=="recommendation"
-    "change_summary": str | None,                         # type=="recommendation"
-    "compact": CompactContext | None }                    # type=="compact"
-  ```
-- ⚠️ **`type`은 정확해야 한다** — 백엔드가 이걸로 저장을 가른다(analysis→Analysis, recommendation→
-  RecommendationVersion(source="chat"), compact→SessionCompact, answer→대화만). 산출물이 non-null이면
-  `type`과 무관하게 모두 저장하니, 수행한 작업과 `type`·산출물을 일치시킬 것.
-- `solution`으로 그래프를 라우팅한다(A360 전용/타 솔루션 범용). `solution`은 세션에 확정
-  저장된 값이라 프롬프트로 추측하지 않는다.
-- **compact** (대화 압축, RPA-66): `operation="compact"`면 압축 노드 직행. 입력은 `compact`(이전
-  압축본) + `history`(그 이후 대화 전체)이고, 받은 걸 전부 압축한다. 출력 `compact`는 고정 섹션 JSON:
-  ```python
-  { "schema_version": "1.0",
-    "task_overview": str,
-    "decisions": [str, ...],        # 재압축에도 유실 금지
-    "flow_journal": [str, ...],
-    "open_questions": [str, ...],
-    "verbatim": [{"kind": "catalog", "content": str}, ...] }  # 요약 금지 원문 (카탈로그 등)
-  ```
+- `agent_version` 없음 → env `AGENT_VERSION`(없으면 `v2`) 기본으로 동작.
+- 미지 버전을 명시 요청하면 `ValueError`(백엔드 엔드포인트가 `available_versions()`로 사전 검증).
 
-### 문서 분석 — `analyze` (FR-05)
+> **HTTP 표면은 백엔드가 제공한다(이 PR 범위 밖).** `AgentTurnRequest.agent_version` 필드와
+> `GET /api/agent/versions` 엔드포인트는 백엔드 담당이 구현한다(작업요청서). 이 패키지는
+> `context["agent_version"]` 소비와 `available_versions()`/`default_version()` 헬퍼만 제공한다.
 
-```python
-from app.agent import analyze
-from app.schemas import AnalysisResult
+## 버전 추가 (v3 이후 — 프론트·백엔드 무변경)
 
-def analyze(parsed_doc: dict) -> AnalysisResult: ...   # parsed_content → 업무 단계 분석
-```
+`app/agent/v3/` 폴더를 **드롭하는 것만으로** 끝난다:
 
-- `parsed_doc`: 백엔드 파서 산출물(`documents.parsed_content`) — 마스킹 적용된 상태로 전달.
-- 반환 `AnalysisResult`(공유 스키마): `document_title / summary / steps[WorkStep] / ambiguities`. 저장은 백엔드(`analyses.result`).
-- LLM은 `app.core.llm.chat(purpose="analyze", response_format={"type":"json_object"})` 경유 — 사용량은 `usage_context`로 귀속(백엔드가 심음). 출력은 Pydantic으로 검증하고 실패 시 1회 교정한다.
-- `OPENAI_API_KEY` 미설정 등은 `RuntimeError`(503 매핑), 교정 후에도 스키마 불일치면 `ValueError`.
-- `vision_text`(이미지 자동 추출) 기반 불확실 항목은 `ambiguities`로 분리된다. `step_id`/`order`는 결정론적으로 재부여되어 안정적이다(recommend가 참조).
+1. `v3/` 안에 그 버전의 완결된 에이전트(진입점 `stream_agent_turn`/`analyze`/`recommend` re-export)와 `v3/meta.py`(`VERSION_META = {"label", "description"}`)를 둔다.
+2. registry가 자동 발견 → 백엔드 `GET /api/agent/versions`(= `available_versions()` 노출)에 자동 반영 → **FE 셀렉터 자동 갱신·BE 검증 자동 수용(양쪽 코드 0 수정)**.
+3. v3를 기본으로 승격하려면 코드가 아니라 env `AGENT_VERSION=v3`만 바꾼다(통제형 거버넌스).
 
-## 호출 예시
+## 계약 (버전 불변)
 
-```python
-from app.agent import run_agent, stream_agent
-
-# 비스트리밍
-result = run_agent("A360에서 엑셀 데이터를 읽는 방법 알려줘")
-print(result.answer)
-for source in result.sources:
-    print(f"- 근거: {source.title} (score={source.score})")
-
-# 스트리밍
-async for token in stream_agent("A360에서 엑셀 데이터를 읽는 방법 알려줘"):
-    print(token, end="", flush=True)
-
-# 멀티턴 — 백엔드가 이전 대화 턴을 history로 주입 (Agent는 stateless)
-history = [
-    {"role": "user", "content": "엑셀 읽는 방법 알려줘"},
-    {"role": "assistant", "content": "Excel advanced 패키지의 Open / Get multiple cells를 씁니다."},
-]
-result = run_agent("방금 읽은 걸 다른 시트에 쓰려면?", history=history)
-```
-
-## FastAPI 라우트 연동 예시 (백엔드 담당)
-
-비스트리밍 — `/api/rag/search`의 `RuntimeError → 503` 처리와 같은 방식:
-
-```python
-from fastapi import HTTPException
-from pydantic import BaseModel
-
-from app.agent import run_agent
-
-
-class AgentChatRequest(BaseModel):
-    message: str
-
-
-@app.post("/api/agent/chat")
-def agent_chat(payload: AgentChatRequest) -> dict:
-    try:
-        result = run_agent(payload.message)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Agent 설정 오류: {e}")
-    return {
-        "answer": result.answer,
-        "sources": [source.model_dump() for source in result.sources],
-    }
-```
-
-SSE 스트리밍 — 이벤트 형식은 팀 규약인 `app.schemas.ProgressEvent`를 쓴다
-(`docs/INTERFACES.md` §5, 프론트는 `event` 필드로 분기):
-
-```python
-from fastapi.responses import StreamingResponse
-
-from app.agent import stream_agent
-from app.schemas import ProgressEvent
-
-
-@app.post("/api/agent/chat/stream")
-async def agent_chat_stream(payload: AgentChatRequest) -> StreamingResponse:
-    async def sse():
-        try:
-            async for token in stream_agent(payload.message):
-                yield ProgressEvent(event="token", message=token).to_sse()
-            yield ProgressEvent(event="done").to_sse()
-        except RuntimeError as e:
-            yield ProgressEvent(event="error", message=f"Agent 설정 오류: {e}").to_sse()
-
-    return StreamingResponse(sse(), media_type="text/event-stream")
-```
+`stream_agent_turn(message, context)` 시그니처와 `done.data` 판별 유니온(type ∈
+answer/analysis/recommendation/compact), SSE `ProgressEvent` 규약은 **모든 버전에서 동일**하다.
+상세는 `docs/INTERFACES.md` §3·§4. 버전이 다른 것은 흐름도를 **어떻게 만드는가**(내부 그래프)일 뿐,
+백엔드·프론트가 보는 입출력 계약은 같다.
 
 ## 환경변수 (.env)
 
@@ -175,59 +63,15 @@ async def agent_chat_stream(payload: AgentChatRequest) -> StreamingResponse:
 |---|---|---|
 | `OPENAI_API_KEY` | ✅ | OpenAI API 키 |
 | `OPENAI_MODEL` | — | 챗 모델명 (기본 `gpt-5.4-mini`) |
+| `AGENT_VERSION` | — | 요청에 `agent_version`이 없을 때의 기본 버전 (기본 `v2`) |
 
 ## 로컬 동작 확인
 
-`.env`에 `OPENAI_API_KEY`를 설정한 뒤, 리포 루트에서:
-
 ```bash
-# venv 활성화 후 — 비스트리밍 (KB에 있는 주제: 근거와 함께 답변)
-python -c "
-from app.agent import run_agent
-
-result = run_agent('A360에서 엑셀 데이터를 읽는 방법 알려줘')
-print(result.answer)
-print([s.title for s in result.sources])
-"
-
-# 스트리밍 (토큰이 조각조각 출력되면 정상)
-python -c "
-import asyncio
-from app.agent import stream_agent
-
-async def main():
-    async for token in stream_agent('안녕'):
-        print(token, end='|', flush=True)
-
-asyncio.run(main())
-"
+# 발견된 버전 목록 (레지스트리 자동탐색 확인)
+python -c "from app.agent import available_versions; print(available_versions())"
+# → [{'id':'v1','label':'v1 · 단계분해 매핑',...,'default':False},
+#    {'id':'v2','label':'v2 · Agentic (ReAct)',...,'default':True}]
 ```
 
-엑셀 관련 답변과 근거 제목 리스트가 출력되면 정상. KB에 없는 주제(예: "주식 추천해줘")를
-물으면 sources가 비고, 지식베이스로 확인할 수 없다는 답변이 나와야 한다.
-`RuntimeError: OPENAI_API_KEY 환경변수가 필요합니다`가 나오면 `.env`를 확인한다.
-
-## 구조
-
-| 파일 | 역할 |
-|---|---|
-| `__init__.py` | 공개 진입점 export (`run_agent`, `stream_agent`, `AgentResult`) |
-| `config.py` | 환경변수 로딩 (`OPENAI_API_KEY`, `OPENAI_MODEL`) |
-| `graph.py` | LangGraph `StateGraph` 정의·컴파일 (retrieve → generate), `run_agent`/`stream_agent` 구현 |
-| `retrieval.py` | 검색 인터페이스(`Retriever`)와 스텁 구현(`FakeRetriever`) |
-| `schemas.py` | pydantic 입출력 계약 (`AgentResult` — 출처는 공유 `app.schemas.RagSource`) |
-
-## 검색 스텁 교체 (RAG 담당 가이드)
-
-agent는 `retrieval.Retriever` 인터페이스에만 의존한다:
-
-```python
-class Retriever(Protocol):
-    def search(self, query: str, limit: int = 4) -> list[dict]: ...
-```
-
-반환 dict 스키마는 `/api/rag/search`(`app.rag.store.db.search`)의 행과 동일하다:
-`id, source_type, package_name, action_name, title, url, content, score`.
-
-실제 검색 모듈(pgvector·하이브리드)이 완성되면 `retrieval.py`의 `get_retriever()`가
-그 구현을 반환하도록 교체하면 된다 — `graph.py` 등 나머지 agent 코드는 수정 불필요.
+버전 선택 API·라이브 스모크(각 버전으로 `/turn` 호출)는 `docs/INTERFACES.md` §3와 RPA-167 PR 참조.

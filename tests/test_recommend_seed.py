@@ -5,7 +5,7 @@
 system에는 원문이 새지 않는지, 제약은 여전히 system에 실리는지 확인한다.
 """
 
-from app.agent.recommend.graph import MAX_DOC_CHARS, _seed_messages
+from app.agent.v2.recommend.graph import MAX_DOC_CHARS, _seed_messages
 
 _ANALYSIS = {
     "summary": "테스트 업무",

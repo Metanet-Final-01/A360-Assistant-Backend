@@ -8,14 +8,14 @@ qa/edit의 ChatOpenAI는 _make_llm 몽키패치로, 구조화 호출(intake/comp
 import asyncio
 import json
 
-from app.agent.orchestrator import compact as compact_mod
-from app.agent.orchestrator import edit as edit_mod
-from app.agent.orchestrator import generate as generate_mod
-from app.agent.orchestrator import intake as intake_mod
-from app.agent.orchestrator import qa as qa_mod
-from app.agent.orchestrator.compact import CompactContext
-from app.agent.orchestrator.graph import stream_agent_turn
-from app.agent.orchestrator.intake import IntakeOutput
+from app.agent.v2.orchestrator import compact as compact_mod
+from app.agent.v2.orchestrator import edit as edit_mod
+from app.agent.v2.orchestrator import generate as generate_mod
+from app.agent.v2.orchestrator import intake as intake_mod
+from app.agent.v2.orchestrator import qa as qa_mod
+from app.agent.v2.orchestrator.compact import CompactContext
+from app.agent.v2.orchestrator.graph import stream_agent_turn
+from app.agent.v2.orchestrator.intake import IntakeOutput
 from app.schemas import AnalysisResult
 
 _CTX = {"solution": "a360", "history": [], "analysis": None,
@@ -104,8 +104,8 @@ class _FakeInvokeLLM:
 
 
 def _set_api_key(monkeypatch):
-    from app.agent import config
-    from app.agent.orchestrator import graph as graph_mod
+    from app.agent.v2 import config
+    from app.agent.v2.orchestrator import graph as graph_mod
 
     monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(graph_mod.config, "OPENAI_API_KEY", "test-key", raising=False)
@@ -234,7 +234,7 @@ def test_edit_other_solution_verifies_via_user_catalog(monkeypatch):
     edited = _edit_ops_json("정리", "수정")
     monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(edited)]))
 
-    from app.agent.orchestrator.generate import (
+    from app.agent.v2.orchestrator.generate import (
         CatalogExtraction, UserCatalogAction, UserCatalogParam,
     )
     called = {"extract": False}
@@ -261,7 +261,7 @@ def test_edit_other_solution_skips_verify_without_catalog(monkeypatch):
     edited = _edit_ops_json("", "수정")
     monkeypatch.setattr(edit_mod, "_make_llm", lambda: _FakeInvokeLLM([_Chunk(edited)]))
 
-    from app.agent.orchestrator.generate import CatalogExtraction
+    from app.agent.v2.orchestrator.generate import CatalogExtraction
     monkeypatch.setattr(edit_mod, "extract_user_catalog", lambda state: CatalogExtraction(actions=[]))
 
     def verify_boom(*a, **k):
@@ -291,7 +291,7 @@ def test_compact_operation_bypasses_intake(monkeypatch):
 
 
 def test_missing_api_key_yields_error(monkeypatch):
-    from app.agent.orchestrator import graph as graph_mod
+    from app.agent.v2.orchestrator import graph as graph_mod
 
     monkeypatch.setattr(graph_mod.config, "OPENAI_API_KEY", "", raising=False)
     events = _collect("안녕", dict(_CTX))
