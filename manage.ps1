@@ -15,11 +15,12 @@
   .\manage.ps1 logs          # 전체 로그 (Ctrl+C로 종료)
   .\manage.ps1 logs backend  # 특정 서비스 로그
   .\manage.ps1 reset         # 볼륨까지 삭제 (DB 데이터 초기화 — 주의)
+  .\manage.ps1 smoke         # 손으로 확인용 서버 기동 — 관측 로그가 팀 공유 DB로 안 가게 격리
 #>
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [ValidateSet("up", "down", "restart", "status", "logs", "reset")]
+  [ValidateSet("up", "down", "restart", "status", "logs", "reset", "smoke")]
   [string]$Action = "up",
 
   [Parameter(Position = 1)]
@@ -124,6 +125,42 @@ switch ($Action) {
   "logs" {
     if ($Service) { Invoke-Compose @("logs", "-f", "--tail", "100", $Service) }
     else { Invoke-Compose @("logs", "-f", "--tail", "100") }
+  }
+  "smoke" {
+    # 손으로 API를 찔러보는(live smoke) 용도로 서버를 띄우되, **관측 로그가 팀 공유 Neon에
+    # 가지 않게** 격리한다 (RPA-168).
+    #
+    # 왜 필요한가: tests/conftest.py의 격리 픽스처는 **pytest 전용**이다. `.env` 그대로
+    # uvicorn을 띄우면 관측 미들웨어가 공유 DB에 그대로 쓴다 — 2026-07-15에 실제로 발생해
+    # request_metrics 25행·audit_logs 22행을 오염시켰다. CONVENTIONS §8이 live 증명을
+    # 요구하므로 live smoke 자체는 계속 필요하다. 끄고 돌리면 된다.
+    Initialize-EnvFile
+
+    # ⚠️ `$env:X = ""` 는 쓰면 안 된다 — PowerShell이 변수를 **삭제**해버려서 load_dotenv()가
+    #    .env에서 값을 다시 읽어온다(실측 2026-07-15). 공백 한 칸을 넣으면 환경에는 존재하되
+    #    observability_url()의 .strip()에서 빈 값이 돼 로컬 앱 DB로 폴백한다.
+    $env:OBSERVABILITY_DATABASE_URL = " "
+
+    # 격리를 바라지 말고 확인한다 — 위 메커니즘이 언제든 깨질 수 있으므로, 조용히 오염시키는
+    # 대신 시끄럽게 멈춘다(fail-closed).
+    # 격리를 바라지 말고 확인한다 — 관측 URL이 비었는지 + 폴백 대상인 앱 DB도 로컬인지 둘 다
+    # 본다(#234 리뷰). 검사 로직·함정은 scripts/check_smoke_isolation.py 참고.
+    Write-Step "관측 DB 격리 확인 중..."
+    $target = python scripts/check_smoke_isolation.py
+    if ($LASTEXITCODE -ne 0) { throw "격리 확인 실패 — 의존성이 설치됐는지 확인하세요." }
+    if ($target -ne "LOCAL") {
+      throw "팀 데이터 오염을 막기 위해 기동을 중단합니다 — $target"
+    }
+    Write-Ok "관측 쓰기 = 로컬 앱 DB (공유 Neon 미접촉)"
+
+    $port = "8000"
+    if (Test-Path ".env") {
+      $m = Select-String -Path ".env" -Pattern '^APP_PORT=(\d+)' | Select-Object -First 1
+      if ($m) { $port = $m.Matches[0].Groups[1].Value }
+    }
+    Write-Step "uvicorn 기동 (Ctrl+C 로 종료) — http://localhost:$port/docs"
+    Write-Warn2 "이 창에서만 격리됩니다. 다른 창에서 그냥 uvicorn 을 띄우면 공유 DB에 씁니다."
+    python -m uvicorn app.main:app --reload --port $port
   }
   "reset" {
     Write-Warn2 "볼륨(DB 데이터 포함)까지 모두 삭제합니다."

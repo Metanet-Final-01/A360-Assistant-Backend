@@ -1,4 +1,6 @@
-# pytest 단위 테스트 — PR마다 실행해 서비스 로직 회귀를 방지한다
+# pytest — PR마다 실행해 서비스 로직 회귀를 방지한다.
+# 유닛(전부 mock) + 통합(실 Postgres, RPA-168)을 한 잡에서 돌린다. 통합 테스트는 DB가 없으면
+# 스스로 skip하므로, 서비스가 안 떠도 유닛은 그대로 통과한다.
 name: Tests
 
 on:
@@ -12,6 +14,31 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # 통합 테스트(RPA-168)가 쓸 앱 DB. pgvector 불필요 — rag_documents는 app/rag가 원시 SQL로
+    # 따로 관리해 Alembic·models.py 밖이고, 마이그레이션에 vector 타입이 없다(0013의 "vector"는
+    # vector_weight라는 Float 컬럼명일 뿐). 그래서 plain postgres로 충분하다.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: a360_admin
+          POSTGRES_PASSWORD: a360_ci_password
+          POSTGRES_DB: postgres   # 유지보수 DB — conftest가 여기 붙어 a360_test를 만든다
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U a360_admin -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_HOST: localhost
+      DATABASE_PORT: "5432"
+      DATABASE_USERNAME: a360_admin
+      DATABASE_PASSWORD: a360_ci_password
+      DATABASE_NAME: a360        # app.db import 시 엔진 URL용(지연 연결이라 실접속 안 함)
+      # ⚠️ OBSERVABILITY_DATABASE_URL·RAG_DATABASE_URL·OPENSEARCH_* 는 CI에 두지 않는다 —
+      # 있으면 테스트가 팀 공유 Neon/Bonsai를 때린다. conftest가 격리하지만 env를 안 주는 게 1차 방어.
     steps:
       - uses: actions/checkout@v4
         with:
