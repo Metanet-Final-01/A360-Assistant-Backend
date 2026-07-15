@@ -143,14 +143,13 @@ switch ($Action) {
 
     # 격리를 바라지 말고 확인한다 — 위 메커니즘이 언제든 깨질 수 있으므로, 조용히 오염시키는
     # 대신 시끄럽게 멈춘다(fail-closed).
-    # ⚠️ 프로브는 반드시 `import app.db` 를 먼저 해야 한다 — load_dotenv()가 거기서만 돈다.
-    #    observability_db 만 import하면 .env가 안 읽혀 **항상 LOCAL이 나오는 가짜 가드**가 된다
-    #    (실측 2026-07-15: 그렇게 짰다가 잡음).
+    # 격리를 바라지 말고 확인한다 — 관측 URL이 비었는지 + 폴백 대상인 앱 DB도 로컬인지 둘 다
+    # 본다(#234 리뷰). 검사 로직·함정은 scripts/check_smoke_isolation.py 참고.
     Write-Step "관측 DB 격리 확인 중..."
-    $target = python -c "import app.db; from app.core.observability_db import observability_url; print('LOCAL' if not observability_url() else 'SHARED')"
+    $target = python scripts/check_smoke_isolation.py
     if ($LASTEXITCODE -ne 0) { throw "격리 확인 실패 — 의존성이 설치됐는지 확인하세요." }
     if ($target -ne "LOCAL") {
-      throw "관측 쓰기가 여전히 공유 DB로 향합니다 ($target). 팀 데이터 오염을 막기 위해 기동을 중단합니다."
+      throw "팀 데이터 오염을 막기 위해 기동을 중단합니다 — $target"
     }
     Write-Ok "관측 쓰기 = 로컬 앱 DB (공유 Neon 미접촉)"
 

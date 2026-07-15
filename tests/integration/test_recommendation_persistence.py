@@ -21,6 +21,7 @@ pytestmark = pytest.mark.integration
 
 
 def _rec(n_actions: int = 1) -> dict:
+    """Recommendation 스키마를 만족하는 최소 흐름도. n_actions로 편집 결과를 구분한다."""
     return {
         "schema_version": "1.0",
         "steps": [{
@@ -108,6 +109,7 @@ def test_save_recovers_from_real_unique_violation(seeded, db_session, integratio
     stolen = {}
 
     def steal_version_once(self, **kw):
+        """max() 읽은 뒤 INSERT 커밋 전에 끼어들어, 다른 커넥션이 그 version을 선점하게 한다."""
         orig_init(self, **kw)
         if stolen:  # 아래 끼어들기가 만드는 행에는 재귀하지 않는다
             return
