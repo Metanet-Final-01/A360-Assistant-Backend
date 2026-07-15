@@ -136,8 +136,9 @@ def main() -> int:
         warnings.append(f"사용자 {n_users}명뿐 — 사용자별 분포가 대표성이 없다")
     rid_pct = n_rid * 100 // total
     if rid_pct < 80:
-        warnings.append(f"request_id가 {rid_pct}%뿐 — 턴 단위 통계 표본이 작다 "
-                        f"(RPA-158 백필 미실행 가능: scripts/backfill_llm_cost.py 확인)")
+        warnings.append(f"request_id가 {rid_pct}%뿐 — 턴 단위 통계 표본이 작다. "
+                        f"RPA-158(2026-07-14) 이전 행에는 없고 **소급 복원이 불가능**하다"
+                        f"(런타임 값이라 backfill_llm_cost.py로도 못 채운다). 새 트래픽이 쌓이면 올라간다")
     for w in warnings:
         print(f"  ⚠️  {w}")
 
