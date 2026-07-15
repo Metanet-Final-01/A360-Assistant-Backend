@@ -45,7 +45,9 @@ def _format_menu(menu: list[dict]) -> str:
             mark = "필수" if p.get("required") else "선택"
             seg = f"{p['name']}({p.get('type')}, {mark}"
             if p.get("options"):
-                opts = "/".join(str(o.get("value")) for o in p["options"])
+                opts = "/".join(
+                    str(o.get("value") if isinstance(o, dict) else o) for o in p["options"]
+                )
                 seg += f", 선택지: {opts}"
             if "default" in p:
                 seg += f", 기본값: {json.dumps(p['default'], ensure_ascii=False)}"
