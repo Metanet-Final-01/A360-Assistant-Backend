@@ -188,7 +188,25 @@ def test_save_edited_400_names_offending_fields():
     assert detail["code"] == "INVALID_RECOMMENDATION"
     fields = [e["field"] for e in detail["errors"]]
     assert "steps.0.actions.0.order" in fields  # 정확한 경로를 짚어준다
-    assert all("input" not in e for e in detail["errors"])  # 원문 트리는 반향하지 않는다
+
+
+def test_save_edited_400_does_not_reflect_input():
+    """400은 사용자가 보낸 값을 응답에 반향하지 않는다 — 원문 유출·응답 비대 방지.
+
+    sentinel을 Pydantic이 err["input"]에 싣는 자리(int 자리의 문자열)에 놓는다. 유효한
+    필드(notes 등)에 두면 어떤 에러에도 그 값이 안 실려, input을 그대로 내보내도 통과하는
+    무력한 테스트가 된다.
+    """
+    session = SimpleNamespace(id=SID, user_id=None)
+    _override(FakeDB(session=session, versions=[_row(1)]))
+    sentinel = "SENTINEL-7f3ac91e-원문유출탐지"
+    bad = _valid_recommendation()
+    bad["steps"][0]["actions"][0]["order"] = sentinel  # int 자리 → input에 sentinel이 실린다
+    with TestClient(app) as c:
+        r = c.post(f"/api/sessions/{SID}/recommendations", json={"recommendation": bad})
+    assert r.status_code == 400
+    assert r.json()["detail"]["errors"], "위반 필드가 비면 반향 검사가 무의미하다"
+    assert sentinel not in r.text  # 응답 어디에도(errors·message 포함) 원문이 없다
 
 
 def test_save_edited_409_without_base(monkeypatch):
