@@ -10,6 +10,7 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -446,8 +447,15 @@ def _get_agent_versions():
 
 class AgentTurnRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000, description="사용자 메시지 (버튼이면 프론트가 합성)")
-    # compact 버튼발 결정론 요청 — LLM 라우터를 우회하는 명시 신호 (기본 "chat")
-    operation: str = Field("chat", pattern="^(chat|compact)$", description="chat | compact")
+    # compact/fill_cards 버튼발 결정론 요청 — LLM 라우터를 우회하는 명시 신호 (기본 "chat")
+    operation: str = Field(
+        "chat", pattern="^(chat|compact|fill_cards)$", description="chat | compact | fill_cards"
+    )
+    # fill_cards 전용 — {card_id: 값}. 에이전트(v3)가 targets 좌표로 결정론 적용한다.
+    # v3 미지원 버전이 fill_cards를 받으면 에이전트가 미지 operation으로 안전 처리한다.
+    card_values: dict[str, Any] | None = Field(
+        None, description="operation=fill_cards일 때 질문 카드 응답 {card_id: value}"
+    )
     agent_version: str | None = Field(
         None, description="에이전트 버전 (없으면 서버 기본). 유효값은 GET /api/agent/versions"
     )
@@ -955,6 +963,10 @@ async def agent_turn(
         session, db, operation=payload.operation, agent_version=payload.agent_version
     )
     agent_context = ctx["agent_context"]
+    if payload.operation == "fill_cards":
+        # 카드 응답 원본을 그대로 넘긴다 — 적용은 에이전트(v3 cards.apply_card_values)가
+        # targets 좌표로 결정론 수행한다 (백엔드는 흐름도 구조를 해석하지 않는다).
+        agent_context["card_values"] = payload.card_values or {}
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
 
     # 턴 노드 타임라인 관측(RPA-105) — 스트림을 지나는 stage/error/done을 버퍼링해 턴

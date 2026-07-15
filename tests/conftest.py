@@ -14,17 +14,25 @@ import pytest
 
 from app.agent.v2 import retrieval as retrieval_mod
 from app.agent.v2.verify import catalog as catalog_mod
+from app.agent.v3 import retrieval as retrieval_mod_v3
+from app.agent.v3.verify import catalog as catalog_mod_v3
 
 from tests.agent_stubs import FakeCatalog, FakeRetriever
 
 
 @pytest.fixture(autouse=True)
 def _stub_agent_rag(monkeypatch):
-    """모든 테스트에서 agent 검색기·카탈로그를 인메모리 스텁으로 대체한다."""
+    """모든 테스트에서 agent 검색기·카탈로그를 인메모리 스텁으로 대체한다.
+
+    버전 패키지는 완전 벤더링이라 v2/v3 각자의 팩토리를 모두 patch한다 — 한쪽만 막으면
+    다른 버전 경로의 테스트가 실제 인프라를 때린다.
+    """
     fake_retriever = FakeRetriever()
     fake_catalog = FakeCatalog()
     monkeypatch.setattr(retrieval_mod, "_make_retriever", lambda: fake_retriever)
     monkeypatch.setattr(catalog_mod, "_make_catalog", lambda: fake_catalog)
+    monkeypatch.setattr(retrieval_mod_v3, "_make_retriever", lambda: fake_retriever)
+    monkeypatch.setattr(catalog_mod_v3, "_make_catalog", lambda: fake_catalog)
 
 
 @pytest.fixture(autouse=True)

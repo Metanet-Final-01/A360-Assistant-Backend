@@ -101,6 +101,16 @@ def _is_empty(value) -> bool:
     return False
 
 
+def _opt_value(o: object) -> object:
+    """옵션 원소에서 value를 뽑는다 — 파서가 dict로 정규화 못 한 문자열 옵션도 견딘다."""
+    return o.get("value") if isinstance(o, dict) else o
+
+
+def _opt_label(o: object) -> object:
+    """옵션 원소에서 label을 뽑는다 — dict가 아닌 문자열 옵션도 견딘다."""
+    return o.get("label") if isinstance(o, dict) else o
+
+
 def _check_parameters(action: dict, spec: dict, location: str) -> list[Violation]:
     """R2~R5: 파라미터 name·필수·enum·형식 검사. spec이 있는 액션에만 호출된다."""
     violations: list[Violation] = []
@@ -139,14 +149,14 @@ def _check_parameters(action: dict, spec: dict, location: str) -> list[Violation
         value = provided.get("value")
         # R4: enum 타입은 값이 options 안에 있어야
         if pspec.get("type") in _ENUM_TYPES and "options" in pspec:
-            allowed = {o.get("value") for o in pspec["options"]} | {o.get("label") for o in pspec["options"]}
+            allowed = {_opt_value(o) for o in pspec["options"]} | {_opt_label(o) for o in pspec["options"]}
             if value not in allowed:
                 violations.append(
                     Violation(
                         "R4", location,
                         f"'{name}' 값 '{value}'은(는) 허용된 선택지가 아닙니다.",
                         package=pkg, action=act, param=name,
-                        spec_excerpt={"options": [o.get("value") for o in pspec["options"]]},
+                        spec_excerpt={"options": [_opt_value(o) for o in pspec["options"]]},
                     )
                 )
         # R5: NUMBER/BOOLEAN 형식 (경량)

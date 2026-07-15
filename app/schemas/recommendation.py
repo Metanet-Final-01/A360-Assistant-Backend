@@ -21,6 +21,18 @@ class ActionParameter(BaseModel):
     )
 
 
+class VarRef(BaseModel):
+    """액션↔변수 연결 한 건 (v3 데이터플로우 검증 R9~R11의 원료).
+
+    실봇 JSON의 returnTo(생산)·VARIABLE attribute/`$var$` 보간(소비)에 대응한다.
+    composer가 명시 출력하는 것이 1차이고, 검증기가 `$var$` 파싱으로 교차 보정한다.
+    미기재 시 데이터플로우 검사가 침묵할 뿐 오탐은 없다(하위호환).
+    """
+
+    name: str = Field(description="BotVariable.name 참조")
+    role: str | None = Field(None, description="'session'|'data'|'counter' 등 용도 힌트")
+
+
 class RagSource(BaseModel):
     """추천 근거가 된 RAG 문서 참조 (FR-11)."""
 
@@ -52,6 +64,12 @@ class RecommendedAction(BaseModel):
     rationale: str | None = Field(None, description="왜 이 액션인지 (FR-11)")
     sources: list[RagSource] = Field(default_factory=list)
     confidence: float | None = Field(None, ge=0.0, le=1.0, description="FR-12 신뢰도")
+    produces: list[VarRef] = Field(
+        default_factory=list, description="이 액션이 쓰기(할당)하는 변수 — 실봇 returnTo에 대응 (v3)"
+    )
+    consumes: list[VarRef] = Field(
+        default_factory=list, description="이 액션이 읽는 변수 — 파라미터의 $var$ 참조 포함 (v3)"
+    )
 
 
 class StepRecommendation(BaseModel):
@@ -82,6 +100,65 @@ class BotVariable(BaseModel):
     description: str | None = None
 
 
+class CardTarget(BaseModel):
+    """질문 카드가 채울 위치 — fill_cards가 이 좌표로 set_params EditOps를 결정론 생성한다."""
+
+    step_id: str
+    node_path: str = Field(description="단계 내 트리 경로, 예: 'actions[0].children[1]'")
+    param_name: str
+
+
+class QuestionCard(BaseModel):
+    """미확정 항목을 사용자에게 묻는 1급 산출물 (v3 — R3·모호성·전제 확인의 승격).
+
+    흐름도는 항상 완성 상태로 출고된다: 카드는 '빈칸'이 아니라 default(시안값)가
+    채워진 확인 요청이 기본이고, 진짜 빈칸은 kind="missing_param"뿐이다.
+    """
+
+    card_id: str
+    kind: Literal["missing_param", "ambiguity", "assumption_confirm"]
+    question: str = Field(description="사용자에게 보일 질문")
+    why: str | None = Field(None, description="왜 이 값이 필요한지")
+    targets: list[CardTarget] = Field(default_factory=list)
+    input_type: Literal["text", "number", "select", "file_path", "credential_ref", "confirm"] = "text"
+    options: list[Any] | None = Field(None, description="select일 때 — 카탈로그 enum에서 결정론 추출")
+    default: Any = Field(None, description="시안값 — 사용자가 승인만 해도 되게")
+    blocking: bool = Field(False, description="미해결 시 봇이 아예 실행 불가한가")
+    resolved: bool = Field(False, description="fill_cards로 해소되었는가")
+
+
+class SpecRequirement(BaseModel):
+    """FlowSpec의 요구사항 한 줄 — req_id가 L2 커버리지·심판·질문 카드의 공유 앵커다."""
+
+    req_id: str = Field(description="예: 'req-1'")
+    text: str
+    priority: Literal["must", "should"] = "must"
+    source: Literal["doc", "chat", "inferred"] = "chat"
+
+
+class SpecUnknown(BaseModel):
+    """spec 단계에서 수집한 미확정 사항 — finalize에서 질문 카드로 전환된다."""
+
+    what: str
+    why_needed: str | None = None
+    blocking: bool = False
+
+
+class FlowSpec(BaseModel):
+    """요구사항 정형화 산출물 (v3) — 시맨틱 검증(L2)·심판·시뮬레이션의 채점 기준 문서.
+
+    recommendation과 함께 저장·재주입되어 이후 edit의 재채점도 원래 요구 기준으로 한다.
+    """
+
+    goal: str = ""
+    requirements: list[SpecRequirement] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list, description="필요한 입력(파일·시스템·데이터)")
+    outputs: list[str] = Field(default_factory=list, description="기대 산출물")
+    error_policy: list[str] = Field(default_factory=list, description="예외 상황별 기대 처리")
+    unknowns: list[SpecUnknown] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list, description="생성이 임의로 정한 전제(명시 강제)")
+
+
 class Recommendation(BaseModel):
     """추천안 전체 — 이 JSON이 최종 내보내기 형식이자 골드셋 채점 대상이다."""
 
@@ -89,6 +166,13 @@ class Recommendation(BaseModel):
     steps: list[StepRecommendation]
     variables: list[BotVariable] = Field(default_factory=list)
     notes: str | None = Field(None, description="전제·주의사항, 예: 'Knox 메일은 Email 패키지 기준'")
+    needs_input: list[QuestionCard] = Field(
+        default_factory=list, description="사용자 입력 대기 질문 카드 (v3)"
+    )
+    flow_confidence: float | None = Field(
+        None, ge=0.0, le=1.0, description="흐름도 수준 신뢰도 — must 커버리지×blocker×시뮬레이션 (v3)"
+    )
+    spec: FlowSpec | None = Field(None, description="이 흐름도의 채점 기준이 된 FlowSpec (v3)")
 
     def iter_actions(self):
         """트리를 평탄화해 모든 액션을 순회 (골드셋 채점·검증용)."""

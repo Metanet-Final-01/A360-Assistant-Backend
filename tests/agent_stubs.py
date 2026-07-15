@@ -109,9 +109,13 @@ _FAKE_DOCS: list[dict] = [
 
 
 class FakeRetriever:
-    """키워드 매칭 기반 스텁 검색기 (테스트 전용)."""
+    """키워드 매칭 기반 스텁 검색기 (테스트 전용).
 
-    def search(self, query: str, limit: int = 4) -> list[dict]:
+    source_types는 실제 검색기 계약(Retriever Protocol)에 있는 인자라 시그니처만 받는다 —
+    스텁 문서엔 source_type 구분이 없어 필터링은 하지 않는다(v3 research가 넘겨도 안전).
+    """
+
+    def search(self, query: str, limit: int = 4, source_types: list[str] | None = None) -> list[dict]:
         q = query.lower()
         scored = []
         for doc in _FAKE_DOCS:
@@ -146,6 +150,7 @@ def _p(name, type_, required=False, options=None, label="", default=_MISSING):
 _FAKE_ACTIONS: list[dict] = [
     # --- WebAutomation (웹 조작) ---
     {"package": "WebAutomation", "action": "StartSessionWebAutomation", "label": "Start Session",
+     "return_type": "SESSION",  # v3 세션 레지스트리 유도 테스트용 (JAR 원천과 동형)
      "parameters": [_p("browserType", "SELECT", True, ["Chrome", "Edge"], "브라우저"),
                     _p("sessionName", "TEXT", True, label="세션 이름")]},
     {"package": "WebAutomation", "action": "openpage", "label": "Open Page",
@@ -204,7 +209,8 @@ _FAKE_ACTIONS: list[dict] = [
                     _p("message", "TEXTAREA", True, label="메시지")]},
     {"package": "Email", "action": "closeEmail", "label": "연결 끊기", "parameters": []},
     # --- Excel advanced (현행 카탈로그 — open은 세션을 리턴, 사용·닫기는 sessionName 참조) ---
-    {"package": "Excel advanced", "action": "cloudExcelOpen", "label": "열기",
+    # return_type=SESSION: v3 derive_session_registry의 opener 유도 신호 (실카탈로그 동형).
+    {"package": "Excel advanced", "action": "cloudExcelOpen", "label": "열기", "return_type": "SESSION",
      "parameters": [_p("fileSource", "TEXT", False, label="파일"),
                     _p("sessionName", "TEXT", False, label="세션 이름")]},
     {"package": "Excel advanced", "action": "excelAdvancedPackageSaveWorkbookAction", "label": "저장",
@@ -245,3 +251,7 @@ class FakeCatalog:
 
     def get_action_schema(self, package: str, action: str) -> dict | None:
         return _FAKE_INDEX.get((package, action))
+
+    def iter_action_schemas(self):
+        """전체 스펙 순회 — v3 세션 레지스트리 유도·라벨 인덱스가 쓴다 (BackendCatalog 동형)."""
+        yield from _FAKE_INDEX.values()
