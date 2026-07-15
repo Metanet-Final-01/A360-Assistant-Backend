@@ -13,6 +13,7 @@ compact 경로가 한 번도 실행된 적이 없었다 — 값만 바꾸고 발
    주지 않는다 (cl100k_base 실측 tok/char: 영문 0.12 / 한글 1.08 / 희귀 CJK 2.0 / 이모지 3.0
    → 같은 4,000자가 500~12,000토큰). 이 파일에서 입력 크기는 반드시 `_estimate_message_tokens`로
    재고, 문자 수를 토큰처럼 쓰지 말 것 — 한때 그렇게 적어 결론이 뒤집혔다.
+   인코더 폴백은 UTF-8 **바이트** 수를 쓴다(byte-level BPE라 tokens ≤ bytes가 증명됨).
 """
 
 import uuid
@@ -140,14 +141,20 @@ def test_realistic_longest_korean_input_does_not_trigger_compact(monkeypatch, re
     """**현실 입력의 최악**(스키마 최대 길이의 한국어 산문)으로는 초반 오발동이 없어야 한다.
 
     LIMIT 아래 경계의 근거. 한글 산문은 cl100k_base에서 ≈1.08 tok/char라 4,000자 ≈ 4,309토큰,
-    base(582)를 더해 ~4,891 < LIMIT(6000). 이 테스트가 깨지면 LIMIT을 낮춘 것이고, 평범한 긴
+    base(582)를 더해 **≈4,891 < LIMIT(6000)**. 이 테스트가 깨지면 LIMIT을 낮춘 것이고, 평범한 긴
     한국어 입력만으로 압축할 history도 없이 compact 비용이 나간다.
+
+    경계를 **관계로** 단언한다(숫자를 하드코딩하면 상수가 바뀌어도 조용히 통과한다).
     """
     prose = _schema_valid_message("업무 정의서 분석 요청 ")
+    worst_realistic = BASE_TOKENS + sessions_api._estimate_message_tokens(prose)
+
+    assert sessions_api._GAUGE_LIMIT_DEFAULT > worst_realistic, (
+        f"LIMIT({sessions_api._GAUGE_LIMIT_DEFAULT}) ≤ 현실 최악({worst_realistic}) — "
+        f"평범한 긴 한국어 입력이 초반 턴에 compact를 유발한다")
+
     g = _gauge_with(monkeypatch, BASE_TOKENS)
-    assert sessions_api._needs_auto_compact(g, prose) is False, (
-        f"스키마 최대 길이의 평범한 한국어 입력({sessions_api._estimate_message_tokens(prose)}tok)이 "
-        f"자동 compact를 유발한다 — LIMIT({sessions_api._GAUGE_LIMIT_DEFAULT})이 너무 낮다")
+    assert sessions_api._needs_auto_compact(g, prose) is False
 
 
 def test_schema_length_cap_does_not_cap_tokens(monkeypatch, real_encoder):
@@ -184,21 +191,36 @@ def test_history_plus_large_input_triggers(monkeypatch, real_encoder):
     assert sessions_api._needs_auto_compact(g, prose) is True
 
 
-def test_fallback_underestimates_emoji_and_misses_the_spike(monkeypatch):
-    """인코더 폴백(len)의 **알려진 한계**를 고정한다 — 이모지 스파이크를 놓친다.
+@pytest.mark.parametrize("unit", ["a", "업무 정의서 분석 요청 ", "🙃", "龘", "ก"])
+def test_fallback_never_underestimates(monkeypatch, real_encoder, unit):
+    """인코더 폴백은 **절대 과소추정하면 안 된다** — 과소추정은 곧 가드가 뚫리는 것이다.
 
-    `_estimate_message_tokens`의 폴백은 1문자≈1토큰이라 이모지(3 tok/char)를 3배 과소추정한다.
-    tiktoken이 워밍업된 프로덕션에선 무관하지만, 워밍업 실패(오프라인 등) 시엔 위
-    test_schema_length_cap_does_not_cap_tokens가 잡는 그 입력을 **그냥 통과시킨다**.
-    폴백을 '안전한 상한'으로 착각하지 않도록 여기 못 박아둔다.
+    cl100k_base는 byte-level BPE라 모든 토큰이 ≥1바이트를 소비 → `tokens ≤ bytes`가 항상 참이다.
+    폴백이 UTF-8 바이트 수를 쓰는 근거가 이것이다. 이 테스트는 그 상한 관계를 실제 인코더와
+    대조해 지킨다 — 누가 폴백을 `len(text)`(문자 수)로 되돌리면 이모지·CJK에서 깨진다.
     """
-    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)  # 워밍업 실패 상황
-    emoji = _schema_valid_message("🙃")
+    msg = _schema_valid_message(unit)
+    actual = len(real_encoder.encode(msg))
 
-    assert sessions_api._estimate_message_tokens(emoji) == len(emoji), "폴백은 len이어야 한다"
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)  # 워밍업 실패 상황
+    fallback = sessions_api._estimate_message_tokens(msg)
+
+    assert fallback >= actual, (
+        f"폴백({fallback})이 실제 토큰({actual})보다 작다 — 스파이크를 놓치는 상한이다")
+
+
+def test_fallback_still_catches_the_emoji_spike(monkeypatch):
+    """폴백 상태(tiktoken 로드 실패)에서도 이모지 스파이크를 **잡아야** 한다.
+
+    한때 폴백이 `len(text)`라 이모지 4,000자(실제 12,000토큰)를 4,000으로 세서 선행 가드를
+    그냥 통과시켰다. 저하 모드라고 가드가 뚫리면 안 된다 — CodeRabbit #256 지적.
+    """
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
+    emoji = _schema_valid_message("🙃")
     g = _gauge_with(monkeypatch, BASE_TOKENS)
-    assert sessions_api._needs_auto_compact(g, emoji) is False, (
-        "폴백이 이모지 스파이크를 잡았다면 폴백 로직이 바뀐 것이다 — 이 한계 문서를 갱신할 것")
+
+    assert sessions_api._needs_auto_compact(g, emoji) is True, (
+        "폴백이 이모지 스파이크를 놓친다 — 폴백이 토큰 상한이 아닌 값으로 되돌아갔다")
 
 
 def test_lookahead_still_fires_for_genuinely_oversized_input(monkeypatch, real_encoder):
