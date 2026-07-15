@@ -8,7 +8,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from app.agent import analysis
+from app.agent.v2 import analysis
 from app.schemas import AnalysisResult
 
 

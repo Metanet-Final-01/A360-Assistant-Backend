@@ -6,8 +6,8 @@ edit→generate 강등, 미지 라우트→qa), 파싱 실패 시 qa 폴백, 인
 
 import pytest
 
-from app.agent.orchestrator import intake as intake_mod
-from app.agent.orchestrator.intake import IntakeOutput, intake_node
+from app.agent.v2.orchestrator import intake as intake_mod
+from app.agent.v2.orchestrator.intake import IntakeOutput, intake_node
 
 _FLOW = {"schema_version": "1.0", "steps": [{"step_id": "step-1", "actions": []}]}
 

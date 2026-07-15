@@ -149,6 +149,7 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 |---|---|
 | `solution` | 라우팅 키 (세션 확정값, 기본 `"a360"`) — 에이전트가 전용 그래프를 고른다 |
 | `operation` | `"chat"` \| `"compact"` (compact면 LLM 라우터 우회, 압축 노드 직행) |
+| `agent_version` | 에이전트 구현 버전 (`"v1"` \| `"v2"` … \| 없음). 없으면 env `AGENT_VERSION`(기본 `v2`). 백엔드가 `AgentTurnRequest`로 받아 실어 보내고, 진입점이 이 키로 버전 그래프를 고른다. 사용 가능 목록은 `app.agent.available_versions()`(백엔드가 `GET /api/agent/versions`로 노출, RPA-167) |
 | `history` | 대화 이력 `[{"role","content"}]` (마지막 compact 이후분, 절삭 없이) |
 | `compact` | 최신 대화 압축본 (없으면 None) |
 | `analysis` / `recommendation` / `parsed_doc` | 세션의 최신 분석·추천·파싱 문서 (있으면) |

@@ -6,7 +6,7 @@ LangChain 메시지로 변환한다. LLM·앱 부팅 없이 변환 규칙만 검
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.agent.orchestrator.qa import _history_messages
+from app.agent.v2.orchestrator.qa import _history_messages
 
 
 def test_history_messages_maps_roles_and_skips_unknown():
