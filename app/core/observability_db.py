@@ -133,7 +133,16 @@ def ensure_observability_schema() -> bool:
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS ix_llm_usage_request_id ON llm_usage (request_id)")
             )
-        logger.info("관측 DB 스키마 확인 완료 (audit_logs·llm_usage, request_id 보장)")
+            # 예산 가드레일(RPA-171)이 매 턴 "주체의 기간내 누적 비용"을 조회한다 — 요청 경로라
+            # 인덱스 없이 두면 llm_usage가 커질수록 턴 지연이 함께 커진다. user_id는 단독
+            # 인덱스도 없었다(session_id만 있었음). 기간 필터가 항상 붙으므로 복합으로 만든다.
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_llm_usage_user_created "
+                "ON llm_usage (user_id, created_at)"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_llm_usage_session_created "
+                "ON llm_usage (session_id, created_at)"))
+        logger.info("관측 DB 스키마 확인 완료 (audit_logs·llm_usage, request_id·예산조회 인덱스 보장)")
         return True
     except Exception as e:  # noqa: BLE001 — 관측 DB 장애가 앱 기동을 막으면 안 된다
         logger.warning("관측 DB 스키마 준비 실패 (앱은 계속, 기록은 폴백 없이 유실될 수 있음): %s", e)
