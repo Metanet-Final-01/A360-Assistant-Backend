@@ -48,11 +48,14 @@ def test_warn_ratio_formula():
 # --- WARN_RATIO env화 (적용 경로) ---
 
 def test_gauge_warn_ratio_env(monkeypatch):
+    """env 파싱·폴백 규칙을 검증한다. 기본값 자체는 상수를 참조 — 재보정(RPA-172 등)으로
+    값이 바뀌어도 이 테스트가 깨지지 않게(값이 아니라 규칙을 지킨다)."""
+    default = sessions_api._GAUGE_WARN_RATIO_DEFAULT
     monkeypatch.delenv("TURN_GAUGE_WARN_RATIO", raising=False)
-    assert sessions_api._gauge_warn_ratio() == 0.7  # 기본
-    monkeypatch.setenv("TURN_GAUGE_WARN_RATIO", "0.87")
-    assert sessions_api._gauge_warn_ratio() == 0.87  # 캘리브레이션 권장값 적용
+    assert sessions_api._gauge_warn_ratio() == default  # 기본
+    monkeypatch.setenv("TURN_GAUGE_WARN_RATIO", "0.55")
+    assert sessions_api._gauge_warn_ratio() == 0.55  # 캘리브레이션 권장값 적용
     monkeypatch.setenv("TURN_GAUGE_WARN_RATIO", "banana")
-    assert sessions_api._gauge_warn_ratio() == 0.7  # 비정상값 폴백
+    assert sessions_api._gauge_warn_ratio() == default  # 비정상값 폴백
     monkeypatch.setenv("TURN_GAUGE_WARN_RATIO", "1.5")
-    assert sessions_api._gauge_warn_ratio() == 0.7  # 범위 밖(>1) 폴백
+    assert sessions_api._gauge_warn_ratio() == default  # 범위 밖(>1) 폴백

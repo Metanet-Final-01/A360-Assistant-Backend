@@ -477,23 +477,32 @@ def test_read_intake_gauge_ratio_and_recommend(monkeypatch):
 
     monkeypatch.setattr("app.db.SessionLocal", _S)
     monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", "100000")
+    # 임계도 명시한다 — 기본 WARN_RATIO에 암묵적으로 기대면 재보정(RPA-172) 때 무관한
+    # 이 테스트가 깨진다. 여기서 검증할 건 ratio 계산과 임계 비교지 기본값이 아니다.
+    monkeypatch.setenv("TURN_GAUGE_WARN_RATIO", "0.7")
     g = sessions_api._read_intake_gauge(SID)
     assert g["intake_tokens"] == 75000 and g["ratio"] == 0.75
     assert g["compact_recommended"] is True  # 0.75 >= 0.7
 
 
 def test_read_intake_gauge_invalid_limit_falls_back(monkeypatch):
-    """비정상 env(non-numeric)는 기본값으로 폴백 — 게이지가 꺼지거나 크래시하지 않는다 (CodeRabbit)."""
+    """비정상 env(non-numeric)는 기본값으로 폴백 — 게이지가 꺼지거나 크래시하지 않는다 (CodeRabbit).
+
+    폴백'값'이 아니라 폴백'규칙'을 검증한다 — 상수를 참조해 재보정(RPA-172)에 깨지지 않게.
+    """
+    default = sessions_api._GAUGE_LIMIT_DEFAULT
+    tokens = default // 2  # 폴백이 먹으면 ratio가 정확히 0.5
+
     class _S:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: 50000)
+        def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: tokens)
 
     monkeypatch.setattr("app.db.SessionLocal", _S)
     for bad in ("abc", "0", "-5", ""):
         monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", bad)
         g = sessions_api._read_intake_gauge(SID)
-        assert g["limit_tokens"] == 100000 and g["ratio"] == 0.5  # 폴백값 사용
+        assert g["limit_tokens"] == default and g["ratio"] == 0.5  # 폴백값 사용
 
 
 def test_read_intake_gauge_none_when_no_intake(monkeypatch):

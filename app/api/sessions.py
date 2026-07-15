@@ -714,17 +714,43 @@ def _save_turn_events(session_id: uuid.UUID, request_id: str | None, rows: list[
         logger.warning("turn_events 적재 실패 (턴은 정상): session=%s", session_id, exc_info=True)
 
 
+# 대화 누적 게이지 하드 임계(토큰) — 실측 기반 (RPA-172, 2026-07-15).
+#
+# 이전 기본값 100000은 **하드 도달에 ~527턴이 필요해 자동 compact가 절대 발동하지 않았다**
+# (RPA-89가 진단해 .env.example에 경고까지 적어뒀으나 값은 그대로였다). 실측(관측 DB 6,237행):
+#   - 대화 누적 Δ ≈ 188 토큰/턴, 첫 턴 base ≈ 582 토큰
+#   - 세션당 턴 수: 중앙 1턴 / p90 3턴 / 최대 7턴
+#
+# 6000을 고른 이유 — 두 제약이 아래에서 위로, 위에서 아래로 조인다:
+#   ① 아래 경계(3000 이상이어야): 관측 최대 단일 메시지가 3,400토큰이다. LIMIT=3000이면
+#      base(582)+3400=3982로 **1턴째부터 선행 가드(RPA-86)가 자동 compact를 오발동**한다 —
+#      압축할 history가 없는데 compact 비용($0.00843/콜)만 나간다.
+#   ② 위 경계(작을수록 발동): 6000이면 하드가 29턴째(경고 25턴째). 100000의 527턴에서 18배 당겨져
+#      실사용 긴 대화에서 실제로 동작하고, 게이지 ratio도 눈에 보이게 움직인다.
+#   ③ 경제성: compact는 콜당 $0.00843인데, LIMIT=6000에서 압축하면 ~5,418토큰/턴을 아껴
+#      **2턴이면 본전**이다. 낮출수록 나빠진다(3000=5턴, 2000=8턴) — 일찍 터질수록 압축할 게 적다.
+#
+# ⚠️ 관측 표본은 대부분 테스트/시뮬 트래픽(최대 7턴)이라 이 값으로도 관측 트래픽에선 안 터진다.
+#    실사용/데모 대화가 쌓이면 scripts/gauge_calibration_report.py로 재확인할 것.
+_GAUGE_LIMIT_DEFAULT = 6000
+
+# compact 권장(소프트) 임계 비율 기본값 — LIMIT=6000에서 "하드 4턴 전 경고"가 되는 값.
+# 계산: 1 − 4×Δ/LIMIT = 1 − 4×188/6000 ≈ 0.87 (RPA-89 리포트의 headroom 공식).
+# 이전 0.7은 LIMIT=6000 기준 하드 10턴 전에 경고해 과잉 알림이 된다.
+_GAUGE_WARN_RATIO_DEFAULT = 0.87
+
+
 def _gauge_warn_ratio() -> float:
-    """compact 권장(소프트) 임계 비율 — 기본 0.7. env로 조정, 비정상값은 0.7 (RPA-89).
+    """compact 권장(소프트) 임계 비율. env로 조정, 비정상값은 기본값 (RPA-89).
 
     RPA-89 캘리브레이션 리포트가 실데이터에서 권장값을 산출하면 이 env로 적용한다
     (코드 수정 없이 사람이 승인해 갱신 — 통제형 거버넌스).
     """
     try:
-        v = float(os.getenv("TURN_GAUGE_WARN_RATIO", "0.7"))
+        v = float(os.getenv("TURN_GAUGE_WARN_RATIO", str(_GAUGE_WARN_RATIO_DEFAULT)))
     except ValueError:
-        return 0.7
-    return v if 0 < v <= 1 else 0.7
+        return _GAUGE_WARN_RATIO_DEFAULT
+    return v if 0 < v <= 1 else _GAUGE_WARN_RATIO_DEFAULT
 
 
 def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
@@ -751,11 +777,11 @@ def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
     # env가 비정상(non-numeric)·0·음수면 기본값으로 폴백 — 게이지를 통째로 끄거나
     # ZeroDivision을 내지 않고 항상 의미 있는 값을 낸다.
     try:
-        limit = int(os.getenv("TURN_GAUGE_LIMIT_TOKENS", "100000"))
+        limit = int(os.getenv("TURN_GAUGE_LIMIT_TOKENS", str(_GAUGE_LIMIT_DEFAULT)))
     except ValueError:
         limit = 0
     if limit <= 0:
-        limit = 100000
+        limit = _GAUGE_LIMIT_DEFAULT
     ratio = round(tokens / limit, 4)
     return {
         "intake_tokens": int(tokens),
