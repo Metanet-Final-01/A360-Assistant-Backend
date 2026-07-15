@@ -141,9 +141,8 @@ switch ($Action) {
     #    observability_url()의 .strip()에서 빈 값이 돼 로컬 앱 DB로 폴백한다.
     $env:OBSERVABILITY_DATABASE_URL = " "
 
-    # 격리를 바라지 말고 확인한다 — 위 메커니즘이 언제든 깨질 수 있으므로, 조용히 오염시키는
-    # 대신 시끄럽게 멈춘다(fail-closed).
-    # 격리를 바라지 말고 확인한다 — 관측 URL이 비었는지 + 폴백 대상인 앱 DB도 로컬인지 둘 다
+    # 격리를 바라지 말고 확인한다 — 메커니즘이 언제든 깨질 수 있으므로, 조용히 오염시키는 대신
+    # 시끄럽게 멈춘다(fail-closed). 관측 URL이 비었는지 + 폴백 대상인 앱 DB도 로컬인지 둘 다
     # 본다(#234 리뷰). 검사 로직·함정은 scripts/check_smoke_isolation.py 참고.
     Write-Step "관측 DB 격리 확인 중..."
     $target = python scripts/check_smoke_isolation.py
