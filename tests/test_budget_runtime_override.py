@@ -221,6 +221,12 @@ def test_put_persists_and_busts_cache(monkeypatch):
     assert budget._cache is None, "bust_cache가 안 불렸다 — 변경이 최대 30초 안 먹는다"
 
 
+def _full(**over) -> dict:
+    """4개 전체 스냅샷 — 부분 갱신은 계약 위반이라 항상 다 보낸다."""
+    return {"subject_daily_usd": None, "subject_monthly_usd": None,
+            "global_daily_usd": None, "global_monthly_usd": None, **over}
+
+
 def test_put_service_identity_sets_updated_by_service():
     """X-API-Key(머신) 경로는 user가 None이라 updated_by=service — 감사 주체 구분."""
     from fastapi.testclient import TestClient
@@ -233,15 +239,56 @@ def test_put_service_identity_sets_updated_by_service():
     fake = _FakeSession(row=None)
     app.dependency_overrides[get_db] = lambda: fake
     with TestClient(app) as c:
-        r = c.put("/api/admin/budget-limits", json={"subject_daily_usd": 6})
+        r = c.put("/api/admin/budget-limits", json=_full(subject_daily_usd=6))
     assert r.status_code == 200 and r.json()["updated_by"] == "service"
 
 
+@pytest.mark.parametrize("partial", [
+    {},
+    {"subject_daily_usd": 6},
+    {"subject_daily_usd": 6, "subject_monthly_usd": 120},
+    {"subject_daily_usd": 6, "subject_monthly_usd": 120, "global_daily_usd": 15},
+])
+def test_put_rejects_partial_payload(partial):
+    """부분 페이로드는 422 — "전체 스냅샷" 계약이 코드로 강제돼야 한다 (#243 리뷰).
+
+    기본값(None)이 있으면 생략 필드가 **조용히 null로 저장**돼 (1) 감사 이력에 완전한 설정이
+    안 남고 (2) **월<일 검증이 무력화**된다(월을 생략하면 None이라 비교를 건너뜀).
+    """
+    from fastapi.testclient import TestClient
+
+    from app.db import get_db
+    from app.main import app
+
+    _auth_admin()
+    app.dependency_overrides[get_db] = lambda: _FakeSession(row=None)
+    with TestClient(app) as c:
+        r = c.put("/api/admin/budget-limits", json=partial)
+    assert r.status_code == 422, "필드를 생략했는데 통과했다 — 전체 스냅샷 계약이 안 지켜진다"
+
+
+def test_monthly_check_cannot_be_bypassed_by_omission():
+    """월<일 검증을 필드 생략으로 우회할 수 없다 — 이게 부분 페이로드의 진짜 위험이다.
+
+    `{"subject_daily_usd": 100}`만 보내면 예전엔 월 상한이 조용히 꺼진 채 저장됐다.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.db import get_db
+    from app.main import app
+
+    _auth_admin()
+    app.dependency_overrides[get_db] = lambda: _FakeSession(row=None)
+    with TestClient(app) as c:
+        r = c.put("/api/admin/budget-limits", json={"subject_daily_usd": 100})
+    assert r.status_code == 422
+
+
 @pytest.mark.parametrize("payload,why", [
-    ({"subject_daily_usd": 0}, "0은 '비활성'이 아니라 오설정 — null로 끄게 강제"),
-    ({"subject_daily_usd": -5}, "음수"),
-    ({"subject_daily_usd": 10, "subject_monthly_usd": 5}, "월<일이면 일 상한이 무의미해짐"),
-    ({"global_daily_usd": 20, "global_monthly_usd": 1}, "전역도 동일"),
+    (_full(subject_daily_usd=0), "0은 '비활성'이 아니라 오설정 — null로 끄게 강제"),
+    (_full(subject_daily_usd=-5), "음수"),
+    (_full(subject_daily_usd=10, subject_monthly_usd=5), "월<일이면 일 상한이 무의미해짐"),
+    (_full(global_daily_usd=20, global_monthly_usd=1), "전역도 동일"),
 ])
 def test_put_rejects_invalid_limits(payload, why):
     """잘못된 상한은 422로 거부 — 서비스를 막는 값이라 조용히 받으면 안 된다."""
@@ -257,8 +304,8 @@ def test_put_rejects_invalid_limits(payload, why):
     assert r.status_code == 422, why
 
 
-def test_put_allows_null_to_disable():
-    """null은 '그 상한 비활성' — .env 미설정과 같은 의미라 허용해야 한다."""
+def test_put_allows_explicit_null_to_disable():
+    """**명시적** null은 '그 상한 비활성' — 생략(422)과 달리 의도가 분명하므로 허용한다."""
     from fastapi.testclient import TestClient
 
     from app.db import get_db
@@ -267,5 +314,5 @@ def test_put_allows_null_to_disable():
     _auth_admin()
     app.dependency_overrides[get_db] = lambda: _FakeSession(row=None)
     with TestClient(app) as c:
-        r = c.put("/api/admin/budget-limits", json={"subject_daily_usd": None})
+        r = c.put("/api/admin/budget-limits", json=_full(subject_daily_usd=None))
     assert r.status_code == 200 and r.json()["subject_daily_usd"] is None
