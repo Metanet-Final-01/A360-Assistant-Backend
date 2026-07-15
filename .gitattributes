@@ -1,0 +1,6 @@
+# Phase 0 files are content-addressed. Preserve their reviewed bytes across checkouts.
+/assurance/phase0/v1.10/** -text whitespace=cr-at-eol
+
+# These frozen artifacts contain reviewed trailing spaces in transcripts/Markdown line breaks.
+/assurance/phase0/v1.10/contract.md whitespace=cr-at-eol,-blank-at-eol
+/assurance/phase0/v1.10/independent-review.md whitespace=cr-at-eol,-blank-at-eol

@@ -1,0 +1,766 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:control-registry:1.8",
+  "title": "Control Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "registry_version",
+    "registry_kind",
+    "schema_ref",
+    "digest_method",
+    "blocking_policy_ref",
+    "baseline",
+    "controls"
+  ],
+  "$defs": {
+    "control_id": {
+      "type": "string",
+      "pattern": "^(CH|OH|EH)-[0-9]{2}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "owner_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assignment"
+      ],
+      "properties": {
+        "assignment": {
+          "enum": [
+            "unassigned",
+            "proposed",
+            "approved"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "assignment": {
+                "const": "unassigned"
+              }
+            },
+            "required": [
+              "assignment"
+            ]
+          },
+          "then": {
+            "properties": {
+              "role": {
+                "type": "null"
+              },
+              "ref": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P1-10: proposed is a RECOMMENDATION, never an approval; ref must stay null.",
+          "if": {
+            "properties": {
+              "assignment": {
+                "const": "proposed"
+              }
+            },
+            "required": [
+              "assignment"
+            ]
+          },
+          "then": {
+            "required": [
+              "role"
+            ],
+            "properties": {
+              "role": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "ref": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "assignment": {
+                "const": "approved"
+              }
+            },
+            "required": [
+              "assignment"
+            ]
+          },
+          "then": {
+            "required": [
+              "role",
+              "ref"
+            ],
+            "properties": {
+              "role": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "ref": {
+                "$ref": "#/$defs/nonempty"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evidence_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim",
+        "status",
+        "evidence_kind"
+      ],
+      "properties": {
+        "claim": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "status": {
+          "enum": [
+            "Baseline-Confirmed",
+            "Current-Confirmed",
+            "Not-tested",
+            "Decision-needed"
+          ]
+        },
+        "evidence_kind": {
+          "enum": [
+            "static_code",
+            "local_execution",
+            "live_operational",
+            "none"
+          ],
+          "description": "P1-6: static_code proves wiring exists, NOT that it executes. live_operational (branch protection, deployed network) requires evidence from the live system, which this review does not have."
+        },
+        "baseline_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "current_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "scoped_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonempty"
+          }
+        },
+        "repro": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "runtime_env": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "python",
+            "os",
+            "dependency_digest"
+          ],
+          "properties": {
+            "python": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "os": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "dependency_digest": {
+              "$ref": "#/$defs/sha256"
+            },
+            "validator_library": {
+              "type": "string"
+            }
+          }
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date"
+        },
+        "limitations": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "unresolved_decision": {
+          "$ref": "#/$defs/nonempty"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "Current-Confirmed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "current_sha",
+              "scoped_paths",
+              "repro",
+              "runtime_env",
+              "verified_at",
+              "limitations"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "Baseline-Confirmed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "baseline_sha",
+              "scoped_paths",
+              "limitations"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "Not-tested"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "evidence_kind": {
+                "const": "none"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "Decision-needed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "unresolved_decision"
+            ],
+            "properties": {
+              "evidence_kind": {
+                "const": "none"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P1-6: a static_code claim may not assert runtime execution; it must state that limitation.",
+          "if": {
+            "properties": {
+              "evidence_kind": {
+                "const": "static_code"
+              }
+            },
+            "required": [
+              "evidence_kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "scoped_paths",
+              "limitations"
+            ]
+          }
+        }
+      ]
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_layer",
+        "owner_domain",
+        "enforcement_point",
+        "mutable_by_backend",
+        "detector_state",
+        "execution_state",
+        "effect_mode",
+        "target_effect_mode",
+        "in_phase0_mvp",
+        "owner",
+        "evidence"
+      ],
+      "properties": {
+        "control_layer": {
+          "enum": [
+            "producer_advisory",
+            "boundary_enforcement",
+            "change_gate",
+            "evidence_gate"
+          ]
+        },
+        "owner_domain": {
+          "enum": [
+            "agent_producer",
+            "backend_consumer",
+            "ci_change",
+            "backend_evidence",
+            "backoffice_evidence",
+            "cross_cutting"
+          ]
+        },
+        "enforcement_point": {
+          "enum": [
+            "producer_internal",
+            "persistence_boundary",
+            "ci_required_check",
+            "evidence_pipeline",
+            "backoffice_console",
+            "offline_eval"
+          ]
+        },
+        "mutable_by_backend": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "detector_state": {
+          "enum": [
+            "absent",
+            "present",
+            "verified"
+          ]
+        },
+        "execution_state": {
+          "enum": [
+            "inactive",
+            "active"
+          ]
+        },
+        "effect_mode": {
+          "enum": [
+            "advisory",
+            "warn",
+            "block"
+          ]
+        },
+        "target_effect_mode": {
+          "enum": [
+            "advisory",
+            "warn",
+            "block"
+          ]
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule_id",
+              "detector"
+            ],
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+              },
+              "detector": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "evidence": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "dependency_policy": {
+          "type": "object"
+        },
+        "detector_spec": {
+          "type": "string"
+        },
+        "block_point": {
+          "type": "string"
+        },
+        "evidence_field": {
+          "type": "string"
+        },
+        "in_phase0_mvp": {
+          "type": "boolean"
+        },
+        "owner": {
+          "$ref": "#/$defs/owner_state"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/evidence_claim"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "$comment": "P1-4: producer_advisory mapping is fixed. Agent-owned, Backend-immutable, advisory only. Enforcement point is producer_internal, or offline_eval for agent-owned offline evaluation (OH-10).",
+          "if": {
+            "properties": {
+              "control_layer": {
+                "const": "producer_advisory"
+              }
+            },
+            "required": [
+              "control_layer"
+            ]
+          },
+          "then": {
+            "properties": {
+              "owner_domain": {
+                "const": "agent_producer"
+              },
+              "enforcement_point": {
+                "enum": [
+                  "producer_internal",
+                  "offline_eval"
+                ]
+              },
+              "mutable_by_backend": {
+                "const": false
+              },
+              "effect_mode": {
+                "const": "advisory"
+              },
+              "target_effect_mode": {
+                "const": "advisory"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P1-4: boundary_enforcement mapping is fixed to the Backend persistence boundary.",
+          "if": {
+            "properties": {
+              "control_layer": {
+                "const": "boundary_enforcement"
+              }
+            },
+            "required": [
+              "control_layer"
+            ]
+          },
+          "then": {
+            "properties": {
+              "owner_domain": {
+                "const": "backend_consumer"
+              },
+              "enforcement_point": {
+                "const": "persistence_boundary"
+              },
+              "mutable_by_backend": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P1-4: change_gate mapping is fixed to the CI change boundary.",
+          "if": {
+            "properties": {
+              "control_layer": {
+                "const": "change_gate"
+              }
+            },
+            "required": [
+              "control_layer"
+            ]
+          },
+          "then": {
+            "properties": {
+              "owner_domain": {
+                "const": "ci_change"
+              },
+              "enforcement_point": {
+                "const": "ci_required_check"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P1-4: evidence_gate must name an evidence owner and an evidence enforcement point.",
+          "if": {
+            "properties": {
+              "control_layer": {
+                "const": "evidence_gate"
+              }
+            },
+            "required": [
+              "control_layer"
+            ]
+          },
+          "then": {
+            "properties": {
+              "owner_domain": {
+                "enum": [
+                  "backend_evidence",
+                  "backoffice_evidence",
+                  "cross_cutting"
+                ]
+              },
+              "enforcement_point": {
+                "enum": [
+                  "evidence_pipeline",
+                  "backoffice_console"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "Ownership: agent_producer is never Backend-mutable.",
+          "if": {
+            "properties": {
+              "owner_domain": {
+                "const": "agent_producer"
+              }
+            },
+            "required": [
+              "owner_domain"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mutable_by_backend": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P1-5 coherence: an absent detector cannot execute or have effect.",
+          "if": {
+            "properties": {
+              "detector_state": {
+                "const": "absent"
+              }
+            },
+            "required": [
+              "detector_state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "execution_state": {
+                "const": "inactive"
+              },
+              "effect_mode": {
+                "const": "advisory"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "P1-5 coherence: blocking requires an actually-executing detector.",
+          "if": {
+            "properties": {
+              "effect_mode": {
+                "const": "block"
+              }
+            },
+            "required": [
+              "effect_mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "execution_state": {
+                "const": "active"
+              },
+              "detector_state": {
+                "enum": [
+                  "present",
+                  "verified"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "properties": {
+    "registry_version": {
+      "const": "1.8"
+    },
+    "registry_kind": {
+      "enum": [
+        "full",
+        "phase0_mvp"
+      ]
+    },
+    "schema_ref": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "digest_method": {
+      "const": "raw_bytes"
+    },
+    "blocking_policy_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id",
+        "version",
+        "state"
+      ],
+      "description": "P1-3: the registry must not inline a severity threshold. It references the policy, whose state gates any block transition (HL-16).",
+      "properties": {
+        "policy_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "state": {
+          "enum": [
+            "unapproved",
+            "approved"
+          ]
+        }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend_sha",
+        "backoffice_sha",
+        "as_of"
+      ],
+      "properties": {
+        "backend_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "backoffice_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "as_of": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "ownership_note": {
+      "type": "string"
+    },
+    "integrity_note": {
+      "type": "string"
+    },
+    "enums": {
+      "type": "object"
+    },
+    "controls": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "harness",
+          "layers"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/control_id"
+          },
+          "name": {
+            "$ref": "#/$defs/nonempty"
+          },
+          "harness": {
+            "enum": [
+              "change",
+              "output",
+              "evidence"
+            ]
+          },
+          "invariant_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^INV-[0-9]{2}$"
+          },
+          "description": {
+            "type": "string"
+          },
+          "applicability": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "layers": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/layer"
+            }
+          }
+        }
+      }
+    }
+  }
+}

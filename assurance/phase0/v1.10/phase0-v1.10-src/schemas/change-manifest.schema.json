@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:change-manifest:1.8",
+  "title": "Change Manifest (author-declared CLAIMS, not authority)",
+  "description": "P0-1/P0-2: every declared_* field is a CLAIM by the change author (possibly an AI) and is NOT authoritative. The trusted runner re-derives each value from the TRUSTED CI event context and the actual diff (HL-11) and fails closed on mismatch. A caller-chosen commit pair cannot certify itself. Immutable head of the acyclic digest chain.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "created_at",
+    "declared_repository_id",
+    "jira",
+    "intent",
+    "declared_baseline_sha",
+    "declared_head_sha",
+    "declared_changed_paths",
+    "declared_dependency_changed",
+    "declared_touches_agent_owned_paths",
+    "declared_risk_profiles",
+    "declared_control_applicability",
+    "generated_env",
+    "rollback"
+  ],
+  "$defs": {
+    "control_id": {
+      "type": "string",
+      "pattern": "^(CH|OH|EH)-[0-9]{2}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": "1.8"
+    },
+    "manifest_id": {
+      "type": "string",
+      "pattern": "^CM-[0-9a-f]{8,}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "jira": {
+      "type": "string",
+      "pattern": "^RPA-[0-9]+$"
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "non_goals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "declared_changed_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "declared_changed_components": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "declared_dependency_changed": {
+      "type": "boolean"
+    },
+    "declared_touches_agent_owned_paths": {
+      "type": "boolean"
+    },
+    "agent_owner_approval_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "declared_risk_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "auth",
+          "db_migration",
+          "agent_output",
+          "api_contract",
+          "rag",
+          "infra",
+          "workflow",
+          "dependency",
+          "docs",
+          "agent_boundary",
+          "none"
+        ]
+      }
+    },
+    "declared_control_applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "controls_expected"
+          ],
+          "properties": {
+            "controls_expected": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/control_id"
+              }
+            },
+            "no_applicable_reason": false
+          }
+        },
+        {
+          "required": [
+            "no_applicable_reason"
+          ],
+          "properties": {
+            "no_applicable_reason": {
+              "type": "string",
+              "minLength": 1
+            },
+            "controls_expected": false
+          }
+        }
+      ],
+      "properties": {
+        "controls_expected": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/control_id"
+          }
+        },
+        "no_applicable_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "contracts_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "data_changes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "generated_env": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python",
+        "os",
+        "dependency_digest"
+      ],
+      "properties": {
+        "python": {
+          "type": "string",
+          "minLength": 1
+        },
+        "os": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dependency_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "rollback": {
+      "type": "string",
+      "minLength": 1
+    },
+    "waivers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^WV-[0-9]+$"
+      }
+    },
+    "declared_repository_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Claim; must equal the trusted runner's repository id."
+    },
+    "declared_baseline_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$",
+      "description": "Claim; must equal the trusted event PR base."
+    },
+    "declared_head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$",
+      "description": "Claim; must equal the trusted event head."
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "Declared consistency only. HL-11 still re-derives against the real diff; this cannot be trusted alone.",
+      "if": {
+        "properties": {
+          "declared_dependency_changed": {
+            "const": true
+          }
+        },
+        "required": [
+          "declared_dependency_changed"
+        ]
+      },
+      "then": {
+        "required": [
+          "declared_control_applicability"
+        ],
+        "properties": {
+          "declared_control_applicability": {
+            "required": [
+              "controls_expected"
+            ],
+            "properties": {
+              "controls_expected": {
+                "contains": {
+                  "const": "CH-04"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "declared_touches_agent_owned_paths": {
+            "const": true
+          }
+        },
+        "required": [
+          "declared_touches_agent_owned_paths"
+        ]
+      },
+      "then": {
+        "required": [
+          "agent_owner_approval_ref"
+        ]
+      }
+    }
+  ]
+}

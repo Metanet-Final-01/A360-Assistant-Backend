@@ -1,0 +1,64 @@
+# Phase 0 v1.10 executable contract source. SHA-256 of every file below.
+#   CONTRACT SELF-TEST : PYTHONIOENCODING=utf-8 python -B contract_self_test.py
+#   VERTICAL PATHS     : PYTHONIOENCODING=utf-8 python -B vertical_paths.py
+#   REGRESSIONS        : codex_v15/v16/v17/v18/v19_regression.py
+#   SELF-ATTACK        : PYTHONIOENCODING=utf-8 python -B selfattack.py
+# Generated documents go to .out/, which is NOT hashed: the published commands leave this
+# manifest unchanged. Verify with: sha256sum -c SHA256SUMS.txt
+# Current-Confirmed baseline: d66fce1840c1dcf907c9d303bbc64654c7c41857 (origin/dev)
+# Historical Baseline-Confirmed: ed1a1b0d62452f75212da4f78f3e8b9f990da42e (v1.1-v1.7 only)
+# attest.py is the ONLY certifier and is NOT proved to run on an isolated CI runner (D-16).
+# policies/ are state=unapproved by design (D-6/D-9/D-11/D-20/D-22..D-24);
+# policies_approved_fixture/ is TEST-ONLY and reachable only via Attestor.for_testing_only.
+# v1.10: Attestor.for_runner takes NO installation root - it derives one from this module's own
+# location - so no caller ARGUMENT selects an authority. HL-19 requires the receipt's policy
+# authority SET to equal the resolved set exactly. HL-20 compares registry snapshot and public
+# contract version against a RUNNER-BOUND observation adapter; the shipped adapter is
+# NotConfiguredPublicBoundaryAdapter and fails closed, which is the truthful state at d66fce1.
+# See selfattack.py for the 4 attacks v1.10 does NOT close - all of them D-16.
+
+599e8a4a13970d70fbb487027e352c253c103bd9cf93c537d2546c1107cceff8 *./attest.py
+4e463ed227bf60562e4ec7dfe4e80f99e89dd93a9053e577d4f962f1874fa870 *./codex_v15_regression.py
+1433f64151019cbfcfc8cbf2898702fef9266b5c773d61790e756345d2914666 *./codex_v16_regression.py
+2a26fb4be73f848e25dd841fe2377b9cdfe622883498c2b78ee7232913ceb828 *./codex_v17_regression.py
+0f7e7adc104e01381af21ed64e71da2c40c1d947c4912fe0a98979ff9f84c5b5 *./codex_v18_regression.py
+8e5153246770f8d77abf2a1ef57415ddf5c05c57f818db45ea4cfb5a6d9e5c11 *./codex_v19_regression.py
+cf43ac5d75c6109f7634f80062b077b812320f1396a708aa4e3b84992169f824 *./contract_self_test.py
+019eca6417f3f9f6c1a074a4774c8aafdbf3c3df278a6fa903190f61f9bc65e5 *./control-registry.yaml
+425fc202a4b57ab54580d08376ab109a51bb462929692e6e568488f85d686ec9 *./core.py
+fb1a3a04df6996b6aba543ef39854207181dbfa88d451983288c200c4a8e392f *./policies/agent-version-policy.yaml
+e15e03aff5c3943390efd398b63b6e7c46088854d5485841c3149e160cb47fc0 *./policies/applicability-policy.yaml
+e17bb170367b6f9a16c461f8901edeaceed2d9bc8ab09920ec06098c496096a6 *./policies/approvals/AP-1.yaml
+43e38a36429cc46486f4495940092c65e16cf54fb3b04513873227db604bf385 *./policies/approvals/AP-WRONGROLE.yaml
+b31d1565ddd13766e92ac3a91f15629d80cda20d5f18d5d7679f4aa7b084a854 *./policies/dependency-path-policy.yaml
+bb1b79b41d8fb3c48ea635174aa09938c38688de923c61f1ae04f7e0e99424fc *./policies/interface-policy.yaml
+4bbaef4efa13781d9b27785dee60b66a4399acac23fda3cdae8745bb07f7dd6a *./policies/operation-policy.yaml
+af71ee73270b1b19c50df6c0f27202c5498ecfcf7dcc4bfcf8dec284349d3212 *./policies/severity-policy.yaml
+a0e415ce58317f8b4e55317748b12d49a9f0c7fa5517eb8282fae207b270663c *./policies/waivers/WV-1.yaml
+1c3eebcc9edd728f0c43729b6d5fb6e3b2b2b0b92bc237f6123ab3f719233224 *./policies/waivers/WV-2.yaml
+e3f07c66671732e3164913487a90bc27ab4ee3a07ca39a6842bd1f99402fe7f8 *./policies/waivers/WV-3.yaml
+e81c0ed3af86f2ddcdce77401c03773e73a87dc111661c17a1d78bf3d2d43ed7 *./policies_approved_fixture/agent-version-policy.yaml
+5b553f366b41a63764d5f958898b3b458fad4f0616b46e76bf621595f4fddf85 *./policies_approved_fixture/applicability-policy.yaml
+e17bb170367b6f9a16c461f8901edeaceed2d9bc8ab09920ec06098c496096a6 *./policies_approved_fixture/approvals/AP-1.yaml
+43e38a36429cc46486f4495940092c65e16cf54fb3b04513873227db604bf385 *./policies_approved_fixture/approvals/AP-WRONGROLE.yaml
+31ede700d95b357a4ee34ced878e6bf9abcc8dfb5b78296bd1ff37a8195775d0 *./policies_approved_fixture/dependency-path-policy.yaml
+36da2cbde969ef3c6cf658a358e5ad18ba3f256e06b61501e045d3b42feb61ca *./policies_approved_fixture/interface-policy.yaml
+f8127faca79c855a49825bc933533612a4a22e9f390e54e8d882502c8936351e *./policies_approved_fixture/operation-policy.yaml
+7461f8aed6f1173828d6e7fc22a6f57871042a2a8bc6165d609bb3bbd1ca03d7 *./policies_approved_fixture/severity-policy.yaml
+a0e415ce58317f8b4e55317748b12d49a9f0c7fa5517eb8282fae207b270663c *./policies_approved_fixture/waivers/WV-1.yaml
+1c3eebcc9edd728f0c43729b6d5fb6e3b2b2b0b92bc237f6123ab3f719233224 *./policies_approved_fixture/waivers/WV-2.yaml
+e3f07c66671732e3164913487a90bc27ab4ee3a07ca39a6842bd1f99402fe7f8 *./policies_approved_fixture/waivers/WV-3.yaml
+490d6577607bb2832e7bbdeeb0fcb9bcaf84bbe2d0484f731de4c9621a0d4bbf *./rules.py
+58f9e5a93cc5b4d33455e589f8fe8dca03486b3f6057408d695cb73fd96d3c71 *./schemas/approval.schema.json
+3b469316d18b767bcb8748416ea2d0f3ad68f352d099aebf374812cdfadd13ac *./schemas/assurance-report.schema.json
+4145c172216b9dc3d5078544297fd5eee8d88465d82910ee9dc266f44cfbf9c5 *./schemas/change-manifest.schema.json
+9d35a7270a5cd34099d6b98c92a92b2d62c262f3c8008e0dc69e1727c912f20d *./schemas/change-receipt.schema.json
+b8c8b08f80a2cc3315362c0801a32fe34de3d89cd061adcc8b261a2b34f75dbd *./schemas/control-registry.schema.json
+926d2f10e567003cb956976d0c09356c63212be61178fe4a256e6238e83bd9ba *./schemas/evidence-bundle.schema.json
+c6c6fbf59aef6601b2b5cfe7c00f1d2ada3d1193a12eb946009bf199cdeee0bd *./schemas/policy.schema.json
+2e5ba211ef27a7b6e436f0b598f000782a795ae9bdb0aabb764960cdaa92c193 *./schemas/runtime-validation.schema.json
+dcb3ef0b498b0f9ea8a0e562421740f9ff4a97da0d4e02bb0890a1c26cdca05c *./schemas/trusted-context.schema.json
+1aa871b040c10e1375fcd42bafd5aa7b2cfa3f9f7f598c28c382988ea376e1d5 *./schemas/waiver.schema.json
+81f45a524136f3d7c2d7aed2b32dd1138d4147baffb7745796aef5bc374ab5e4 *./selfattack.py
+d5bef08a2d58b10e601be027a2371340cf33d4a3093d00ce6f29eaa0f7139899 *./store.py
+c88c49e453debde9ee7f59673e9b6ec738c4e3b746b2a56230ef409d8f88f534 *./vertical_paths.py

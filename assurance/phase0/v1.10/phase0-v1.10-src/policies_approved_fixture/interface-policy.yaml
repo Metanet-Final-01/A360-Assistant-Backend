@@ -1,0 +1,29 @@
+kind: interface-policy
+policy_id: agent.public_interface
+version: 0.2.0-fixture
+state: approved
+approval:
+  approver_role: phase0-fixture-only
+  approval_ref: FIXTURE-NOT-A-REAL-APPROVAL
+  approved_at: '2026-07-10T00:00:00Z'
+owner_role: agent-maintainer
+source_of_truth: app/agent/__init__.py __all__
+observed_at_sha: d66fce1840c1dcf907c9d303bbc64654c7c41857
+public_names:
+- analyze
+- available_versions
+- default_version
+- recommend
+- stream_agent_turn
+bounded_coverage_note: 'This lint detects direct imports, parent-package imports, package aliases and literal dynamic imports.
+  It does NOT detect fully computed module names, sys.modules manipulation, or imports performed by native/compiled code.
+  It is a bounded boundary lint, not a complete import authority.
+
+  '
+version_dispatch_note: 'app/agent now vendors independent per-version stacks under app/agent/v1 and app/agent/v2, each with
+  its own orchestrator/recommend/verify/prompts. Backend control MUST NOT be rewritten to point at app/agent/vN/** paths:
+  those are Agent-owned internals (D-002). Backend uses only the public boundary - the dispatcher symbols above and the done-data
+  envelope.
+
+  '
+fixture_warning: TEST FIXTURE ONLY. Not a human approval. The shipped policies/ remain state=unapproved pending D-6/D-22.

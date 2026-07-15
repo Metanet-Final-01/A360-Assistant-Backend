@@ -1,0 +1,107 @@
+{
+  "$schema": "./adoption.schema.json",
+  "schema_version": "1.0",
+  "contract": {
+    "version": "v1.10",
+    "artifact_sha256": "05c1bb974193e973025ac818235a9df511c0f566bba4d40f6b270dcaed531128",
+    "contract_baseline_sha": "d66fce1840c1dcf907c9d303bbc64654c7c41857",
+    "implementation_baseline_sha": "7d2561819eba107a6a5ffcc32f5420a955dd7028",
+    "verdict": "approve_for_human_decision"
+  },
+  "ownership": {
+    "decision_id": "D-002",
+    "agent_internal_owner": "agent-team",
+    "backend_boundary_owner": "backend-team",
+    "integration_rule": "public-contract-only",
+    "forbidden_paths": [
+      "app/agent/**"
+    ],
+    "forbidden_internals": [
+      "prompt",
+      "graph",
+      "model",
+      "tool",
+      "repair",
+      "retry",
+      "eval"
+    ]
+  },
+  "decisions": {
+    "D-16": {
+      "status": "accepted",
+      "owner": "decision-needed",
+      "implementation_jira": "RPA-183",
+      "writer": "protected-github-actions",
+      "single_writer": true,
+      "signing": "deferred"
+    },
+    "D-17": {
+      "status": "accepted",
+      "owner": "decision-needed",
+      "implementation_jira": "RPA-183",
+      "codeowners": true,
+      "branch_protection": true,
+      "minimum_reviewers": 2
+    },
+    "D-21": {
+      "status": "accepted",
+      "owner": "decision-needed",
+      "implementation_jira": "RPA-184",
+      "requested_from": "agent-team",
+      "public_field": "resolved_agent_version",
+      "backend_private_imports": "forbidden"
+    },
+    "D-22": {
+      "status": "accepted",
+      "owner": "decision-needed",
+      "implementation_jira": "RPA-184",
+      "approved_versions": [],
+      "discovered_is_approved": false
+    },
+    "D-23": {
+      "status": "accepted",
+      "owner": "decision-needed",
+      "implementation_jira": "RPA-181",
+      "implementation_scope": "backend-boundary",
+      "observe": "record-unassured",
+      "enforce": "block-active-persist-latest-history-export",
+      "silent_fallback": "forbidden"
+    },
+    "D-24": {
+      "status": "accepted",
+      "owner": "decision-needed",
+      "implementation_jira": "RPA-184",
+      "coordination": "backend-and-agent-teams",
+      "selection_granularity": "per-turn",
+      "same_version_within_turn": true,
+      "next_turn_may_change": true,
+      "current_discovered_versions": [
+        "v1",
+        "v2"
+      ],
+      "target_selection_contract": [
+        "v1",
+        "v2",
+        "v3"
+      ],
+      "v3_status": "planned-pr-249-not-merged"
+    }
+  },
+  "rollout": {
+    "current": "not-connected",
+    "allowed_next": "observe",
+    "warn_authorized": false,
+    "enforce_authorized": false
+  },
+  "open_decisions": {
+    "runtime_override_policy_boundary": {
+      "status": "decision-needed",
+      "affected": [
+        "budget_limits",
+        "retrieval_params"
+      ],
+      "recommended": "outside-assurance-authority-inside-evidence-governance",
+      "target_jira": "RPA-183"
+    }
+  }
+}
