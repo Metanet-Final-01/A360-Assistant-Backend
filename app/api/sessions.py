@@ -312,8 +312,19 @@ def save_edited_recommendation(
     try:
         Recommendation.model_validate(payload.recommendation)  # 스키마 검증 (구조 깨짐 방지)
     except ValidationError as e:
+        # 개수만 주면 프론트가 어디를 고쳐야 할지 알 수 없다 — 필드 경로·사유까지 돌려준다.
+        # err["input"]은 트리 전체가 실릴 수 있어 제외(응답 비대·원문 반향 방지), 상한 10건.
+        errors = [
+            {"field": ".".join(str(p) for p in err["loc"]) or "(root)", "reason": err["msg"]}
+            for err in e.errors()[:10]
+        ]
         raise HTTPException(
-            400, detail={"code": "INVALID_RECOMMENDATION", "message": f"추천안 형식이 올바르지 않습니다: {e.error_count()}건"}
+            400,
+            detail={
+                "code": "INVALID_RECOMMENDATION",
+                "message": f"추천안 형식이 올바르지 않습니다: {e.error_count()}건",
+                "errors": errors,
+            },
         ) from None
     # 기준 버전(부모)에서 analysis_id를 이어받는다 — 편집본도 같은 분석에 속한다
     base = db.execute(

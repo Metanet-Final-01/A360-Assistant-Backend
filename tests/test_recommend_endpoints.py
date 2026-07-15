@@ -175,6 +175,22 @@ def test_save_edited_rejects_malformed_400(monkeypatch):
     assert r.json()["detail"]["code"] == "INVALID_RECOMMENDATION"
 
 
+def test_save_edited_400_names_offending_fields():
+    """400은 개수만이 아니라 어느 필드가 왜 틀렸는지 알려준다 — 프론트 연동 디버깅용."""
+    session = SimpleNamespace(id=SID, user_id=None)
+    _override(FakeDB(session=session, versions=[_row(1)]))
+    bad = _valid_recommendation()
+    del bad["steps"][0]["actions"][0]["order"]  # 드래그 재정렬 때 흔한 누락
+    with TestClient(app) as c:
+        r = c.post(f"/api/sessions/{SID}/recommendations", json={"recommendation": bad})
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["code"] == "INVALID_RECOMMENDATION"
+    fields = [e["field"] for e in detail["errors"]]
+    assert "steps.0.actions.0.order" in fields  # 정확한 경로를 짚어준다
+    assert all("input" not in e for e in detail["errors"])  # 원문 트리는 반향하지 않는다
+
+
 def test_save_edited_409_without_base(monkeypatch):
     session = SimpleNamespace(id=SID, user_id=None)
     _override(FakeDB(session=session, versions=[]))  # 기준 버전 없음
