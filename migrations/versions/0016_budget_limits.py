@@ -39,6 +39,19 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True),
                   server_default=sa.text("now()"), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        # 값 자체를 DB가 지킨다 — API(BudgetLimitsUpdate)가 이미 막지만, 직접 SQL 등 우회 경로로
+        # 이상값이 들어오면 상한이 조용히 무력화된다: nan은 서비스에서 비활성으로, inf는 "영원히
+        # 초과 안 됨"이 된다 (#243 리뷰).
+        # ⚠️ Postgres는 **NaN을 모든 수보다 크게** 취급해 `> 0`으로 안 걸러진다(Python과 반대).
+        #    `< 'Infinity'`가 NaN(비교 False)과 inf를 함께 막는다.
+        *[
+            sa.CheckConstraint(
+                f"{c} IS NULL OR ({c} > 0 AND {c} < 'Infinity'::float8)",
+                name=f"ck_budget_limits_{c}_positive_finite",
+            )
+            for c in ("subject_daily_usd", "subject_monthly_usd",
+                      "global_daily_usd", "global_monthly_usd")
+        ],
     )
     op.create_index("ix_budget_limits_created_at", "budget_limits", ["created_at"], unique=False)
 

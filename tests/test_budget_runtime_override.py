@@ -118,9 +118,65 @@ def test_read_failure_without_cache_falls_back_to_env(monkeypatch):
 # --- 값 저하 규칙 ---
 
 @pytest.mark.parametrize("bad", [0, -1, -0.5])
-def test_nonpositive_db_value_disables_that_limit(monkeypatch, bad):
+def test_nonpositive_db_value_disables_that_limit(bad):
     """직접 SQL 등으로 0·음수가 들어가 있어도 None으로 저하 — env와 같은 규칙."""
-    assert budget._positive_or_none(bad) is None
+    assert budget._sane_limit(bad, "x") is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_db_value_raises_instead_of_degrading(bad):
+    """nan/inf는 **저하가 아니라 예외** — 저하하면 상한이 조용히 사라진다 (#243 리뷰).
+
+    nan을 None으로 떨구면 상한이 꺼지고, inf를 통과시키면 영원히 초과가 안 나 상한이 무의미하다.
+    둘 다 "상한이 사라지는" 결과라, 조회 실패와 같이 취급해 직전 캐시/env를 유지시켜야 한다.
+    """
+    with pytest.raises(ValueError):
+        budget._sane_limit(bad, "subject_daily_usd")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_api_rejects_nonfinite_limits(bad):
+    """API가 nan/inf를 애초에 거부한다 — `nan <= 0`이 False라 양수 검사만으론 못 막는다.
+
+    RetrievalParams(RPA-149)가 같은 함정을 주석으로 남겨뒀다:
+    "float()은 nan·inf를 통과시키고, nan<0/inf<0은 둘 다 False라 음수 검사로 못 막는다".
+    """
+    from app.schemas.budget import BudgetLimitsUpdate
+
+    with pytest.raises(ValueError):
+        BudgetLimitsUpdate(subject_daily_usd=bad, subject_monthly_usd=None,
+                           global_daily_usd=None, global_monthly_usd=None)
+
+
+def test_nonfinite_db_value_keeps_last_known_limits(monkeypatch):
+    """DB에 nan이 들어와도 직전 상한이 유지된다 — 저하 규칙이 실제로 그렇게 동작하는지."""
+    _override(monkeypatch, subject_daily=5.0)
+    assert budget.active_limits()["subject_daily"] == 5.0
+
+    def _nan_row():
+        return {"subject_daily": budget._sane_limit(float("nan"), "subject_daily_usd")}
+
+    monkeypatch.setattr(budget, "_read_override", _nan_row)
+    budget._cache = (budget._cache[0] - 999, budget._cache[1])  # TTL 만료 강제
+    assert budget.active_limits()["subject_daily"] == 5.0, "nan이 상한을 지워버렸다"
+
+
+# --- 캐시 무효화 race (#243 리뷰) ---
+
+def test_inflight_read_does_not_resurrect_busted_cache(monkeypatch):
+    """조회 중 PUT이 무효화하면, 그 조회는 **옛 값을 캐시에 되돌려놓지 않는다**.
+
+    이게 없으면: 조회가 옛 행을 읽는 동안 PUT이 새 값 저장 + bust_cache() → 조회 스레드가
+    그 뒤에 `_cache = 옛값`을 실행 → **최대 TTL(30초) 동안 변경 전 상한이 적용**된다.
+    """
+    def _slow_read():
+        budget.bust_cache()  # 조회 "도중" PUT이 무효화한 상황을 재현
+        return {"subject_daily": 5.0, "subject_monthly": None,
+                "global_daily": None, "global_monthly": None}
+
+    monkeypatch.setattr(budget, "_read_override", _slow_read)
+    assert budget.active_limits()["subject_daily"] == 5.0  # 호출자는 읽은 값을 그대로 받는다
+    assert budget._cache is None, "무효화된 캐시를 조회 스레드가 되살렸다"
 
 
 def test_check_budget_uses_override(monkeypatch):

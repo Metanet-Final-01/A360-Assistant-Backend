@@ -30,7 +30,9 @@ eventually-consistent soft cap이다. 정확한 강제가 필요해지면 예약
 """
 
 import logging
+import math
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -56,6 +58,17 @@ _CACHE_TTL_SEC = 30.0
 
 # (monotonic 시각, {상한이름: 값|None}) — None이면 미로드. monotonic이라 시계 변경에 안 흔들린다.
 _cache: tuple[float, dict[str, float | None]] | None = None
+
+# 캐시 무효화 세대 — bust_cache()가 올린다. 조회 스레드는 "읽기 시작 시점의 세대"와 저장 직전
+# 세대가 같을 때만 캐시에 쓴다 (#243 리뷰).
+#
+# 왜 필요한가: 조회가 _read_override()로 옛 행을 읽는 동안 PUT이 새 값을 쓰고 bust_cache()를
+# 부르면, 조회 스레드가 그 뒤에 `_cache = (now, 옛값)`을 실행해 **무효화를 되돌린다** — 최대 TTL
+# 30초 동안 변경 전 상한이 적용된다.
+# 왜 락 직렬화가 아닌가: 락을 DB 조회 전체에 걸면 그동안 모든 /turn이 대기한다(요청 경로). 세대
+# 비교는 짧은 임계구역만 잠그고 조회는 병렬로 둔다 — 최악의 경우 캐시를 한 번 못 채울 뿐이다.
+_lock = threading.Lock()
+_generation = 0
 
 
 @dataclass(frozen=True)
@@ -125,17 +138,32 @@ def _read_override() -> dict[str, float | None] | None:
         )
         if row is None:
             return None
-        # 0·음수가 어쩌다 들어가 있어도(직접 SQL 등) None으로 저하 — env와 같은 규칙
+        # 0·음수가 어쩌다 들어가 있어도(직접 SQL 등) None으로 저하 — env와 같은 규칙.
+        # 단 nan/inf는 저하가 아니라 예외 → 위 규칙대로 직전 캐시/env가 유지된다.
         return {
-            "subject_daily": _positive_or_none(row.subject_daily_usd),
-            "subject_monthly": _positive_or_none(row.subject_monthly_usd),
-            "global_daily": _positive_or_none(row.global_daily_usd),
-            "global_monthly": _positive_or_none(row.global_monthly_usd),
+            "subject_daily": _sane_limit(row.subject_daily_usd, "subject_daily_usd"),
+            "subject_monthly": _sane_limit(row.subject_monthly_usd, "subject_monthly_usd"),
+            "global_daily": _sane_limit(row.global_daily_usd, "global_daily_usd"),
+            "global_monthly": _sane_limit(row.global_monthly_usd, "global_monthly_usd"),
         }
 
 
-def _positive_or_none(v: float | None) -> float | None:
-    return float(v) if v is not None and v > 0 else None
+def _sane_limit(v: float | None, name: str) -> float | None:
+    """DB 값 → 상한. 0·음수는 비활성(None), **nan/inf는 예외**.
+
+    저하 방향을 왜 가르나 (#243 리뷰): 0·음수는 "끔"으로 해석해도 안전하지만, nan/inf는 그렇지
+    않다 — nan을 None으로 저하하면 **상한이 조용히 꺼지고**, inf를 그대로 쓰면 **영원히 초과가
+    안 나 상한이 무의미**해진다. 둘 다 "상한이 사라지는" 결과라 비용이 샌다. 그래서 예외로 올려
+    active_limits()가 **직전 캐시(없으면 env)를 유지**하게 한다 — 조회 실패와 같은 취급.
+
+    API는 nan/inf를 애초에 거부하므로(BudgetLimitsUpdate) 여기 걸리는 건 직접 SQL 등 비정상 경로다.
+    """
+    if v is None:
+        return None
+    f = float(v)
+    if not math.isfinite(f):
+        raise ValueError(f"budget_limits.{name}가 유한한 수가 아닙니다: {f!r}")
+    return f if f > 0 else None
 
 
 def active_limits() -> dict[str, float | None]:
@@ -150,26 +178,46 @@ def active_limits() -> dict[str, float | None]:
     """
     global _cache
     now = time.monotonic()
-    if _cache is not None and now - _cache[0] < _CACHE_TTL_SEC:
-        return _cache[1]
+    with _lock:
+        cached = _cache
+        gen_at_read = _generation  # 이 조회가 "시작된" 세대 — 저장 직전에 다시 비교한다
+    if cached is not None and now - cached[0] < _CACHE_TTL_SEC:
+        return cached[1]
     try:
-        override = _read_override()
+        override = _read_override()  # DB 왕복 — 락 밖에서. 이 사이 PUT이 무효화할 수 있다
     except Exception:
-        if _cache is not None:
+        if cached is not None:
             logger.warning("예산 상한 오버라이드 조회 실패 — 직전 값을 유지한다", exc_info=True)
-            _cache = (now, _cache[1])
-            return _cache[1]
+            _store_if_current(gen_at_read, now, cached[1])
+            return cached[1]
         logger.warning("예산 상한 오버라이드 조회 실패 — .env 값으로 폴백", exc_info=True)
         override = None
     limits = override if override is not None else _env_limits()
-    _cache = (now, limits)
+    _store_if_current(gen_at_read, now, limits)
     return limits
 
 
-def bust_cache() -> None:
-    """캐시 무효화 — admin PUT 직후 호출해 다음 검사가 DB를 다시 읽게 한다(무중단 반영)."""
+def _store_if_current(gen_at_read: int, now: float, limits: dict[str, float | None]) -> None:
+    """읽는 동안 무효화가 없었을 때만 캐시에 쓴다 — 무효화를 되돌리지 않기 위해 (#243 리뷰)."""
     global _cache
-    _cache = None
+    with _lock:
+        if gen_at_read == _generation:
+            _cache = (now, limits)
+        else:
+            # 내가 읽는 사이 PUT이 값을 바꿨다 — 내 값은 이미 낡았으니 캐시에 넣지 않는다.
+            # 다음 호출이 새 값을 다시 읽는다(한 번의 DB 왕복 손해일 뿐).
+            logger.debug("예산 상한 캐시 저장 생략 — 조회 중 무효화됨")
+
+
+def bust_cache() -> None:
+    """캐시 무효화 — admin PUT 직후 호출해 다음 검사가 DB를 다시 읽게 한다(무중단 반영).
+
+    세대를 올려, **지금 조회 중인 스레드가 옛 값을 캐시에 되돌려놓는 것**도 함께 막는다.
+    """
+    global _cache, _generation
+    with _lock:
+        _cache = None
+        _generation += 1
 
 
 def _period_start(period: str, now: datetime) -> datetime:
