@@ -7,6 +7,7 @@
   "required": [
     "schema_version",
     "contract",
+    "post_freeze_review",
     "ownership",
     "decisions",
     "rollout",
@@ -44,6 +45,86 @@
         },
         "verdict": {
           "const": "approve_for_human_decision"
+        }
+      }
+    },
+    "post_freeze_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source",
+        "source_is_authority",
+        "reviewed_commits",
+        "reviewed_at",
+        "counts",
+        "implementation_gate",
+        "production_use",
+        "frozen_artifacts_modified",
+        "disposition_path",
+        "target_jira"
+      ],
+      "properties": {
+        "status": {
+          "const": "corrective-action-required"
+        },
+        "source": {
+          "const": "coderabbit-plus-codex-independent-verification"
+        },
+        "source_is_authority": {
+          "const": false
+        },
+        "reviewed_commits": {
+          "const": [
+            "2101f915110f5a92debf7e782d7c8358f56b2dc6",
+            "69e7d3b4b7e884181420f4c351774173710a873a"
+          ]
+        },
+        "reviewed_at": {
+          "const": "2026-07-15"
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "unique_findings",
+            "corrective_action_required",
+            "qualified_gap",
+            "historical_or_curation",
+            "dismissed"
+          ],
+          "properties": {
+            "unique_findings": {
+              "const": 28
+            },
+            "corrective_action_required": {
+              "const": 22
+            },
+            "qualified_gap": {
+              "const": 3
+            },
+            "historical_or_curation": {
+              "const": 3
+            },
+            "dismissed": {
+              "const": 0
+            }
+          }
+        },
+        "implementation_gate": {
+          "const": "blocked-until-rpa-179"
+        },
+        "production_use": {
+          "const": "blocked"
+        },
+        "frozen_artifacts_modified": {
+          "const": false
+        },
+        "disposition_path": {
+          "const": "../evidence/post-freeze-review.md"
+        },
+        "target_jira": {
+          "const": "RPA-179"
         }
       }
     },

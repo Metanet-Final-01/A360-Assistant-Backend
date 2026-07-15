@@ -3,5 +3,6 @@
 3a8fa7ee2f54007f6b51a8ca54c54034e73e52134830e9717758990c6cc6b36a  frozen/codex-independent-check-v1.10.py
 d0ad43c2a705d0522cba8e287b31fe040c953bb2ba89a5d3d9788cc0b07a666f  frozen/phase0-v1.10-src/SHA256SUMS.txt
 2235c5942414603e52487794787a6c2ca21358485fcd46cddc1cfbc092ce5999  frozen/claude-post-contract-impact-v1.md
-6192e83017884ca0c983fa648a916a420798dc315f32c857fc25cc9ae99bb7dc  ../decisions/adoption.json
-c3e31e1aba57175c974549a2503fae17d55f98ff2b25d71d1a1849943ca0afc6  ../decisions/adoption.schema.json
+f0e08d4198667fb7df17e504872bb14fb836d17c3b97ea71a40df75eb676af83  ../decisions/adoption.json
+46fe0dc2a27404f9bbbc200f9f280ce80a76d9680ef85a11719fad78e7306423  ../decisions/adoption.schema.json
+a53e39fad3d7978731fece041b5ebbf134d35dffd0d63a21a6b10ec08f88a48b  post-freeze-review.md

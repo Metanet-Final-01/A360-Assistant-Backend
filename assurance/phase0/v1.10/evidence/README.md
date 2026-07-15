@@ -12,7 +12,7 @@
 |---|---|---|
 | 설명 | 상위 `README.md`, `VERSION_HISTORY.md` | 사람이 빠르게 이해하는 한국어 중심 안내 |
 | 결정 | `../decisions/` | 현재 채택된 경계와 rollout의 기계 판독 정본 |
-| 증거 | `verification.md`, `artifact-manifest.sha256`, `frozen/` | 당시 원본과 재현 가능한 검사 |
+| 증거 | `post-freeze-review.md`, `verification.md`, `artifact-manifest.sha256`, `frozen/` | 당시 원본, 사후 처분과 재현 가능한 검사 |
 
 원본을 많이 저장했다는 사실 자체가 보증은 아니다. 중요한 것은 원본의 역할과 한계를 표시하고,
 실제 하네스 구현이 이 계약을 실행 경로에서 소비하도록 만드는 것이다.
@@ -21,6 +21,7 @@
 
 | 경로 | 작성·검토 주체 | 역할 |
 |---|---|---|
+| `post-freeze-review.md` | CodeRabbit 제안, Codex 독립 판정 | 28건의 유효성·영향·후속 처리와 생산 적용 차단 조건 |
 | `verification.md` | Codex 재검증 | 실행 환경, 통과·실패·Not-tested 기록 |
 | `artifact-manifest.sha256` | 저장소 채택 단계 | 최종 원본과 결정 파일의 내용 무결성 |
 | `frozen/claude-contract-v1.10.md` | Claude | 최종 계약, 참조 코드, 당시 실행 로그, 한국어 요약 |
@@ -65,24 +66,27 @@
 
 1. 상위 [Phase 0 개요](../README.md)
 2. [버전별 변화](../VERSION_HISTORY.md)
-3. [재검증 결과](verification.md)
-4. 필요할 때만 최종 독립 리뷰 원본
+3. [동결 후 사후 검토](post-freeze-review.md)
+4. [재검증 결과](verification.md)
+5. 필요할 때만 최종 독립 리뷰 원본
 
 ### Backend 구현자
 
 1. `../decisions/adoption.json`
-2. `control-registry.yaml`
-3. `schemas/`
-4. `rules.py`, `attest.py`, `store.py`
-5. positive·negative 수직 경로
+2. `post-freeze-review.md`의 RPA-179 차단 조건
+3. `control-registry.yaml`
+4. `schemas/`
+5. `rules.py`, `attest.py`, `store.py`
+6. positive·negative 수직 경로
 
 ### 보안·감사 검토자
 
 1. `artifact-manifest.sha256`와 `SHA256SUMS.txt`
-2. Codex 독립 리뷰
-3. `selfattack.py`
-4. v1.5~v1.9 회귀 검사
-5. `verification.md`의 Not-tested와 후속 조건
+2. `post-freeze-review.md`의 28건 처분
+3. Codex 독립 리뷰
+4. `selfattack.py`
+5. v1.5~v1.9 회귀 검사
+6. `verification.md`의 Not-tested와 후속 조건
 
 ## 5. 무결성 확인
 

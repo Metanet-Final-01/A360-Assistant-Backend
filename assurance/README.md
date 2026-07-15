@@ -22,8 +22,9 @@ A360은 개발 과정에서 AI를 적극적으로 사용했다. 그래서 결과
 | 1 | [Phase 0 v1.10 개요](phase0/v1.10/README.md) | 무엇을 결정했고 무엇은 아직 미구현인지 |
 | 2 | [버전별 설계 변화](phase0/v1.10/VERSION_HISTORY.md) | v1.1부터 v1.10까지 왜 반복 수정했는지 |
 | 3 | [채택 결정](phase0/v1.10/decisions/adoption.json) | 사람이 확정한 경계와 rollout 상태 |
-| 4 | [재검증 결과](phase0/v1.10/evidence/verification.md) | 무엇을 어느 환경에서 재현했는지 |
-| 5 | [증거 안내](phase0/v1.10/evidence/README.md) | 동결 원본과 검증 코드의 역할 및 읽는 법 |
+| 4 | [동결 후 사후 검토](phase0/v1.10/evidence/post-freeze-review.md) | 외부 AI 리뷰 28건의 독립 판정과 구현 차단 조건 |
+| 5 | [재검증 결과](phase0/v1.10/evidence/verification.md) | 무엇을 어느 환경에서 재현했는지 |
+| 6 | [증거 안내](phase0/v1.10/evidence/README.md) | 동결 원본과 검증 코드의 역할 및 읽는 법 |
 
 ## 세 가지 하네스
 
@@ -43,6 +44,8 @@ Backend 하네스는 Agent의 공개 계약을 소비하고 저장 경계를 감
 |---|---|
 | Phase 0 계약 검토 | 종료, `approve_for_human_decision` |
 | 사람의 핵심 결정 | D-16, D-17, D-21~D-24 채택 |
+| 동결 후 참조 구현 검토 | 28건 처분 완료, `corrective-action-required` |
+| 참조 구현의 생산 사용 | RPA-179 교정 전 금지 |
 | 제품 코드 연결 | 아직 없음 |
 | 현재 허용 rollout | 다음 구현은 `Observe`만 허용 |
 | `Warn`·`Enforce` | 별도 증거와 사람 승인 전 금지 |
@@ -64,6 +67,7 @@ assurance/
    │  └─ adoption.schema.json        # 결정 파일 검증 스키마
    └─ evidence/
       ├─ README.md                   # 증거 분류와 파일 역할
+      ├─ post-freeze-review.md       # CodeRabbit 지적의 독립 판정과 처분
       ├─ verification.md             # 재실행 환경과 결과
       ├─ artifact-manifest.sha256    # 동결 원본 무결성
       └─ frozen/                     # 당시 원본, 내용 수정 금지

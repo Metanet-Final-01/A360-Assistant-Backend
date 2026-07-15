@@ -8,6 +8,28 @@
     "implementation_baseline_sha": "7d2561819eba107a6a5ffcc32f5420a955dd7028",
     "verdict": "approve_for_human_decision"
   },
+  "post_freeze_review": {
+    "status": "corrective-action-required",
+    "source": "coderabbit-plus-codex-independent-verification",
+    "source_is_authority": false,
+    "reviewed_commits": [
+      "2101f915110f5a92debf7e782d7c8358f56b2dc6",
+      "69e7d3b4b7e884181420f4c351774173710a873a"
+    ],
+    "reviewed_at": "2026-07-15",
+    "counts": {
+      "unique_findings": 28,
+      "corrective_action_required": 22,
+      "qualified_gap": 3,
+      "historical_or_curation": 3,
+      "dismissed": 0
+    },
+    "implementation_gate": "blocked-until-rpa-179",
+    "production_use": "blocked",
+    "frozen_artifacts_modified": false,
+    "disposition_path": "../evidence/post-freeze-review.md",
+    "target_jira": "RPA-179"
+  },
   "ownership": {
     "decision_id": "D-002",
     "agent_internal_owner": "agent-team",

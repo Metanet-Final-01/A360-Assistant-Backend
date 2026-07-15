@@ -1,6 +1,6 @@
 # Phase 0 보증 계약 v1.10
 
-> 상태: `approve_for_human_decision` 이후 사람 결정을 반영한 구현 기준
+> 상태: 설계 결정은 `approve_for_human_decision`, 동결 참조 구현은 `corrective-action-required`
 >
 > 범위: 계약·정책·결정론적 fixture의 원본 보존과 재검증
 >
@@ -9,8 +9,8 @@
 ## 1. 세 줄 요약
 
 1. AI가 만든 코드와 AI 출력이 틀릴 수 있다는 전제로 서로 다른 세 경계에 하네스를 설계했다.
-2. v1.1부터 v1.10까지 독립 검토에서 발견된 fail-open 결함을 반복 보정하고 Phase 0를 종료했다.
-3. 현재 저장된 것은 **계약과 참조 구현**이며 실제 Backend·CI 강제는 후속 Jira에서 구현한다.
+2. v1.1부터 v1.10까지 독립 검토에서 발견된 fail-open 결함을 반복 보정해 사람 결정 단계로 넘겼다.
+3. 동결 뒤 PR 리뷰에서 28건을 추가 검토했으므로 참조 구현은 RPA-179 교정 전 생산 코드로 사용하지 않는다.
 
 처음 보는 독자는 [버전별 설계 변화](VERSION_HISTORY.md)를 먼저 읽으면 왜 문서와 검증 원본이
 이 정도로 상세한지 빠르게 이해할 수 있다.
@@ -24,6 +24,7 @@
 | 채택 결정 | `decisions/adoption.json` | 사람 결정과 rollout의 기계 판독 원본 | 정책 입력 후보 |
 | 결정 스키마 | `decisions/adoption.schema.json` | 잘못된 채택 상태를 거부 | 검증 계약 |
 | 검증 기록 | `evidence/verification.md` | 실행 환경, 명령, 결과와 한계 | 아니오 |
+| 사후 검토 | `evidence/post-freeze-review.md` | 동결 후 리뷰 28건의 독립 판정과 구현 차단 조건 | 아니오 |
 | 동결 원본 | `evidence/frozen/` | Claude 계약, Codex 리뷰, 참조 코드와 fixture | 참조 구현 |
 | 무결성 목록 | `evidence/artifact-manifest.sha256` | 동결 원본과 채택 결정의 SHA-256 | 증거 |
 
@@ -114,6 +115,21 @@ D-24의 목표 불변식은 다음과 같다.
 
 세부 실행 환경과 실패까지 포함한 기록은 [evidence/verification.md](evidence/verification.md)에 있다.
 
+### 동결 후 검토가 바꾼 판정
+
+PR #255에서 CodeRabbit가 첫 리뷰 24건과 후속 리뷰 4건, 총 28개의 고유 지적을 냈다. Codex는
+리뷰 문구를 권위로 취급하지 않고 현재 동결 원본에서 각각 다시 확인했다. 결과는 다음과 같다.
+
+| 처분 | 수 | 의미 |
+|---|---:|---|
+| 교정 필요 | 22 | 구현 또는 테스트·증거 계약에 실제 결손이 있음 |
+| 범위 한정 후 교정 | 3 | 문제는 맞지만 우회 영향이나 제안 수정의 범위가 과장·불완전함 |
+| 역사 기록·정리층 처리 | 3 | 동결 원본은 보존하고 현재 안내에서 모순과 경로를 바로잡음 |
+
+따라서 `approve_for_human_decision`은 D-16·D-17·D-21~D-24 같은 **설계 결정을 사람이 검토할
+수 있다**는 뜻으로 유지한다. 참조 Python을 구현 정본으로 복사해도 된다는 승인은 철회한다.
+상세 처분과 독립 재현 근거는 [동결 후 사후 검토](evidence/post-freeze-review.md)에 있다.
+
 ## 8. 남은 결정과 구현 순서
 
 런타임의 `budget_limits`와 `retrieval_params`를 assurance 정책 권위에 포함할지는 아직
@@ -122,7 +138,7 @@ D-24의 목표 불변식은 다음과 같다.
 
 | 순서 | Jira | 산출물 | 허용 모드 |
 |---|---|---|---|
-| 1 | RPA-179 | 결정론적 회귀 안정화, 정책 registry 단일화, 의존성 선언 | fixture |
+| 1 | RPA-179 | 사후 검토 28건 교정, 결정론적 회귀 안정화, 정책 registry 단일화, 의존성 선언 | fixture |
 | 2 | RPA-180 | Change Assurance MVP | Observe |
 | 3 | RPA-181 | Backend Output Boundary MVP | Observe |
 | 4 | RPA-184 | 공개 Agent 버전 계약과 Backend 소비 | Observe |

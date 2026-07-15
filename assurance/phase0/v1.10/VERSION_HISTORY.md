@@ -29,7 +29,7 @@ Phase 0의 목적은 그럴듯한 설계 문서를 만드는 것이 아니라, A
 | v1.7 | `revision_required` | raw-byte 결정, 영수증 단일화 시도, 8/10 수렴 | 테스트 승인 정책 경로 우회와 영수증 ID의 복수 출처·충돌 |
 | v1.8 | `revision_required` | 기준선 재대조, Agent 버전 정책과 canonical receipt | 버전 provenance가 기록만 되고 판정에 미사용, runner 권위 우회 |
 | v1.9 | `revision_required` | Agent 정책 연결, 내용 주소, Git parser 보정 | 정책 집합 완전성, registry 관측 결속, caller-controlled root 잔존 |
-| v1.10 | `approve_for_human_decision` | 권위 선택 입력 제거, 정확한 정책 집합, 관측 결속, 결정론적 Git | 제품 구현 전 D-16 보호 runner와 두 테스트 부채가 남음 |
+| v1.10 | `approve_for_human_decision` | 권위 선택 입력 제거, 정확한 정책 집합, 관측 결속, 결정론적 Git | 동결 후 리뷰에서 참조 구현 28건을 추가 처분, RPA-179 교정 전 생산 사용 금지 |
 
 ## 3. 버전별 고민과 보정
 
