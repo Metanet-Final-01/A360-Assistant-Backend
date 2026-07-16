@@ -61,6 +61,39 @@ class Alert:
     severity: str = "warning"  # info | warning | critical
 
 
+def budget_exceeded(verdict, subject_label: str) -> Alert:
+    """예산 초과 429를 알림으로 — enforce가 실제로 사용자를 막은 순간.
+
+    **key에 주체를 넣는다.** `budget:subject:<id>:daily`처럼 분리하지 않으면 한 사용자의
+    쿨다운이 다른 사용자의 알림을 삼킨다. 전역은 주체가 없으므로 `budget:global:daily` 하나다
+    (전원이 같은 사유로 막히니 알림도 하나가 맞다).
+
+    ⚠️ 429 응답(`budget.exceeded_detail`)은 전역 초과 때 사용량을 **가린다** — 남의 합계가
+    새어나가기 때문이다. 여기 슬랙은 **내부 운영 채널**이라 수치를 담는다. 그게 chargeback의
+    요점이다("누가 얼마 썼나"). 채널을 외부에 공유하면 이 전제가 깨진다.
+    """
+    scope, period = verdict.scope or "?", verdict.period or "?"
+    if scope == "global":
+        key = f"budget:global:{period}"
+        who = "서비스 전체"
+    else:
+        key = f"budget:subject:{subject_label}:{period}"
+        who = subject_label
+
+    spent = f"${verdict.spent_usd:.2f}" if verdict.spent_usd is not None else "?"
+    limit = f"${verdict.limit_usd:.2f}" if verdict.limit_usd is not None else "?"
+    text = (f"• 주체: {who}\n"
+            f"• 사용: {spent} / 상한 {limit} ({period})\n"
+            f"• 해제: {verdict.resets_at or '?'}\n"
+            f"→ 해당 요청은 **429로 차단**됐습니다.")
+    return Alert(
+        key=key,
+        title=f"LLM 예산 초과 — {who} ({period})",
+        text=text,
+        severity="critical" if scope == "global" else "warning",
+    )
+
+
 def _obs_session():
     """관측 DB 세션 — 미설정이면 앱 DB로 폴백(observability_db가 알아서 한다)."""
     from app.core.observability_db import observability_sessionmaker
