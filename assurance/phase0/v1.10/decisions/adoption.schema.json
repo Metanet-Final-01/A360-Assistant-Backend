@@ -1,0 +1,522 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a360.local/schemas/phase0-adoption-v1.json",
+  "title": "A360 Phase 0 Contract Adoption",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "post_freeze_review",
+    "ownership",
+    "decisions",
+    "rollout",
+    "open_decisions"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "artifact_sha256",
+        "contract_baseline_sha",
+        "implementation_baseline_sha",
+        "verdict"
+      ],
+      "properties": {
+        "version": {
+          "const": "v1.10"
+        },
+        "artifact_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contract_baseline_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "implementation_baseline_sha": {
+          "$ref": "#/$defs/git_sha"
+        },
+        "verdict": {
+          "const": "approve_for_human_decision"
+        }
+      }
+    },
+    "post_freeze_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source",
+        "source_is_authority",
+        "reviewed_commits",
+        "reviewed_at",
+        "counts",
+        "implementation_gate",
+        "production_use",
+        "frozen_artifacts_modified",
+        "disposition_path",
+        "target_jira"
+      ],
+      "properties": {
+        "status": {
+          "const": "corrective-action-required"
+        },
+        "source": {
+          "const": "coderabbit-plus-codex-independent-verification"
+        },
+        "source_is_authority": {
+          "const": false
+        },
+        "reviewed_commits": {
+          "const": [
+            "2101f915110f5a92debf7e782d7c8358f56b2dc6",
+            "69e7d3b4b7e884181420f4c351774173710a873a"
+          ]
+        },
+        "reviewed_at": {
+          "const": "2026-07-15"
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "unique_findings",
+            "corrective_action_required",
+            "qualified_gap",
+            "historical_or_curation",
+            "dismissed"
+          ],
+          "properties": {
+            "unique_findings": {
+              "const": 28
+            },
+            "corrective_action_required": {
+              "const": 22
+            },
+            "qualified_gap": {
+              "const": 3
+            },
+            "historical_or_curation": {
+              "const": 3
+            },
+            "dismissed": {
+              "const": 0
+            }
+          }
+        },
+        "implementation_gate": {
+          "const": "blocked-until-rpa-179"
+        },
+        "production_use": {
+          "const": "blocked"
+        },
+        "frozen_artifacts_modified": {
+          "const": false
+        },
+        "disposition_path": {
+          "const": "../evidence/post-freeze-review.md"
+        },
+        "target_jira": {
+          "const": "RPA-179"
+        }
+      }
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "agent_internal_owner",
+        "backend_boundary_owner",
+        "integration_rule",
+        "forbidden_paths",
+        "forbidden_internals"
+      ],
+      "properties": {
+        "decision_id": {
+          "const": "D-002"
+        },
+        "agent_internal_owner": {
+          "const": "agent-team"
+        },
+        "backend_boundary_owner": {
+          "const": "backend-team"
+        },
+        "integration_rule": {
+          "const": "public-contract-only"
+        },
+        "forbidden_paths": {
+          "const": [
+            "app/agent/**"
+          ]
+        },
+        "forbidden_internals": {
+          "type": "array",
+          "minItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "prompt",
+              "graph",
+              "model",
+              "tool",
+              "repair",
+              "retry",
+              "eval"
+            ]
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "D-16",
+        "D-17",
+        "D-21",
+        "D-22",
+        "D-23",
+        "D-24"
+      ],
+      "properties": {
+        "D-16": {
+          "$ref": "#/$defs/d16"
+        },
+        "D-17": {
+          "$ref": "#/$defs/d17"
+        },
+        "D-21": {
+          "$ref": "#/$defs/d21"
+        },
+        "D-22": {
+          "$ref": "#/$defs/d22"
+        },
+        "D-23": {
+          "$ref": "#/$defs/d23"
+        },
+        "D-24": {
+          "$ref": "#/$defs/d24"
+        }
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current",
+        "allowed_next",
+        "warn_authorized",
+        "enforce_authorized"
+      ],
+      "properties": {
+        "current": {
+          "const": "not-connected"
+        },
+        "allowed_next": {
+          "const": "observe"
+        },
+        "warn_authorized": {
+          "const": false
+        },
+        "enforce_authorized": {
+          "const": false
+        }
+      }
+    },
+    "open_decisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_override_policy_boundary"
+      ],
+      "properties": {
+        "runtime_override_policy_boundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "affected",
+            "recommended",
+            "target_jira"
+          ],
+          "properties": {
+            "status": {
+              "const": "decision-needed"
+            },
+            "affected": {
+              "const": [
+                "budget_limits",
+                "retrieval_params"
+              ]
+            },
+            "recommended": {
+              "const": "outside-assurance-authority-inside-evidence-governance"
+            },
+            "target_jira": {
+              "const": "RPA-183"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "accepted_base": {
+      "type": "object",
+      "required": [
+        "status",
+        "owner",
+        "implementation_jira"
+      ],
+      "properties": {
+        "status": {
+          "const": "accepted"
+        },
+        "owner": {
+          "const": "decision-needed"
+        },
+        "implementation_jira": {
+          "type": "string",
+          "pattern": "^RPA-[0-9]+$"
+        }
+      }
+    },
+    "d16": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/accepted_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "owner",
+            "implementation_jira",
+            "writer",
+            "single_writer",
+            "signing"
+          ],
+          "properties": {
+            "status": {},
+            "owner": {},
+            "implementation_jira": {},
+            "writer": {
+              "const": "protected-github-actions"
+            },
+            "single_writer": {
+              "const": true
+            },
+            "signing": {
+              "const": "deferred"
+            }
+          }
+        }
+      ]
+    },
+    "d17": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/accepted_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "owner",
+            "implementation_jira",
+            "codeowners",
+            "branch_protection",
+            "minimum_reviewers"
+          ],
+          "properties": {
+            "status": {},
+            "owner": {},
+            "implementation_jira": {},
+            "codeowners": {
+              "const": true
+            },
+            "branch_protection": {
+              "const": true
+            },
+            "minimum_reviewers": {
+              "const": 2
+            }
+          }
+        }
+      ]
+    },
+    "d21": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/accepted_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "owner",
+            "implementation_jira",
+            "requested_from",
+            "public_field",
+            "backend_private_imports"
+          ],
+          "properties": {
+            "status": {},
+            "owner": {},
+            "implementation_jira": {},
+            "requested_from": {
+              "const": "agent-team"
+            },
+            "public_field": {
+              "const": "resolved_agent_version"
+            },
+            "backend_private_imports": {
+              "const": "forbidden"
+            }
+          }
+        }
+      ]
+    },
+    "d22": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/accepted_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "owner",
+            "implementation_jira",
+            "approved_versions",
+            "discovered_is_approved"
+          ],
+          "properties": {
+            "status": {},
+            "owner": {},
+            "implementation_jira": {},
+            "approved_versions": {
+              "const": []
+            },
+            "discovered_is_approved": {
+              "const": false
+            }
+          }
+        }
+      ]
+    },
+    "d23": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/accepted_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "owner",
+            "implementation_jira",
+            "implementation_scope",
+            "observe",
+            "enforce",
+            "silent_fallback"
+          ],
+          "properties": {
+            "status": {},
+            "owner": {},
+            "implementation_jira": {},
+            "implementation_scope": {
+              "const": "backend-boundary"
+            },
+            "observe": {
+              "const": "record-unassured"
+            },
+            "enforce": {
+              "const": "block-active-persist-latest-history-export"
+            },
+            "silent_fallback": {
+              "const": "forbidden"
+            }
+          }
+        }
+      ]
+    },
+    "d24": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/accepted_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "owner",
+            "implementation_jira",
+            "coordination",
+            "selection_granularity",
+            "same_version_within_turn",
+            "next_turn_may_change",
+            "current_discovered_versions",
+            "target_selection_contract",
+            "v3_status"
+          ],
+          "properties": {
+            "status": {},
+            "owner": {},
+            "implementation_jira": {},
+            "coordination": {
+              "const": "backend-and-agent-teams"
+            },
+            "selection_granularity": {
+              "const": "per-turn"
+            },
+            "same_version_within_turn": {
+              "const": true
+            },
+            "next_turn_may_change": {
+              "const": true
+            },
+            "current_discovered_versions": {
+              "const": [
+                "v1",
+                "v2"
+              ]
+            },
+            "target_selection_contract": {
+              "const": [
+                "v1",
+                "v2",
+                "v3"
+              ]
+            },
+            "v3_status": {
+              "const": "planned-pr-249-not-merged"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

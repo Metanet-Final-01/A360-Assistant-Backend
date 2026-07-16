@@ -1,0 +1,25 @@
+kind: severity-policy
+policy_id: sev.blocking
+version: 0.1.0-fixture
+state: approved
+approval:
+  approver_role: phase0-fixture-only
+  approval_ref: FIXTURE-NOT-A-REAL-APPROVAL
+  approved_at: '2026-07-10T00:00:00Z'
+blocking_severities:
+- critical
+- high
+severity_scale:
+- critical
+- high
+- medium
+- low
+- info
+rule_severity_mapping_state: unapproved
+notes: 'Validators must not hard-code severities. A validator marks each violation with a blocking flag derived from THIS
+  policy; HL-16 re-derives it from these protected bytes and compares. P0-7: an unapproved policy still permits Observe mode
+  (no blocking effect, business persistence untouched, assurance_status=unassured_observe). It only forbids a blocking effect.
+
+  '
+fixture_warning: TEST FIXTURE ONLY. Not a human approval. The shipped policies/ directory remains state=unapproved pending
+  D-9/D-11/D-20.

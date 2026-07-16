@@ -1,0 +1,13 @@
+kind: approval
+approval_id: AP-1
+status: approved
+approver_role: agent-maintainer
+approval_ref: RPA-900
+subject:
+  repository_id: R_kgDO-a360-backend
+  commit: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+approved_paths:
+  - app/agent/verify/checker.py
+approved_at: "2026-07-10T00:00:00Z"
+expires_at: "2026-08-01T00:00:00Z"
+reason: "Agent owner agreed to the boundary change under RPA-900"

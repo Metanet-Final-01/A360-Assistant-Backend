@@ -1,0 +1,25 @@
+kind: agent-version-policy
+policy_id: agent.versions
+version: "0.1.0-proposed"
+state: unapproved            # human decision D-22: discoverable != approved
+approval: null
+# post-merge item 3: "discoverable vN and production enabled/approved must be separate states".
+# app/agent/registry.py auto-discovers any app/agent/vN folder and exposes it through
+# available_versions()/GET /api/agent/versions. A folder appearing on disk is NOT an approval.
+# This artifact is where a human states which discovered versions are approved for production.
+discovered_at_sha: "d66fce1840c1dcf907c9d303bbc64654c7c41857"
+discovered_versions: [v1, v2]          # observed: app/agent/v1, app/agent/v2
+approved_versions: []                  # EMPTY BY DESIGN until D-22 is decided
+observed_fallback_default: "v2"        # registry._FALLBACK_DEFAULT, read-only observation
+# Decision-needed, recorded without inventing an owner:
+#   D-22 which discovered versions are approved for production
+#   D-23 invalid/unapproved default readiness handling (registry falls back and only logs a warning)
+#   D-24 session-pinned vs per-turn version switching
+unresolved_decisions:
+  - "D-22: which discovered versions are approved for production use"
+  - "D-23: readiness behaviour when the configured default is unknown or unapproved"
+  - "D-24: session-pinned version vs per-turn switching"
+notes: >
+  Until approved_versions is ratified, the Backend boundary may RECORD the requested version and its
+  own derived default, but must not treat discoverability as approval and must not claim a resolved
+  producer version it cannot observe (see runtime-validation.agent_provenance).

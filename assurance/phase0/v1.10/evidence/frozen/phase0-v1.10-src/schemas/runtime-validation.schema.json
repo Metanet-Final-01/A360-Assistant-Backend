@@ -1,0 +1,1169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:runtime-validation:1.8",
+  "title": "Runtime Validation (Backend consumer boundary enforcement)",
+  "description": "P0-7: business persistence outcome, assurance verdict and enforcement effect are three SEPARATE facts. Observe mode may run on the live service without changing what it persists.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_kind",
+    "origin",
+    "mutation_kind",
+    "llm_invoked",
+    "identity",
+    "binding",
+    "blocking_policy",
+    "detectors",
+    "violations",
+    "assurance_status",
+    "enforcement",
+    "business_outcome",
+    "reasons",
+    "agent_provenance"
+  ],
+  "$defs": {
+    "oh_id": {
+      "type": "string",
+      "pattern": "^OH-[0-9]{2}$"
+    },
+    "rule_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "strict_schema_failed",
+            "catalog_closure_failed",
+            "unresolved_blocking_violation",
+            "catalog_snapshot_unavailable",
+            "catalog_snapshot_empty",
+            "detector_error",
+            "binding_mismatch",
+            "policy_unapproved",
+            "observe_mode_not_certified"
+          ]
+        },
+        "control_id": {
+          "$ref": "#/$defs/oh_id"
+        },
+        "violation_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "boundary_violation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "violation_id",
+        "rule",
+        "control_id",
+        "severity",
+        "blocking",
+        "location",
+        "resolved"
+      ],
+      "properties": {
+        "violation_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "rule": {
+          "$ref": "#/$defs/rule_id"
+        },
+        "control_id": {
+          "$ref": "#/$defs/oh_id"
+        },
+        "severity": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "blocking": {
+          "type": "boolean",
+          "description": "Derived from the approved severity policy; HL-16 re-derives and compares."
+        },
+        "location": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "message": {
+          "type": "string"
+        },
+        "resolved": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": "1.8"
+    },
+    "event_kind": {
+      "const": "candidate_validation"
+    },
+    "origin": {
+      "enum": [
+        "agent_turn",
+        "manual_edit_api"
+      ]
+    },
+    "mutation_kind": {
+      "enum": [
+        "create",
+        "revise"
+      ]
+    },
+    "llm_invoked": {
+      "type": "boolean"
+    },
+    "client_declared_source": {
+      "enum": [
+        "drag",
+        "chat",
+        "feedback"
+      ],
+      "description": "NON-AUTHORITATIVE; audit only."
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "session_id",
+        "request_id"
+      ],
+      "properties": {
+        "candidate_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "recommendation_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "session_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "request_id": {
+          "$ref": "#/$defs/nonempty"
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_payload_digest",
+        "canonicalization",
+        "boundary_schema_digest",
+        "catalog_snapshot_digest",
+        "boundary_validator_version",
+        "validated_at"
+      ],
+      "properties": {
+        "candidate_payload_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "canonicalization": {
+          "const": "jcs-rfc8785"
+        },
+        "boundary_schema_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "catalog_snapshot_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "boundary_validator_version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "validated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "blocking_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id",
+        "version",
+        "digest",
+        "state",
+        "blocking_severities"
+      ],
+      "properties": {
+        "policy_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "state": {
+          "enum": [
+            "unapproved",
+            "approved"
+          ]
+        },
+        "blocking_severities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonempty"
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "prompt_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "retrieval_config_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "commit": {
+          "$ref": "#/$defs/git_sha"
+        }
+      }
+    },
+    "producer_advisory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "present",
+        "availability"
+      ],
+      "description": "violations ARE de facto present on the public agent stream (graph.py:113) but untyped and undocumented; Backend drops them from the external response. Consumed via a Backend-owned adapter over the PUBLIC boundary. Optional, non-authoritative, never required to agree.",
+      "properties": {
+        "present": {
+          "type": "boolean"
+        },
+        "availability": {
+          "enum": [
+            "de_facto_untyped",
+            "contract_agreed",
+            "unavailable"
+          ]
+        },
+        "adapter_version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "raw_payload_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "normalized": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rule",
+              "location",
+              "message"
+            ],
+            "properties": {
+              "rule": {
+                "type": "string",
+                "pattern": "^R[1-8]$"
+              },
+              "location": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "message": {
+                "type": "string"
+              },
+              "package": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "action": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "param": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "step_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "detectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strict_schema",
+        "catalog_closure"
+      ],
+      "properties": {
+        "strict_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "passed",
+            "schema_id"
+          ],
+          "properties": {
+            "passed": {
+              "type": "boolean"
+            },
+            "schema_id": {
+              "$ref": "#/$defs/nonempty"
+            }
+          }
+        },
+        "catalog_closure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope",
+            "passed"
+          ],
+          "properties": {
+            "scope": {
+              "const": "solution=a360"
+            },
+            "passed": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "violations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/boundary_violation"
+      }
+    },
+    "assurance_status": {
+      "enum": [
+        "validated",
+        "invalid",
+        "error",
+        "unassured_observe"
+      ],
+      "description": "The harness's verdict about the candidate. Independent of what the business did."
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "detail"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "catalog_unavailable",
+            "catalog_empty",
+            "detector_exception",
+            "binding_mismatch"
+          ]
+        },
+        "detail": {
+          "$ref": "#/$defs/nonempty"
+        }
+      }
+    },
+    "enforcement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "effect"
+      ],
+      "description": "P0-7: rollout mode and the effect actually applied to the business transition.",
+      "properties": {
+        "mode": {
+          "enum": [
+            "observe",
+            "warn",
+            "enforce"
+          ]
+        },
+        "effect": {
+          "enum": [
+            "none",
+            "warned",
+            "blocked"
+          ]
+        }
+      }
+    },
+    "business_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "persisted"
+      ],
+      "description": "P0-7: what the EXISTING service did. In observe mode this is untouched by the harness.",
+      "properties": {
+        "persisted": {
+          "type": "boolean"
+        },
+        "recommendation_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reason"
+      }
+    },
+    "agent_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_agent_version",
+        "producer_resolved_version",
+        "resolved_version_observability",
+        "agent_registry_snapshot_digest",
+        "public_contract_version"
+      ],
+      "description": "post-merge item 3. Verified at d66fce1: Backend passes context['agent_version'] (the client's request, possibly null) and the agent resolves internally; _done_data does NOT return the resolved version. So the requested version, Backend's own derived default, and the producer's actual resolved version are three different facts and must not be collapsed. Storing agent_version=null as provenance is forbidden.",
+      "properties": {
+        "requested_agent_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The client's claim, validated against the registry. null means 'not requested', NEVER 'unknown'."
+        },
+        "boundary_derived_default": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Backend's own re-derivation via the PUBLIC default_version(). An approximation from a separate call, not the producer's choice."
+        },
+        "producer_resolved_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the agent actually ran. NOT observable at the public boundary at d66fce1."
+        },
+        "resolved_version_observability": {
+          "enum": [
+            "observed_from_public_contract",
+            "not_observable_pending_D21"
+          ],
+          "description": "At d66fce1 this is always not_observable_pending_D21: done-data carries no version field."
+        },
+        "agent_registry_snapshot_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Digest of the public available_versions() projection observed at the boundary."
+        },
+        "public_contract_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agent_version_policy_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "INV-RV-1: validated requires both detectors true, no unresolved blocking violation, no reasons.",
+      "if": {
+        "properties": {
+          "assurance_status": {
+            "const": "validated"
+          }
+        },
+        "required": [
+          "assurance_status"
+        ]
+      },
+      "then": {
+        "required": [
+          "detectors",
+          "violations",
+          "reasons"
+        ],
+        "properties": {
+          "detectors": {
+            "required": [
+              "strict_schema",
+              "catalog_closure"
+            ],
+            "properties": {
+              "strict_schema": {
+                "required": [
+                  "passed"
+                ],
+                "properties": {
+                  "passed": {
+                    "const": true
+                  }
+                }
+              },
+              "catalog_closure": {
+                "required": [
+                  "passed"
+                ],
+                "properties": {
+                  "passed": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          },
+          "violations": {
+            "not": {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "resolved",
+                  "blocking"
+                ],
+                "properties": {
+                  "resolved": {
+                    "const": false
+                  },
+                  "blocking": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          },
+          "reasons": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-2: validated and error are mutually exclusive.",
+      "if": {
+        "properties": {
+          "assurance_status": {
+            "const": "validated"
+          }
+        },
+        "required": [
+          "assurance_status"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "error"
+          ]
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-3: either detector false => not validated, >=1 typed reason, >=1 violation.",
+      "if": {
+        "anyOf": [
+          {
+            "required": [
+              "detectors"
+            ],
+            "properties": {
+              "detectors": {
+                "required": [
+                  "strict_schema"
+                ],
+                "properties": {
+                  "strict_schema": {
+                    "required": [
+                      "passed"
+                    ],
+                    "properties": {
+                      "passed": {
+                        "const": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "required": [
+              "detectors"
+            ],
+            "properties": {
+              "detectors": {
+                "required": [
+                  "catalog_closure"
+                ],
+                "properties": {
+                  "catalog_closure": {
+                    "required": [
+                      "passed"
+                    ],
+                    "properties": {
+                      "passed": {
+                        "const": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "then": {
+        "required": [
+          "assurance_status",
+          "reasons",
+          "violations"
+        ],
+        "properties": {
+          "assurance_status": {
+            "enum": [
+              "invalid",
+              "error",
+              "unassured_observe"
+            ]
+          },
+          "reasons": {
+            "minItems": 1
+          },
+          "violations": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-4: error requires a typed error object and >=1 reason.",
+      "if": {
+        "properties": {
+          "assurance_status": {
+            "const": "error"
+          }
+        },
+        "required": [
+          "assurance_status"
+        ]
+      },
+      "then": {
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "reasons": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-5: invalid requires >=1 typed reason.",
+      "if": {
+        "properties": {
+          "assurance_status": {
+            "const": "invalid"
+          }
+        },
+        "required": [
+          "assurance_status"
+        ]
+      },
+      "then": {
+        "required": [
+          "reasons"
+        ],
+        "properties": {
+          "reasons": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-6 (P0-7): a blocking effect requires enforce mode, an APPROVED policy, a non-validated verdict, and no business persistence.",
+      "if": {
+        "properties": {
+          "enforcement": {
+            "required": [
+              "effect"
+            ],
+            "properties": {
+              "effect": {
+                "const": "blocked"
+              }
+            }
+          }
+        },
+        "required": [
+          "enforcement"
+        ]
+      },
+      "then": {
+        "properties": {
+          "enforcement": {
+            "properties": {
+              "mode": {
+                "const": "enforce"
+              }
+            }
+          },
+          "blocking_policy": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "approved"
+              }
+            }
+          },
+          "assurance_status": {
+            "enum": [
+              "invalid",
+              "error"
+            ]
+          },
+          "business_outcome": {
+            "required": [
+              "persisted"
+            ],
+            "properties": {
+              "persisted": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-7 (P0-7): observe mode never applies an effect. Existing business persistence continues untouched.",
+      "if": {
+        "properties": {
+          "enforcement": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "observe"
+              }
+            }
+          }
+        },
+        "required": [
+          "enforcement"
+        ]
+      },
+      "then": {
+        "properties": {
+          "enforcement": {
+            "properties": {
+              "effect": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-8 (P0-7): warn mode may warn but never block.",
+      "if": {
+        "properties": {
+          "enforcement": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "warn"
+              }
+            }
+          }
+        },
+        "required": [
+          "enforcement"
+        ]
+      },
+      "then": {
+        "properties": {
+          "enforcement": {
+            "properties": {
+              "effect": {
+                "enum": [
+                  "none",
+                  "warned"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-9 (P0-7): unassured_observe is only meaningful in observe mode.",
+      "if": {
+        "properties": {
+          "assurance_status": {
+            "const": "unassured_observe"
+          }
+        },
+        "required": [
+          "assurance_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "enforcement": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "observe"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-10: enforce mode requires an approved severity policy (nothing may enforce on a proposal).",
+      "if": {
+        "properties": {
+          "enforcement": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "enforce"
+              }
+            }
+          }
+        },
+        "required": [
+          "enforcement"
+        ]
+      },
+      "then": {
+        "properties": {
+          "blocking_policy": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "approved"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Business persistence and version assignment agree.",
+      "if": {
+        "properties": {
+          "business_outcome": {
+            "required": [
+              "persisted"
+            ],
+            "properties": {
+              "persisted": {
+                "const": true
+              }
+            }
+          }
+        },
+        "required": [
+          "business_outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "business_outcome": {
+            "required": [
+              "recommendation_version"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "business_outcome": {
+            "required": [
+              "persisted"
+            ],
+            "properties": {
+              "persisted": {
+                "const": false
+              }
+            }
+          }
+        },
+        "required": [
+          "business_outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "business_outcome": {
+            "not": {
+              "required": [
+                "recommendation_version"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-11 (P1-2): model/prompt required only when an LLM was directly invoked.",
+      "if": {
+        "properties": {
+          "llm_invoked": {
+            "const": true
+          }
+        },
+        "required": [
+          "llm_invoked"
+        ]
+      },
+      "then": {
+        "required": [
+          "provenance"
+        ],
+        "properties": {
+          "provenance": {
+            "required": [
+              "model",
+              "prompt_hash"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-12: producer present=false carries no producer fields.",
+      "if": {
+        "required": [
+          "producer_advisory"
+        ],
+        "properties": {
+          "producer_advisory": {
+            "required": [
+              "present"
+            ],
+            "properties": {
+              "present": {
+                "const": false
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "producer_advisory": {
+            "allOf": [
+              {
+                "not": {
+                  "required": [
+                    "adapter_version"
+                  ]
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "raw_payload_digest"
+                  ]
+                }
+              },
+              {
+                "not": {
+                  "required": [
+                    "normalized"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-RV-13: producer present=true requires Backend adapter identity + raw digest.",
+      "if": {
+        "required": [
+          "producer_advisory"
+        ],
+        "properties": {
+          "producer_advisory": {
+            "required": [
+              "present"
+            ],
+            "properties": {
+              "present": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "producer_advisory": {
+            "required": [
+              "adapter_version",
+              "raw_payload_digest"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "P1-3: every non-validated assurance state needs a typed reason, including unassured_observe.",
+      "if": {
+        "properties": {
+          "assurance_status": {
+            "const": "unassured_observe"
+          }
+        },
+        "required": [
+          "assurance_status"
+        ]
+      },
+      "then": {
+        "required": [
+          "reasons"
+        ],
+        "properties": {
+          "reasons": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "post-merge item 3: a null resolved version may never be recorded as if it were provenance. If it is not observable, the record must say so explicitly.",
+      "if": {
+        "properties": {
+          "agent_provenance": {
+            "properties": {
+              "producer_resolved_version": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "producer_resolved_version"
+            ]
+          }
+        },
+        "required": [
+          "agent_provenance"
+        ]
+      },
+      "then": {
+        "properties": {
+          "agent_provenance": {
+            "properties": {
+              "resolved_version_observability": {
+                "const": "not_observable_pending_D21"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "An observed resolved version must actually carry the value it claims to have observed.",
+      "if": {
+        "properties": {
+          "agent_provenance": {
+            "properties": {
+              "resolved_version_observability": {
+                "const": "observed_from_public_contract"
+              }
+            },
+            "required": [
+              "resolved_version_observability"
+            ]
+          }
+        },
+        "required": [
+          "agent_provenance"
+        ]
+      },
+      "then": {
+        "properties": {
+          "agent_provenance": {
+            "properties": {
+              "producer_resolved_version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

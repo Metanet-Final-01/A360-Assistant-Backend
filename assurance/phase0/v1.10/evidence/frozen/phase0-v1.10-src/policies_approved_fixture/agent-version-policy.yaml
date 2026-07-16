@@ -1,0 +1,25 @@
+kind: agent-version-policy
+policy_id: agent.versions
+version: 0.1.0-fixture
+state: approved
+approval:
+  approver_role: phase0-fixture-only
+  approval_ref: FIXTURE-NOT-A-REAL-APPROVAL
+  approved_at: '2026-07-10T00:00:00Z'
+discovered_at_sha: d66fce1840c1dcf907c9d303bbc64654c7c41857
+discovered_versions:
+- v1
+- v2
+approved_versions:
+- v1
+- v2
+observed_fallback_default: v2
+unresolved_decisions:
+- 'D-22: which discovered versions are approved for production use'
+- 'D-23: readiness behaviour when the configured default is unknown or unapproved'
+- 'D-24: session-pinned version vs per-turn switching'
+notes: 'Until approved_versions is ratified, the Backend boundary may RECORD the requested version and its own derived default,
+  but must not treat discoverability as approval and must not claim a resolved producer version it cannot observe (see runtime-validation.agent_provenance).
+
+  '
+fixture_warning: TEST FIXTURE ONLY. Not a human approval. The shipped policies/ remain state=unapproved pending D-6/D-22.

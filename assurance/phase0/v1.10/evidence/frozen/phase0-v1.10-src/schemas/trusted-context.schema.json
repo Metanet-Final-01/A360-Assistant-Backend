@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:trusted-context:1.8",
+  "title": "Trusted execution context (runner-supplied)",
+  "description": "P0-1: supplied by the CI runner, NEVER by an assessed artifact. A manifest-selected historical commit pair must not be certifiable. mode=local_nonauthoritative can never certify.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "mode",
+    "repository_id",
+    "event_type",
+    "pr_base_sha",
+    "event_head_sha",
+    "checkout_sha",
+    "merge_base",
+    "workflow_ref",
+    "git_state"
+  ],
+  "properties": {
+    "mode": {
+      "enum": [
+        "authoritative",
+        "local_nonauthoritative"
+      ]
+    },
+    "repository_id": {
+      "type": "string",
+      "description": "Immutable repository id, not a mutable name."
+    },
+    "repository_name": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string"
+    },
+    "pr_base_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "event_head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "checkout_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "merge_base": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "workflow_ref": {
+      "type": "string"
+    },
+    "git_state": {
+      "enum": [
+        "clean",
+        "dirty",
+        "unknown"
+      ]
+    },
+    "dirty_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "downgrade_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "authoritative context must carry every binding and a derived git state",
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "authoritative"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "repository_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pr_base_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{7,40}$"
+          },
+          "event_head_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{7,40}$"
+          },
+          "checkout_sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{7,40}$"
+          },
+          "merge_base": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{7,40}$"
+          },
+          "workflow_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "git_state": {
+            "enum": [
+              "clean",
+              "dirty"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "P0-1: a non-authoritative context must say WHY it was downgraded.",
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "local_nonauthoritative"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "required": [
+          "downgrade_reason"
+        ],
+        "properties": {
+          "downgrade_reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
+}

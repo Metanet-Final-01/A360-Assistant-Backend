@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:approval:1.8",
+  "title": "Owner approval artifact",
+  "description": "P0-4: v1.4 accepted a caller-supplied dictionary containing only status=approved and a generic scope. An approval is now an immutable artifact resolved from a protected directory and bound to an exact repository, commit, path set, role and expiry.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "approval_id",
+    "status",
+    "approver_role",
+    "approval_ref",
+    "subject",
+    "approved_paths",
+    "approved_at",
+    "expires_at"
+  ],
+  "$defs": {
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    }
+  },
+  "properties": {
+    "kind": {
+      "const": "approval"
+    },
+    "approval_id": {
+      "type": "string",
+      "pattern": "^AP-[0-9]+$"
+    },
+    "status": {
+      "enum": [
+        "approved",
+        "revoked",
+        "expired"
+      ]
+    },
+    "approver_role": {
+      "$ref": "#/$defs/nonempty",
+      "description": "A ROLE, never an individual assigned by an AI."
+    },
+    "approval_ref": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "commit"
+      ],
+      "properties": {
+        "repository_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "commit": {
+          "$ref": "#/$defs/git_sha"
+        }
+      }
+    },
+    "approved_paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/nonempty"
+      },
+      "description": "Exact paths. A generic glob does not authorise arbitrary Agent-owned edits."
+    },
+    "approved_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}

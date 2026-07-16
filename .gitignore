@@ -52,3 +52,6 @@ _archive_pre_agent_handoff/
 # 조사 과정 원본 로그/샘플 (시간순 기록, raw HTML 샘플 등) — 핵심 결론은 이미
 # app/rag/README.md에 요약돼 있어 팀원에게 공유할 필요 없음, 로컬 참고용으로만 보존
 app/rag/_investigation_notes/
+
+# Phase 0 assurance verification outputs (generated, not contract source)
+/assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src/.out/
