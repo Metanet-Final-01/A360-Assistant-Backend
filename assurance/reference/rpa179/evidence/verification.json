@@ -1,9 +1,14 @@
 {
-  "baseline_commit": "135c7548bce8922a95c52632d94bade249ae058c",
+  "baseline_commit": "79c3428ed05a13f4a4f9be8155ee56b41546a2e4",
   "determinism": {
     "regression_equal": true,
     "transcripts_equal": true,
-    "tree_digest_equal": true
+    "tree_digest_equal": true,
+    "validated_common_digests": {
+      "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
+      "transcript_digest": "sha256:17b223bd8723eb220ca79467a9fb58fed9aca4c04b22dec18b648a708f0b4367",
+      "tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a"
+    }
   },
   "environment": {
     "dependencies": {
@@ -26,16 +31,16 @@
   ],
   "reference": {
     "corrected_file_count": 52,
-    "corrected_tree_digest": "sha256:21a28a51bab4ace5074af4cb778b88452786c23ee737c3f43689e72e4b5b99c1",
-    "corrections_sha256": "sha256:170cddc6e9b014dbff9fae4190f7b328e9bc196c9c295fab8d95561e1beddfbe",
+    "corrected_tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a",
+    "corrections_sha256": "sha256:b8fdea25f17cb04bf31400bd941bfd9b02872c443112fe603cb2f0edcd0d8764",
     "finding_matrix_sha256": "sha256:0dfaaa6dd43fd4b709574963cf2fbfd2907757494cee0ca838867d999fe8c661",
     "source": "assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src",
     "source_manifest_sha256": "sha256:d0ad43c2a705d0522cba8e287b31fe040c953bb2ba89a5d3d9788cc0b07a666f",
     "verification_tools": {
-      "materialize.py": "sha256:c584ab14565920950762bd304941c59d3db91c008893e1d0b9524235ab4bfb5c",
-      "regression.py": "sha256:7c91980ef9f30ac903b49a02d68269721307818fcfb24fa00aaf203b391d9c60",
-      "verification-result.schema.json": "sha256:a77464230ece73b508684ab97c82af528cb07d8582f08ebecd4a52eacb90c1f8",
-      "verify.py": "sha256:74d2b6d80ce779c26596c20557f1772ed5f2fa21c287b9ec45b5a18cc79eaf9a"
+      "materialize.py": "sha256:f1f28324112531237d9919eace19b80677cd9bac898ec282779e3faf57e69447",
+      "regression.py": "sha256:ad3b0ce3aa4ea0513881806d9b1ad863976fcb622d31089fc2bfbfa974c90511",
+      "verification-result.schema.json": "sha256:9fe54d13c2a86d82660cb0b56f8633ddd1950e0c9189cdb8413ab7615d15b828",
+      "verify.py": "sha256:32cbd7f2b08557288e6be045d49ab836a69bdc5020d1c330b79b1a53a14517f3"
     },
     "verified_source_files": 45
   },
@@ -319,7 +324,7 @@
           "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
           "passed": true,
           "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "stdout_sha256": "sha256:47443d9f3d0fc1cd5d55d3c8340507ee05552377687b1161532d66ba44413182"
+          "stdout_sha256": "sha256:dfdd4759c8576b980ecebd828efcad0e0596b333510decf605c6c22a73458d05"
         },
         {
           "argv": [
@@ -347,7 +352,7 @@
       ],
       "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
       "run_id": "run-1",
-      "tree_digest": "sha256:21a28a51bab4ace5074af4cb778b88452786c23ee737c3f43689e72e4b5b99c1"
+      "tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a"
     },
     {
       "commands": [
@@ -404,7 +409,7 @@
           "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
           "passed": true,
           "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "stdout_sha256": "sha256:7ca2a0bca45fd79453e1fc3886c28b01134d41954e4a21ecdece3ce1f62d7a39"
+          "stdout_sha256": "sha256:8b4e62d288327e62de312d74d1c79bbd5b07faa85a00830b04b874f099aa3d09"
         },
         {
           "argv": [
@@ -432,7 +437,7 @@
       ],
       "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
       "run_id": "run-2",
-      "tree_digest": "sha256:21a28a51bab4ace5074af4cb778b88452786c23ee737c3f43689e72e4b5b99c1"
+      "tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a"
     }
   ],
   "schema_version": "rpa179.verification.1",
@@ -444,5 +449,5 @@
     "regression_cases": 23,
     "selfattack_expected_residuals": 4
   },
-  "verified_at": "2026-07-16T06:50:41.566413Z"
+  "verified_at": "2026-07-16T07:11:46.469501Z"
 }
