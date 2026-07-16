@@ -111,6 +111,89 @@ def test_pending_order_is_applicable(script_dir):
             f"{earlier} → {later} 순서가 리비전 그래프와 다르다")
 
 
+# --- --apply 게이트: dev에 머지된 것만 (CONVENTIONS §7 ①) ---
+
+@pytest.fixture
+def apply_run(monkeypatch):
+    """`--apply` 경로를 DB·git 없이 실행하고 (rc, run_migrations 호출 횟수)를 돌려준다.
+
+    적용 대기가 **있는** 상황을 만든다 — 실제 공유 DB는 head라 `이미 최신`에서 early-return돼
+    게이트에 **닿지도 않는다**(그걸로 "통과했다"고 착각한 적 있다).
+    """
+    import app.db as app_db
+
+    monkeypatch.setenv("APP_DATABASE_URL", "postgresql://u:p@ep-x-pooler.neon.tech/neondb")
+    monkeypatch.setattr(mig, "_current_revision", lambda engine: "0014")  # → 대기 2개
+    monkeypatch.setattr(app_db, "engine", create_engine("sqlite://"))  # 실 DB 접속 없음
+
+    calls: list = []
+    monkeypatch.setattr(app_db, "run_migrations", lambda **k: calls.append(k))
+
+    def _run(*argv: str) -> tuple[int, int]:
+        calls.clear()
+        monkeypatch.setattr(sys, "argv", ["migrate_shared_db.py", *argv])
+        return mig.main(), len(calls)
+
+    return _run
+
+
+def test_apply_blocked_when_head_not_in_dev(apply_run, monkeypatch, capsys):
+    """머지 안 된 커밋에서 `--apply`하면 **차단**한다.
+
+    브랜치를 출력만 하고 "dev가 아니면 멈추세요"라고 부탁했었다 — 이 PR이 자동 마이그레이션을
+    코드로 막은 이유와 정면으로 배치된다(규약은 지켜지지 않는다). 머지 안 된 리비전이 공유
+    스키마로 올라가면 리뷰에서 까여도 되돌리기 어렵고, 다른 사람은 그 컬럼을 모른다.
+    """
+    monkeypatch.setattr(mig, "_head_is_in_dev", lambda: False)
+
+    rc, applied = apply_run("--apply")
+
+    assert rc == 1, "머지 안 된 커밋에서 --apply가 통과했다"
+    assert applied == 0, "차단했다면서 마이그레이션이 실제로 돌았다"
+
+
+def test_apply_allowed_when_head_is_in_dev(apply_run, monkeypatch):
+    """dev에 머지된 커밋이면 적용된다 — 게이트가 기능을 죽이면 안 된다.
+
+    이게 없으면 "차단된다"가 **스크립트가 아예 안 도는** 탓일 수도 있다.
+    """
+    monkeypatch.setattr(mig, "_head_is_in_dev", lambda: True)
+
+    rc, applied = apply_run("--apply")
+
+    assert rc == 0 and applied == 1, "머지된 커밋인데도 적용이 안 된다"
+
+
+def test_apply_blocked_when_dev_state_unknown(apply_run, monkeypatch):
+    """`origin/dev`를 못 읽으면 **막는다** (fail-closed).
+
+    모르면 통과시키는 게 아니라 멈춘다 — 공유 DB는 되돌리기 어렵다.
+    """
+    monkeypatch.setattr(mig, "_head_is_in_dev", lambda: None)
+
+    rc, applied = apply_run("--apply")
+
+    assert rc == 1 and applied == 0, "dev 상태를 모르는데 적용했다"
+
+
+def test_escape_hatch_overrides_the_gate(apply_run, monkeypatch):
+    """탈출구 플래그는 게이트를 넘는다 — git 없는 환경 등."""
+    monkeypatch.setattr(mig, "_head_is_in_dev", lambda: False)
+
+    rc, applied = apply_run("--apply", "--i-know-dev-check-is-broken")
+
+    assert rc == 0 and applied == 1
+
+
+def test_dry_run_works_on_any_branch(apply_run, monkeypatch):
+    """dry-run은 어느 브랜치에서든 된다 — 무엇이 올라갈지 보는 건 안전하다."""
+    monkeypatch.setattr(mig, "_head_is_in_dev", lambda: False)
+
+    rc, applied = apply_run()
+
+    assert rc == 0 and applied == 0
+
+
 # --- 이 스크립트가 존재하는 이유 자체 ---
 
 def test_migrations_have_exactly_one_head(script_dir):
