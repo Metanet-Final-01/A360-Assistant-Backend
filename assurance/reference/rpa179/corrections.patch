@@ -1071,7 +1071,7 @@ index de3024f2934b471042af35ba78b5dd7bf7c3d672..4b2fadc6aca40e2e7e2180ded03f0fb5
  reason: "compensating control never passes"
  compensating_control: CH-99
 diff --git a/rules.py b/rules.py
-index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b249eaf24b6 100644
+index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f977feb23 100644
 --- a/rules.py
 +++ b/rules.py
 @@ -223,9 +223,9 @@ def hl12(ctx: TrustedContext, manifest_art: Artifact, report_art: Artifact, deri
@@ -1274,7 +1274,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b24
      """v1.5 P1-1: `from app import agent as x` + `getattr(x, "verify")` was accepted, and parse
      failures were treated as clean. v1.6 uses a closed rule: any binding of the `app.agent` package
      itself is rejected, so no alias can exist to call getattr on. Sources are read from the VERIFIED
-@@ -816,13 +883,54 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -816,13 +883,95 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
      bad: list = []
      indeterminate: list = []
  
@@ -1297,6 +1297,35 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b24
 +                for alias in node.names:
 +                    if alias.name == "import_module":
 +                        dynamic_names.add(alias.asname or alias.name)
++
++        def importlib_getattr_status(node):
++            if not (
++                isinstance(node, ast.Call)
++                and isinstance(node.func, ast.Name)
++                and node.func.id == "getattr"
++            ):
++                return None
++            if not node.args:
++                return None
++            target = node.args[0]
++            target_known = isinstance(target, ast.Name) and target.id in importlib_modules
++            if len(node.args) < 2:
++                return "indeterminate" if target_known else None
++            attribute = node.args[1]
++            attribute_name = (
++                attribute.value
++                if isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)
++                else None
++            )
++            if target_known:
++                if attribute_name is None:
++                    return "indeterminate"
++                return "dynamic" if attribute_name == "import_module" else None
++            if attribute_name == "import_module":
++                return "indeterminate"
++            return None
++
++        alias_indeterminate = set()
 +        changed = True
 +        while changed:
 +            changed = False
@@ -1327,11 +1356,23 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b24
 +                        if name not in dynamic_names:
 +                            dynamic_names.add(name)
 +                            changed = True
++                else:
++                    getattr_status = importlib_getattr_status(node.value)
++                    if getattr_status == "dynamic":
++                        for name in target_names:
++                            if name not in dynamic_names:
++                                dynamic_names.add(name)
++                                changed = True
++                    elif getattr_status == "indeterminate":
++                        alias_indeterminate.add(
++                            f"{rel} (computed importlib getattr alias)"
++                        )
++        indeterminate.extend(sorted(alias_indeterminate))
 +        for node in ast.walk(tree):
              if isinstance(node, ast.ImportFrom) and node.module:
                  if node.module == "app.agent":
                      for a in node.names:
-@@ -844,17 +952,53 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -844,17 +993,57 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
                      elif a.name == "app.agent":
                          bad.append(f"{rel}: import app.agent"
                                     f"{' as ' + a.asname if a.asname else ''} (package binding)")
@@ -1348,6 +1389,10 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b24
 -                            indeterminate.append(f"{rel} (computed import target)")
 +            elif isinstance(node, ast.Call):
 +                fn = node.func
++                getattr_status = importlib_getattr_status(fn)
++                if getattr_status == "indeterminate":
++                    indeterminate.append(f"{rel} (computed importlib getattr call)")
++                    continue
 +                dynamic_call = (
 +                    isinstance(fn, ast.Name) and fn.id in dynamic_names
 +                ) or (
@@ -1355,7 +1400,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b24
 +                    and fn.attr == "import_module"
 +                    and isinstance(fn.value, ast.Name)
 +                    and fn.value.id in importlib_modules
-+                )
++                ) or getattr_status == "dynamic"
 +                if dynamic_call:
 +                    if not node.args:
 +                        indeterminate.append(f"{rel} (dynamic import without a target)")
@@ -1396,7 +1441,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b24
  
      for rel in reader.list_files():
          if not rel.endswith(".py") or rel.startswith("app/agent/") or rel.startswith("tests/"):
-@@ -874,7 +1018,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -874,7 +1063,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
          return RuleResult(False, f"indeterminate sources: {indeterminate[:5]}", "source_indeterminate")
      return (RuleResult(True, f"no private app.agent import outside app/agent/** "
                               f"(closed rule over verified objects)") if not bad

@@ -40,13 +40,27 @@ def canonical_digest(value: object) -> str:
     return digest_bytes(raw)
 
 
-def isolated_python_environment(env: dict[str, str]) -> dict[str, str]:
-    """Remove inherited Python and coverage hooks before a fixture subprocess."""
+def isolated_subprocess_environment(env: dict[str, str]) -> dict[str, str]:
+    """Remove inherited interpreter, coverage, and Git repository selectors."""
+    git_selectors = {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
     for key in tuple(env):
+        upper = key.upper()
         if (
-            key.upper().startswith("PYTHON")
+            upper.startswith("PYTHON")
             or key.startswith("COV_CORE_")
             or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}
+            or upper in git_selectors
+            or upper.startswith("GIT_CONFIG_")
         ):
             env.pop(key, None)
     env["PYTHONNOUSERSITE"] = "1"
@@ -54,7 +68,7 @@ def isolated_python_environment(env: dict[str, str]) -> dict[str, str]:
 
 
 def command_environment(source: Path, output: Path) -> dict[str, str]:
-    env = isolated_python_environment(os.environ.copy())
+    env = isolated_subprocess_environment(os.environ.copy())
     env.update({
         "A360_HARNESS_OUT": str(output),
         "A360_TEST_SUBJECT_REPO": str(source),
@@ -188,7 +202,12 @@ def run_once(run_id: str, run_root: Path) -> dict:
 def environment_record() -> dict:
     dependencies = {name: version(name) for name in ("jsonschema", "PyYAML")}
     git = subprocess.run(
-        ["git", "--version"], capture_output=True, text=True, encoding="utf-8", check=True
+        ["git", "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+        env=isolated_subprocess_environment(os.environ.copy()),
     ).stdout.strip()
     return {
         "python_version": platform.python_version(),
@@ -204,12 +223,14 @@ def environment_record() -> dict:
 
 
 def repository_head(repo_root: Path = REPO_ROOT) -> str:
+    env = isolated_subprocess_environment(os.environ.copy())
     status = subprocess.run(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
         cwd=repo_root,
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=env,
     )
     if status.returncode != 0:
         raise RuntimeError(f"git status failed: {status.stderr.strip()[:400]}")
@@ -224,6 +245,7 @@ def repository_head(repo_root: Path = REPO_ROOT) -> str:
         text=True,
         encoding="utf-8",
         check=True,
+        env=env,
     ).stdout.strip()
 
 

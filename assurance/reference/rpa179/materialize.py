@@ -108,6 +108,8 @@ def corrected_tree(destination: Path) -> dict:
 
 def materialize(destination: Path) -> dict:
     frozen, frozen_files = read_verified_frozen()
+    corrections_bytes = CORRECTIONS.read_bytes()
+    corrections_digest = hashlib.sha256(corrections_bytes).hexdigest()
     if destination.exists() and any(destination.iterdir()):
         raise RuntimeError(f"destination must not exist or must be empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
@@ -144,21 +146,24 @@ def materialize(destination: Path) -> dict:
             command = ["git", "apply", "--whitespace=nowarn"]
             if mode == "check":
                 command.append("--check")
-            command.append(str(CORRECTIONS))
-            result = subprocess.run(command, cwd=destination, capture_output=True, text=True)
+            command.append("-")
+            result = subprocess.run(
+                command, cwd=destination, input=corrections_bytes, capture_output=True
+            )
             if result.returncode != 0:
-                raise RuntimeError(f"git apply {mode} failed: {result.stderr.strip()[:400]}")
+                detail = result.stderr.decode("utf-8", "replace").strip()[:400]
+                raise RuntimeError(f"git apply {mode} failed: {detail}")
 
         reverse_check = subprocess.run(
-            ["git", "apply", "--reverse", "--check", str(CORRECTIONS)],
+            ["git", "apply", "--reverse", "--check", "--whitespace=nowarn", "-"],
             cwd=destination,
+            input=corrections_bytes,
             capture_output=True,
-            text=True,
         )
         if reverse_check.returncode != 0:
+            detail = reverse_check.stderr.decode("utf-8", "replace").strip()[:400]
             raise RuntimeError(
-                "correction patch did not materialize completely: "
-                + reverse_check.stderr.strip()[:400]
+                "correction patch did not materialize completely: " + detail
             )
     except Exception:
         shutil.rmtree(destination, ignore_errors=True)
@@ -172,7 +177,7 @@ def materialize(destination: Path) -> dict:
         "schema_version": "rpa179.1",
         "source": "assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src",
         "source_integrity": frozen,
-        "corrections_sha256": "sha256:" + sha256(CORRECTIONS),
+        "corrections_sha256": "sha256:" + corrections_digest,
         "excluded_historical_regressions": sorted(HISTORICAL_REGRESSIONS),
         "corrected_tree": tree,
     }

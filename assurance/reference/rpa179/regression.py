@@ -43,13 +43,27 @@ def require(condition: bool, detail: str) -> None:
         raise AssertionError(detail)
 
 
-def isolated_python_environment(env: dict[str, str]) -> dict[str, str]:
-    """Remove inherited Python and coverage hooks before a fixture subprocess."""
+def isolated_subprocess_environment(env: dict[str, str]) -> dict[str, str]:
+    """Remove inherited interpreter, coverage, and Git repository selectors."""
+    git_selectors = {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
     for key in tuple(env):
+        upper = key.upper()
         if (
-            key.upper().startswith("PYTHON")
+            upper.startswith("PYTHON")
             or key.startswith("COV_CORE_")
             or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}
+            or upper in git_selectors
+            or upper.startswith("GIT_CONFIG_")
         ):
             env.pop(key, None)
     env["PYTHONNOUSERSITE"] = "1"
@@ -58,7 +72,11 @@ def isolated_python_environment(env: dict[str, str]) -> dict[str, str]:
 
 def git(repo: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     result = subprocess.run(
-        ["git", *args], cwd=repo, input=input_bytes, capture_output=True
+        ["git", *args],
+        cwd=repo,
+        input=input_bytes,
+        capture_output=True,
+        env=isolated_subprocess_environment(os.environ.copy()),
     )
     if result.returncode != 0:
         raise AssertionError(
@@ -220,7 +238,24 @@ def synthetic_git_paths():
 
 @case("coverage_matrix", "CR-03")
 def coverage_matrix():
-    actionable = [item for item in MATRIX["findings"] if item["disposition"] in ACTIONABLE]
+    findings = MATRIX["findings"]
+    ids = [item["id"] for item in findings]
+    expected_ids = {f"CR-{index:02d}" for index in range(1, 29)}
+    require(
+        len(ids) == len(set(ids)) and set(ids) == expected_ids,
+        "finding IDs are missing, duplicated, or unexpected",
+    )
+    require(
+        all(item["disposition"] in ACTIONABLE | {"historical"} for item in findings),
+        "unknown finding disposition",
+    )
+    historical = [item for item in findings if item["disposition"] == "historical"]
+    require(
+        {item["id"] for item in historical} == {"CR-17", "CR-22", "CR-23"}
+        and all(item.get("test") is None for item in historical),
+        "historical finding contract drift",
+    )
+    actionable = [item for item in findings if item["disposition"] in ACTIONABLE]
     require(len(actionable) == 25, f"expected 25 actionable findings, got {len(actionable)}")
     require(all(item.get("test") for item in actionable), "an actionable finding has no regression")
     expected: dict[str, set[str]] = {}
@@ -334,6 +369,34 @@ def dynamic_import_alias():
     result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, callable_alias)
     require(not result.ok and result.reason == "private_agent_import",
             "import_module callable alias escaped HL-06")
+    getattr_alias = {
+        "app/api/getattr_alias.py": (
+            "import importlib\n"
+            "load = getattr(importlib, 'import_module')\n"
+            "load('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, getattr_alias)
+    require(not result.ok and result.reason == "private_agent_import",
+            "getattr import_module alias escaped HL-06")
+    computed_getattr = {
+        "app/api/computed_getattr.py": (
+            "import importlib\nload = getattr(importlib, attribute)\n"
+            "load('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, computed_getattr)
+    require(not result.ok and result.reason == "source_indeterminate",
+            "computed importlib getattr did not fail closed")
+    direct_getattr = {
+        "app/api/direct_getattr.py": (
+            "import importlib\n"
+            "getattr(importlib, 'import_module')('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, direct_getattr)
+    require(not result.ok and result.reason == "private_agent_import",
+            "direct getattr import_module call escaped HL-06")
     relative = {
         "app/api/relative.py": (
             "import importlib\nimportlib.import_module('.verify', 'app.agent')\n"
@@ -413,7 +476,7 @@ def waiver_approval():
 @case("selfcheck_exit", "CR-16")
 def selfcheck_exit():
     with case_temp("rpa179-selfcheck-") as td:
-        env = isolated_python_environment(os.environ.copy())
+        env = isolated_subprocess_environment(os.environ.copy())
         env["A360_HARNESS_OUT"] = str(Path(td) / "generated")
         result = subprocess.run(
             [sys.executable, "-B", "selfattack.py"], cwd=SRC, env=env,

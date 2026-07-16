@@ -38,13 +38,35 @@ def load_verifier():
         sys.path.pop(0)
 
 
+def load_regression():
+    spec = importlib.util.spec_from_file_location("rpa179_regression", REFERENCE / "regression.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_regression(source: Path, output: Path) -> dict:
     env = os.environ.copy()
     for key in tuple(env):
+        upper = key.upper()
         if (
-            key.upper().startswith("PYTHON")
+            upper.startswith("PYTHON")
             or key.startswith("COV_CORE_")
             or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}
+            or upper in {
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_CEILING_DIRECTORIES",
+                "GIT_COMMON_DIR",
+                "GIT_DIR",
+                "GIT_INDEX_FILE",
+                "GIT_NAMESPACE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_SHALLOW_FILE",
+                "GIT_WORK_TREE",
+            }
+            or upper.startswith("GIT_CONFIG_")
         ):
             env.pop(key, None)
     env.update({
@@ -222,9 +244,13 @@ def test_materialize_writes_the_verified_bytes(monkeypatch: pytest.MonkeyPatch):
     destination = REPO / ".rpa179-test" / f"bytes-{os.getpid():x}-{secrets.token_hex(3)}"
     expected = {relative.as_posix() for _, relative in materializer.manifest_entries()}
     reads: dict[str, int] = {}
+    corrections_reads = 0
     real_read_bytes = Path.read_bytes
 
     def counted_read_bytes(path: Path) -> bytes:
+        nonlocal corrections_reads
+        if path == materializer.CORRECTIONS:
+            corrections_reads += 1
         try:
             relative = path.relative_to(materializer.FROZEN).as_posix()
         except ValueError:
@@ -240,6 +266,7 @@ def test_materialize_writes_the_verified_bytes(monkeypatch: pytest.MonkeyPatch):
             materializer.materialize(destination)
         assert set(reads) == expected
         assert set(reads.values()) == {1}
+        assert corrections_reads == 1
     finally:
         shutil.rmtree(destination, ignore_errors=True)
 
@@ -249,13 +276,86 @@ def test_verifier_strips_inherited_python_environment(monkeypatch: pytest.Monkey
         poisoned.setenv("PYTHONPATH", "poison-path")
         poisoned.setenv("PYTHONHOME", "poison-home")
         poisoned.setenv("PYTHONWARNINGS", "error")
+        poisoned.setenv("GIT_DIR", "poison-git-dir")
+        poisoned.setenv("GIT_WORK_TREE", "poison-work-tree")
+        poisoned.setenv("GIT_CONFIG_COUNT", "1")
         verifier = load_verifier()
         env = verifier.command_environment(REFERENCE, REFERENCE / ".work" / "env-test")
 
     assert "PYTHONPATH" not in env
     assert "PYTHONHOME" not in env
     assert "PYTHONWARNINGS" not in env
+    assert "GIT_DIR" not in env
+    assert "GIT_WORK_TREE" not in env
+    assert "GIT_CONFIG_COUNT" not in env
     assert env["PYTHONNOUSERSITE"] == "1"
+
+
+def test_git_commands_ignore_inherited_repository_selectors(monkeypatch: pytest.MonkeyPatch):
+    verifier = load_verifier()
+    regression = load_regression()
+    test_root = REPO / ".rpa179-test" / f"git-env-{os.getpid():x}-{secrets.token_hex(3)}"
+    actual = test_root / "actual"
+    redirected = test_root / "redirected"
+
+    def initialize(repository: Path, value: str) -> str:
+        repository.mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet"], cwd=repository, check=True)
+        subprocess.run(["git", "config", "user.name", "test"], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"],
+            cwd=repository,
+            check=True,
+        )
+        (repository / "value.txt").write_text(value, encoding="utf-8")
+        subprocess.run(["git", "add", "value.txt"], cwd=repository, check=True)
+        subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    try:
+        actual_head = initialize(actual, "actual")
+        initialize(redirected, "redirected")
+        with monkeypatch.context() as poisoned:
+            poisoned.setenv("GIT_DIR", str(redirected / ".git"))
+            poisoned.setenv("GIT_WORK_TREE", str(redirected))
+            poisoned.setenv("GIT_CONFIG_COUNT", "1")
+            poisoned.setenv("GIT_CONFIG_KEY_0", "core.bare")
+            poisoned.setenv("GIT_CONFIG_VALUE_0", "true")
+            assert verifier.repository_head(actual) == actual_head
+            assert regression.git(actual, "rev-parse", "HEAD").decode().strip() == actual_head
+    finally:
+        shutil.rmtree(test_root, ignore_errors=True)
+
+
+def test_coverage_matrix_rejects_historical_drift():
+    regression = load_regression()
+    matrix = regression.yaml.safe_load(
+        (REFERENCE / "finding-matrix.yaml").read_text(encoding="utf-8")
+    )
+    mutations = []
+
+    duplicate = copy.deepcopy(matrix)
+    duplicate["findings"].append(copy.deepcopy(duplicate["findings"][16]))
+    mutations.append(duplicate)
+
+    tested_historical = copy.deepcopy(matrix)
+    tested_historical["findings"][16]["test"] = "coverage_matrix"
+    mutations.append(tested_historical)
+
+    wrong_disposition = copy.deepcopy(matrix)
+    wrong_disposition["findings"][21]["disposition"] = "corrective"
+    mutations.append(wrong_disposition)
+
+    for mutation in mutations:
+        regression.MATRIX = mutation
+        with pytest.raises(AssertionError):
+            regression.coverage_matrix()
 
 
 def test_materialize_failure_can_retry(monkeypatch: pytest.MonkeyPatch):
