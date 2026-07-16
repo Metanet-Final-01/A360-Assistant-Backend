@@ -115,6 +115,17 @@ def materialize(destination: Path) -> dict:
     if init.returncode != 0:
         raise RuntimeError(f"temporary git init failed: {init.stderr.strip()[:400]}")
     try:
+        for key in ("core.autocrlf", "core.safecrlf"):
+            config = subprocess.run(
+                ["git", "config", "--local", key, "false"],
+                cwd=destination,
+                capture_output=True,
+                text=True,
+            )
+            if config.returncode != 0:
+                raise RuntimeError(
+                    f"temporary git config {key} failed: {config.stderr.strip()[:400]}"
+                )
         for mode in ("check", "apply"):
             command = ["git", "apply", "--whitespace=nowarn"]
             if mode == "check":

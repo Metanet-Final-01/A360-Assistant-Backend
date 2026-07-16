@@ -75,12 +75,21 @@ def run_regression(source: Path, output: Path) -> dict:
     return json.loads(report.read_text(encoding="utf-8"))
 
 
-def test_reference_materializes_deterministically_and_covers_all_findings():
-    materializer = load_materializer()
+def test_reference_materializes_deterministically_and_covers_all_findings(
+    monkeypatch: pytest.MonkeyPatch,
+):
     test_root = REPO / ".rpa179-test" / f"p{os.getpid():x}-{secrets.token_hex(3)}"
+    fake_home = test_root / "home"
     first = test_root / "first" / "source"
     second = test_root / "second" / "source"
     try:
+        fake_home.mkdir(parents=True)
+        (fake_home / ".gitconfig").write_text(
+            "[core]\n\tautocrlf = true\n\tsafecrlf = true\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))
+        materializer = load_materializer()
         first_metadata = materializer.materialize(first)
         second_metadata = materializer.materialize(second)
 

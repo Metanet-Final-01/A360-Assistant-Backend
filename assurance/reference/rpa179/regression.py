@@ -218,10 +218,12 @@ def coverage_matrix():
     actionable = [item for item in MATRIX["findings"] if item["disposition"] in ACTIONABLE]
     require(len(actionable) == 25, f"expected 25 actionable findings, got {len(actionable)}")
     require(all(item.get("test") for item in actionable), "an actionable finding has no regression")
-    expected_tests = {item["test"] for item in actionable}
-    registered_tests = {item.name for item in CASES}
-    require(expected_tests == registered_tests,
-            f"matrix/test drift: missing={expected_tests - registered_tests} extra={registered_tests - expected_tests}")
+    expected: dict[str, set[str]] = {}
+    for item in actionable:
+        expected.setdefault(item["test"], set()).add(item["id"])
+    registered = {item.name: set(item.findings) for item in CASES}
+    require(len(registered) == len(CASES), "duplicate regression case name")
+    require(expected == registered, f"matrix/case mapping drift: expected={expected} registered={registered}")
 
 
 @case("portable_paths", "CR-04", "CR-18")
