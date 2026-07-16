@@ -19,6 +19,8 @@ import json
 import logging
 import math
 import os
+import sys as _sys
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -169,7 +171,8 @@ def check_daily_thresholds(now: datetime | None = None) -> list[str]:
                 if notify(a, FIRING if firing else OK, now):
                     sent.append(a.key)
     except Exception:  # noqa: BLE001 — 알림 판정 실패가 롤업을 죽이면 안 된다
-        logger.warning("임계 알림 판정 실패 (롤업은 계속)", exc_info=True)
+        # exc_info=True 금지 — 스택트레이스가 웹훅 URL(토큰)을 싣는다(실측 확인).
+        logger.warning("임계 알림 판정 실패 — error=%s", type(_sys.exc_info()[1]).__name__)
     return sent
 
 
@@ -207,13 +210,21 @@ def check_health(now: datetime | None = None) -> bool:
         else:
             title, text = "백엔드 정상 복귀", "• 모든 의존성 ok"
 
+        # 🔴 status를 **그대로** 전이 토큰으로 쓴다 (CodeRabbit #263).
+        # degraded/unhealthy를 둘 다 FIRING으로 뭉개면 `_should_notify`가 "같은 상태"로 보고
+        # 쿨다운에 걸린다 → **degraded 중에 앱 DB가 죽어 unhealthy가 돼도 알림이 안 간다.**
+        # 가장 알려야 할 악화가 묻히는 것이다. healthy/degraded/unhealthy를 구분하면
+        # degraded→unhealthy가 전이로 잡혀 즉시 critical이 나간다.
+        # (OK 상수는 "정상"의 의미로 계속 쓴다 — healthy가 그 값이어야 복구 판정이 맞는다.)
+        token = OK if status == "healthy" else str(status)
         return notify(
             Alert(key="health:deps", title=title, text=text,
                   severity="critical" if status == "unhealthy" else "warning"),
-            FIRING if firing else OK, now,
+            token, now,
         )
     except Exception:  # noqa: BLE001 — 헬스 알림 실패가 스케줄러를 죽이면 안 된다
-        logger.warning("헬스 알림 판정 실패", exc_info=True)
+        # exc_info=True 금지 — 스택트레이스가 웹훅 URL(토큰)을 싣는다(실측 확인).
+        logger.warning("헬스 알림 판정 실패 — error=%s", type(_sys.exc_info()[1]).__name__)
         return False
 
 
@@ -228,9 +239,14 @@ def _should_notify(key: str, status: str, now: datetime) -> bool:
     """이 알림을 지금 보낼까? **전이면 보내고, 이어지면 쿨다운 주기로만 보낸다.**
 
     한 프리미티브로 두 가지를 판단한다:
-      - 상태 전이(ok→firing, firing→ok) → 항상 보낸다. 사람이 "터졌다"/"끝났다"를 알아야 한다.
-      - 같은 firing이 이어짐 → 쿨다운이 지났을 때만("아직도 터져 있다"). 안 그러면 도배.
-      - 같은 ok가 이어짐 → 안 보낸다. 정상은 뉴스가 아니다.
+      - **상태가 바뀜** → 항상 보낸다. 사람이 "터졌다"/"악화됐다"/"끝났다"를 알아야 한다.
+      - 같은 비정상이 이어짐 → 쿨다운이 지났을 때만("아직도 터져 있다"). 안 그러면 도배.
+      - 같은 OK가 이어짐 → 안 보낸다. 정상은 뉴스가 아니다.
+
+    ⚠️ status는 FIRING/OK만이 아니다 — 호출부가 **의미 있는 토큰**을 넘길 수 있고, 그래야
+       악화가 잡힌다. `check_health`는 "degraded"/"unhealthy"를 그대로 넘긴다: 둘 다 FIRING으로
+       뭉개면 degraded→unhealthy가 "같은 상태"가 돼 **쿨다운에 묻힌다**(CodeRabbit #263).
+       여기선 OK가 아닌 값이면 전부 "비정상"으로 다루고, 값이 다르면 전이로 본다.
 
     ⚠️ 상태를 **DB에서** 읽는다. 인메모리면 재시작·멀티워커에서 각자 "처음"이라 중복 발송한다.
        "스로틀했다"는 주장은 그 저장소를 모든 발신자가 공유할 때만 참이다.
@@ -258,6 +274,29 @@ def _should_notify(key: str, status: str, now: datetime) -> bool:
         return True
 
 
+_fallback_last: dict[tuple[str, str], datetime] = {}
+_fallback_lock = threading.Lock()
+
+
+def _fallback_should_notify(key: str, status: str, now: datetime) -> bool:
+    """**상태 DB가 죽었을 때만** 쓰는 프로세스 로컬 스로틀.
+
+    평소엔 alert_state(DB)가 전이·쿨다운을 판단한다. 그게 죽으면 통지 자체를 접는 게 아니라
+    — 하필 그때가 "관측 DB가 죽었다"를 알려야 할 때다 — **최소한의 도배 방지만** 하고 보낸다.
+
+    ⚠️ 인메모리라 한계가 명확하다: 재시작하면 초기화되고, 워커 N개면 최대 N배 발송된다.
+       그래서 **평소 경로가 아니다.** DB 장애라는 예외 상황에서 "중복 몇 통"과 "침묵" 중
+       중복을 택한 것이다 — 침묵은 장애를 숨기지만 중복은 시끄러울 뿐이다.
+    """
+    cd = _cooldown() or timedelta(minutes=_DEFAULT_COOLDOWN_MIN)
+    with _fallback_lock:
+        last = _fallback_last.get((key, status))
+        if last is not None and (now - last) < cd:
+            return False
+        _fallback_last[(key, status)] = now
+    return True
+
+
 def _aware(dt: datetime) -> datetime:
     """naive로 돌아온 값(드라이버·DB 설정에 따라)을 UTC로 간주해 비교 가능하게."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
@@ -280,19 +319,30 @@ def _record(key: str, status: str, detail: str, now: datetime, sent: bool) -> No
 
 
 def _post(alert: Alert) -> bool:
-    """Slack Incoming Webhook 발송. 실패는 삼키고 로깅만(fail-open)."""
+    """Slack Incoming Webhook 발송. 실패는 삼키고 로깅만(fail-open).
+
+    🔴 **예외 객체를 로그에 넣지 않는다** (CodeRabbit #263). `httpx.HTTPStatusError`의 문자열은
+    요청 URL을 통째로 담는다 — 실측:
+        "Client error '404 Not Found' for url 'https://hooks.slack.com/services/T0/B0/<토큰>'"
+    즉 `logger.warning(..., e)` 한 줄로 **웹훅 토큰이 로그에 영구 기록**된다. 그 URL을 아는
+    사람은 누구나 그 채널에 글을 쓸 수 있다. 상태 코드와 예외 **타입만** 남긴다.
+    """
     import httpx
 
     icon = {"critical": "🔴", "warning": "🟠", "info": "🔵"}.get(alert.severity, "🟠")
-    payload = {
-        "text": f"{icon} *{alert.title}*\n{alert.text}",
-    }
+    payload = {"text": f"{icon} *{alert.title}*\n{alert.text}"}
     try:
         r = httpx.post(webhook_url(), json=payload, timeout=5.0)
         r.raise_for_status()
         return True
+    except httpx.HTTPStatusError as e:  # noqa: PERF203 — 상태 코드만(URL·본문에 토큰이 있다)
+        logger.warning("Slack 알림 발송 실패 — key=%s status=%s (서비스는 계속)",
+                       alert.key, e.response.status_code)
+        return False
     except Exception as e:  # noqa: BLE001 — 알림 실패가 서비스를 죽이면 안 된다(fail-open)
-        logger.warning("Slack 알림 발송 실패 (서비스는 계속): %s — %s", alert.key, e)
+        # 타입만. 네트워크 예외(ConnectError 등)도 메시지에 URL을 담을 수 있다.
+        logger.warning("Slack 알림 발송 실패 — key=%s error=%s (서비스는 계속)",
+                       alert.key, type(e).__name__)
         return False
 
 
@@ -306,13 +356,35 @@ def notify(alert: Alert, status: str = FIRING, now: datetime | None = None) -> b
         return False  # 미설정=비활성 — 기존 동작 그대로
 
     now = now or datetime.now(timezone.utc)
+
+    # 🔴 상태 DB가 죽어도 **발송은 해야 한다** (CodeRabbit #263).
+    # 상태 조회 실패로 알림을 접으면, 하필 "관측 DB가 죽었다"를 알려야 할 때 침묵한다 —
+    # 자기모순이다. 도배 방지(상태)는 **부가 기능**이고 통지가 본질이다.
+    # 그래서 DB 장애 시엔 프로세스 로컬 폴백 스로틀로 최소한의 도배만 막고 **보낸다**.
     try:
-        if not _should_notify(alert.key, status, now):
-            return False
-        sent = _post(alert)
-        _record(alert.key, status, json.dumps(
-            {"title": alert.title, "text": alert.text}, ensure_ascii=False), now, sent)
-        return sent
-    except Exception as e:  # noqa: BLE001 — 상태 DB 장애도 서비스를 죽이면 안 된다
-        logger.warning("알림 처리 실패 (서비스는 계속): %s — %s", alert.key, e)
+        should = _should_notify(alert.key, status, now)
+        state_ok = True
+    except Exception as e:  # noqa: BLE001 — 상태 DB 장애
+        logger.warning("알림 상태 조회 실패 — key=%s error=%s (폴백 스로틀로 발송 시도)",
+                       alert.key, type(e).__name__)
+        should, state_ok = _fallback_should_notify(alert.key, status, now), False
+
+    if not should:
         return False
+
+    # _post는 자체 fail-open이지만 여기서도 감싼다 — 그 구현에 기대면, 누가 _post를 바꾸는
+    # 순간 알림이 서비스를 죽인다. "관측 실패는 서비스를 죽이지 않는다"는 notify 전체의 계약이다.
+    # (sessions.py에서 빌더가 try 밖이라 429가 500이 된 것과 같은 교훈 — CodeRabbit #258.)
+    try:
+        sent = _post(alert)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("알림 발송 실패 — key=%s error=%s", alert.key, type(e).__name__)
+        sent = False
+
+    if state_ok:
+        try:
+            _record(alert.key, status, json.dumps(
+                {"title": alert.title, "text": alert.text}, ensure_ascii=False), now, sent)
+        except Exception as e:  # noqa: BLE001 — 기록 실패가 발송을 무르지 않는다
+            logger.warning("알림 상태 기록 실패 — key=%s error=%s", alert.key, type(e).__name__)
+    return sent

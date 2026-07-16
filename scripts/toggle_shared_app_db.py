@@ -42,6 +42,16 @@ def main() -> int:
     #    이 스크립트는 사용자의 .env(크레덴셜 보관 파일)를 건드리므로, 지정한 한 줄 외에는
     #    **한 바이트도** 바뀌면 안 된다.
     text = io.open(ENV, encoding="utf-8", newline="").read()
+    # ⚠️ 중복 정의를 거부한다 (CodeRabbit #263). python-dotenv는 같은 키가 여러 번이면
+    #    **마지막 값**을 쓰는데 이 스크립트는 **첫 번째**만 토글한다 — "꺼짐"이라 표시해놓고
+    #    실제로는 켜져 있는 상태가 된다. 가드가 읽는 것과 동작이 읽는 것이 갈리는 그 병이다.
+    matches = LINE.findall(text)
+    if len(matches) > 1:
+        print(f".env에 {KEY}가 {len(matches)}번 정의돼 있습니다 — 하나만 남기고 지우세요.\n"
+              f"  (dotenv는 마지막 값을 쓰는데 이 스크립트는 첫 번째만 바꿔 상태가 어긋납니다.)",
+              file=sys.stderr)
+        return 1
+
     m = LINE.search(text)
     if not m:
         print(f".env에 {KEY} 줄이 없습니다 — 이미 로컬입니다(추가하려면 .env.example 참고).")

@@ -325,6 +325,34 @@ def test_health_degraded_does_not_spam(sent, health):
     assert len(sent) == 1, f"{len(sent)}번 보냈다 — 도배다"
 
 
+def test_health_degraded_to_unhealthy_alerts_immediately(sent, health):
+    """🔴 **악화(degraded → unhealthy)는 쿨다운을 뚫고 즉시 알린다** (CodeRabbit #263).
+
+    처음엔 둘 다 FIRING으로 저장해서 `_should_notify`가 "같은 상태"로 보고 쿨다운에 걸렸다 —
+    **degraded 중에 앱 DB가 죽어도 critical 알림이 안 갔다.** 가장 알려야 할 순간을 놓친 것이다.
+    status를 그대로 전이 토큰으로 쓰면 값이 달라져 전이로 잡힌다.
+    """
+    health("degraded", database="ok", observability_database="fail", opensearch="ok")
+    alerts.check_health(NOW)
+    assert len(sent) == 1
+
+    # 쿨다운(60분) 한참 안, 겨우 1분 뒤 — 그런데 상태가 악화됐다
+    health("unhealthy", database="fail", observability_database="fail", opensearch="ok")
+    assert alerts.check_health(NOW + timedelta(minutes=1)) is True, (
+        "degraded→unhealthy 악화가 쿨다운에 묻혔다 — 앱 DB가 죽었는데 아무도 모른다")
+    assert len(sent) == 2
+    assert sent[1].severity == "critical"
+
+
+def test_health_same_degraded_still_throttled(sent, health):
+    """단, **같은** degraded가 이어지는 건 여전히 쿨다운에 막힌다 — 악화 감지가 도배를 열면 안 된다."""
+    health("degraded", database="ok", observability_database="fail", opensearch="ok")
+    for i in range(12):
+        alerts.check_health(NOW + timedelta(minutes=5 * i))
+
+    assert len(sent) == 1
+
+
 def test_health_recovery_notifies(sent, health):
     """복귀도 알린다 — 사람이 끝난 걸 알아야 한다."""
     health("degraded", database="ok", observability_database="fail", opensearch="ok")
@@ -393,13 +421,44 @@ def test_slack_failure_does_not_raise(monkeypatch):
     assert alerts.notify(_alert(), alerts.FIRING, NOW) is False  # 예외가 아니라 False
 
 
-def test_state_db_failure_does_not_raise(monkeypatch):
-    """상태 DB가 죽어도 마찬가지 — fail-open."""
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", HOOK)
+def test_state_db_failure_still_sends(sent, monkeypatch):
+    """🔴 상태 DB가 죽어도 **발송은 한다** (CodeRabbit #263).
 
+    처음엔 정반대로 짰다 — 상태 조회가 실패하면 `notify`가 False를 반환했고, 그걸
+    `test_state_db_failure_does_not_raise`가 **정답으로 못 박고 있었다**.
+
+    자기모순이다: 관측 DB가 죽으면 → 상태 조회 실패 → 침묵. **하필 그때가 "관측 DB가
+    죽었다"를 알려야 할 때다.** 도배 방지(상태)는 부가 기능이고 **통지가 본질**이다.
+    DB 장애 시엔 프로세스 로컬 폴백 스로틀로 최소한만 막고 보낸다.
+    """
     def _boom():
         raise RuntimeError("db down")
 
     monkeypatch.setattr(alerts, "_obs_session", _boom)
+    alerts._fallback_last.clear()
 
-    assert alerts.notify(_alert(), alerts.FIRING, NOW) is False
+    assert alerts.notify(_alert(), alerts.FIRING, NOW) is True, (
+        "상태 DB가 죽었다고 알림을 접었다 — 그때가 알려야 할 때다")
+    assert len(sent) == 1
+
+
+def test_state_db_failure_still_throttles(sent, monkeypatch):
+    """단, 폴백에서도 도배는 막는다 — DB가 죽었다고 5분마다 288개를 쏘면 안 된다."""
+    monkeypatch.setattr(alerts, "_obs_session", lambda: (_ for _ in ()).throw(RuntimeError("db")))
+    alerts._fallback_last.clear()
+
+    for i in range(12):
+        alerts.notify(_alert(), alerts.FIRING, NOW + timedelta(minutes=5 * i))
+
+    assert len(sent) == 1, f"폴백 스로틀이 안 듣는다 — {len(sent)}번 보냈다"
+
+
+def test_state_db_failure_does_not_raise(monkeypatch):
+    """어느 경우든 예외가 새면 안 된다 — 알림이 서비스를 죽이면 안 된다."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", HOOK)
+    monkeypatch.setattr(alerts, "_obs_session", lambda: (_ for _ in ()).throw(RuntimeError("db")))
+    monkeypatch.setattr(alerts, "_post", lambda a: (_ for _ in ()).throw(RuntimeError("slack")))
+    alerts._fallback_last.clear()
+
+    # 상태 DB도 슬랙도 죽었다 — 그래도 예외는 안 난다
+    alerts.notify(_alert(), alerts.FIRING, NOW)

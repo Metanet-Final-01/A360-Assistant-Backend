@@ -114,6 +114,23 @@ def _isolate_observability_db(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_slack_webhook(monkeypatch):
+    """테스트가 **진짜 슬랙 채널**에 쏘지 못하게 격리한다 (RPA-189).
+
+    공유 DB(관측·RAG·앱)는 격리했으면서 웹훅은 안 했었다 — 같은 계열의 구멍이다. `.env`에
+    SLACK_WEBHOOK_URL이 있으면(승민님 로컬이 그렇다) `alerts.notify()`를 부르는 어떤 테스트든
+    **팀 채널에 실제 메시지를 보낸다.** `_post`를 모킹하지 않은 경로가 하나라도 있으면 샌다.
+
+    빈 문자열로 덮는다(delenv 아님) — `app/db.py`의 `load_dotenv()`가 지운 키를 .env에서
+    되살리기 때문. 위 _isolate_observability_db와 같은 이유다.
+
+    웹훅 동작 자체를 검증하는 테스트(tests/test_alerts.py)는 자기 setenv로 다시 켠다
+    (function-scoped monkeypatch라 이 fixture 뒤에 덮어쓴다).
+    """
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_rag_shared_infra(monkeypatch):
     """테스트가 공유 RAG 인프라(Neon 코퍼스·Bonsai)를 절대 때리지 않게 격리한다 (RPA-157).
 

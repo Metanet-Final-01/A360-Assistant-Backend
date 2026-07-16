@@ -24,19 +24,31 @@
 
 import argparse
 import io
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# CI 잡 타임아웃보다 짧게 — 우리가 먼저 끝나야 원본을 복원할 수 있다.
+_TEST_TIMEOUT_SEC = int(os.getenv("PROVE_TEETH_TIMEOUT_SEC", "300"))
+
 
 def _run_test(test: str) -> tuple[bool, str]:
     """(통과했나, 요약)."""
-    r = subprocess.run(
-        [sys.executable, "-m", "pytest", test, "-q", "--no-header", "-p", "no:cacheprovider"],
-        capture_output=True, text=True, errors="replace", cwd=str(ROOT),
-    )
+    # ⚠️ timeout 필수 (CodeRabbit #263). 없으면 pytest가 멈출 때 **상위 CI 타임아웃이 이 프로세스를
+    #    통째로 죽여** 아래 finally의 원본 복원이 안 돈다 — 즉 **결함이 심긴 소스가 그대로 남는다.**
+    #    "항상 복원한다"는 계약은 우리가 먼저 끝날 때만 지켜진다.
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", test, "-q", "--no-header", "-p", "no:cacheprovider"],
+            capture_output=True, text=True, errors="replace", cwd=str(ROOT),
+            timeout=_TEST_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        # 멈춘 것도 "통과 아님"이지만, 그걸 이빨로 오해하면 안 된다 — 명시적으로 알린다.
+        return False, f"⏱ {_TEST_TIMEOUT_SEC}초 초과로 중단 (테스트가 멈췄다 — 이빨 판정 불가)"
     tail = [l for l in r.stdout.splitlines() if l.strip()][-1:] or ["(출력 없음)"]
     return r.returncode == 0, tail[0]
 
