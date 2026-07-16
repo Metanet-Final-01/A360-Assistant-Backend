@@ -113,6 +113,9 @@ def main() -> int:
     p = {"d": args.days} if args.days else {}
 
     # ── 표본
+    # 날짜 묶음은 KST(+9h) — 서비스의 일 경계(app/core/localtime)와 같은 축이어야 한다.
+    # UTC ::date로 산출하면 '일 최대'가 KST 09:00~09:00 창 기준이 돼 임계 근거가 왜곡된다
+    # (실측: 07-15가 실제로는 07-15 09:00~07-16 09:00 KST 합계였다).
     r = _rows(f"select count(*), min(created_at)::date, max(created_at)::date, "
               f"count(distinct user_id), count(distinct session_id), count(request_id) "
               f"from llm_usage where {where}", **p)[0]
@@ -163,8 +166,8 @@ def main() -> int:
 
     # ── 주체별 일 사용량 → 일 상한 유도
     user_days = [float(x[2]) for x in _rows(
-        f"select user_id, created_at::date, sum(cost_usd) from llm_usage "
-        f"where user_id is not null and {where} group by user_id, created_at::date "
+        f"select user_id, (created_at + interval '9 hours')::date, sum(cost_usd) from llm_usage "
+        f"where user_id is not null and {where} group by user_id, (created_at + interval '9 hours')::date "
         f"having sum(cost_usd) > 0", **p)]
     print("\n── 사용자별 하루 비용 (일 상한의 직접 근거)")
     subject_daily = 0.0
@@ -176,8 +179,8 @@ def main() -> int:
         print("  (사용자 귀속 비용 없음 — 익명 트래픽뿐이면 session 기준으로 봐야 한다)")
 
     global_days = [float(x[1]) for x in _rows(
-        f"select created_at::date, sum(cost_usd) from llm_usage where {where} "
-        f"group by created_at::date having sum(cost_usd) > 0", **p)]
+        f"select (created_at + interval '9 hours')::date, sum(cost_usd) from llm_usage where {where} "
+        f"group by (created_at + interval '9 hours')::date having sum(cost_usd) > 0", **p)]
     print("\n── 전역 하루 비용 (전역 상한의 직접 근거)")
     global_daily = max(global_days) if global_days else 0.0
     if global_days:

@@ -24,6 +24,8 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from app.core import localtime
+
 logger = logging.getLogger(__name__)
 
 FIRING = "firing"
@@ -159,7 +161,8 @@ def check_daily_thresholds(now: datetime | None = None) -> list[str]:
     from sqlalchemy import text
 
     now = now or datetime.now(timezone.utc)
-    today = now.date()
+    # KST 날짜 — rollup이 쓰는 day 축과 같아야 한다(둘이 갈리면 '오늘' 행을 못 찾아 0으로 판정).
+    today = localtime.local_date(now)
     sent: list[str] = []
 
     cost_limit = _threshold("ALERT_GLOBAL_DAILY_USD")

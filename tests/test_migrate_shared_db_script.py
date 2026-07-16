@@ -222,7 +222,13 @@ def test_apply_blocked_when_dev_comparison_unknown(apply_run, monkeypatch):
     assert rc == 1 and applied == 0
 
 
-def test_revisions_not_in_dev_catches_a_real_file_git_ignores(script_dir, tmp_path):
+def test_revisions_not_in_dev_catches_a_real_file_git_ignores(script_dir, tmp_path, worker_id):
+    if worker_id != "master":
+        pytest.skip(
+            "저장소 전역 자원(migrations/versions·.git/info/exclude)을 실제로 변형한다 — "
+            "병렬(xdist)에선 다른 워커와 경쟁한다. 실측: 프로브가 만든 두 번째 head를 "
+            "동시에 돌던 통합 테스트의 run_migrations()가 읽어 'Multiple head revisions'로 "
+            "5개가 죽었다. 순차 실행과 CI(-n 없음)가 이 테스트를 계속 검증한다.")
     """**모킹 없이** 진짜 파일로 검증한다 — 위 테스트들은 `_revisions_not_in_dev`를 monkeypatch
     하므로 그 함수 자체가 옳은지는 아무것도 증명하지 못한다.
 

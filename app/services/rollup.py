@@ -22,6 +22,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import delete, select
 
+from app.core import localtime
 from app import models
 
 logger = logging.getLogger(__name__)
@@ -95,9 +96,14 @@ def aggregate_usage(rows: list[tuple]) -> list[dict]:
 
 
 def _day_bounds(day: date) -> tuple[datetime, datetime]:
-    """해당 일자(UTC)의 [시작, 끝) 타임스탬프."""
-    start = datetime.combine(day, time.min, tzinfo=timezone.utc)
-    return start, start + timedelta(days=1)
+    """해당 일자(**KST**)의 [시작, 끝) 타임스탬프 — app.core.localtime에 위임.
+
+    metrics_daily·usage_daily의 day 컬럼이 곧 이 경계다. UTC였을 때는 "07-15" 행이
+    실제로는 KST 07-15 09:00~07-16 09:00을 담아, 대시보드의 "오늘"과 사람이 생각하는
+    오늘이 달랐다. ⚠️ 경계 의미가 바뀌었으므로 기존 UTC 기준 집계 행은 **재집계**해야
+    한다(멱등: run_rollup(days_back=45) 1회 — 원천 raw는 timestamptz라 무손상).
+    """
+    return localtime.day_bounds(day)
 
 
 # ── DB 롤업 (관측 세션 사용) ─────────────────────────────────────────────
@@ -188,7 +194,7 @@ def run_rollup(days_back: int = 1) -> None:
     from app.core.observability_db import observability_sessionmaker
 
     sf = observability_sessionmaker()
-    today = datetime.now(timezone.utc).date()
+    today = localtime.local_date(datetime.now(timezone.utc))  # KST 기준 '오늘' — _day_bounds와 같은 축
     for i in range(days_back + 1):
         day = today - timedelta(days=i)
         try:

@@ -146,9 +146,16 @@ def test_subject_detail_shows_own_usage():
 # --- 기간 경계 ---
 
 def test_period_boundaries():
-    """일별=UTC 자정, 월별=월초. 리셋 시각은 다음 경계."""
-    assert budget._period_start("daily", NOW) == datetime(2026, 7, 15, tzinfo=timezone.utc)
-    assert budget._period_start("monthly", NOW) == datetime(2026, 7, 1, tzinfo=timezone.utc)
+    """일별=**KST** 자정, 월별=KST 월초. 리셋 시각은 다음 경계.
+
+    UTC 자정이었을 때는 일 상한이 한국시간 **오전 9시에 리셋**됐다(아침에 예산이 풀림).
+    NOW(07-15T12:00Z)는 KST 07-15 21:00 → 그 날의 시작은 KST 07-15 00:00 = 07-14T15:00Z.
+    """
+    from app.core.localtime import KST
+
+    assert budget._period_start("daily", NOW) == datetime(2026, 7, 15, tzinfo=KST)
+    assert budget._period_start("daily", NOW) == datetime(2026, 7, 14, 15, tzinfo=timezone.utc)
+    assert budget._period_start("monthly", NOW) == datetime(2026, 7, 1, tzinfo=KST)
     assert budget._period_end("daily", datetime(2026, 7, 15, tzinfo=timezone.utc)) == \
         datetime(2026, 7, 16, tzinfo=timezone.utc)
     assert budget._period_end("monthly", datetime(2026, 7, 1, tzinfo=timezone.utc)) == \
