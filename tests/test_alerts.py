@@ -157,6 +157,106 @@ def test_state_survives_module_reload(sent):
     assert len(sent) == 1, "재시작 후 같은 사유로 또 보냈다 — 상태가 프로세스 안에 있다"
 
 
+# --- 배치 임계 알림 (롤업 직후) ---
+
+@pytest.fixture
+def agg(monkeypatch):
+    """usage_daily·metrics_daily의 '오늘' 값을 원하는 대로 세운다.
+
+    실제 집계 테이블에 쓰지 않고 조회만 가로챈다 — 팀 관측 DB에 테스트 행을 남기지 않기 위해서.
+
+    ⚠️ `_obs_session`은 집계 조회(check_daily_thresholds)**와** 알림 상태(_should_notify·_record)
+       **양쪽이** 쓴다. 조회만 흉내내면 상태 쪽이 터지고 — notify의 fail-open이 그걸 **삼켜서**
+       "알림이 안 갔다"로만 보인다(실제로 그렇게 헛다리를 짚었다). 그래서 완전한 가짜를 준다.
+    """
+    state: dict = {}
+
+    def _set(cost: float = 0.0, e5: int = 0):
+        class _R:
+            def __init__(self, v): self._v = v
+            def scalar(self): return self._v
+
+        class _DB:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def execute(self, stmt, params=None):
+                return _R(cost if "usage_daily" in str(stmt).lower() else e5)
+            # 알림 상태 저장소 — dict 하나로 전이·쿨다운이 실제로 동작하게 한다
+            def get(self, model, key): return state.get(key)
+            def add(self, row): state[row.key] = row
+            def commit(self): pass
+
+        monkeypatch.setattr(alerts, "_obs_session", lambda: _DB())
+    return _set
+
+
+def test_cost_over_threshold_alerts(sent, agg, monkeypatch):
+    """오늘 누적 비용이 임계를 넘으면 알린다 — 차단($45)보다 **일찍**($15) 안다."""
+    monkeypatch.setenv("ALERT_GLOBAL_DAILY_USD", "15")
+    agg(cost=17.81)  # 실측 최대(07-15)
+
+    keys = alerts.check_daily_thresholds(NOW)
+
+    assert "alert:cost:daily" in keys
+    assert "$17.81" in sent[0].text and "$15.00" in sent[0].text
+
+
+def test_cost_under_threshold_is_silent(sent, agg, monkeypatch):
+    """임계 아래면 조용하다 — 평범한 날($1~5)에 울리면 아무도 안 본다."""
+    monkeypatch.setenv("ALERT_GLOBAL_DAILY_USD", "15")
+    agg(cost=4.40)  # 실측 평범한 날
+
+    assert alerts.check_daily_thresholds(NOW) == []
+    assert sent == []
+
+
+def test_5xx_over_threshold_alerts(sent, agg, monkeypatch):
+    """5xx는 실측 기준선이 6일간 총 1건 — 몇 건만 나도 이상이다."""
+    monkeypatch.setenv("ALERT_5XX_DAILY", "3")
+    agg(e5=9)
+
+    assert "alert:5xx:daily" in alerts.check_daily_thresholds(NOW)
+    assert sent[0].severity == "critical"
+
+
+def test_thresholds_unset_means_disabled(sent, agg, monkeypatch):
+    """임계 미설정이면 아무것도 안 한다 — 기존 배포 동작 그대로."""
+    monkeypatch.delenv("ALERT_GLOBAL_DAILY_USD", raising=False)
+    monkeypatch.delenv("ALERT_5XX_DAILY", raising=False)
+    agg(cost=999.0, e5=999)
+
+    assert alerts.check_daily_thresholds(NOW) == []
+    assert sent == []
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-5", "0", "abc"])
+def test_bad_threshold_disables_that_alert(sent, agg, monkeypatch, bad):
+    """비정상 임계는 그 알림만 끈다 — 특히 nan/inf.
+
+    nan은 **모든 비교가 False**라 음수·양수 검사로 못 거른다(파이썬↔Postgres도 반대다).
+    거르지 않으면 '임계가 있는데 절대 안 울리는' 상태가 되고, 그건 없는 것보다 나쁘다 —
+    켜뒀다고 믿게 되니까. (같은 이유로 app/schemas/budget.py가 isfinite를 먼저 본다.)
+    """
+    monkeypatch.setenv("ALERT_GLOBAL_DAILY_USD", bad)
+    monkeypatch.delenv("ALERT_5XX_DAILY", raising=False)
+    agg(cost=999.0)
+
+    assert alerts.check_daily_thresholds(NOW) == []
+    assert sent == []
+
+
+def test_recovery_below_threshold_notifies(sent, agg, monkeypatch):
+    """넘었다가 내려오면 '복귀'를 알린다 — 사람이 끝난 걸 알아야 한다."""
+    monkeypatch.setenv("ALERT_GLOBAL_DAILY_USD", "15")
+    agg(cost=20.0)
+    alerts.check_daily_thresholds(NOW)          # firing
+    agg(cost=4.0)
+    alerts.check_daily_thresholds(NOW + timedelta(minutes=1))  # ok
+
+    assert len(sent) == 2
+    assert "복귀" in sent[1].title
+
+
 # --- fail-open: 알림이 서비스를 죽이면 안 된다 ---
 
 def test_slack_failure_does_not_raise(monkeypatch):

@@ -198,3 +198,13 @@ def run_rollup(days_back: int = 1) -> None:
         except Exception:  # noqa: BLE001 — 롤업 실패가 스케줄러를 죽이면 안 됨
             logger.warning("롤업 실패 %s (다음 주기에 재시도)", day, exc_info=True)
     purge_all_raw(sf)  # 테이블별 보관기간 정리 (request_metrics·turn_events·llm_usage·audit_logs)
+
+    # 집계가 방금 갱신됐으니 지금이 임계를 볼 자리다 (RPA-189).
+    # 별도 스케줄러를 두면 집계와 알림이 어긋나(집계 전 값으로 판정) 있지도 않은 급등을 알린다.
+    # SLACK_WEBHOOK_URL 미설정이면 no-op — 기존 배포의 동작은 그대로다.
+    try:
+        from app.services import alerts
+
+        alerts.check_daily_thresholds()
+    except Exception:  # noqa: BLE001 — 알림 실패가 롤업(집계·retention)을 죽이면 안 된다
+        logger.warning("임계 알림 실패 (롤업은 정상 완료)", exc_info=True)

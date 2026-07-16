@@ -17,6 +17,7 @@
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,84 @@ def budget_exceeded(verdict, subject_label: str) -> Alert:
         text=text,
         severity="critical" if scope == "global" else "warning",
     )
+
+
+def _threshold(name: str) -> float | None:
+    """알림 임계 — 미설정/비정상이면 None(그 알림 비활성)."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        v = float(raw)
+    except ValueError:
+        logger.warning("%s가 숫자가 아니라 무시한다: %r", name, raw)
+        return None
+    if not math.isfinite(v) or v <= 0:
+        # nan/inf는 비교가 전부 False라 '임계 없음'과 구분이 안 된다 — 명시적으로 끈다.
+        # (app/schemas/budget.py가 같은 이유로 isfinite를 양수 검사보다 먼저 한다.)
+        logger.warning("%s가 비정상(%r)이라 무시한다", name, raw)
+        return None
+    return v
+
+
+def check_daily_thresholds(now: datetime | None = None) -> list[str]:
+    """집계 테이블을 보고 임계 초과를 알린다. 보낸 알림의 key 목록을 돌려준다.
+
+    **롤업 직후에 부른다** — metrics_daily·usage_daily가 방금 갱신된 그 자리다. 별도 스케줄러를
+    두면 집계와 알림이 어긋나(집계 전 값으로 판정) 있지도 않은 급등을 알린다.
+
+    ⚠️ **오늘(당일)을 본다.** 완결일이 아니라 '지금까지 누적'이다 — 알림은 **지금 대응하라**는
+    신호라서 하루가 끝나길 기다리면 늦다. (반대로 **임계를 산출**할 땐 완결일만 써야 한다.
+    당일을 포함해 산출했다가 권장값이 실측 최대보다 낮아진 적이 있다 — RPA-171 → #258.)
+
+    ⚠️ 4xx는 보지 않는다. 실측 2.2~23%로 튄다(테스트 401/404) — 켜면 상시 울려 무시당한다.
+       5xx는 6일간 총 1건(0.1%)이라 몇 건만 나도 이상 신호다.
+    """
+    from sqlalchemy import text
+
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+    sent: list[str] = []
+
+    cost_limit = _threshold("ALERT_GLOBAL_DAILY_USD")
+    err_limit = _threshold("ALERT_5XX_DAILY")
+    if not enabled() or (cost_limit is None and err_limit is None):
+        return sent  # 미설정=비활성
+
+    try:
+        with _obs_session() as db:
+            if cost_limit is not None:
+                spent = db.execute(text(
+                    "select coalesce(sum(cost_usd), 0) from usage_daily where day = :d"
+                ), {"d": today}).scalar() or 0.0
+                firing = float(spent) > cost_limit
+                a = Alert(
+                    key="alert:cost:daily",
+                    title=("LLM 일 비용 임계 초과" if firing else "LLM 일 비용 정상 복귀"),
+                    text=(f"• 오늘({today}) 누적: ${float(spent):.2f} / 임계 ${cost_limit:.2f}\n"
+                          f"→ 차단은 BUDGET_GLOBAL_DAILY_USD에서 별도로 겁니다(알림은 일찍, 차단은 늦게)."),
+                    severity="warning",
+                )
+                if notify(a, FIRING if firing else OK, now):
+                    sent.append(a.key)
+
+            if err_limit is not None:
+                e5 = db.execute(text(
+                    "select coalesce(sum(err_5xx), 0) from metrics_daily where day = :d"
+                ), {"d": today}).scalar() or 0
+                firing = int(e5) > err_limit
+                a = Alert(
+                    key="alert:5xx:daily",
+                    title=("5xx 급증" if firing else "5xx 정상 복귀"),
+                    text=(f"• 오늘({today}) 5xx: {int(e5)}건 / 임계 {err_limit:.0f}건\n"
+                          f"→ 실측 기준선은 6일간 총 1건입니다 — 몇 건만 나도 이상입니다."),
+                    severity="critical",
+                )
+                if notify(a, FIRING if firing else OK, now):
+                    sent.append(a.key)
+    except Exception:  # noqa: BLE001 — 알림 판정 실패가 롤업을 죽이면 안 된다
+        logger.warning("임계 알림 판정 실패 (롤업은 계속)", exc_info=True)
+    return sent
 
 
 def _obs_session():
