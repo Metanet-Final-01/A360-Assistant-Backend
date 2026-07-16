@@ -1,3 +1,5 @@
 pytest==8.3.4
 pytest-cov==6.0.0  # 테스트 커버리지 측정 (CI에서 결과 확인)
 reportlab==4.2.5  # 테스트용 PDF(표 포함) 픽스처 생성
+jsonschema==4.26.0  # Phase 0 보증 계약/증거 JSON Schema 검증
+PyYAML==6.0.3  # Phase 0 정책 registry와 회귀 matrix 파싱

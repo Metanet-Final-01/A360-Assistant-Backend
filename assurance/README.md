@@ -25,6 +25,7 @@ A360은 개발 과정에서 AI를 적극적으로 사용했다. 그래서 결과
 | 4 | [동결 후 사후 검토](phase0/v1.10/evidence/post-freeze-review.md) | 외부 AI 리뷰 28건의 독립 판정과 구현 차단 조건 |
 | 5 | [재검증 결과](phase0/v1.10/evidence/verification.md) | 무엇을 어느 환경에서 재현했는지 |
 | 6 | [증거 안내](phase0/v1.10/evidence/README.md) | 동결 원본과 검증 코드의 역할 및 읽는 법 |
+| 7 | [RPA-179 교정 참조](reference/rpa179/README.md) | 동결 원본을 보존하며 28건을 어떻게 교정·회귀하는지 |
 
 ## 세 가지 하네스
 
@@ -45,21 +46,23 @@ Backend 하네스는 Agent의 공개 계약을 소비하고 저장 경계를 감
 | Phase 0 계약 검토 | 종료, `approve_for_human_decision` |
 | 사람의 핵심 결정 | D-16, D-17, D-21~D-24 채택 |
 | 동결 후 참조 구현 검토 | 28건 처분 완료, `corrective-action-required` |
-| 참조 구현의 생산 사용 | RPA-179 교정 전 금지 |
+| RPA-179 교정 참조 | 실행 대상 25/25, 독립 실행 2회 결정론 검증 PASS |
+| 참조 구현의 제품·운영 사용 | 금지, RPA-179도 fixture 참조만 제공 |
 | 제품 코드 연결 | 아직 없음 |
 | 현재 허용 rollout | 다음 구현은 `Observe`만 허용 |
 | `Warn`·`Enforce` | 별도 증거와 사람 승인 전 금지 |
 | 운영 보안 인증 | 아님 |
 
 즉, 현재 저장된 코드는 **운영 하네스가 아니라 검토 가능한 계약과 결정론적 참조 구현**이다.
-실제 제품 경로에 연결되는 구현은 Jira `RPA-179`부터 `RPA-184`까지 별도로 추적한다.
+RPA-179 결과도 fixture 참조이며 생산 사용 승인이 아니다. 실제 제품 경로에 연결되는 구현은
+Jira `RPA-180`부터 `RPA-184`까지 별도로 추적한다.
 
 ## 디렉터리 구조
 
 ```text
 assurance/
 ├─ README.md                         # 전체 목적과 읽기 순서
-└─ phase0/v1.10/
+├─ phase0/v1.10/
    ├─ README.md                      # 현재 계약과 구현 경계
    ├─ VERSION_HISTORY.md             # v1.1~v1.10 고민과 보정 과정
    ├─ decisions/
@@ -71,6 +74,17 @@ assurance/
       ├─ verification.md             # 재실행 환경과 결과
       ├─ artifact-manifest.sha256    # 동결 원본 무결성
       └─ frozen/                     # 당시 원본, 내용 수정 금지
+└─ reference/rpa179/
+   ├─ README.md                      # 교정 구조, 실행법과 한계
+   ├─ corrections.patch              # 동결 원본 대비 교정만 담은 diff
+   ├─ finding-matrix.yaml            # 검토 28건과 회귀 case 연결
+   ├─ materialize.py                 # 무결성 확인 후 임시 교정본 조립
+   ├─ regression.py                  # 실행 대상 25건 회귀
+   ├─ verify.py                      # 독립 조립·실행 2회 결정론 검증
+   ├─ verification-result.schema.json # 검증 evidence의 정확한 계약
+   └─ evidence/
+      ├─ verification.json           # 마지막 독립 검증 결과
+      └─ verification.sha256         # 결과 파일의 sha256 sidecar
 ```
 
 ## 판정 언어
