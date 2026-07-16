@@ -131,7 +131,17 @@ def test_purge_all_raw_covers_all_tables_and_is_best_effort(monkeypatch):
 # --- 스케줄러 게이트 ---
 
 def test_scheduler_disabled_by_env(monkeypatch):
+    """롤업·헬스 **둘 다** 꺼져 있으면 스케줄러 자체를 안 켠다.
+
+    ⚠️ 예전엔 METRICS_ROLLUP_ENABLED만 껐다 — 그땐 그게 함수 전체를 early-return시켜서 통과했다.
+       지금은 잡마다 독립 토글이라(RPA-189, CodeRabbit #263) 웹훅이 있으면 헬스 잡이 켜져
+       True가 된다. 그래서 **의도를 명시**한다 — 주변 .env 상태에 기대면 안 된다
+       (승민님 로컬엔 웹훅이 있고 CI엔 없어서, 그 차이로 로컬에서만 깨졌다).
+       잡별 독립 동작은 tests/test_scheduler_jobs.py가 본다.
+    """
     from app.core import scheduler
 
     monkeypatch.setenv("METRICS_ROLLUP_ENABLED", "false")
-    assert scheduler.start_scheduler() is False  # 비활성이면 안 켬 (테스트 기본)
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)  # 헬스 잡도 끔
+
+    assert scheduler.start_scheduler() is False

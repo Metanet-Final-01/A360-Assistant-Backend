@@ -193,12 +193,15 @@ def _check_opensearch() -> bool:
 
 
 @app.get("/api/health")
-@app.get("/health")
-def health(response: Response) -> dict:
-    """의존성 체크 포함 헬스 (RPA-117) — 백오피스 생존 감시 probe의 대상.
+def compute_health() -> dict:
+    """의존성을 실제로 찔러 헬스를 판정한다 (RPA-117). 순수 함수 — 응답과 무관.
 
-    - 앱 DB 실패 → 503 unhealthy: 서비스가 사실상 동작 불가라 probe가 DOWN으로 봐야 한다.
-    - 관측 DB 실패 → 200 degraded: 본 기능은 살아 있으니 UP이되, "반쯤 죽은" 상태를 구분.
+    - 앱 DB 실패 → unhealthy: 서비스가 사실상 동작 불가.
+    - 관측 DB·OpenSearch 실패 → degraded: 본 기능은 살아 있으나 "반쯤 죽은" 상태.
+
+    ⚠️ 라우트에서 분리한 이유 (RPA-189): 알림 잡도 이 판정이 필요한데, **복사하면 반드시
+    갈린다** — 한쪽에 체크를 추가하고 다른 쪽을 잊으면 "/health는 degraded인데 알림은 조용"이
+    된다. 가드가 읽는 것과 동작이 읽는 것은 같은 표현식이어야 한다(CONVENTIONS §9).
     """
     import app.db as app_db
     from app.core.observability_db import observability_sessionmaker
@@ -211,7 +214,6 @@ def health(response: Response) -> dict:
     }
     if checks["database"] == "fail":
         status = "unhealthy"
-        response.status_code = 503
     elif checks["observability_database"] == "fail" or checks["opensearch"] == "fail":
         status = "degraded"
     else:
@@ -222,6 +224,19 @@ def health(response: Response) -> dict:
         # 관측 DB가 공유(Neon)인지 로컬 폴백인지 — 폴백이면 위 체크는 앱 DB와 동일 대상
         "observability_shared": bool(os.getenv("OBSERVABILITY_DATABASE_URL")),
     }
+
+
+@app.get("/health")
+def health(response: Response) -> dict:
+    """의존성 체크 포함 헬스 (RPA-117) — 백오피스 생존 감시 probe·ALB 헬스체크의 대상.
+
+    판정은 compute_health()가 한다(알림 잡과 공유). 여기선 HTTP 상태코드만 매핑한다:
+    앱 DB가 죽으면 503 — probe가 DOWN으로 봐야 한다. degraded는 200(UP이되 반쯤 죽음).
+    """
+    result = compute_health()
+    if result["status"] == "unhealthy":
+        response.status_code = 503
+    return result
 
 
 _STATIC_DIR = Path(__file__).parent / "static"

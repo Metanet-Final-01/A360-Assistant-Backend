@@ -91,6 +91,7 @@ def _observability_metadata() -> MetaData:
         models.UsageDaily.__table__,
         models.TurnEvent.__table__,
         models.RagEvent.__table__,
+        models.AlertState.__table__,
     ):
         table = Table(
             src.name,

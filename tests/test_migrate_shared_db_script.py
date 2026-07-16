@@ -261,13 +261,28 @@ def test_revisions_not_in_dev_catches_a_real_file_git_ignores(script_dir, tmp_pa
         exclude.write_text(original, encoding="utf-8")
 
 
-def test_revisions_not_in_dev_is_clean_on_untouched_tree(script_dir):
-    """평소(=dev와 일치)엔 빈 목록 — 가드가 상시 차단이면 아무도 못 쓴다."""
+def test_revisions_not_in_dev_only_flags_files_that_differ(script_dir):
+    """가드는 **dev와 다른 파일만** 잡는다 — 상시 차단이면 아무도 못 쓴다.
+
+    ⚠️ "빈 목록이어야 한다"로 짰다가 **마이그레이션을 추가하는 모든 PR에서 CI가 깨졌다**
+    (RPA-189의 0017을 만들자마자 이 테스트가 나를 막았다). feature 브랜치는 정의상 dev에 없는
+    리비전을 갖고 있으므로 "깨끗함"은 dev에서만 참이다 — 테스트가 브랜치 상태에 의존하면 안 된다.
+
+    대신 **불변식**을 검증한다: 잡힌 항목은 전부 실제로 dev와 다른 파일이어야 한다(오탐 없음).
+    dev에 이미 있고 수정도 안 된 파일이 잡히면 그건 가드가 망가진 것이다.
+    """
     result = mig._revisions_not_in_dev(script_dir)
     if result is None:
         pytest.skip("origin/dev를 확인할 수 없다")
 
-    assert result == [], f"깨끗한 트리인데 차단 사유가 잡혔다: {result}"
+    flagged = {line.split()[0] for line in result}
+    for rel in flagged:
+        in_dev = mig._git("rev-parse", f"origin/dev:{rel}")
+        if in_dev.returncode != 0:
+            continue  # dev에 없다 = 정당한 지적(새 리비전)
+        local = mig._git("hash-object", str(_ROOT / rel))
+        assert local.stdout.strip() != in_dev.stdout.strip(), (
+            f"{rel}은 dev와 내용이 같은데 잡혔다 — 오탐이다. 가드가 상시 차단이 된다")
 
 
 # --- 이 스크립트가 존재하는 이유 자체 ---

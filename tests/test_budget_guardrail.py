@@ -209,6 +209,68 @@ def test_turn_returns_429_when_budget_exceeded(monkeypatch):
         app.dependency_overrides.clear()
 
 
+def test_turn_429_sends_slack_alert(monkeypatch):
+    """429로 사용자를 막았으면 **사람에게 알린다** (RPA-189).
+
+    로그만 남기면 아무도 안 본다 — 예산을 넘겨 서비스를 끊었는데 대시보드를 열어봐야만 알았다.
+    이게 meter→enforce→**alert**의 마지막 한 걸음이다.
+
+    ⚠️ 여기서 검증하는 건 **배선**이다 — 429 지점이 올바른 Alert로 notify를 부르는가.
+       쿨다운·전이·fail-open은 test_alerts.py가 본다(_spend가 관측 세션을 가짜로 바꿔서
+       여기선 alerts의 상태 DB가 안 돈다 — 그걸 몰라 처음엔 _post를 세다가 헛다리 짚었다).
+    """
+    from fastapi.testclient import TestClient
+
+    import app.services.alerts as alerts
+
+    sent = []
+    monkeypatch.setattr(alerts, "notify", lambda a, *args, **kw: (sent.append(a), True)[1])
+
+    app = _override_turn_deps(monkeypatch)
+    monkeypatch.setenv("BUDGET_SUBJECT_DAILY_USD", "1.0")
+    _spend(monkeypatch, 5.0)
+    try:
+        with TestClient(app) as c:
+            r = c.post(f"/api/sessions/{SID}/turn", json={"message": "안녕하세요"})
+        assert r.status_code == 429
+
+        assert len(sent) == 1, "429로 막았는데 알림이 안 갔다"
+        assert sent[0].key.startswith("budget:subject:"), (
+            f"주체별 key여야 한 사용자의 쿨다운이 남을 안 삼킨다: {sent[0].key}")
+        assert "$5.00" in sent[0].text and "$1.00" in sent[0].text, (
+            f"사용액/상한이 알림에 없다 — 받는 사람이 판단할 근거가 없다: {sent[0].text}")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_turn_429_alert_failure_does_not_break_the_response(monkeypatch):
+    """알림 경로가 **어디서 터지든 429는 정상으로** 나가야 한다 — 관측이 본체를 죽이면 안 된다.
+
+    ⚠️ notify()는 자체 fail-open이지만 **budget_exceeded() 빌더는 그 바깥**이다. 처음엔 거기가
+       안 감싸져 있어서, 빌더가 터지면 run_in_threadpool이 그대로 던져 **429가 500으로** 바뀌었다.
+       그래서 여기선 빌더를 터뜨린다 — notify를 터뜨리면 그 구멍을 못 잡는다.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.services.alerts as alerts
+
+    def _boom(*a, **kw):
+        raise RuntimeError("alert path down")
+
+    monkeypatch.setattr(alerts, "budget_exceeded", _boom)
+
+    app = _override_turn_deps(monkeypatch)
+    monkeypatch.setenv("BUDGET_SUBJECT_DAILY_USD", "1.0")
+    _spend(monkeypatch, 5.0)
+    try:
+        with TestClient(app) as c:
+            r = c.post(f"/api/sessions/{SID}/turn", json={"message": "안녕하세요"})
+        assert r.status_code == 429, "슬랙 장애가 429를 500으로 바꿨다 — fail-open이 깨졌다"
+        assert r.json()["detail"]["code"] == "BUDGET_EXCEEDED"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_turn_not_blocked_when_budget_unset(monkeypatch):
     """상한 미설정이면 예산 때문에 막히지 않는다 — 429가 아니어야 한다(기존 동작 불변)."""
     from fastapi.testclient import TestClient

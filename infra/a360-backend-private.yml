@@ -810,7 +810,10 @@ Resources:
               FRONTEND_ORIGINS=${FrontendOrigins}
               AWS_REGION=${AWS::Region}
               DOCUMENT_BUCKET=${DocumentBucket}
-              LOGS_BUCKET=${LogsBucket}
+              # LOGS_BUCKET 제거 (RPA-189) — 앱 코드가 읽는 곳이 0곳이다.
+              # ⚠️ LogsBucket **리소스와 IAM 권한은 유지**한다(S3 버킷 삭제는 파괴적이고,
+              #    S3 로그 업로드를 붙일 여지가 있다). 지금 지우는 건 '설정돼 있으니
+              #    동작하겠지'라는 오해를 만드는 env 주입뿐이다.
               DATABASE_HOST=${Database.Endpoint.Address}
               DATABASE_PORT=${Database.Endpoint.Port}
               DATABASE_NAME=${DatabaseName}
@@ -820,7 +823,10 @@ Resources:
               VOYAGE_API_KEY=$VOYAGE_API_KEY
               JWT_SECRET=$JWT_SECRET
               EMBEDDING_PROVIDER=openai
-              AGENT_RETRIEVER=hybrid
+              # AGENT_RETRIEVER 제거 (RPA-189) — RPA-69가 fake 검색기 분기를 없애면서
+              # 코드가 이 값을 읽지 않게 됐다. 남겨두면 '하이브리드가 켜져 있구나'라는
+              # 오해만 만든다(fake로 바꿔도 아무 일도 안 일어난다).
+              # 검색기 모듈 app/services/agent_retriever.py 자체는 살아 있다 — 이름만 비슷.
               OPENSEARCH_HOST=${OpenSearchHost}
               PDFBOX_JAR_PATH=/opt/pdfbox/pdfbox-app.jar
               EOF

@@ -90,19 +90,44 @@ def _isolate_observability_db(monkeypatch):
     """테스트가 공유 관측 DB(Neon)를 절대 때리지 않게 격리한다 (RPA-90).
 
     개발자 .env에 OBSERVABILITY_DATABASE_URL이 설정돼 있으면 record_usage/_record_audit이
-    실제 팀 공유 DB에 테스트 쓰레기를 쓴다 — env를 지워 앱 SessionLocal 폴백(각 테스트가
-    monkeypatch하는 대상)으로 고정하고 모듈 싱글톤도 초기화한다. 관측 DB 라우팅 자체를
-    검증하는 테스트(test_observability_db.py)는 자기 setenv로 다시 켠다.
+    실제 팀 공유 DB에 테스트 쓰레기를 쓴다 — env를 **빈 문자열로 덮어** 앱 SessionLocal
+    폴백(각 테스트가 monkeypatch하는 대상)으로 고정하고 모듈 싱글톤도 초기화한다. 관측 DB
+    라우팅 자체를 검증하는 테스트(test_observability_db.py)는 자기 setenv로 다시 켠다.
+
+    ⚠️⚠️ **delenv가 아니라 빈 문자열이어야 한다** (2026-07-16 실측으로 구멍 발견, RPA-189).
+    delenv로 지워도 **아래 `_isolate_rag_shared_infra`가 `import app.rag.config`를 하는 순간
+    그 모듈의 `load_dotenv()`가 .env에서 키를 되살린다** — 픽스처 둘이 서로를 방해했다.
+    프로브로 확인: `[FX] 전:True → 후:False → [TEST] 본문:True`. 모듈 캐시 때문에 **매 실행의
+    첫 테스트만** 공유 Neon을 봤고(그래서 오래 안 보였다), test_alerts.py에서 첫 테스트만
+    ERROR나는 걸로 드러났다. `load_dotenv(override=False, 기본)`는 이미 os.environ에 있는 키를
+    건드리지 않으므로 **빈 문자열은 살아남는다**. APP_DATABASE_URL(RPA-186)과 같은 해법이다.
     """
     import app.core.observability_db as obs
 
-    monkeypatch.delenv("OBSERVABILITY_DATABASE_URL", raising=False)
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "")
     obs._engine = None
     obs._sessionmaker = None
     obs._url_cached = None
     # 롤업 스케줄러(RPA-104)도 테스트에선 끈다 — TestClient lifespan마다 배치가 돌면
     # 느려지고 로컬 DB에 집계 쓰레기가 쌓인다.
     monkeypatch.setenv("METRICS_ROLLUP_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_slack_webhook(monkeypatch):
+    """테스트가 **진짜 슬랙 채널**에 쏘지 못하게 격리한다 (RPA-189).
+
+    공유 DB(관측·RAG·앱)는 격리했으면서 웹훅은 안 했었다 — 같은 계열의 구멍이다. `.env`에
+    SLACK_WEBHOOK_URL이 있으면(승민님 로컬이 그렇다) `alerts.notify()`를 부르는 어떤 테스트든
+    **팀 채널에 실제 메시지를 보낸다.** `_post`를 모킹하지 않은 경로가 하나라도 있으면 샌다.
+
+    빈 문자열로 덮는다(delenv 아님) — `app/db.py`의 `load_dotenv()`가 지운 키를 .env에서
+    되살리기 때문. 위 _isolate_observability_db와 같은 이유다.
+
+    웹훅 동작 자체를 검증하는 테스트(tests/test_alerts.py)는 자기 setenv로 다시 켠다
+    (function-scoped monkeypatch라 이 fixture 뒤에 덮어쓴다).
+    """
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "")
 
 
 @pytest.fixture(autouse=True)
@@ -123,7 +148,9 @@ def _isolate_rag_shared_infra(monkeypatch):
     """
     import app.rag.config as rag_config
 
-    monkeypatch.delenv("RAG_DATABASE_URL", raising=False)
+    # ⚠️ delenv가 아니라 빈 문자열 — 이 모듈(app.rag.config)이 import 시점에 load_dotenv()를
+    #    부르므로, 지워도 .env에서 되살아난다. 위 _isolate_observability_db 주석 참고(RPA-189).
+    monkeypatch.setenv("RAG_DATABASE_URL", "")
     monkeypatch.setattr(rag_config, "OPENSEARCH_HOST", "http://localhost:9200")
     monkeypatch.setattr(rag_config, "OPENSEARCH_USERNAME", "")
     monkeypatch.setattr(rag_config, "OPENSEARCH_PASSWORD", "")

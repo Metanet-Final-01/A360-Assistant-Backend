@@ -25,7 +25,7 @@ from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
 from app.schemas import ProgressEvent, Recommendation
-from app.services import budget
+from app.services import alerts, budget
 
 logger = logging.getLogger(__name__)
 
@@ -968,6 +968,23 @@ async def agent_turn(
             "예산 초과로 턴 차단 — scope=%s period=%s session=%s",
             verdict.scope, verdict.period, session.id,
         )
+        # 사람에게 알린다 (RPA-189) — 여기가 enforce가 실제로 사용자를 막는 순간이다.
+        # 로그만 남기면 아무도 안 본다: 예산을 넘겨 서비스를 끊었는데 대시보드를 열어봐야만 알았다.
+        #
+        # ⚠️ 요청 경로다. notify()는 슬랙 POST(최대 5초)를 하므로 run_in_threadpool로 이벤트
+        #    루프를 막지 않는다(check_budget과 같은 패턴). 이 턴의 429 응답은 그만큼 늦어질 수
+        #    있으나, 쿨다운(기본 60분) 때문에 실제 발송은 드물고 이미 차단된 요청이다.
+        #
+        # ⚠️ try가 **빌더까지** 감싼다. notify()는 자체 fail-open이지만 budget_exceeded()는
+        #    그 바깥이라, 거기서 예외가 나면 429가 500으로 바뀐다 — 알림이 본체를 죽인다.
+        #    "관측 실패는 서비스를 죽이지 않는다"는 이 블록 전체에 적용돼야 한다.
+        try:
+            subject = budget.subject_of(user, session.id)
+            await run_in_threadpool(
+                alerts.notify, alerts.budget_exceeded(verdict, f"{subject.kind}:{subject.id}")
+            )
+        except Exception:  # noqa: BLE001 — 알림 실패가 429를 500으로 바꾸면 안 된다
+            logger.warning("예산 초과 알림 실패 (차단은 정상 진행)", exc_info=True)
         raise HTTPException(429, detail=budget.exceeded_detail(verdict))
 
     session_key = session.id
