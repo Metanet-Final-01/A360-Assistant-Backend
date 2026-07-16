@@ -125,7 +125,7 @@ def apply_run(monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", "postgresql://u:p@ep-x-pooler.neon.tech/neondb")
     monkeypatch.setattr(mig, "_current_revision", lambda engine: "0014")  # → 대기 2개
     monkeypatch.setattr(app_db, "engine", create_engine("sqlite://"))  # 실 DB 접속 없음
-    monkeypatch.setattr(mig, "_migrations_dirty", lambda: [])  # 기본: migrations/ 깨끗함
+    monkeypatch.setattr(mig, "_revisions_not_in_dev", lambda script: [])  # 기본: dev와 일치
 
     calls: list = []
     monkeypatch.setattr(app_db, "run_migrations", lambda **k: calls.append(k))
@@ -195,33 +195,79 @@ def test_dry_run_works_on_any_branch(apply_run, monkeypatch):
     assert rc == 0 and applied == 0
 
 
-def test_apply_blocked_when_migrations_uncommitted(apply_run, monkeypatch):
-    """`HEAD`가 dev에 있어도 **migrations/에 미커밋 변경**이 있으면 차단한다.
+def test_apply_blocked_when_revision_files_differ_from_dev(apply_run, monkeypatch):
+    """`HEAD`가 dev에 있어도 **리비전 파일이 dev와 다르면** 차단한다.
 
-    게이트는 `HEAD`(커밋 이력)를 보는데 alembic의 `ScriptDirectory`는 **작업 트리**를 읽는다.
-    dev를 체크아웃한 채 `0017_실험.py`를 만들어두면 HEAD 검사는 통과하고 그 미커밋 파일이
-    공유 DB에 올라간다 — 팀에는 존재하지 않는 리비전이다 (CodeRabbit #258).
-
-    실측으로 확인했다: untracked 파일이 그대로 `get_heads()`에 잡혔다.
+    게이트는 `HEAD`(커밋 이력)를 보는데 alembic은 **디스크**를 읽는다. dev를 체크아웃한 채
+    `0017_실험.py`를 만들어두면 HEAD 검사는 통과하고 그 파일이 공유 DB에 올라간다 —
+    팀에는 존재하지 않는 리비전이다 (CodeRabbit #258).
     """
     monkeypatch.setattr(mig, "_head_is_in_dev", lambda: True)  # HEAD 검사는 통과시킨다
-    monkeypatch.setattr(mig, "_migrations_dirty",
-                        lambda: ["?? migrations/versions/0017_experiment.py"])
+    monkeypatch.setattr(mig, "_revisions_not_in_dev",
+                        lambda script: ["migrations/versions/0017_x.py  (origin/dev에 없음)"])
 
     rc, applied = apply_run("--apply")
 
-    assert rc == 1, "미커밋 마이그레이션이 있는데 --apply가 통과했다"
+    assert rc == 1, "dev와 다른 리비전 파일이 있는데 --apply가 통과했다"
     assert applied == 0, "차단했다면서 마이그레이션이 실제로 돌았다"
 
 
-def test_apply_blocked_when_migrations_status_unknown(apply_run, monkeypatch):
-    """`migrations/`의 git 상태를 못 읽으면 막는다 (fail-closed)."""
+def test_apply_blocked_when_dev_comparison_unknown(apply_run, monkeypatch):
+    """`origin/dev`와 대조할 수 없으면 막는다 (fail-closed)."""
     monkeypatch.setattr(mig, "_head_is_in_dev", lambda: True)
-    monkeypatch.setattr(mig, "_migrations_dirty", lambda: None)
+    monkeypatch.setattr(mig, "_revisions_not_in_dev", lambda script: None)
 
     rc, applied = apply_run("--apply")
 
     assert rc == 1 and applied == 0
+
+
+def test_revisions_not_in_dev_catches_a_real_file_git_ignores(script_dir, tmp_path):
+    """**모킹 없이** 진짜 파일로 검증한다 — 위 테스트들은 `_revisions_not_in_dev`를 monkeypatch
+    하므로 그 함수 자체가 옳은지는 아무것도 증명하지 못한다.
+
+    ⚠️ 이 테스트가 존재하는 이유: 처음엔 `git status --porcelain -- migrations`로 판정했는데,
+    **git이 무시하는 파일은 `??`로도 안 뜬다**. 실측에서 status는 빈 문자열인데
+    `get_heads()`는 `['0099_hidden']`이었다 — 가드가 통과시킨 채 공유 DB에 올라갈 뻔했다.
+    그래서 대리 지표(git status)를 버리고 **alembic이 로드한 파일 경로 자체**를 대조한다.
+
+    origin/dev가 없는 환경(CI의 얕은 클론 등)에선 판정 불가(None)라 skip한다.
+    """
+    if mig._revisions_not_in_dev(script_dir) is None:
+        pytest.skip("origin/dev를 확인할 수 없다 — 이 검증은 dev 참조가 필요하다")
+
+    versions = _ROOT / "migrations" / "versions"
+    probe = versions / "0099_ignored_probe.py"
+    exclude = _ROOT / ".git" / "info" / "exclude"
+    original = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+
+    exclude.write_text(original + "\nmigrations/versions/0099_ignored_probe.py\n",
+                       encoding="utf-8")
+    probe.write_text('revision = "0099_ignored_probe"\ndown_revision = "0016"\n'
+                     "def upgrade(): pass\ndef downgrade(): pass\n", encoding="utf-8")
+    try:
+        cfg = Config()
+        cfg.set_main_option("script_location", str(_ROOT / "migrations"))
+        fresh = ScriptDirectory.from_config(cfg)
+
+        assert "0099_ignored_probe" in fresh.get_heads(), (
+            "전제 확인: alembic이 무시된 파일도 읽는다 — 이게 아니면 이 구멍은 없다")
+
+        bad = mig._revisions_not_in_dev(fresh)
+        assert bad, "git이 무시하는 리비전 파일을 놓쳤다 — 공유 DB에 올라갈 수 있다"
+        assert any("0099_ignored_probe" in b for b in bad)
+    finally:
+        probe.unlink(missing_ok=True)
+        exclude.write_text(original, encoding="utf-8")
+
+
+def test_revisions_not_in_dev_is_clean_on_untouched_tree(script_dir):
+    """평소(=dev와 일치)엔 빈 목록 — 가드가 상시 차단이면 아무도 못 쓴다."""
+    result = mig._revisions_not_in_dev(script_dir)
+    if result is None:
+        pytest.skip("origin/dev를 확인할 수 없다")
+
+    assert result == [], f"깨끗한 트리인데 차단 사유가 잡혔다: {result}"
 
 
 # --- 이 스크립트가 존재하는 이유 자체 ---

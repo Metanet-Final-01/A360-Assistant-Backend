@@ -93,20 +93,47 @@ def _head_is_in_dev() -> bool | None:
         return None
 
 
-def _migrations_dirty() -> list[str] | None:
-    """`migrations/`에 커밋 안 된 변경(수정·추가). 판정 불가면 None.
+def _revisions_not_in_dev(script) -> list[str] | None:
+    """**alembic이 실제로 읽은 리비전 파일들** 중 `origin/dev`와 다른 것. 판정 불가면 None.
 
-    ⚠️ `HEAD`가 origin/dev에 있는지만 보면 **뚫린다**: 게이트는 `HEAD`(커밋 이력)를 보는데
-    `ScriptDirectory`는 **작업 트리(디스크)**를 읽는다. 즉 dev를 체크아웃한 채 `0017_실험.py`를
-    만들어두면 게이트는 통과하고 그 미커밋 파일이 공유 DB에 올라간다 (CodeRabbit #258).
-    실측으로 확인: untracked 파일이 그대로 `get_heads()`에 잡혔다.
+    ⚠️ 여기가 이 스크립트에서 가장 자주 틀린 자리다. 규칙: **가드가 읽는 대상 == 동작이 읽는
+    대상**이어야 한다. 대리 지표를 쓰면 반드시 갈린다:
 
-    `--porcelain`은 tracked 수정(` M`)과 untracked(`??`)를 모두 준다 — 둘 다 위험하다.
+      - `HEAD`가 origin/dev에 있나? → 대리 지표다. alembic은 커밋 이력이 아니라 **디스크**를
+        읽으므로, dev 체크아웃 + 미커밋 `0017_실험.py` → 통과시킨 뒤 그대로 올린다.
+      - `git status --porcelain -- migrations`가 깨끗한가? → **이것도 대리 지표다.** git이
+        무시하는 파일(.gitignore·.git/info/exclude)은 `??`로도 안 뜬다. 실측: 무시되는
+        `0099_hidden.py`에 대해 status는 빈 문자열인데 `get_heads()`는 `['0099_hidden']`이었다.
+
+    그래서 대리 지표를 버리고 **`script.walk_revisions()`가 로드한 바로 그 파일 경로**를 순회해
+    각각을 `origin/dev`의 blob과 해시로 대조한다. 무시되든 untracked든 수정됐든 전부 걸린다.
     """
-    r = _git("status", "--porcelain", "--", "migrations")
-    if r.returncode != 0:
-        return None
-    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+    root = Path(__file__).resolve().parent.parent
+    if _git("rev-parse", "--verify", "--quiet", "origin/dev").returncode != 0:
+        return None  # origin/dev를 모른다 (fetch 안 함 / 리모트 없음)
+
+    # alembic이 디스크에서 읽어 **실행**하는 파일 전부: 리비전들 + env.py(URL 해석·실행 로직).
+    # env.py를 빼면 같은 구멍이 남는다 — 로컬 수정된 env.py가 그대로 돈다.
+    targets = [Path(rev.path) for rev in script.walk_revisions()]
+    targets.append(root / "migrations" / "env.py")
+
+    bad: list[str] = []
+    for path in targets:
+        try:
+            rel = path.resolve().relative_to(root).as_posix()
+        except ValueError:  # 저장소 밖 (있을 수 없지만, 그러면 판정 못 한다)
+            return None
+
+        in_dev = _git("rev-parse", f"origin/dev:{rel}")
+        if in_dev.returncode != 0:
+            bad.append(f"{rel}  (origin/dev에 없음 — 머지 안 된 리비전)")
+            continue
+        local = _git("hash-object", str(path))
+        if local.returncode != 0:
+            return None
+        if local.stdout.strip() != in_dev.stdout.strip():
+            bad.append(f"{rel}  (origin/dev와 내용이 다름 — 로컬 수정)")
+    return bad
 
 
 def main() -> int:
@@ -186,17 +213,18 @@ def main() -> int:
                   file=sys.stderr)
             return 1
 
-        # HEAD 검사만으론 부족하다 — alembic은 **작업 트리**를 읽는다. dev를 체크아웃한 채
-        # 미커밋 마이그레이션을 두면 그게 그대로 올라간다(실측 확인).
-        dirty = _migrations_dirty()
-        if dirty is None:
-            print("\n`migrations/`의 git 상태를 확인할 수 없어 적용을 중단합니다.\n"
+        # HEAD 검사만으론 부족하다 — alembic은 커밋 이력이 아니라 **디스크**를 읽는다.
+        # 그래서 로드된 파일 자체를 origin/dev와 대조한다 (대리 지표 금지 — 위 docstring 참고).
+        unmerged = _revisions_not_in_dev(script)
+        if unmerged is None:
+            print("\n리비전 파일을 `origin/dev`와 대조할 수 없어 적용을 중단합니다.\n"
+                  "  git fetch origin dev\n"
                   "--skip-git-checks 로 넘길 수 있습니다(위험).", file=sys.stderr)
             return 1
-        if dirty:
-            print("\n`migrations/`에 커밋되지 않은 변경이 있습니다:\n"
-                  + "\n".join(f"  {ln}" for ln in dirty)
-                  + "\n\nalembic은 커밋 이력이 아니라 **작업 트리**를 읽습니다 — 지금 적용하면 이"
+        if unmerged:
+            print("\nalembic이 읽은 리비전 파일 중 origin/dev와 다른 것이 있습니다:\n"
+                  + "\n".join(f"  {ln}" for ln in unmerged)
+                  + "\n\nalembic은 커밋 이력이 아니라 **디스크**를 읽습니다 — 지금 적용하면 이"
                     "\n파일들이 공유 DB에 올라가고, 팀에는 그 리비전이 존재하지 않습니다.\n"
                     "커밋 후 dev에 머지하고 다시 실행하세요.", file=sys.stderr)
             return 1
