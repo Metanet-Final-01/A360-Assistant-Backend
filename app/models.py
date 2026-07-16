@@ -371,6 +371,27 @@ class TurnEvent(Base):
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AlertState(Base):
+    """알림 전이·쿨다운 상태 (RPA-189) — "이미 보냈나"를 기억한다. FK 없음(관측 전용).
+
+    **왜 DB인가:** 인메모리로 두면 (a) 재시작마다 재알림 (b) uvicorn --workers N이면 N개
+    프로세스가 각자 보낸다. "스로틀했다"고 주장하려면 그 상태를 **모든 발신자가 함께 보는
+    곳**에 둬야 한다 — 가드가 읽는 것과 동작이 읽는 것이 같아야 한다(CONVENTIONS §9).
+
+    key = 알림 종류 식별자. 같은 key의 상태가 바뀌면(ok↔firing) 전이로 보고 알린다.
+      예: "budget:global:daily" · "budget:subject:e7a3929d:daily" · "health:degraded" · "metrics:5xx"
+    """
+
+    __tablename__ = "alert_state"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    status: Mapped[str] = mapped_column(String(20))  # ok | firing
+    last_sent_at: Mapped[str | None] = mapped_column(DateTime(timezone=True))
+    detail: Mapped[str | None] = mapped_column(Text)  # 마지막으로 보낸 내용(디버깅·중복 판단용)
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class RagEvent(Base):
     """RAG 파이프라인 단계 로그 (RPA-128) — embed/search/rerank 단계별 소요·파라미터를
     관측 DB에 중앙화. 로컬 JSONL(app/rag/logs)과 같은 내용이되 유실 방지·중앙화·대시보드

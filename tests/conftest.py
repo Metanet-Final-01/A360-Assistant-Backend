@@ -90,13 +90,21 @@ def _isolate_observability_db(monkeypatch):
     """테스트가 공유 관측 DB(Neon)를 절대 때리지 않게 격리한다 (RPA-90).
 
     개발자 .env에 OBSERVABILITY_DATABASE_URL이 설정돼 있으면 record_usage/_record_audit이
-    실제 팀 공유 DB에 테스트 쓰레기를 쓴다 — env를 지워 앱 SessionLocal 폴백(각 테스트가
-    monkeypatch하는 대상)으로 고정하고 모듈 싱글톤도 초기화한다. 관측 DB 라우팅 자체를
-    검증하는 테스트(test_observability_db.py)는 자기 setenv로 다시 켠다.
+    실제 팀 공유 DB에 테스트 쓰레기를 쓴다 — env를 **빈 문자열로 덮어** 앱 SessionLocal
+    폴백(각 테스트가 monkeypatch하는 대상)으로 고정하고 모듈 싱글톤도 초기화한다. 관측 DB
+    라우팅 자체를 검증하는 테스트(test_observability_db.py)는 자기 setenv로 다시 켠다.
+
+    ⚠️⚠️ **delenv가 아니라 빈 문자열이어야 한다** (2026-07-16 실측으로 구멍 발견, RPA-189).
+    delenv로 지워도 **아래 `_isolate_rag_shared_infra`가 `import app.rag.config`를 하는 순간
+    그 모듈의 `load_dotenv()`가 .env에서 키를 되살린다** — 픽스처 둘이 서로를 방해했다.
+    프로브로 확인: `[FX] 전:True → 후:False → [TEST] 본문:True`. 모듈 캐시 때문에 **매 실행의
+    첫 테스트만** 공유 Neon을 봤고(그래서 오래 안 보였다), test_alerts.py에서 첫 테스트만
+    ERROR나는 걸로 드러났다. `load_dotenv(override=False, 기본)`는 이미 os.environ에 있는 키를
+    건드리지 않으므로 **빈 문자열은 살아남는다**. APP_DATABASE_URL(RPA-186)과 같은 해법이다.
     """
     import app.core.observability_db as obs
 
-    monkeypatch.delenv("OBSERVABILITY_DATABASE_URL", raising=False)
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "")
     obs._engine = None
     obs._sessionmaker = None
     obs._url_cached = None
@@ -123,7 +131,9 @@ def _isolate_rag_shared_infra(monkeypatch):
     """
     import app.rag.config as rag_config
 
-    monkeypatch.delenv("RAG_DATABASE_URL", raising=False)
+    # ⚠️ delenv가 아니라 빈 문자열 — 이 모듈(app.rag.config)이 import 시점에 load_dotenv()를
+    #    부르므로, 지워도 .env에서 되살아난다. 위 _isolate_observability_db 주석 참고(RPA-189).
+    monkeypatch.setenv("RAG_DATABASE_URL", "")
     monkeypatch.setattr(rag_config, "OPENSEARCH_HOST", "http://localhost:9200")
     monkeypatch.setattr(rag_config, "OPENSEARCH_USERNAME", "")
     monkeypatch.setattr(rag_config, "OPENSEARCH_PASSWORD", "")
