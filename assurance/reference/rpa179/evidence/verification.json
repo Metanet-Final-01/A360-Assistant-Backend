@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "61ed147ad9885780060c3682622f985190585367",
+  "baseline_commit": "564ae44dced71068e905bc2cc9706a0d9edfbb24",
   "determinism": {
     "regression_equal": true,
     "transcripts_equal": true,
@@ -32,7 +32,7 @@
     "source": "assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src",
     "source_manifest_sha256": "sha256:d0ad43c2a705d0522cba8e287b31fe040c953bb2ba89a5d3d9788cc0b07a666f",
     "verification_tools": {
-      "materialize.py": "sha256:3fcb29b929573705a4e1bbe547eebac92c2abd9b3d58fce212717e491c24e07a",
+      "materialize.py": "sha256:ad9af1bd4f9e0cb5eae1fe77df2754306a43da22ceacaaf783926567de0d2e81",
       "regression.py": "sha256:69ce09f9154f2be9a7b31a4c99fe749788242cda353007e36b084223e390fe14",
       "verification-result.schema.json": "sha256:c1830270be3c8d61d7ca592fac0bdc96d08f100146b04b1fa7218964e41c4d08",
       "verify.py": "sha256:69a5258eec0003cf9d4648e881f9a270e97cc7067b2b00d1453375ef082ce63f"
@@ -319,7 +319,7 @@
           "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
           "passed": true,
           "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "stdout_sha256": "sha256:ee04663d29f245e03b00ac09589309a744d1e451fd7128599004298865e3bfcf"
+          "stdout_sha256": "sha256:ee2ea91be729b1ae21f01542f16dae47afe22148ecec60a7accbeb1f173a4048"
         },
         {
           "argv": [
@@ -404,7 +404,7 @@
           "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
           "passed": true,
           "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "stdout_sha256": "sha256:aaada5eb4e31bda6777326d437de07edd239cc98b819a105aeb73c87d8280f30"
+          "stdout_sha256": "sha256:92d69d96859e833b1697fbc070a09cbba1cf33cec57428cb9d36d914ef872949"
         },
         {
           "argv": [
@@ -444,5 +444,5 @@
     "regression_cases": 23,
     "selfattack_expected_residuals": 4
   },
-  "verified_at": "2026-07-16T03:28:11.308125Z"
+  "verified_at": "2026-07-16T03:39:00.141541Z"
 }
