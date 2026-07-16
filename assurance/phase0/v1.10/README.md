@@ -1,6 +1,7 @@
 # Phase 0 보증 계약 v1.10
 
-> 상태: 설계 결정은 `approve_for_human_decision`, 동결 참조 구현은 `corrective-action-required`
+> 상태: 설계 결정은 `approve_for_human_decision`, 동결 원본은 `corrective-action-required`,
+> RPA-179 교정본은 fixture 검증 완료
 >
 > 범위: 계약·정책·결정론적 fixture의 원본 보존과 재검증
 >
@@ -27,6 +28,7 @@
 | 사후 검토 | `evidence/post-freeze-review.md` | 동결 후 리뷰 28건의 독립 판정과 구현 차단 조건 | 아니오 |
 | 동결 원본 | `evidence/frozen/` | Claude 계약, Codex 리뷰, 참조 코드와 fixture | 참조 구현 |
 | 무결성 목록 | `evidence/artifact-manifest.sha256` | 동결 원본과 채택 결정의 SHA-256 | 증거 |
+| 교정 참조 | `../../reference/rpa179/` | 원본 보존형 패치, 25건 회귀, 독립 실행 2회 | fixture 참조 |
 
 `evidence/frozen/` 아래의 파일명과 내부 코드는 당시 검토한 원본을 보존하기 위해 고치지 않는다.
 사람이 읽는 이름과 구조는 바깥 계층에서 정리하고, 원본의 역할은
@@ -95,7 +97,7 @@ D-24의 목표 불변식은 다음과 같다.
 
 ## 7. 검증된 것과 검증되지 않은 것
 
-동결된 계약 패키지에서 다음 결과를 재현했다.
+동결된 계약 패키지에서 다음 역사 결과를 재현했다.
 
 | 검사 | 결과 | 의미 |
 |---|---|---|
@@ -112,6 +114,18 @@ D-24의 목표 불변식은 다음과 같다.
 - Agent의 공개 `resolved_agent_version`
 - 운영 DB, 실제 LLM, 실제 Agent 출력의 end-to-end 검증
 - Python 3.11 환경의 참조 검사 의존성 재현
+
+RPA-179에서는 동결 원본을 직접 수정하지 않고 별도 교정 참조를 조립해 다음을 확인했다.
+
+| 검사 | 결과 | 사실 라벨 |
+|---|---|---|
+| 원본 무결성·교정 조립 | 45/45, 교정 트리 52개 | Current-Confirmed |
+| 교정 계약 self-test | 68/68, 실행 규칙 15개 coverage PASS | Current-Confirmed |
+| 사후 검토 회귀 | 실행 대상 25/25, 23개 case PASS | Current-Confirmed |
+| 독립 재실행 | 트리·회귀·정규화 출력 2/2 동일 | Current-Confirmed |
+| Python 3.11 재실행 | 로컬 런타임 미보유 | Not-tested |
+
+교정 구조와 기계 판독 증거는 [RPA-179 교정 참조](../../reference/rpa179/README.md)에 있다.
 
 세부 실행 환경과 실패까지 포함한 기록은 [evidence/verification.md](evidence/verification.md)에 있다.
 
@@ -138,7 +152,7 @@ PR #255에서 CodeRabbit가 첫 리뷰 24건과 후속 리뷰 4건, 총 28개의
 
 | 순서 | Jira | 산출물 | 허용 모드 |
 |---|---|---|---|
-| 1 | RPA-179 | 사후 검토 28건 교정, 결정론적 회귀 안정화, 정책 registry 단일화, 의존성 선언 | fixture |
+| 1 | RPA-179 | 사후 검토 28건 교정, 결정론적 회귀 안정화, 정책 registry 단일화, 의존성 선언 | fixture 검증 완료 |
 | 2 | RPA-180 | Change Assurance MVP | Observe |
 | 3 | RPA-181 | Backend Output Boundary MVP | Observe |
 | 4 | RPA-184 | 공개 Agent 버전 계약과 Backend 소비 | Observe |
@@ -164,6 +178,15 @@ python -B codex-independent-check-v1.10.py
 
 실행 전후 `phase0-v1.10-src/SHA256SUMS.txt`의 45개 원본 해시가 모두 같아야 한다. 실행 시 OS,
 Python 버전, dependency digest, Git commit, 명령, 종료 코드와 생성 증거 경로를 함께 남긴다.
+
+교정 참조는 저장소 루트에서 비어 있는 작업 경로를 지정해 실행한다.
+
+```powershell
+$stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
+python -B assurance/reference/rpa179/verify.py `
+  --work-root "assurance/reference/rpa179/.work/m-$stamp" `
+  --evidence assurance/reference/rpa179/evidence/verification.json
+```
 
 ## English Summary
 

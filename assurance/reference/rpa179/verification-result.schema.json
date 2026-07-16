@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a360.local/schemas/rpa179-verification-result.schema.json",
+  "title": "RPA-179 deterministic reference verification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verified_at",
+    "result",
+    "baseline_commit",
+    "reference",
+    "environment",
+    "runs",
+    "regression",
+    "determinism",
+    "summary",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "rpa179.verification.1"},
+    "verified_at": {"type": "string", "format": "date-time"},
+    "result": {"const": "pass"},
+    "baseline_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "source_manifest_sha256",
+        "corrections_sha256",
+        "corrected_tree_digest",
+        "corrected_file_count",
+        "verified_source_files",
+        "finding_matrix_sha256",
+        "verification_tools"
+      ],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "source_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "corrections_sha256": {"$ref": "#/$defs/digest"},
+        "corrected_tree_digest": {"$ref": "#/$defs/digest"},
+        "corrected_file_count": {"const": 52},
+        "verified_source_files": {"const": 45},
+        "finding_matrix_sha256": {"$ref": "#/$defs/digest"},
+        "verification_tools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "materialize.py",
+            "regression.py",
+            "verify.py",
+            "verification-result.schema.json"
+          ],
+          "properties": {
+            "materialize.py": {"$ref": "#/$defs/digest"},
+            "regression.py": {"$ref": "#/$defs/digest"},
+            "verify.py": {"$ref": "#/$defs/digest"},
+            "verification-result.schema.json": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python_version",
+        "python_implementation",
+        "system",
+        "release",
+        "machine",
+        "platform",
+        "git_version",
+        "dependencies",
+        "dependency_digest"
+      ],
+      "properties": {
+        "python_version": {"type": "string", "minLength": 1},
+        "python_implementation": {"type": "string", "minLength": 1},
+        "system": {"type": "string", "minLength": 1},
+        "release": {"type": "string", "minLength": 1},
+        "machine": {"type": "string"},
+        "platform": {"type": "string", "minLength": 1},
+        "git_version": {"type": "string", "pattern": "^git version "},
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jsonschema", "PyYAML"],
+          "properties": {
+            "jsonschema": {"type": "string", "minLength": 1},
+            "PyYAML": {"type": "string", "minLength": 1}
+          }
+        },
+        "dependency_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/run"}
+    },
+    "regression": {"$ref": "#/$defs/regression"},
+    "determinism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tree_digest_equal", "regression_equal", "transcripts_equal"],
+      "properties": {
+        "tree_digest_equal": {"const": true},
+        "regression_equal": {"const": true},
+        "transcripts_equal": {"const": true}
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_cases",
+        "executable_rules",
+        "regression_cases",
+        "actionable_findings",
+        "historical_findings",
+        "selfattack_expected_residuals"
+      ],
+      "properties": {
+        "contract_cases": {"const": 68},
+        "executable_rules": {"const": 15},
+        "regression_cases": {"const": 23},
+        "actionable_findings": {"const": 25},
+        "historical_findings": {"const": 3},
+        "selfattack_expected_residuals": {"const": 4}
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "argv",
+        "exit_code",
+        "stdout_sha256",
+        "stderr_sha256",
+        "normalized_stdout_sha256",
+        "normalized_stderr_sha256",
+        "markers",
+        "passed"
+      ],
+      "properties": {
+        "name": {"enum": ["contract", "vertical", "selfattack", "regression"]},
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "exit_code": {"const": 0},
+        "stdout_sha256": {"$ref": "#/$defs/digest"},
+        "stderr_sha256": {"$ref": "#/$defs/digest"},
+        "normalized_stdout_sha256": {"$ref": "#/$defs/digest"},
+        "normalized_stderr_sha256": {"$ref": "#/$defs/digest"},
+        "markers": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"const": true}
+        },
+        "passed": {"const": true}
+      }
+    },
+    "regressionCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "findings", "passed"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "findings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "pattern": "^CR-[0-9]{2}$"}
+        },
+        "passed": {"const": true}
+      }
+    },
+    "regression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "cases",
+        "actionable_findings",
+        "covered_findings",
+        "coverage_complete"
+      ],
+      "properties": {
+        "schema_version": {"const": "rpa179.1"},
+        "cases": {
+          "type": "array",
+          "minItems": 23,
+          "maxItems": 23,
+          "items": {"$ref": "#/$defs/regressionCase"}
+        },
+        "actionable_findings": {
+          "type": "array",
+          "minItems": 25,
+          "maxItems": 25,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^CR-[0-9]{2}$"}
+        },
+        "covered_findings": {
+          "type": "array",
+          "minItems": 25,
+          "maxItems": 25,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^CR-[0-9]{2}$"}
+        },
+        "coverage_complete": {"const": true}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "tree_digest",
+        "commands",
+        "regression_digest"
+      ],
+      "properties": {
+        "run_id": {"enum": ["run-1", "run-2"]},
+        "tree_digest": {"$ref": "#/$defs/digest"},
+        "commands": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/command"}
+        },
+        "regression_digest": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

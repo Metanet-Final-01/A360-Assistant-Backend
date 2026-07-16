@@ -55,3 +55,12 @@ app/rag/_investigation_notes/
 
 # Phase 0 assurance verification outputs (generated, not contract source)
 /assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src/.out/
+
+# RPA-179 corrected reference materialization and verification outputs
+/assurance/reference/rpa179/.work/
+/.rpa179-test/
+/.rpa179-debug*/
+/.rpa179-materialized-*/
+/.rpa179-rebuild-*/
+/.rpa179-run-*/
+/.rpa179-work/
