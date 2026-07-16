@@ -3,9 +3,13 @@
 이 모듈의 본질은 "슬랙에 POST한다"가 아니라 **"같은 사유로 도배하지 않는다"**이다.
 /health가 30초마다 degraded면 하루 2,880개다 — 그러면 아무도 안 본다.
 
-⚠️ 상태를 DB에서 읽는지가 핵심이다. 인메모리면 재시작·멀티워커에서 각자 "처음"이라 중복
-   발송한다. 여기 테스트는 **실제 alert_state 테이블**(관측 URL 미설정 → 앱 DB 폴백,
-   conftest가 로컬로 격리)을 거쳐 그 계약을 검증한다.
+⚠️ 상태가 **프로세스 밖**에 있는지가 핵심이다. 모듈 전역이면 재시작·멀티워커에서 각자
+   "처음"이라 중복 발송한다. 여기선 그 계약만 본다 — 저장소는 인메모리 dict로 대체한다.
+
+   **진짜 DB를 쓰면 안 된다**: 유닛 테스트는 DB 없이 돌아야 한다. CI의 postgres 서비스는
+   `postgres`(유지보수 DB)만 만들고 `a360`은 없어서(통합 테스트가 `a360_test`를 따로 만든다)
+   `database "a360" does not exist`로 깨진다 — 실제로 그렇게 CI를 깨뜨렸다(로컬엔 docker가
+   만들어놔서 안 보였다). 실 DB 경로는 **live 증명**으로 확인했다(실제 Neon + 실제 Slack).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -33,14 +37,29 @@ def sent(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _clean_state():
-    """매 테스트를 빈 alert_state에서 시작 — 상태가 새면 전이 판정이 오염된다."""
-    from app import models
+def state(monkeypatch):
+    """alert_state 저장소를 **인메모리 dict로 대체**하고, 매 테스트를 빈 상태로 시작한다.
 
-    with alerts._obs_session() as db:
-        db.query(models.AlertState).delete()
-        db.commit()
-    yield
+    ⚠️ 처음엔 진짜 DB(`_obs_session` → 앱 SessionLocal 폴백 → 로컬 `a360`)를 지웠다.
+       **내 로컬에서만 됐다** — CI의 postgres 서비스는 `postgres`(유지보수 DB)만 만들고
+       `a360`은 없다(통합 테스트가 `a360_test`를 따로 만든다). `database "a360" does not exist`로
+       CI가 깨졌다. 유닛 테스트는 DB 없이 돌아야 한다(conftest 상단 주석의 전제).
+
+    이 가짜로도 검증 대상은 그대로다 — 여기서 볼 건 "**상태가 프로세스 밖에 있나**"지
+    "Postgres가 되나"가 아니다. 진짜 DB 경로는 **live 증명**으로 확인했다(실제 Neon +
+    실제 Slack 2통, RPA-189 PR 본문).
+    """
+    store: dict = {}
+
+    class _DB:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, model, key): return store.get(key)
+        def add(self, row): store[row.key] = row
+        def commit(self): pass
+
+    monkeypatch.setattr(alerts, "_obs_session", lambda: _DB())
+    return store
 
 
 def _alert(key="test:thing") -> alerts.Alert:
@@ -138,11 +157,15 @@ def test_cooldown_zero_means_transition_only(sent, monkeypatch):
 
 # --- 상태가 DB에 있나 (인메모리면 재시작에 샌다) ---
 
-def test_state_survives_module_reload(sent):
-    """상태가 **DB**에 있어야 한다 — 모듈 전역이면 재시작·워커마다 재알림이다.
+def test_state_survives_module_reload(sent, state):
+    """상태가 **모듈 밖**(DB)에 있어야 한다 — 모듈 전역이면 재시작·워커마다 재알림이다.
 
-    importlib.reload로 "새 프로세스"를 흉내낸다. 인메모리 dict였다면 여기서 초기화돼
+    importlib.reload로 "새 프로세스"를 흉내낸다. `alerts` 안에 dict를 뒀다면 여기서 초기화돼
     두 번째 알림이 나간다.
+
+    ⚠️ reload는 monkeypatch를 **전부 날린다**(모듈을 새로 실행하므로). `_post`뿐 아니라
+       `_obs_session`도 다시 심어야 한다 — 안 그러면 reload된 모듈이 **진짜 DB**를 찾아
+       CI에서 깨진다(로컬엔 a360이 있어서 안 보였다).
     """
     import importlib
 
@@ -150,7 +173,16 @@ def test_state_survives_module_reload(sent):
     assert len(sent) == 1
 
     importlib.reload(alerts)
-    # reload가 monkeypatch를 날렸으므로 다시 심는다 (env는 살아 있다)
+    # reload가 심어둔 것들을 날렸으므로 다시 심는다. store(state)는 모듈 **밖**에 있으므로
+    # 살아남는다 — 그게 이 테스트의 요점이다.
+    class _DB:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, model, key): return state.get(key)
+        def add(self, row): state[row.key] = row
+        def commit(self): pass
+
+    alerts._obs_session = lambda: _DB()
     alerts._post = lambda a: (sent.append(a), True)[1]
     alerts.notify(_alert(), alerts.FIRING, NOW + timedelta(minutes=1))
 
@@ -160,7 +192,7 @@ def test_state_survives_module_reload(sent):
 # --- 배치 임계 알림 (롤업 직후) ---
 
 @pytest.fixture
-def agg(monkeypatch):
+def agg(monkeypatch, state):
     """usage_daily·metrics_daily의 '오늘' 값을 원하는 대로 세운다.
 
     실제 집계 테이블에 쓰지 않고 조회만 가로챈다 — 팀 관측 DB에 테스트 행을 남기지 않기 위해서.
@@ -169,8 +201,6 @@ def agg(monkeypatch):
        **양쪽이** 쓴다. 조회만 흉내내면 상태 쪽이 터지고 — notify의 fail-open이 그걸 **삼켜서**
        "알림이 안 갔다"로만 보인다(실제로 그렇게 헛다리를 짚었다). 그래서 완전한 가짜를 준다.
     """
-    state: dict = {}
-
     def _set(cost: float = 0.0, e5: int = 0):
         class _R:
             def __init__(self, v): self._v = v
