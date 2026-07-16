@@ -178,3 +178,29 @@ def test_repository_head_rejects_dirty_tree():
             verifier.repository_head(repository)
     finally:
         shutil.rmtree(repository, ignore_errors=True)
+
+
+def test_materialize_failure_can_retry(monkeypatch: pytest.MonkeyPatch):
+    materializer = load_materializer()
+    destination = REPO / ".rpa179-test" / f"retry-{os.getpid():x}-{secrets.token_hex(3)}"
+    real_run = materializer.subprocess.run
+    failed = False
+
+    def fail_first_config(command, *args, **kwargs):
+        nonlocal failed
+        if command[:3] == ["git", "config", "--local"] and not failed:
+            failed = True
+            return subprocess.CompletedProcess(
+                command, returncode=1, stdout="", stderr="forced config failure"
+            )
+        return real_run(command, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as injected:
+            injected.setattr(materializer.subprocess, "run", fail_first_config)
+            with pytest.raises(RuntimeError, match="forced config failure"):
+                materializer.materialize(destination)
+        assert not destination.exists()
+        assert materializer.materialize(destination)["corrected_tree"]["file_count"] == 52
+    finally:
+        shutil.rmtree(destination, ignore_errors=True)

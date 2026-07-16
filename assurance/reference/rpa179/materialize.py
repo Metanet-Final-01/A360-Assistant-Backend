@@ -109,12 +109,12 @@ def materialize(destination: Path) -> dict:
     # root-relative patch path. A disposable nested repository pins destination as
     # the patch root; its metadata is removed before the tree is measured.
     git_dir = destination / ".git"
-    init = subprocess.run(
-        ["git", "init", "--quiet"], cwd=destination, capture_output=True, text=True
-    )
-    if init.returncode != 0:
-        raise RuntimeError(f"temporary git init failed: {init.stderr.strip()[:400]}")
     try:
+        init = subprocess.run(
+            ["git", "init", "--quiet"], cwd=destination, capture_output=True, text=True
+        )
+        if init.returncode != 0:
+            raise RuntimeError(f"temporary git init failed: {init.stderr.strip()[:400]}")
         for key in ("core.autocrlf", "core.safecrlf"):
             config = subprocess.run(
                 ["git", "config", "--local", key, "false"],
@@ -146,8 +146,12 @@ def materialize(destination: Path) -> dict:
                 "correction patch did not materialize completely: "
                 + reverse_check.stderr.strip()[:400]
             )
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
     finally:
-        shutil.rmtree(git_dir, ignore_errors=False)
+        if git_dir.exists():
+            shutil.rmtree(git_dir, ignore_errors=False)
 
     tree = corrected_tree(destination)
     metadata = {
