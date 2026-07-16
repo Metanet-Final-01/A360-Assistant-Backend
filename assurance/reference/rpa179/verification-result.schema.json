@@ -99,7 +99,27 @@
       "type": "array",
       "minItems": 2,
       "maxItems": 2,
-      "items": {"$ref": "#/$defs/run"}
+      "items": {"$ref": "#/$defs/run"},
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": ["run_id"],
+            "properties": {"run_id": {"const": "run-1"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["run_id"],
+            "properties": {"run_id": {"const": "run-2"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
     },
     "regression": {"$ref": "#/$defs/regression"},
     "determinism": {
@@ -140,6 +160,49 @@
   },
   "$defs": {
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "findingSet": {
+      "type": "array",
+      "minItems": 25,
+      "maxItems": 25,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "CR-01", "CR-02", "CR-03", "CR-04", "CR-05", "CR-06", "CR-07",
+          "CR-08", "CR-09", "CR-10", "CR-11", "CR-12", "CR-13", "CR-14",
+          "CR-15", "CR-16", "CR-18", "CR-19", "CR-20", "CR-21", "CR-24",
+          "CR-25", "CR-26", "CR-27", "CR-28"
+        ]
+      }
+    },
+    "namedContains": {
+      "typed_deny": {"contains": {"required": ["name"], "properties": {"name": {"const": "typed_deny"}}}, "minContains": 1, "maxContains": 1},
+      "synthetic_git_paths": {"contains": {"required": ["name"], "properties": {"name": {"const": "synthetic_git_paths"}}}, "minContains": 1, "maxContains": 1},
+      "coverage_matrix": {"contains": {"required": ["name"], "properties": {"name": {"const": "coverage_matrix"}}}, "minContains": 1, "maxContains": 1},
+      "portable_paths": {"contains": {"required": ["name"], "properties": {"name": {"const": "portable_paths"}}}, "minContains": 1, "maxContains": 1},
+      "registry_evidence_scope": {"contains": {"required": ["name"], "properties": {"name": {"const": "registry_evidence_scope"}}}, "minContains": 1, "maxContains": 1},
+      "artifact_errors": {"contains": {"required": ["name"], "properties": {"name": {"const": "artifact_errors"}}}, "minContains": 1, "maxContains": 1},
+      "root_script_scan": {"contains": {"required": ["name"], "properties": {"name": {"const": "root_script_scan"}}}, "minContains": 1, "maxContains": 1},
+      "waiver_duration": {"contains": {"required": ["name"], "properties": {"name": {"const": "waiver_duration"}}}, "minContains": 1, "maxContains": 1},
+      "agent_policy_approval": {"contains": {"required": ["name"], "properties": {"name": {"const": "agent_policy_approval"}}}, "minContains": 1, "maxContains": 1},
+      "control_state": {"contains": {"required": ["name"], "properties": {"name": {"const": "control_state"}}}, "minContains": 1, "maxContains": 1},
+      "dynamic_import_alias": {"contains": {"required": ["name"], "properties": {"name": {"const": "dynamic_import_alias"}}}, "minContains": 1, "maxContains": 1},
+      "confirmed_evidence": {"contains": {"required": ["name"], "properties": {"name": {"const": "confirmed_evidence"}}}, "minContains": 1, "maxContains": 1},
+      "rule_versions": {"contains": {"required": ["name"], "properties": {"name": {"const": "rule_versions"}}}, "minContains": 1, "maxContains": 1},
+      "runtime_provenance": {"contains": {"required": ["name"], "properties": {"name": {"const": "runtime_provenance"}}}, "minContains": 1, "maxContains": 1},
+      "waiver_approval": {"contains": {"required": ["name"], "properties": {"name": {"const": "waiver_approval"}}}, "minContains": 1, "maxContains": 1},
+      "selfcheck_exit": {"contains": {"required": ["name"], "properties": {"name": {"const": "selfcheck_exit"}}}, "minContains": 1, "maxContains": 1},
+      "git_failure": {"contains": {"required": ["name"], "properties": {"name": {"const": "git_failure"}}}, "minContains": 1, "maxContains": 1},
+      "reason_assertion": {"contains": {"required": ["name"], "properties": {"name": {"const": "reason_assertion"}}}, "minContains": 1, "maxContains": 1},
+      "full_projection": {"contains": {"required": ["name"], "properties": {"name": {"const": "full_projection"}}}, "minContains": 1, "maxContains": 1},
+      "policy_closed": {"contains": {"required": ["name"], "properties": {"name": {"const": "policy_closed"}}}, "minContains": 1, "maxContains": 1},
+      "receipt_positive": {"contains": {"required": ["name"], "properties": {"name": {"const": "receipt_positive"}}}, "minContains": 1, "maxContains": 1},
+      "applicability_companions": {"contains": {"required": ["name"], "properties": {"name": {"const": "applicability_companions"}}}, "minContains": 1, "maxContains": 1},
+      "receipt_poison": {"contains": {"required": ["name"], "properties": {"name": {"const": "receipt_poison"}}}, "minContains": 1, "maxContains": 1}
+    },
+    "commandContract": {"contains": {"required": ["name"], "properties": {"name": {"const": "contract"}}}, "minContains": 1, "maxContains": 1},
+    "commandVertical": {"contains": {"required": ["name"], "properties": {"name": {"const": "vertical"}}}, "minContains": 1, "maxContains": 1},
+    "commandSelfattack": {"contains": {"required": ["name"], "properties": {"name": {"const": "selfattack"}}}, "minContains": 1, "maxContains": 1},
+    "commandRegression": {"contains": {"required": ["name"], "properties": {"name": {"const": "regression"}}}, "minContains": 1, "maxContains": 1},
     "command": {
       "type": "object",
       "additionalProperties": false,
@@ -179,7 +242,33 @@
       "additionalProperties": false,
       "required": ["name", "findings", "passed"],
       "properties": {
-        "name": {"type": "string", "minLength": 1},
+        "name": {
+          "enum": [
+            "typed_deny",
+            "synthetic_git_paths",
+            "coverage_matrix",
+            "portable_paths",
+            "registry_evidence_scope",
+            "artifact_errors",
+            "root_script_scan",
+            "waiver_duration",
+            "agent_policy_approval",
+            "control_state",
+            "dynamic_import_alias",
+            "confirmed_evidence",
+            "rule_versions",
+            "runtime_provenance",
+            "waiver_approval",
+            "selfcheck_exit",
+            "git_failure",
+            "reason_assertion",
+            "full_projection",
+            "policy_closed",
+            "receipt_positive",
+            "applicability_companions",
+            "receipt_poison"
+          ]
+        },
         "findings": {
           "type": "array",
           "minItems": 1,
@@ -204,22 +293,35 @@
           "type": "array",
           "minItems": 23,
           "maxItems": 23,
-          "items": {"$ref": "#/$defs/regressionCase"}
+          "items": {"$ref": "#/$defs/regressionCase"},
+          "allOf": [
+            {"$ref": "#/$defs/namedContains/typed_deny"},
+            {"$ref": "#/$defs/namedContains/synthetic_git_paths"},
+            {"$ref": "#/$defs/namedContains/coverage_matrix"},
+            {"$ref": "#/$defs/namedContains/portable_paths"},
+            {"$ref": "#/$defs/namedContains/registry_evidence_scope"},
+            {"$ref": "#/$defs/namedContains/artifact_errors"},
+            {"$ref": "#/$defs/namedContains/root_script_scan"},
+            {"$ref": "#/$defs/namedContains/waiver_duration"},
+            {"$ref": "#/$defs/namedContains/agent_policy_approval"},
+            {"$ref": "#/$defs/namedContains/control_state"},
+            {"$ref": "#/$defs/namedContains/dynamic_import_alias"},
+            {"$ref": "#/$defs/namedContains/confirmed_evidence"},
+            {"$ref": "#/$defs/namedContains/rule_versions"},
+            {"$ref": "#/$defs/namedContains/runtime_provenance"},
+            {"$ref": "#/$defs/namedContains/waiver_approval"},
+            {"$ref": "#/$defs/namedContains/selfcheck_exit"},
+            {"$ref": "#/$defs/namedContains/git_failure"},
+            {"$ref": "#/$defs/namedContains/reason_assertion"},
+            {"$ref": "#/$defs/namedContains/full_projection"},
+            {"$ref": "#/$defs/namedContains/policy_closed"},
+            {"$ref": "#/$defs/namedContains/receipt_positive"},
+            {"$ref": "#/$defs/namedContains/applicability_companions"},
+            {"$ref": "#/$defs/namedContains/receipt_poison"}
+          ]
         },
-        "actionable_findings": {
-          "type": "array",
-          "minItems": 25,
-          "maxItems": 25,
-          "uniqueItems": true,
-          "items": {"type": "string", "pattern": "^CR-[0-9]{2}$"}
-        },
-        "covered_findings": {
-          "type": "array",
-          "minItems": 25,
-          "maxItems": 25,
-          "uniqueItems": true,
-          "items": {"type": "string", "pattern": "^CR-[0-9]{2}$"}
-        },
+        "actionable_findings": {"$ref": "#/$defs/findingSet"},
+        "covered_findings": {"$ref": "#/$defs/findingSet"},
         "coverage_complete": {"const": true}
       }
     },
@@ -239,7 +341,13 @@
           "type": "array",
           "minItems": 4,
           "maxItems": 4,
-          "items": {"$ref": "#/$defs/command"}
+          "items": {"$ref": "#/$defs/command"},
+          "allOf": [
+            {"$ref": "#/$defs/commandContract"},
+            {"$ref": "#/$defs/commandVertical"},
+            {"$ref": "#/$defs/commandSelfattack"},
+            {"$ref": "#/$defs/commandRegression"}
+          ]
         },
         "regression_digest": {"$ref": "#/$defs/digest"}
       }

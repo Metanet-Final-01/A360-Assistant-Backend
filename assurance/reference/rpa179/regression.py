@@ -311,6 +311,14 @@ def dynamic_import_alias():
     source = {"app/api/alias.py": "from importlib import import_module as load\nload('app.agent.verify')\n"}
     result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, source)
     require(not result.ok and result.reason == "private_agent_import", "aliased import escaped HL-06")
+    rebound = {
+        "app/api/rebound.py": (
+            "import importlib\nmod = importlib\nmod.import_module('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, rebound)
+    require(not result.ok and result.reason == "private_agent_import",
+            "rebound importlib module escaped HL-06")
     computed = {"app/api/computed.py": "from importlib import import_module as load\nload(target)\n"}
     result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, computed)
     require(not result.ok and result.reason == "source_indeterminate", "computed import did not fail closed")

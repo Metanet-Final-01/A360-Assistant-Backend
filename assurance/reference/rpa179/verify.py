@@ -198,10 +198,23 @@ def environment_record() -> dict:
     }
 
 
-def repository_head() -> str:
+def repository_head(repo_root: Path = REPO_ROOT) -> str:
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if status.returncode != 0:
+        raise RuntimeError(f"git status failed: {status.stderr.strip()[:400]}")
+    if status.stdout.strip():
+        raise RuntimeError(
+            "repository must be clean before verification; commit code and policy changes first"
+        )
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -210,6 +223,7 @@ def repository_head() -> str:
 
 
 def verify(work_root: Path) -> dict:
+    baseline_commit = repository_head()
     if work_root.exists() and any(work_root.iterdir()):
         raise RuntimeError(f"work root must not exist or must be empty: {work_root}")
     work_root.mkdir(parents=True, exist_ok=True)
@@ -247,7 +261,7 @@ def verify(work_root: Path) -> dict:
         "schema_version": "rpa179.verification.1",
         "verified_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "result": "pass",
-        "baseline_commit": repository_head(),
+        "baseline_commit": baseline_commit,
         "reference": {
             "source": first_metadata["source"],
             "source_manifest_sha256": first_metadata["source_integrity"]["manifest_sha256"],

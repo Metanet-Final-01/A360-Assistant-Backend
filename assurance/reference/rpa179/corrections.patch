@@ -1071,7 +1071,7 @@ index de3024f2934b471042af35ba78b5dd7bf7c3d672..4b2fadc6aca40e2e7e2180ded03f0fb5
  reason: "compensating control never passes"
  compensating_control: CH-99
 diff --git a/rules.py b/rules.py
-index a2af0e2618d939794a66d585a954bcc603d151c1..1a7f888b1f2b879facf1dc667712b4e839433a49 100644
+index a2af0e2618d939794a66d585a954bcc603d151c1..85181add9a2ec472e8be976c1cdf112e788e4ab9 100644
 --- a/rules.py
 +++ b/rules.py
 @@ -223,9 +223,9 @@ def hl12(ctx: TrustedContext, manifest_art: Artifact, report_art: Artifact, deri
@@ -1274,7 +1274,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..1a7f888b1f2b879facf1dc667712b4e8
      """v1.5 P1-1: `from app import agent as x` + `getattr(x, "verify")` was accepted, and parse
      failures were treated as clean. v1.6 uses a closed rule: any binding of the `app.agent` package
      itself is rejected, so no alias can exist to call getattr on. Sources are read from the VERIFIED
-@@ -816,13 +883,24 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -816,13 +883,43 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
      bad: list = []
      indeterminate: list = []
  
@@ -1297,11 +1297,30 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..1a7f888b1f2b879facf1dc667712b4e8
 +                for alias in node.names:
 +                    if alias.name == "import_module":
 +                        dynamic_names.add(alias.asname or alias.name)
++        changed = True
++        while changed:
++            changed = False
++            for node in ast.walk(tree):
++                if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
++                    continue
++                target_names = [
++                    target.id for target in node.targets if isinstance(target, ast.Name)
++                ]
++                if node.value.id in importlib_modules:
++                    for name in target_names:
++                        if name not in importlib_modules:
++                            importlib_modules.add(name)
++                            changed = True
++                if node.value.id in dynamic_names:
++                    for name in target_names:
++                        if name not in dynamic_names:
++                            dynamic_names.add(name)
++                            changed = True
 +        for node in ast.walk(tree):
              if isinstance(node, ast.ImportFrom) and node.module:
                  if node.module == "app.agent":
                      for a in node.names:
-@@ -844,17 +922,26 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -844,17 +941,26 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
                      elif a.name == "app.agent":
                          bad.append(f"{rel}: import app.agent"
                                     f"{' as ' + a.asname if a.asname else ''} (package binding)")
@@ -1339,7 +1358,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..1a7f888b1f2b879facf1dc667712b4e8
  
      for rel in reader.list_files():
          if not rel.endswith(".py") or rel.startswith("app/agent/") or rel.startswith("tests/"):
-@@ -874,7 +961,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -874,7 +980,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
          return RuleResult(False, f"indeterminate sources: {indeterminate[:5]}", "source_indeterminate")
      return (RuleResult(True, f"no private app.agent import outside app/agent/** "
                               f"(closed rule over verified objects)") if not bad
