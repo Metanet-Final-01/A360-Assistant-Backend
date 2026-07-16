@@ -134,21 +134,20 @@ def materialize(destination: Path) -> dict:
     corrections_digest = hashlib.sha256(corrections_bytes).hexdigest()
     if destination.exists() and any(destination.iterdir()):
         raise RuntimeError(f"destination must not exist or must be empty: {destination}")
-    destination.mkdir(parents=True, exist_ok=True)
-
-    for relative, payload in frozen_files:
-        if relative.name in HISTORICAL_REGRESSIONS:
-            continue
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload)
-
     # A destination below another worktree makes `git apply` silently filter every
     # root-relative patch path. A disposable nested repository pins destination as
     # the patch root; its metadata is removed before the tree is measured.
+    destination.mkdir(parents=True, exist_ok=True)
     git_dir = destination / ".git"
     git_env = sanitized_git_environment()
     try:
+        for relative, payload in frozen_files:
+            if relative.name in HISTORICAL_REGRESSIONS:
+                continue
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+
         init = subprocess.run(
             ["git", "init", "--quiet"],
             cwd=destination,
@@ -198,26 +197,26 @@ def materialize(destination: Path) -> dict:
             raise RuntimeError(
                 "correction patch did not materialize completely: " + detail
             )
+        shutil.rmtree(git_dir, ignore_errors=False)
+        tree = corrected_tree(destination)
+        metadata = {
+            "schema_version": "rpa179.1",
+            "source": "assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src",
+            "source_integrity": frozen,
+            "corrections_sha256": "sha256:" + corrections_digest,
+            "excluded_historical_regressions": sorted(HISTORICAL_REGRESSIONS),
+            "corrected_tree": tree,
+        }
+        (destination / "MATERIALIZED.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return metadata
     except Exception:
         shutil.rmtree(destination, ignore_errors=True)
         raise
     finally:
         if git_dir.exists():
             shutil.rmtree(git_dir, ignore_errors=False)
-
-    tree = corrected_tree(destination)
-    metadata = {
-        "schema_version": "rpa179.1",
-        "source": "assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src",
-        "source_integrity": frozen,
-        "corrections_sha256": "sha256:" + corrections_digest,
-        "excluded_historical_regressions": sorted(HISTORICAL_REGRESSIONS),
-        "corrected_tree": tree,
-    }
-    (destination / "MATERIALIZED.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    return metadata
 
 
 def main() -> int:

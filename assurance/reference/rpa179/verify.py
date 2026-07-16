@@ -275,6 +275,11 @@ def verify(work_root: Path) -> dict:
     }
     if not all(determinism.values()):
         raise RuntimeError(f"independent verification runs diverged: {determinism}")
+    determinism["validated_common_digests"] = {
+        "tree_digest": runs[0]["tree_digest"],
+        "regression_digest": runs[0]["regression_digest"],
+        "transcript_digest": canonical_digest(transcript_projection(runs[0])),
+    }
 
     first_metadata = json.loads(
         (work_root / "run-1" / "source" / "MATERIALIZED.json").read_text(encoding="utf-8")

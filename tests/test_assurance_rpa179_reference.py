@@ -278,6 +278,23 @@ def test_materialize_writes_the_verified_bytes(monkeypatch: pytest.MonkeyPatch):
         shutil.rmtree(destination, ignore_errors=True)
 
 
+def test_materialize_removes_destination_after_metadata_failure(monkeypatch: pytest.MonkeyPatch):
+    materializer = load_materializer()
+    destination = REPO / ".rpa179-test" / f"metadata-failure-{os.getpid():x}-{secrets.token_hex(3)}"
+    real_write_text = Path.write_text
+
+    def fail_metadata(path: Path, *args, **kwargs):
+        if path == destination / "MATERIALIZED.json":
+            raise OSError("synthetic metadata write failure")
+        return real_write_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "write_text", fail_metadata)
+        with pytest.raises(OSError, match="synthetic metadata write failure"):
+            materializer.materialize(destination)
+    assert not destination.exists()
+
+
 def test_verifier_strips_inherited_python_environment(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as poisoned:
         poisoned.setenv("PYTHONPATH", "poison-path")

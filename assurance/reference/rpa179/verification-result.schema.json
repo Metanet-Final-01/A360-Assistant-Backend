@@ -125,11 +125,26 @@
     "determinism": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["tree_digest_equal", "regression_equal", "transcripts_equal"],
+      "required": [
+        "tree_digest_equal",
+        "regression_equal",
+        "transcripts_equal",
+        "validated_common_digests"
+      ],
       "properties": {
         "tree_digest_equal": {"const": true},
         "regression_equal": {"const": true},
-        "transcripts_equal": {"const": true}
+        "transcripts_equal": {"const": true},
+        "validated_common_digests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tree_digest", "regression_digest", "transcript_digest"],
+          "properties": {
+            "tree_digest": {"$ref": "#/$defs/digest"},
+            "regression_digest": {"$ref": "#/$defs/digest"},
+            "transcript_digest": {"$ref": "#/$defs/digest"}
+          }
+        }
       }
     },
     "summary": {

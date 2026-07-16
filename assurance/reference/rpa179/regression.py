@@ -397,6 +397,26 @@ def dynamic_import_alias():
     result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, direct_getattr)
     require(not result.ok and result.reason == "private_agent_import",
             "direct getattr import_module call escaped HL-06")
+    annotated = {
+        "app/api/annotated_alias.py": (
+            "import importlib\n"
+            "mod: object = importlib\n"
+            "mod.import_module('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, annotated)
+    require(not result.ok and result.reason == "private_agent_import",
+            "annotated importlib alias escaped HL-06")
+    named_expression = {
+        "app/api/named_expression.py": (
+            "import importlib\n"
+            "if (mod := importlib):\n"
+            "    mod.import_module('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, named_expression)
+    require(not result.ok and result.reason == "private_agent_import",
+            "named-expression importlib alias escaped HL-06")
     builtins_attribute = {
         "app/api/builtins_attribute.py": (
             "import builtins as runtime\n"

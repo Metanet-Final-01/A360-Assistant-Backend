@@ -1074,7 +1074,7 @@ index de3024f2934b471042af35ba78b5dd7bf7c3d672..4b2fadc6aca40e2e7e2180ded03f0fb5
  reason: "compensating control never passes"
  compensating_control: CH-99
 diff --git a/rules.py b/rules.py
-index a2af0e2618d939794a66d585a954bcc603d151c1..ecd9a809227d3d919b004e66922f06798d74d480 100644
+index a2af0e2618d939794a66d585a954bcc603d151c1..16779fea0a147aeaad8ce556e1df7ce41b095a7e 100644
 --- a/rules.py
 +++ b/rules.py
 @@ -223,9 +223,9 @@ def hl12(ctx: TrustedContext, manifest_art: Artifact, report_art: Artifact, deri
@@ -1277,7 +1277,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..ecd9a809227d3d919b004e66922f0679
      """v1.5 P1-1: `from app import agent as x` + `getattr(x, "verify")` was accepted, and parse
      failures were treated as clean. v1.6 uses a closed rule: any binding of the `app.agent` package
      itself is rejected, so no alias can exist to call getattr on. Sources are read from the VERIFIED
-@@ -816,13 +883,114 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -816,13 +883,123 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
      bad: list = []
      indeterminate: list = []
  
@@ -1343,35 +1343,44 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..ecd9a809227d3d919b004e66922f0679
 +        while changed:
 +            changed = False
 +            for node in ast.walk(tree):
-+                if not isinstance(node, ast.Assign):
++                if isinstance(node, ast.Assign):
++                    targets = node.targets
++                    value = node.value
++                elif isinstance(node, ast.AnnAssign):
++                    targets = [node.target]
++                    value = node.value
++                elif isinstance(node, ast.NamedExpr):
++                    targets = [node.target]
++                    value = node.value
++                else:
 +                    continue
 +                target_names = [
-+                    target.id for target in node.targets if isinstance(target, ast.Name)
++                    target.id for target in targets if isinstance(target, ast.Name)
 +                ]
-+                if isinstance(node.value, ast.Name):
-+                    if node.value.id in importlib_modules:
++                if isinstance(value, ast.Name):
++                    if value.id in importlib_modules:
 +                        for name in target_names:
 +                            if name not in importlib_modules:
 +                                importlib_modules.add(name)
 +                                changed = True
-+                    if node.value.id in builtins_modules:
++                    if value.id in builtins_modules:
 +                        for name in target_names:
 +                            if name not in builtins_modules:
 +                                builtins_modules.add(name)
 +                                changed = True
-+                    if node.value.id in dynamic_names:
++                    if value.id in dynamic_names:
 +                        for name in target_names:
 +                            if name not in dynamic_names:
 +                                dynamic_names.add(name)
 +                                changed = True
 +                elif (
-+                    isinstance(node.value, ast.Attribute)
-+                    and isinstance(node.value.value, ast.Name)
++                    isinstance(value, ast.Attribute)
++                    and isinstance(value.value, ast.Name)
 +                    and (
-+                        (node.value.attr == "import_module"
-+                         and node.value.value.id in importlib_modules)
-+                        or (node.value.attr == "__import__"
-+                            and node.value.value.id in builtins_modules)
++                        (value.attr == "import_module"
++                         and value.value.id in importlib_modules)
++                        or (value.attr == "__import__"
++                            and value.value.id in builtins_modules)
 +                    )
 +                ):
 +                    for name in target_names:
@@ -1379,7 +1388,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..ecd9a809227d3d919b004e66922f0679
 +                            dynamic_names.add(name)
 +                            changed = True
 +                else:
-+                    getattr_status = dynamic_getattr_status(node.value)
++                    getattr_status = dynamic_getattr_status(value)
 +                    if getattr_status == "dynamic":
 +                        for name in target_names:
 +                            if name not in dynamic_names:
@@ -1394,7 +1403,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..ecd9a809227d3d919b004e66922f0679
              if isinstance(node, ast.ImportFrom) and node.module:
                  if node.module == "app.agent":
                      for a in node.names:
-@@ -844,17 +1012,62 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -844,17 +1021,62 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
                      elif a.name == "app.agent":
                          bad.append(f"{rel}: import app.agent"
                                     f"{' as ' + a.asname if a.asname else ''} (package binding)")
@@ -1468,7 +1477,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..ecd9a809227d3d919b004e66922f0679
  
      for rel in reader.list_files():
          if not rel.endswith(".py") or rel.startswith("app/agent/") or rel.startswith("tests/"):
-@@ -874,7 +1087,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -874,7 +1096,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
          return RuleResult(False, f"indeterminate sources: {indeterminate[:5]}", "source_indeterminate")
      return (RuleResult(True, f"no private app.agent import outside app/agent/** "
                               f"(closed rule over verified objects)") if not bad
