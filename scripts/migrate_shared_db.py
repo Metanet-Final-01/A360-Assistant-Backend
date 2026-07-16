@@ -10,9 +10,13 @@
 왜 dry-run이 기본인가: 공유 DB는 되돌리기 어렵다(팀원 데이터가 위에 쌓인다). 무엇이 적용될지
 눈으로 확인하고 나서 손으로 --apply를 붙이게 한다.
 
-**--apply는 `origin/dev`에 머지된 커밋에서만 된다 — 코드가 막는다** (CONVENTIONS §7 ①).
-브랜치를 출력만 하고 "dev가 아니면 멈추세요"라고 부탁했었는데, 그건 이 PR이 자동 마이그레이션을
-코드로 막은 이유와 정면으로 배치된다(규약은 지켜지지 않는다). dry-run은 어느 브랜치에서든 된다.
+**--apply는 코드가 막는다** (CONVENTIONS §7 ①) — 브랜치를 출력만 하고 "dev가 아니면 멈추세요"라고
+부탁했었는데, 그건 이 PR이 자동 마이그레이션을 코드로 막은 이유와 정면으로 배치된다(규약은
+지켜지지 않는다). 두 가지를 본다:
+  1. `HEAD`가 `origin/dev`에 포함됐나 — 머지 안 된 리비전을 올리지 않는다
+  2. `migrations/`에 미커밋 변경이 없나 — alembic은 커밋 이력이 아니라 **작업 트리**를 읽으므로
+     ①만으론 뚫린다(dev 체크아웃 + 미커밋 0017 → 그대로 올라간다)
+dry-run은 어느 브랜치에서든 된다.
 
 ⚠️ 적용 후 팀에 **공지**한다 — 다른 사람은 pull 해야 코드와 스키마가 맞는다. (이건 코드가
    못 막는 부분이다 — 사람이 해야 한다.)
@@ -89,13 +93,29 @@ def _head_is_in_dev() -> bool | None:
         return None
 
 
+def _migrations_dirty() -> list[str] | None:
+    """`migrations/`에 커밋 안 된 변경(수정·추가). 판정 불가면 None.
+
+    ⚠️ `HEAD`가 origin/dev에 있는지만 보면 **뚫린다**: 게이트는 `HEAD`(커밋 이력)를 보는데
+    `ScriptDirectory`는 **작업 트리(디스크)**를 읽는다. 즉 dev를 체크아웃한 채 `0017_실험.py`를
+    만들어두면 게이트는 통과하고 그 미커밋 파일이 공유 DB에 올라간다 (CodeRabbit #258).
+    실측으로 확인: untracked 파일이 그대로 `get_heads()`에 잡혔다.
+
+    `--porcelain`은 tracked 수정(` M`)과 untracked(`??`)를 모두 준다 — 둘 다 위험하다.
+    """
+    r = _git("status", "--porcelain", "--", "migrations")
+    if r.returncode != 0:
+        return None
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="공유 앱 DB에 Alembic 마이그레이션 적용")
     parser.add_argument("--apply", action="store_true",
                         help="실제로 적용한다 (기본은 무엇이 적용될지 보여주고 멈춤)")
-    parser.add_argument("--i-know-dev-check-is-broken", action="store_true",
-                        help="origin/dev 확인을 건너뛴다 — git이 없는 환경 등 예외용. "
-                             "머지 안 된 리비전을 올리면 팀 스키마가 깨진다.")
+    parser.add_argument("--skip-git-checks", action="store_true",
+                        help="origin/dev 포함 여부·migrations 미커밋 검사를 건너뛴다 — git이 없는 "
+                             "환경 등 예외용. 머지 안 된 리비전을 올리면 팀 스키마가 깨진다.")
     args = parser.parse_args()
 
     import app.db as app_db  # load_dotenv()가 여기서 돈다 — .env의 APP_DATABASE_URL을 읽으려면 필요
@@ -149,12 +169,12 @@ def main() -> int:
     # --apply 게이트 — dev에 머지된 리비전만 올린다 (CONVENTIONS §7 ①).
     # 브랜치를 **출력만 하고 사람에게 멈추라고 부탁**하면 안 된다 — 이 PR이 자동 마이그레이션을
     # 코드로 막은 이유와 같다(규약은 지켜지지 않는다). dry-run은 열어두고 적용만 막는다.
-    if not args.i_know_dev_check_is_broken:
+    if not args.skip_git_checks:
         in_dev = _head_is_in_dev()
         if in_dev is None:
             print("\n`origin/dev`를 확인할 수 없어 적용을 중단합니다 (git 없음 / fetch 안 됨?).\n"
                   "  git fetch origin dev\n"
-                  "그래도 안 되면 --i-know-dev-check-is-broken 으로 넘길 수 있습니다.",
+                  "그래도 안 되면 --skip-git-checks 로 넘길 수 있습니다.",
                   file=sys.stderr)
             return 1
         if not in_dev:
@@ -164,6 +184,21 @@ def main() -> int:
                   "  git fetch origin dev && git checkout dev && git pull\n"
                   "먼저 PR을 dev에 머지하세요. (dry-run은 어느 브랜치에서든 됩니다.)",
                   file=sys.stderr)
+            return 1
+
+        # HEAD 검사만으론 부족하다 — alembic은 **작업 트리**를 읽는다. dev를 체크아웃한 채
+        # 미커밋 마이그레이션을 두면 그게 그대로 올라간다(실측 확인).
+        dirty = _migrations_dirty()
+        if dirty is None:
+            print("\n`migrations/`의 git 상태를 확인할 수 없어 적용을 중단합니다.\n"
+                  "--skip-git-checks 로 넘길 수 있습니다(위험).", file=sys.stderr)
+            return 1
+        if dirty:
+            print("\n`migrations/`에 커밋되지 않은 변경이 있습니다:\n"
+                  + "\n".join(f"  {ln}" for ln in dirty)
+                  + "\n\nalembic은 커밋 이력이 아니라 **작업 트리**를 읽습니다 — 지금 적용하면 이"
+                    "\n파일들이 공유 DB에 올라가고, 팀에는 그 리비전이 존재하지 않습니다.\n"
+                    "커밋 후 dev에 머지하고 다시 실행하세요.", file=sys.stderr)
             return 1
 
     print("\n적용 중...")

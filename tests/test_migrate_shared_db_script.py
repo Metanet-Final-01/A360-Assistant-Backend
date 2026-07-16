@@ -125,6 +125,7 @@ def apply_run(monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", "postgresql://u:p@ep-x-pooler.neon.tech/neondb")
     monkeypatch.setattr(mig, "_current_revision", lambda engine: "0014")  # → 대기 2개
     monkeypatch.setattr(app_db, "engine", create_engine("sqlite://"))  # 실 DB 접속 없음
+    monkeypatch.setattr(mig, "_migrations_dirty", lambda: [])  # 기본: migrations/ 깨끗함
 
     calls: list = []
     monkeypatch.setattr(app_db, "run_migrations", lambda **k: calls.append(k))
@@ -180,7 +181,7 @@ def test_escape_hatch_overrides_the_gate(apply_run, monkeypatch):
     """탈출구 플래그는 게이트를 넘는다 — git 없는 환경 등."""
     monkeypatch.setattr(mig, "_head_is_in_dev", lambda: False)
 
-    rc, applied = apply_run("--apply", "--i-know-dev-check-is-broken")
+    rc, applied = apply_run("--apply", "--skip-git-checks")
 
     assert rc == 0 and applied == 1
 
@@ -192,6 +193,35 @@ def test_dry_run_works_on_any_branch(apply_run, monkeypatch):
     rc, applied = apply_run()
 
     assert rc == 0 and applied == 0
+
+
+def test_apply_blocked_when_migrations_uncommitted(apply_run, monkeypatch):
+    """`HEAD`가 dev에 있어도 **migrations/에 미커밋 변경**이 있으면 차단한다.
+
+    게이트는 `HEAD`(커밋 이력)를 보는데 alembic의 `ScriptDirectory`는 **작업 트리**를 읽는다.
+    dev를 체크아웃한 채 `0017_실험.py`를 만들어두면 HEAD 검사는 통과하고 그 미커밋 파일이
+    공유 DB에 올라간다 — 팀에는 존재하지 않는 리비전이다 (CodeRabbit #258).
+
+    실측으로 확인했다: untracked 파일이 그대로 `get_heads()`에 잡혔다.
+    """
+    monkeypatch.setattr(mig, "_head_is_in_dev", lambda: True)  # HEAD 검사는 통과시킨다
+    monkeypatch.setattr(mig, "_migrations_dirty",
+                        lambda: ["?? migrations/versions/0017_experiment.py"])
+
+    rc, applied = apply_run("--apply")
+
+    assert rc == 1, "미커밋 마이그레이션이 있는데 --apply가 통과했다"
+    assert applied == 0, "차단했다면서 마이그레이션이 실제로 돌았다"
+
+
+def test_apply_blocked_when_migrations_status_unknown(apply_run, monkeypatch):
+    """`migrations/`의 git 상태를 못 읽으면 막는다 (fail-closed)."""
+    monkeypatch.setattr(mig, "_head_is_in_dev", lambda: True)
+    monkeypatch.setattr(mig, "_migrations_dirty", lambda: None)
+
+    rc, applied = apply_run("--apply")
+
+    assert rc == 1 and applied == 0
 
 
 # --- 이 스크립트가 존재하는 이유 자체 ---
