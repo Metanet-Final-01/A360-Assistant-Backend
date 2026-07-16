@@ -607,10 +607,24 @@ def test_estimate_message_tokens_fallback():
     assert sessions_api._estimate_message_tokens("업무 자동화 요청입니다") > 0
 
 
-def test_estimate_uses_char_fallback_before_warmup(monkeypatch):
-    """인코더 미준비(워밍업 전/실패)면 요청 경로에서 로드하지 않고 문자 폴백(1문자≈1토큰)."""
+def test_estimate_uses_byte_fallback_before_warmup(monkeypatch):
+    """인코더 미준비(워밍업 전/실패)면 요청 경로에서 로드하지 않고 **UTF-8 바이트** 폴백.
+
+    한때 문자 수(1문자≈1토큰) 폴백이었으나 **상한이 아니었다** — 이모지 3.0 / 희귀 CJK 2.0
+    tok/char라 과소추정해 선행 가드가 뚫렸다(RPA-172). cl100k_base는 byte-level BPE라 모든
+    토큰이 ≥1바이트를 소비하므로 바이트 수는 **증명 가능한 상한**이다.
+    """
     monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
-    assert sessions_api._estimate_message_tokens("가" * 100) == 100  # 한글 ≈1 tok/char 실측 반영
+
+    text = "가" * 100
+    assert sessions_api._estimate_message_tokens(text) == len(text.encode("utf-8"))  # 한글 3B → 300
+
+    # 핵심 불변식: 폴백은 절대 과소추정하지 않는다 (문자 수 폴백은 이 단언에서 깨진다)
+    import tiktoken
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    for sample in ("🙃" * 50, "龘" * 50, "a" * 50, "업무 자동화 요청입니다"):
+        assert sessions_api._estimate_message_tokens(sample) >= len(enc.encode(sample))
 
 
 def test_warmup_failure_is_not_sticky(monkeypatch):
