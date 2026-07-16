@@ -435,7 +435,7 @@ def test_state_db_failure_still_sends(sent, monkeypatch):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(alerts, "_obs_session", _boom)
-    alerts._fallback_last.clear()
+    alerts._fallback_state.clear()
 
     assert alerts.notify(_alert(), alerts.FIRING, NOW) is True, (
         "상태 DB가 죽었다고 알림을 접었다 — 그때가 알려야 할 때다")
@@ -445,7 +445,7 @@ def test_state_db_failure_still_sends(sent, monkeypatch):
 def test_state_db_failure_still_throttles(sent, monkeypatch):
     """단, 폴백에서도 도배는 막는다 — DB가 죽었다고 5분마다 288개를 쏘면 안 된다."""
     monkeypatch.setattr(alerts, "_obs_session", lambda: (_ for _ in ()).throw(RuntimeError("db")))
-    alerts._fallback_last.clear()
+    alerts._fallback_state.clear()
 
     for i in range(12):
         alerts.notify(_alert(), alerts.FIRING, NOW + timedelta(minutes=5 * i))
@@ -453,12 +453,65 @@ def test_state_db_failure_still_throttles(sent, monkeypatch):
     assert len(sent) == 1, f"폴백 스로틀이 안 듣는다 — {len(sent)}번 보냈다"
 
 
+def test_fallback_new_outage_after_recovery_alerts(sent, monkeypatch):
+    """🔴 폴백에서도 **복구 후 재발은 새 사건**이다 (CodeRabbit #263 2차).
+
+    `(key, status)`별 시각만 저장하던 첫 구현은 FIRING→OK→FIRING이 쿨다운 안에 오면
+    두 번째 FIRING이 첫 번째의 타임스탬프에 걸려 **새 장애를 침묵**시켰다.
+    복구됐다가 다시 터진 건 반복이 아니라 새 장애다 — DB 쪽 전이 판정과 같아야 한다.
+    """
+    monkeypatch.setattr(alerts, "_obs_session", lambda: (_ for _ in ()).throw(RuntimeError("db")))
+    alerts._fallback_state.clear()
+
+    assert alerts.notify(_alert(), alerts.FIRING, NOW) is True
+    assert alerts.notify(_alert(), alerts.OK, NOW + timedelta(minutes=5)) is True
+    assert alerts.notify(_alert(), alerts.FIRING, NOW + timedelta(minutes=10)) is True, (
+        "복구 후 10분 만에 다시 터졌는데 쿨다운으로 삼켰다 — 새 장애가 묻힌다")
+    assert len(sent) == 3
+
+
+def test_fallback_first_ok_is_silent(sent, monkeypatch):
+    """폴백에서도 처음 본 OK는 침묵 — DB 경로와 같은 규칙."""
+    monkeypatch.setattr(alerts, "_obs_session", lambda: (_ for _ in ()).throw(RuntimeError("db")))
+    alerts._fallback_state.clear()
+
+    assert alerts.notify(_alert(), alerts.OK, NOW) is False
+    assert sent == []
+
+
+# --- SSRF: 웹훅 목적지 허용목록 ---
+
+@pytest.mark.parametrize("bad", [
+    "https://evil.example.com/services/T0/B0/x",   # 다른 호스트 — 알림 본문이 임의 목적지로
+    "http://hooks.slack.com/services/T0/B0/x",     # 평문 — 토큰이 그대로 노출
+    "https://hooks.slack.com.evil.com/x",          # 접미사 위장
+    "not-a-url",
+])
+def test_webhook_rejects_non_slack_destinations(monkeypatch, bad):
+    """웹훅이 Slack 형식이 아니면 **미설정과 동일**하게 비활성 (CodeRabbit #263 2차, SSRF).
+
+    이 URL로 알림 본문(비용·사용자 라벨·의존성 상태)을 POST하므로, env가 오염되면
+    내부 정보가 임의 목적지로 나간다. https + hooks.slack.com만 허용한다.
+    """
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", bad)
+    alerts._bad_url_warned = False
+
+    assert alerts.enabled() is False, f"허용 안 된 목적지를 통과시켰다: {bad[:40]}"
+
+
+def test_webhook_accepts_real_slack_form(monkeypatch):
+    """정상 형식은 통과 — 허용목록이 기능을 죽이면 안 된다."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", HOOK)
+
+    assert alerts.enabled() is True
+
+
 def test_state_db_failure_does_not_raise(monkeypatch):
     """어느 경우든 예외가 새면 안 된다 — 알림이 서비스를 죽이면 안 된다."""
     monkeypatch.setenv("SLACK_WEBHOOK_URL", HOOK)
     monkeypatch.setattr(alerts, "_obs_session", lambda: (_ for _ in ()).throw(RuntimeError("db")))
     monkeypatch.setattr(alerts, "_post", lambda a: (_ for _ in ()).throw(RuntimeError("slack")))
-    alerts._fallback_last.clear()
+    alerts._fallback_state.clear()
 
     # 상태 DB도 슬랙도 죽었다 — 그래도 예외는 안 난다
     alerts.notify(_alert(), alerts.FIRING, NOW)

@@ -32,9 +32,37 @@ OK = "ok"
 _DEFAULT_COOLDOWN_MIN = 60
 
 
+_SLACK_WEBHOOK_HOST = "hooks.slack.com"
+_bad_url_warned = False
+
+
 def webhook_url() -> str:
-    """참조 시점에 읽는다 — 테스트가 monkeypatch로 켜고 끌 수 있게(import 시점 고정 금지)."""
-    return os.getenv("SLACK_WEBHOOK_URL", "").strip()
+    """참조 시점에 읽고, **Slack 웹훅 형태가 아니면 버린다** — 테스트가 monkeypatch로 켜고
+    끌 수 있게 import 시점 고정 금지.
+
+    ⚠️ 허용목록 검증 (CodeRabbit #263 2차, path_instructions의 SSRF 규칙). 이 URL로 알림
+    본문(비용·사용자 라벨·의존성 상태)을 POST하므로, env가 오염되면 **임의 목적지로 내부
+    정보가 나간다.** https + hooks.slack.com만 허용하고, 아니면 미설정과 동일하게 취급한다
+    (enabled()=False → 스케줄러 헬스 잡도 등록 안 됨 — 일관된 비활성).
+    값은 크레덴셜이라 **로그에 URL을 남기지 않는다.**
+    """
+    global _bad_url_warned
+    raw = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+    if not raw:
+        _bad_url_warned = False
+        return ""
+    from urllib.parse import urlparse
+
+    p = urlparse(raw)
+    if p.scheme != "https" or p.hostname != _SLACK_WEBHOOK_HOST:
+        if not _bad_url_warned:  # 헬스 잡이 5분마다 부르므로 1회만 경고
+            logger.warning(
+                "SLACK_WEBHOOK_URL이 허용된 형식(https://%s/…)이 아니라 무시한다 — 알림 비활성",
+                _SLACK_WEBHOOK_HOST)
+            _bad_url_warned = True
+        return ""
+    _bad_url_warned = False
+    return raw
 
 
 def enabled() -> bool:
@@ -274,15 +302,21 @@ def _should_notify(key: str, status: str, now: datetime) -> bool:
         return True
 
 
-_fallback_last: dict[tuple[str, str], datetime] = {}
+_fallback_state: dict[str, tuple[str, datetime]] = {}  # key → (status, 마지막 발송)
 _fallback_lock = threading.Lock()
 
 
 def _fallback_should_notify(key: str, status: str, now: datetime) -> bool:
-    """**상태 DB가 죽었을 때만** 쓰는 프로세스 로컬 스로틀.
+    """**상태 DB가 죽었을 때만** 쓰는 프로세스 로컬 스로틀 — DB 로직과 같은 전이 판정.
 
     평소엔 alert_state(DB)가 전이·쿨다운을 판단한다. 그게 죽으면 통지 자체를 접는 게 아니라
     — 하필 그때가 "관측 DB가 죽었다"를 알려야 할 때다 — **최소한의 도배 방지만** 하고 보낸다.
+
+    ⚠️ `(key, status)`별 시각만 저장하면 안 된다 (CodeRabbit #263 2차). 그 방식은
+       `FIRING → OK → FIRING`이 쿨다운 안에 오면 두 번째 FIRING이 첫 번째의 타임스탬프에
+       걸려 **새 장애를 반복으로 오인해 삼킨다.** 복구됐다가 다시 터진 건 새 사건이다.
+       그래서 DB 쪽 `_should_notify`와 같은 규칙을 쓴다: 전이면 보내고, 같은 비정상이
+       이어지면 쿨다운, 처음 본 OK는 침묵(정상은 뉴스가 아니다).
 
     ⚠️ 인메모리라 한계가 명확하다: 재시작하면 초기화되고, 워커 N개면 최대 N배 발송된다.
        그래서 **평소 경로가 아니다.** DB 장애라는 예외 상황에서 "중복 몇 통"과 "침묵" 중
@@ -290,11 +324,20 @@ def _fallback_should_notify(key: str, status: str, now: datetime) -> bool:
     """
     cd = _cooldown() or timedelta(minutes=_DEFAULT_COOLDOWN_MIN)
     with _fallback_lock:
-        last = _fallback_last.get((key, status))
-        if last is not None and (now - last) < cd:
-            return False
-        _fallback_last[(key, status)] = now
-    return True
+        prev = _fallback_state.get(key)
+        if prev is None:
+            if status == OK:
+                return False  # 처음 본 OK — 기동할 때마다 "정상입니다"는 소음이다
+            _fallback_state[key] = (status, now)
+            return True
+        prev_status, last_sent = prev
+        if prev_status == status:
+            if status == OK:
+                return False  # 정상이 이어짐
+            if (now - last_sent) < cd:
+                return False  # 같은 비정상이 이어짐 — 쿨다운
+        _fallback_state[key] = (status, now)  # 전이 또는 쿨다운 경과 — 보낸다
+        return True
 
 
 def _aware(dt: datetime) -> datetime:

@@ -35,11 +35,14 @@ ROOT = Path(__file__).resolve().parent.parent
 _TEST_TIMEOUT_SEC = int(os.getenv("PROVE_TEETH_TIMEOUT_SEC", "300"))
 
 
-def _run_test(test: str) -> tuple[bool, str]:
-    """(통과했나, 요약)."""
-    # ⚠️ timeout 필수 (CodeRabbit #263). 없으면 pytest가 멈출 때 **상위 CI 타임아웃이 이 프로세스를
-    #    통째로 죽여** 아래 finally의 원본 복원이 안 돈다 — 즉 **결함이 심긴 소스가 그대로 남는다.**
-    #    "항상 복원한다"는 계약은 우리가 먼저 끝날 때만 지켜진다.
+def _run_test(test: str) -> tuple[str, str]:
+    """("pass" | "fail" | "timeout", 요약).
+
+    ⚠️ timeout 필수 (CodeRabbit #263). 없으면 pytest가 멈출 때 **상위 CI 타임아웃이 이 프로세스를
+       통째로 죽여** 아래 finally의 원본 복원이 안 돈다 — 즉 **결함이 심긴 소스가 그대로 남는다.**
+    ⚠️ 타임아웃을 "fail"로 뭉개면 안 된다 (#263 2차): 결함 삽입 후 pytest가 **멈춘** 것을
+       "테스트가 결함을 잡았다"로 오판한다. 멈춤은 이빨이 아니라 판정 불가다 — 3상태로 구분한다.
+    """
     try:
         r = subprocess.run(
             [sys.executable, "-m", "pytest", test, "-q", "--no-header", "-p", "no:cacheprovider"],
@@ -47,10 +50,9 @@ def _run_test(test: str) -> tuple[bool, str]:
             timeout=_TEST_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired:
-        # 멈춘 것도 "통과 아님"이지만, 그걸 이빨로 오해하면 안 된다 — 명시적으로 알린다.
-        return False, f"⏱ {_TEST_TIMEOUT_SEC}초 초과로 중단 (테스트가 멈췄다 — 이빨 판정 불가)"
+        return "timeout", f"⏱ {_TEST_TIMEOUT_SEC}초 초과로 중단 (테스트가 멈췄다)"
     tail = [l for l in r.stdout.splitlines() if l.strip()][-1:] or ["(출력 없음)"]
-    return r.returncode == 0, tail[0]
+    return ("pass" if r.returncode == 0 else "fail"), tail[0]
 
 
 def main() -> int:
@@ -78,16 +80,17 @@ def main() -> int:
         return 1
 
     # ① 변형 전: 테스트가 통과해야 한다. 원래 빨간불이면 이 증명 자체가 무의미하다.
-    ok_before, sum_before = _run_test(args.test)
-    if not ok_before:
-        print(f"🔴 변형 **전**에 이미 실패한다 — 증명 불가.\n   {sum_before}", file=sys.stderr)
+    out_before, sum_before = _run_test(args.test)
+    if out_before != "pass":
+        print(f"🔴 변형 **전**에 이미 {'멈춘다' if out_before == 'timeout' else '실패한다'}"
+              f" — 증명 불가.\n   {sum_before}", file=sys.stderr)
         return 1
 
     # ② 변형 후: 테스트가 **실패해야** 한다.
     try:
         io.open(path, "w", encoding="utf-8", newline="").write(
             original.replace(args.old, args.new, 1))
-        ok_after, sum_after = _run_test(args.test)
+        out_after, sum_after = _run_test(args.test)
     finally:
         io.open(path, "w", encoding="utf-8", newline="").write(original)  # 항상 복원
 
@@ -96,7 +99,14 @@ def main() -> int:
         print("🔴 원본 복원 실패! 파일을 직접 확인할 것", file=sys.stderr)
         return 1
 
-    if ok_after:
+    if out_after == "timeout":
+        # 멈춤은 "실패"가 아니다 (CodeRabbit #263 2차) — 결함이 무한루프를 만들었을 수도,
+        # 환경 문제일 수도 있다. 어느 쪽이든 "테스트가 그 결함을 잡았다"는 증명이 아니다.
+        print(f"🔴 **판정 불가** — 변형 후 테스트가 {_TEST_TIMEOUT_SEC}초 안에 끝나지 않았다.\n"
+              f"   멈춤 ≠ 이빨. 다른 결함으로 다시 증명할 것. (원본은 복원됨)", file=sys.stderr)
+        return 1
+
+    if out_after == "pass":
         print(f"🔴 **증명 실패** — 결함을 심었는데 테스트가 통과했다.\n"
               f"   {sum_after}\n\n"
               f"   둘 중 하나다:\n"
