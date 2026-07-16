@@ -24,6 +24,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+def _current_revision(engine) -> str | None:
+    """DB의 현재 Alembic 리비전. **신규 DB면 None** (예외 아님).
+
+    ⚠️ `select ... from alembic_version`을 그냥 던지면 안 된다 — 테이블 자체가 없는 신규 DB에서
+    예외가 난다. 공유 DB를 처음 붙이는 순간이 이 스크립트가 가장 필요한 때인데 거기서 크래시하면
+    쓸모가 없다 (CodeRabbit #258).
+    """
+    from sqlalchemy import inspect, text
+
+    if not inspect(engine).has_table("alembic_version"):
+        return None
+    with engine.connect() as c:
+        return c.execute(text("select version_num from alembic_version")).scalar_one_or_none()
+
+
+def _pending_revisions(script, current: str | None) -> list[str]:
+    """`current` 이후로 적용될 리비전을 **적용 순서(아래→위)**로 돌려준다.
+
+    ⚠️ `walk_revisions(base="base")`로 전부 훑고 current만 빼면 **이미 적용된 과거 리비전까지**
+    '대기'로 뜬다 (CodeRabbit #258). base를 현재 리비전으로 잡아야 한다.
+    """
+    if current is None:  # 신규 DB — 전부 적용 대상
+        revs = list(script.walk_revisions())
+    else:
+        revs = [s for s in script.walk_revisions(base=current, head="heads")
+                if s.revision != current]
+    return [s.revision for s in reversed(revs)]  # walk는 head→base 순서라 뒤집는다
+
+
 def _current_branch() -> str:
     """체크아웃된 git 브랜치 — 실패해도 스크립트를 막지 않는다(정보 제공용)."""
     import subprocess
@@ -46,7 +75,6 @@ def main() -> int:
     import app.db as app_db  # load_dotenv()가 여기서 돈다 — .env의 APP_DATABASE_URL을 읽으려면 필요
     from alembic.config import Config
     from alembic.script import ScriptDirectory
-    from sqlalchemy import text
 
     if not os.getenv("APP_DATABASE_URL", "").strip():
         print("APP_DATABASE_URL이 설정돼 있지 않습니다 — 공유 DB가 아닙니다.\n"
@@ -58,26 +86,32 @@ def main() -> int:
     cfg = Config()
     cfg.set_main_option("script_location", str(migrations_dir))
     script = ScriptDirectory.from_config(cfg)
-    head = script.get_current_head()
 
-    # 지금 공유 DB가 몇 번인지 — engine은 app.db가 이미 APP_DATABASE_URL로 만들어 뒀다.
-    with app_db.engine.connect() as c:
-        row = c.execute(text("select version_num from alembic_version")).scalar_one_or_none()
-    current = row or "(비어 있음 — 신규 DB)"
+    # head가 둘이면 get_current_head()가 예외를 던진다 — 이 스크립트가 막으려는 바로 그 상황인데
+    # 거기서 스택트레이스만 뱉으면 아무도 원인을 모른다. 사람이 읽을 수 있게 알려준다.
+    heads = script.get_heads()
+    if len(heads) > 1:
+        print(f"리비전 head가 {len(heads)}개입니다: {', '.join(heads)}\n"
+              "두 브랜치가 각자 마이그레이션을 만들었습니다 — 병합(alembic merge)이 먼저입니다.\n"
+              "이 상태로는 적용할 수 없습니다 (CONVENTIONS §7).", file=sys.stderr)
+        return 1
+    head = heads[0]
+
+    # engine은 app.db가 이미 APP_DATABASE_URL로 만들어 뒀다.
+    current = _current_revision(app_db.engine)
 
     print(f"대상 DB   : {app_db.engine.url.host}/{app_db.engine.url.database}")
     print(f"git 브랜치: {_current_branch()}   ← dev가 아니면 멈추세요 (CONVENTIONS §7)")
-    print(f"현재 리비전: {current}")
+    print(f"현재 리비전: {current or '(없음 — 신규 DB)'}")
     print(f"코드 head : {head}")
 
     if current == head:
         print("\n이미 최신입니다 — 적용할 게 없습니다.")
         return 0
 
-    pending = [s.revision for s in script.walk_revisions(base="base", head="heads")
-               if s.revision != current]
+    pending = _pending_revisions(script, current)
     print(f"\n적용 대기: {len(pending)}개 (아래→위 순서로 적용)")
-    for rev in reversed(pending):
+    for rev in pending:
         print(f"  - {rev}")
 
     if not args.apply:
