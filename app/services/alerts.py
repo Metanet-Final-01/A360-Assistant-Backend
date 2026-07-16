@@ -173,6 +173,50 @@ def check_daily_thresholds(now: datetime | None = None) -> list[str]:
     return sent
 
 
+def check_health(now: datetime | None = None) -> bool:
+    """`/health`가 정상이 아니면 알린다. 보냈으면 True.
+
+    ⚠️ **판정을 재구현하지 않는다** — `app.main.compute_health()`를 그대로 부른다. `/health`
+    엔드포인트가 쓰는 바로 그 함수다. 복사하면 반드시 갈린다(한쪽에 체크를 추가하고 다른 쪽을
+    잊으면 "/health는 degraded인데 알림은 조용"). 가드가 읽는 것 == 동작이 읽는 것.
+
+    ⚠️ **전이만 알린다.** 5분마다 도는데 degraded가 이어지면 하루 288개다 — notify()의
+    전이·쿨다운이 그걸 막는다.
+
+    🔴 **한계: 앱이 죽으면 이 잡도 죽는다.** 프로세스 다운·OOM·네트워크 단절은 **자기가 못
+    알린다**. 그건 앱 밖에서 봐야 한다(백오피스 프로브 — RPA-189 코멘트 참고). 여기가 잡는 건
+    "앱은 살아 있는데 의존성이 죽은" degraded/unhealthy다.
+    """
+    if not enabled():
+        return False
+    try:
+        from app.main import compute_health
+
+        result = compute_health()
+        status = result.get("status")
+        failed = [k for k, v in (result.get("checks") or {}).items() if v != "ok"]
+        firing = status != "healthy"
+
+        if firing:
+            title = f"백엔드 {status}"
+            text = ("• 실패한 의존성: " + ", ".join(failed) + "\n"
+                    + ("→ **앱 DB가 죽었습니다** — 서비스가 사실상 동작 불가입니다(503)."
+                       if status == "unhealthy" else
+                       "→ 본 기능은 살아 있으나 반쯤 죽은 상태입니다"
+                       "(관측 유실 또는 BM25 없이 dense 검색만)."))
+        else:
+            title, text = "백엔드 정상 복귀", "• 모든 의존성 ok"
+
+        return notify(
+            Alert(key="health:deps", title=title, text=text,
+                  severity="critical" if status == "unhealthy" else "warning"),
+            FIRING if firing else OK, now,
+        )
+    except Exception:  # noqa: BLE001 — 헬스 알림 실패가 스케줄러를 죽이면 안 된다
+        logger.warning("헬스 알림 판정 실패", exc_info=True)
+        return False
+
+
 def _obs_session():
     """관측 DB 세션 — 미설정이면 앱 DB로 폴백(observability_db가 알아서 한다)."""
     from app.core.observability_db import observability_sessionmaker

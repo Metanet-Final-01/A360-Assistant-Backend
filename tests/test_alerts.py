@@ -257,6 +257,98 @@ def test_recovery_below_threshold_notifies(sent, agg, monkeypatch):
     assert "복귀" in sent[1].title
 
 
+# --- 헬스 전이 알림 ---
+
+@pytest.fixture
+def health(monkeypatch):
+    """`/health` 판정 결과를 원하는 대로 세운다 (의존성을 실제로 찌르지 않는다)."""
+    def _set(status: str, **checks):
+        import app.main as main_mod
+        monkeypatch.setattr(main_mod, "compute_health",
+                            lambda: {"status": status, "checks": checks or {}})
+    return _set
+
+
+def test_health_degraded_alerts(sent, health):
+    """degraded로 **전이**하면 알린다 — 지금은 뒤집혀도 아무도 슬랙을 못 받는다."""
+    health("degraded", database="ok", observability_database="fail", opensearch="ok")
+
+    assert alerts.check_health(NOW) is True
+    assert "degraded" in sent[0].title
+    assert "observability_database" in sent[0].text, "어느 의존성이 죽었는지 없으면 대응을 못 한다"
+
+
+def test_health_unhealthy_is_critical(sent, health):
+    """앱 DB가 죽으면 critical — 서비스가 사실상 동작 불가다(503)."""
+    health("unhealthy", database="fail", observability_database="ok", opensearch="ok")
+
+    alerts.check_health(NOW)
+    assert sent[0].severity == "critical"
+
+
+def test_health_degraded_does_not_spam(sent, health):
+    """5분마다 도는데 degraded가 이어지면 하루 288개다 — 전이 때만 보낸다."""
+    health("degraded", database="ok", observability_database="fail", opensearch="ok")
+    for i in range(12):  # 1시간치
+        alerts.check_health(NOW + timedelta(minutes=5 * i))
+
+    assert len(sent) == 1, f"{len(sent)}번 보냈다 — 도배다"
+
+
+def test_health_recovery_notifies(sent, health):
+    """복귀도 알린다 — 사람이 끝난 걸 알아야 한다."""
+    health("degraded", database="ok", observability_database="fail", opensearch="ok")
+    alerts.check_health(NOW)
+    health("healthy", database="ok", observability_database="ok", opensearch="ok")
+    alerts.check_health(NOW + timedelta(minutes=5))
+
+    assert len(sent) == 2 and "복귀" in sent[1].title
+
+
+def test_health_healthy_from_start_is_silent(sent, health):
+    """처음부터 정상이면 조용 — 기동할 때마다 "정상입니다"는 소음이다."""
+    health("healthy", database="ok", observability_database="ok", opensearch="ok")
+
+    assert alerts.check_health(NOW) is False
+    assert sent == []
+
+
+def test_alert_and_endpoint_share_one_judge(sent, monkeypatch):
+    """알림과 `/health` 엔드포인트가 **같은 판정 함수**를 쓰는지 — 재구현 금지.
+
+    복사하면 반드시 갈린다 — 한쪽에 체크를 추가하고 다른 쪽을 잊으면 "/health는 degraded인데
+    알림은 조용"이 된다. 이 프로젝트에서 그 계열 버그를 여러 번 냈다(CONVENTIONS §9).
+
+    ⚠️ 처음엔 `inspect.getsource(...)`에서 "compute_health" **문자열**을 찾았다. 장식이었다 —
+       **docstring에 그 단어가 있어서** 판정 코드를 통째로 지워도 통과했다(prove_teeth.py가
+       잡았다). 언급이 아니라 **호출**을 봐야 한다. 그래서 하나를 가짜로 바꾸고 **양쪽이 다
+       그 가짜를 따라오는지** 본다.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+
+    calls = []
+
+    def _fake_judge():
+        calls.append(1)
+        return {"status": "degraded", "checks": {"opensearch": "fail"}, "observability_shared": False}
+
+    monkeypatch.setattr(main_mod, "compute_health", _fake_judge)
+
+    # ① 알림이 그 판정을 따르나
+    assert alerts.check_health(NOW) is True, "알림이 가짜 판정을 안 따랐다 — 재구현했다"
+    assert calls, "check_health가 compute_health를 안 불렀다"
+    assert "opensearch" in sent[0].text
+
+    # ② 엔드포인트도 같은 판정을 따르나
+    before = len(calls)
+    with TestClient(main_mod.app) as c:
+        r = c.get("/health")
+    assert r.json()["status"] == "degraded", "/health가 가짜 판정을 안 따랐다 — 판정이 둘이다"
+    assert len(calls) > before
+
+
 # --- fail-open: 알림이 서비스를 죽이면 안 된다 ---
 
 def test_slack_failure_does_not_raise(monkeypatch):

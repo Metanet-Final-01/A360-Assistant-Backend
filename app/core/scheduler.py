@@ -28,6 +28,18 @@ def _catchup_job() -> None:
     run_rollup(days_back=7)  # 시작 캐치업 — 꺼져 있던 날들의 공백 메움
 
 
+def _health_job() -> None:
+    """의존성 헬스를 찔러 전이 시 알린다 (RPA-189).
+
+    롤업(60분)에 얹지 않고 별도 잡을 둔 이유: **의존성이 죽은 걸 1시간 뒤에 알면 늦다.**
+    반대로 너무 잦으면 DB·OpenSearch를 쓸데없이 찌른다 — 기본 5분.
+    전이·쿨다운은 alerts가 하므로 여기서 도배 걱정은 없다.
+    """
+    from app.services import alerts
+
+    alerts.check_health()
+
+
 def start_scheduler() -> bool:
     """롤업 스케줄러를 켠다. 비활성/실패 시 False (앱 기동은 계속)."""
     global _scheduler
@@ -55,8 +67,19 @@ def start_scheduler() -> bool:
         _scheduler.add_job(_rollup_job, "interval", minutes=max(1, interval), id="metrics_rollup")
         # 시작 캐치업 — 서버가 꺼져 있던 날들의 집계 공백을 메운다 (별도 스레드, 기동 안 막음)
         _scheduler.add_job(_catchup_job, id="rollup_catchup")
+
+        # 헬스 감시 (RPA-189) — SLACK_WEBHOOK_URL 미설정이면 alerts가 no-op이라 기존 배포 무변화.
+        # 롤업(60분)과 분리한 이유는 _health_job docstring 참고(1시간 뒤에 알면 늦다).
+        try:
+            health_min = int(os.getenv("ALERT_HEALTH_INTERVAL_MINUTES", "5"))
+        except ValueError:
+            health_min = 5
+        _scheduler.add_job(
+            _health_job, "interval", minutes=max(1, health_min), id="health_watch")
+
         _scheduler.start()
-        logger.info("롤업 스케줄러 시작 (매 %d분, 시작 캐치업 7일)", interval)
+        logger.info("스케줄러 시작 (롤업 매 %d분 + 시작 캐치업 7일, 헬스 감시 매 %d분)",
+                    interval, health_min)
         return True
     except Exception:  # noqa: BLE001 — 스케줄러 실패가 앱 기동을 막으면 안 됨
         logger.warning("롤업 스케줄러 시작 실패 (앱은 계속)", exc_info=True)
