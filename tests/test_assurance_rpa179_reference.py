@@ -87,11 +87,12 @@ def test_reference_materializes_deterministically_and_covers_all_findings(
         (fake_home / ".gitconfig").write_text(
             "[core]\n\tautocrlf = true\n\tsafecrlf = true\n", encoding="utf-8"
         )
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setenv("USERPROFILE", str(fake_home))
-        materializer = load_materializer()
-        first_metadata = materializer.materialize(first)
-        second_metadata = materializer.materialize(second)
+        with monkeypatch.context() as git_config:
+            git_config.setenv("HOME", str(fake_home))
+            git_config.setenv("USERPROFILE", str(fake_home))
+            materializer = load_materializer()
+            first_metadata = materializer.materialize(first)
+            second_metadata = materializer.materialize(second)
 
         assert first_metadata["source_integrity"]["verified_files"] == 45
         assert first_metadata["corrected_tree"]["file_count"] == 52
