@@ -5,10 +5,15 @@
 않는다. CONVENTIONS §9가 "스텁/Fake로만 통과한 경로는 별도 live smoke가 필요하다"고 요구하는
 바로 그 구멍이다.
 
-**안전**: 여기가 쓰는 건 **앱 DB(각자 로컬 docker)** 뿐이다 — 공유 자원이 아니다. 게다가
-루트 `tests/conftest.py`의 autouse 픽스처가 관측 DB(Neon)·RAG 공유 인프라(Bonsai)를 이미
-격리하므로, 이 테스트들이 팀 공유 DB를 때리는 건 **구조적으로 불가능**하다. 그 격리를
-우회하지 말 것 — 2026-07-15에 live uvicorn(격리 없음)이 실제로 공유 Neon을 오염시켰다.
+**안전**: 루트 `tests/conftest.py`가 관측 DB(Neon)·RAG 공유 인프라(Bonsai)를 autouse 픽스처로,
+공유 앱 DB(`APP_DATABASE_URL`)를 **모듈 최상단 pop**으로 격리한다. 그 격리를 우회하지 말 것 —
+2026-07-15에 live uvicorn(격리 없음)이 실제로 공유 Neon을 오염시켰다.
+
+⚠️ 한때 여기 *"앱 DB는 각자 로컬 docker라 공유 자원이 아니다"*라고 적혀 있었다. **더는 사실이
+아니다** — RPA-186이 `APP_DATABASE_URL` 토글을 추가해 앱 DB도 공유일 수 있다. 지금 이 파일이
+안전한 이유는 "앱 DB가 로컬이라서"가 아니라 **루트 conftest가 그 env를 pop해서**다. 결론은
+같지만 이유가 다르다 — 아래 `_url()`이 조각 env로만 URL을 만드는 것도 그 격리에 기대고 있다.
+여기는 매 테스트 **TRUNCATE**를 하므로, 이 격리가 깨지면 팀 데이터가 통째로 날아간다.
 
 **작업 DB와 분리**: 개발자가 쓰던 `a360`이 아니라 전용 `a360_test`를 만들어 쓴다(TRUNCATE로
 매 테스트를 격리하므로, 작업 DB에 걸면 데이터가 날아간다).
@@ -50,7 +55,17 @@ _DOMAIN_TABLES = (
 
 
 def _url(dbname: str) -> str:
-    """app.db._database_url()과 같은 규칙, DB 이름만 갈아끼운다."""
+    """조각 env(DATABASE_*)로 URL을 만든다. DB 이름만 갈아끼운다.
+
+    ⚠️ `app.db._database_url()`과 **같지 않다** — 저쪽엔 `APP_DATABASE_URL`(공유 앱 DB) 분기가
+    있고 여기엔 없다(RPA-186). 일부러 그렇게 뒀다: 여기는 `a360_test`를 만들고 **TRUNCATE**
+    하므로 공유 DB를 가리키면 안 된다. 조각 env만 보면 공유 URL이 어떻게 설정돼 있든 여기로는
+    새지 않는다(루트 conftest의 pop과 이중 방어).
+
+    ⚠️ 그러므로 `mp.setenv("DATABASE_NAME", ...)`로 대상을 바꾸는 아래 관용구는 **`app.db`
+    쪽엔 안 통한다** — `APP_DATABASE_URL`이 있으면 그게 조각 env를 통째로 이기기 때문이다.
+    루트 conftest가 pop하니 pytest 안에선 문제없지만, 이 관용구를 다른 곳에 복사하지 말 것.
+    """
     host = os.getenv("DATABASE_HOST", "localhost")
     port = os.getenv("DATABASE_PORT", "5432")
     user = os.getenv("DATABASE_USERNAME", "a360_admin")

@@ -12,17 +12,25 @@ get_retriever` 참조는 그대로 두어도 최신 스텁을 받는다(get_retr
 
 import os
 
-# ⚠️ 이 두 줄은 **아래 import보다 먼저** 실행돼야 한다 (RPA-186). 순서를 바꾸지 말 것.
+# ⚠️ 이 줄은 **아래 import보다 먼저** 실행돼야 한다 (RPA-186). 순서를 바꾸지 말 것.
 #
 # 앱 DB는 관측·RAG DB와 달리 `app/db.py`가 **import 시점에 engine을 만든다**. 즉 .env에
 # APP_DATABASE_URL(공유 Neon)이 있으면 `app.db`가 import되는 순간 공유 DB에 커넥션이 열리고,
 # fixture로 env를 지워도 이미 늦다. 아래 `from app.agent...` import가 app.db를 끌고 오므로
-# 그 전에 env에서 뽑아내야 로컬 폴백으로 굳는다.
+# 그 전에 무력화해야 로컬 폴백으로 굳는다.
+#
+# ⚠️⚠️ **pop이 아니라 빈 문자열이어야 한다.** `app/db.py`는 import 시점에 `load_dotenv()`를
+# 부르는데, 그게 .env를 다시 읽어 **pop한 키를 되살린다**. 반면 load_dotenv(override=False,
+# 기본값)는 **이미 os.environ에 있는 키는 건드리지 않는다** — 빈 문자열도 "있는" 것이므로
+# 살아남고, `_database_url()`의 `.strip()`이 falsy로 보고 로컬 조각 env로 폴백한다.
+# (실측 2026-07-15: pop으로 짰다가 .env에 실제 URL이 들어온 순간 623개가 전부 원격을 봤다.
+#  셸 env로만 시험해서 통과했던 것 — 그땐 .env에 키가 없어 load_dotenv가 되살릴 게 없었다.)
 #
 # 왜 중요한가: 테스트 63개 중 45개가 TestClient로 실제 SessionLocal을 쓴다. 격리가 없으면
 # 매 pytest 실행이 팀 공유 DB에 세션·문서·추천을 쓴다 — 2026-07-15 관측 DB 오염(47행)의
 # 확대판이다. 아래 _assert_app_db_is_local이 이 메커니즘이 깨졌는지 **확인**한다(바라지 않고).
-_SHARED_APP_DB_URL = os.environ.pop("APP_DATABASE_URL", None)
+_SHARED_APP_DB_URL = os.environ.get("APP_DATABASE_URL")
+os.environ["APP_DATABASE_URL"] = ""
 
 import pytest
 

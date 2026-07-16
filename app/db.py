@@ -3,6 +3,7 @@
 로컬에서 5432 포트가 점유된 경우 .env의 DATABASE_PORT=5433을 사용한다 (docker-compose 참고).
 """
 
+import logging
 import os
 from urllib.parse import quote
 
@@ -11,6 +12,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_sqlalchemy_url(url: str) -> str:
@@ -60,11 +63,38 @@ def get_db():
         db.close()
 
 
-def run_migrations() -> None:
+def run_migrations(*, allow_shared: bool = False) -> None:
     """Alembic 마이그레이션을 head까지 적용한다 (스키마의 단일 진실 공급원).
 
     신규 DB는 전체 스키마가 생성되고, 최신 DB는 no-op이다. 앱 기동 시 호출한다.
+
+    ⚠️ **공유 앱 DB(APP_DATABASE_URL)에는 자동으로 적용하지 않는다** (RPA-186).
+
+    이건 함수 안에 둔다 — 호출부(main.py lifespan)에 두면 다른 호출자가 그냥 우회한다.
+
+    왜: 이 함수는 **앱 기동 때마다** 돈다(app/main.py). 공유 DB에서 그대로 두면 팀원이 자기
+    브랜치로 서버를 띄우는 것만으로 공유 스키마가 그 브랜치 head로 올라간다 — 아무도 "지금
+    올리겠다"고 결정하지 않았는데도. 그러면:
+      - 두 사람이 각자 리비전을 만들면 head가 둘 → `Multiple head revisions`로 전원 기동 불가
+      - NOT NULL 컬럼이 추가되면 그 컬럼을 모르는 팀원 코드의 INSERT가 깨진다
+      - 리뷰에서 까인 마이그레이션도 이미 공유 DB에 적용돼 되돌리기 어렵다
+
+    "스키마 작업 중엔 토글을 끈다"는 **규약만으로는 못 막는다** — 사람이 결정해서 실행하는
+    동작이 아니라 기동 시 자동으로 일어나기 때문이다. 그래서 코드로 강제한다.
+
+    공유 DB에 적용하는 건 `dev` 머지 후 **한 명이 명시적으로**:
+        python scripts/migrate_shared_db.py
+    (그 스크립트만 allow_shared=True로 부른다.)
     """
+    shared = os.getenv("APP_DATABASE_URL", "").strip()
+    if shared and not allow_shared:
+        logger.warning(
+            "공유 앱 DB(APP_DATABASE_URL)라 자동 마이그레이션을 건너뜁니다 — 스키마가 코드보다 "
+            "낡았다면 기동 후 쿼리에서 터집니다. dev 머지 후 한 명이 "
+            "`python scripts/migrate_shared_db.py`로 적용하세요 (RPA-186)."
+        )
+        return
+
     from pathlib import Path
 
     from alembic import command
