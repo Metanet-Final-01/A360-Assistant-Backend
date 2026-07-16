@@ -114,6 +114,31 @@ def _isolate_observability_db(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fast_lifespan(monkeypatch):
+    """`with TestClient(app)`(102곳)마다 도는 lifespan의 DB 왕복을 유닛 테스트에서 제거한다.
+
+    ⚠️ **함수 자체를 no-op하지 않는다** — run_migrations·backfill_seed_admins·
+       ensure_observability_schema·warmup_token_encoder 전부 직접 검증하는 테스트가 있어,
+       통째로 갈아끼우면 그 테스트들이 장식이 된다. **비용의 실체만** 죽인다:
+
+    - `alembic.command.upgrade` → no-op: 마이그레이션 적용(엔진 생성+리비전 조회)이 비용의
+      본체다. run_migrations의 **가드 로직(공유 DB 차단 등)은 그대로 돈다** — 이를 검증하는
+      테스트(test_app_db_shared_toggle)는 자기 monkeypatch로 upgrade를 다시 잡으므로 무관.
+    - `ADMIN_EMAILS=""`: backfill_seed_admins가 시드 없음 → early-return(DB 안 감).
+      부수 효과 차단도 겸한다 — .env에 시드가 있으면 테스트가 **로컬 users에 is_admin
+      UPDATE를 실제로 날린다**. 직접 검증(test_auth)은 자기 setenv로 다시 켠다.
+    - ensure_observability_schema는 손대지 않는다 — 관측 URL 격리("")로 이미 early-return.
+
+    통합 테스트는 무관: integration_engine(session 스코프)이 이 function 스코프 픽스처보다
+    **먼저** 실행돼 실제 마이그레이션을 탄다(pytest는 상위 스코프를 먼저 세운다).
+    """
+    import alembic.command
+
+    monkeypatch.setattr(alembic.command, "upgrade", lambda *a, **k: None)
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_slack_webhook(monkeypatch):
     """테스트가 **진짜 슬랙 채널**에 쏘지 못하게 격리한다 (RPA-189).
 
