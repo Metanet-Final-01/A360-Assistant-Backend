@@ -63,9 +63,15 @@ def main() -> int:
     ap.add_argument("--test", required=True, help="pytest 대상 (path 또는 path::test)")
     args = ap.parse_args()
 
-    path = ROOT / args.file
-    if not path.exists():
-        print(f"파일 없음: {path}", file=sys.stderr)
+    # ⚠️ 저장소 루트 밖 쓰기 금지 (CodeRabbit #263 3차). `ROOT / 절대경로`는 pathlib에서
+    #    **절대경로가 이긴다** — `--file C:/다른곳/x.py`나 `..` 탈출로 저장소 밖 파일을
+    #    변조·"복원"할 수 있다. 이 도구는 파일을 썼다 되돌리는 도구라 더 위험하다.
+    path = (ROOT / args.file).resolve()
+    if not path.is_relative_to(ROOT.resolve()):
+        print(f"🔴 저장소 밖 경로는 다루지 않는다: {args.file}", file=sys.stderr)
+        return 1
+    if not path.is_file():
+        print(f"파일 없음(또는 일반 파일 아님): {path}", file=sys.stderr)
         return 1
 
     # newline="" — 읽기에도 필요하다. 기본(universal newlines)으로 읽으면 CRLF가 \n으로 번역되고,
