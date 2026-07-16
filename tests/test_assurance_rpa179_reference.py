@@ -222,6 +222,8 @@ def test_repository_head_rejects_dirty_tree():
                 "user.name=RPA-179 Test",
                 "-c",
                 "user.email=rpa179-test@invalid.local",
+                "-c",
+                "commit.gpgSign=false",
                 "commit",
                 "--quiet",
                 "-m",
@@ -263,6 +265,11 @@ def test_materialize_writes_the_verified_bytes(monkeypatch: pytest.MonkeyPatch):
     try:
         with monkeypatch.context() as counted:
             counted.setattr(Path, "read_bytes", counted_read_bytes)
+            counted.setenv("GIT_DIR", "poison-git-dir")
+            counted.setenv("GIT_WORK_TREE", "poison-work-tree")
+            counted.setenv("GIT_CONFIG_COUNT", "1")
+            counted.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+            counted.setenv("GIT_CONFIG_VALUE_0", "poison-hooks")
             materializer.materialize(destination)
         assert set(reads) == expected
         assert set(reads.values()) == {1}
@@ -309,7 +316,11 @@ def test_git_commands_ignore_inherited_repository_selectors(monkeypatch: pytest.
         )
         (repository / "value.txt").write_text(value, encoding="utf-8")
         subprocess.run(["git", "add", "value.txt"], cwd=repository, check=True)
-        subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "fixture"],
+            cwd=repository,
+            check=True,
+        )
         return subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=repository,

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,6 +28,27 @@ HISTORICAL_REGRESSIONS = {
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def sanitized_git_environment() -> dict[str, str]:
+    """Remove inherited selectors that can redirect temporary Git operations."""
+    git_selectors = {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
+    env = os.environ.copy()
+    for key in tuple(env):
+        upper = key.upper()
+        if upper in git_selectors or upper.startswith("GIT_CONFIG_"):
+            env.pop(key, None)
+    return env
 
 
 def manifest_entries() -> list[tuple[str, Path]]:
@@ -125,9 +147,14 @@ def materialize(destination: Path) -> dict:
     # root-relative patch path. A disposable nested repository pins destination as
     # the patch root; its metadata is removed before the tree is measured.
     git_dir = destination / ".git"
+    git_env = sanitized_git_environment()
     try:
         init = subprocess.run(
-            ["git", "init", "--quiet"], cwd=destination, capture_output=True, text=True
+            ["git", "init", "--quiet"],
+            cwd=destination,
+            env=git_env,
+            capture_output=True,
+            text=True,
         )
         if init.returncode != 0:
             raise RuntimeError(f"temporary git init failed: {init.stderr.strip()[:400]}")
@@ -135,6 +162,7 @@ def materialize(destination: Path) -> dict:
             config = subprocess.run(
                 ["git", "config", "--local", key, "false"],
                 cwd=destination,
+                env=git_env,
                 capture_output=True,
                 text=True,
             )
@@ -148,7 +176,11 @@ def materialize(destination: Path) -> dict:
                 command.append("--check")
             command.append("-")
             result = subprocess.run(
-                command, cwd=destination, input=corrections_bytes, capture_output=True
+                command,
+                cwd=destination,
+                env=git_env,
+                input=corrections_bytes,
+                capture_output=True,
             )
             if result.returncode != 0:
                 detail = result.stderr.decode("utf-8", "replace").strip()[:400]
@@ -157,6 +189,7 @@ def materialize(destination: Path) -> dict:
         reverse_check = subprocess.run(
             ["git", "apply", "--reverse", "--check", "--whitespace=nowarn", "-"],
             cwd=destination,
+            env=git_env,
             input=corrections_bytes,
             capture_output=True,
         )

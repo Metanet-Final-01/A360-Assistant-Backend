@@ -397,6 +397,15 @@ def dynamic_import_alias():
     result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, direct_getattr)
     require(not result.ok and result.reason == "private_agent_import",
             "direct getattr import_module call escaped HL-06")
+    builtins_attribute = {
+        "app/api/builtins_attribute.py": (
+            "import builtins as runtime\n"
+            "runtime.__import__('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, builtins_attribute)
+    require(not result.ok and result.reason == "private_agent_import",
+            "builtins.__import__ escaped HL-06")
     relative = {
         "app/api/relative.py": (
             "import importlib\nimportlib.import_module('.verify', 'app.agent')\n"
@@ -471,6 +480,19 @@ def waiver_approval():
         )
         require(error is not None and "protected waiver approval" in error,
                 "unresolved waiver approval_ref was accepted")
+    with case_temp("rpa179-waiver-approval-id-") as td:
+        root = Path(td) / "policies"
+        shutil.copytree(SRC / "policies", root)
+        approval_path = root / "waiver-approvals" / "WA-1.yaml"
+        approval = yaml.safe_load(approval_path.read_text(encoding="utf-8"))
+        approval["approval_id"] = "WA-9"
+        approval_path.write_text(yaml.safe_dump(approval, sort_keys=False), encoding="utf-8")
+        error = rules._resolve_waiver(
+            core.ArtifactStore(root, cst.V), cst.REG, "WV-1", "CH-04", cst.SUBJECT,
+            cst.NOW, {"CH-08"}
+        )
+        require(error is not None and "protected waiver approval" in error,
+                "waiver approval filename/internal ID mismatch was accepted")
 
 
 @case("selfcheck_exit", "CR-16")
@@ -525,6 +547,18 @@ def policy_closed():
     policy = yaml.safe_load((SRC / "policies" / "operation-policy.yaml").read_text(encoding="utf-8"))
     policy["approval_typo"] = None
     require(validators_reject(cst.V["policy"], policy), "unknown top-level policy field passed")
+    with case_temp("rpa179-policy-approval-id-") as td:
+        root = Path(td) / "policies"
+        shutil.copytree(SRC / "policies_approved_fixture", root)
+        approval_path = root / "policy-approvals" / "PA-1.yaml"
+        approval = yaml.safe_load(approval_path.read_text(encoding="utf-8"))
+        approval["approval_id"] = "PA-9"
+        approval_path.write_text(yaml.safe_dump(approval, sort_keys=False), encoding="utf-8")
+        result = policy_version_fixture(
+            core.PolicyResolver(root, cst.V), core.ArtifactStore(root, cst.V)
+        )
+        require(not result.ok and result.reason == "agent_version_policy_approval_unresolved",
+                "policy approval filename/internal ID mismatch was accepted")
 
 
 @case("receipt_positive", "CR-25")

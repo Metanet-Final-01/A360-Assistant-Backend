@@ -364,7 +364,7 @@ index bd89ea0b8d01ec735eef0a674c8b8cedd913843b..2286005867a7604e3c941408bd1fa265
          python: 3.13.2
          os: Windows-11-10.0.26200-SP0
 diff --git a/core.py b/core.py
-index c0d6b479d5fd64edcf3b4a31b658095e86670591..f1a84cb3cb3f01e8d535a1669e591bca424cd726 100644
+index c0d6b479d5fd64edcf3b4a31b658095e86670591..28b017d23bd29c9c1e826a767e765ca072585b80 100644
 --- a/core.py
 +++ b/core.py
 @@ -18,9 +18,10 @@ Read-only. Never writes to the product tree.
@@ -690,37 +690,40 @@ index c0d6b479d5fd64edcf3b4a31b658095e86670591..f1a84cb3cb3f01e8d535a1669e591bca
          problems = []
          if claim.get("policy_id") != p["policy_id"]:
              problems.append(f"policy_id claimed={claim.get('policy_id')} actual={p['policy_id']}")
-@@ -338,8 +448,10 @@ class ArtifactStore:
+@@ -338,17 +448,26 @@ class ArtifactStore:
      root: Path
      validators: dict
  
 -    def _load(self, sub: str, ident: str, schema: str) -> Artifact | None:
 -        p = Path(self.root) / sub / f"{ident}.yaml"
-+    def _load(self, sub: str, ident: str, schema: str) -> Artifact | None:
++    def _load(self, sub: str, ident: str, schema: str, id_field: str) -> Artifact | None:
 +        if not isinstance(ident, str) or not re.fullmatch(r"[A-Z]{2,4}-[0-9]+", ident):
 +            return None
 +        p = Path(self.root) / sub / f"{ident}.yaml"
          if not p.is_file():
              return None
-         return Artifact.load(p, self.validators.get(schema))
-@@ -347,8 +459,14 @@ class ArtifactStore:
+-        return Artifact.load(p, self.validators.get(schema))
++        artifact = Artifact.load(p, self.validators.get(schema))
++        return artifact if artifact.obj.get(id_field) == ident else None
+ 
      def approval(self, ident: str) -> Artifact | None:
-         return self._load("approvals", ident, "approval")
+-        return self._load("approvals", ident, "approval")
++        return self._load("approvals", ident, "approval", "approval_id")
  
 -    def waiver(self, ident: str) -> Artifact | None:
 -        return self._load("waivers", ident, "waiver")
 +    def waiver(self, ident: str) -> Artifact | None:
-+        return self._load("waivers", ident, "waiver")
++        return self._load("waivers", ident, "waiver", "waiver_id")
 +
 +    def policy_approval(self, ident: str) -> Artifact | None:
-+        return self._load("policy-approvals", ident, "policy-approval")
++        return self._load("policy-approvals", ident, "policy-approval", "approval_id")
 +
 +    def waiver_approval(self, ident: str) -> Artifact | None:
-+        return self._load("waiver-approvals", ident, "waiver-approval")
++        return self._load("waiver-approvals", ident, "waiver-approval", "approval_id")
  
  
  # ----------------------------------------------------------------- rule registry (P0-7)
-@@ -402,7 +520,7 @@ def specified_only(rid: str, category: str, statement: str, governance: str):
+@@ -402,7 +521,7 @@ def specified_only(rid: str, category: str, statement: str, governance: str):
  
  # ------------------------------------------------- receipt identity (v1.7 review item 3)
  ATTESTOR_ID = "a360-phase0-attestor"
@@ -1071,7 +1074,7 @@ index de3024f2934b471042af35ba78b5dd7bf7c3d672..4b2fadc6aca40e2e7e2180ded03f0fb5
  reason: "compensating control never passes"
  compensating_control: CH-99
 diff --git a/rules.py b/rules.py
-index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f977feb23 100644
+index a2af0e2618d939794a66d585a954bcc603d151c1..ecd9a809227d3d919b004e66922f06798d74d480 100644
 --- a/rules.py
 +++ b/rules.py
 @@ -223,9 +223,9 @@ def hl12(ctx: TrustedContext, manifest_art: Artifact, report_art: Artifact, deri
@@ -1274,7 +1277,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
      """v1.5 P1-1: `from app import agent as x` + `getattr(x, "verify")` was accepted, and parse
      failures were treated as clean. v1.6 uses a closed rule: any binding of the `app.agent` package
      itself is rejected, so no alias can exist to call getattr on. Sources are read from the VERIFIED
-@@ -816,13 +883,95 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -816,13 +883,114 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
      bad: list = []
      indeterminate: list = []
  
@@ -1287,18 +1290,25 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
              return
 -        for node in ast.walk(tree):
 +        importlib_modules = {"importlib"}
++        builtins_modules = {"builtins"}
 +        dynamic_names = {"import_module", "__import__"}
 +        for node in ast.walk(tree):
 +            if isinstance(node, ast.Import):
 +                for alias in node.names:
 +                    if alias.name == "importlib":
 +                        importlib_modules.add(alias.asname or alias.name)
++                    elif alias.name == "builtins":
++                        builtins_modules.add(alias.asname or alias.name)
 +            elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
 +                for alias in node.names:
 +                    if alias.name == "import_module":
 +                        dynamic_names.add(alias.asname or alias.name)
++            elif isinstance(node, ast.ImportFrom) and node.module == "builtins":
++                for alias in node.names:
++                    if alias.name == "__import__":
++                        dynamic_names.add(alias.asname or alias.name)
 +
-+        def importlib_getattr_status(node):
++        def dynamic_getattr_status(node):
 +            if not (
 +                isinstance(node, ast.Call)
 +                and isinstance(node.func, ast.Name)
@@ -1308,7 +1318,9 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
 +            if not node.args:
 +                return None
 +            target = node.args[0]
-+            target_known = isinstance(target, ast.Name) and target.id in importlib_modules
++            importlib_known = isinstance(target, ast.Name) and target.id in importlib_modules
++            builtins_known = isinstance(target, ast.Name) and target.id in builtins_modules
++            target_known = importlib_known or builtins_known
 +            if len(node.args) < 2:
 +                return "indeterminate" if target_known else None
 +            attribute = node.args[1]
@@ -1320,8 +1332,9 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
 +            if target_known:
 +                if attribute_name is None:
 +                    return "indeterminate"
-+                return "dynamic" if attribute_name == "import_module" else None
-+            if attribute_name == "import_module":
++                expected = "import_module" if importlib_known else "__import__"
++                return "dynamic" if attribute_name == expected else None
++            if attribute_name in {"import_module", "__import__"}:
 +                return "indeterminate"
 +            return None
 +
@@ -1341,6 +1354,11 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
 +                            if name not in importlib_modules:
 +                                importlib_modules.add(name)
 +                                changed = True
++                    if node.value.id in builtins_modules:
++                        for name in target_names:
++                            if name not in builtins_modules:
++                                builtins_modules.add(name)
++                                changed = True
 +                    if node.value.id in dynamic_names:
 +                        for name in target_names:
 +                            if name not in dynamic_names:
@@ -1348,16 +1366,20 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
 +                                changed = True
 +                elif (
 +                    isinstance(node.value, ast.Attribute)
-+                    and node.value.attr == "import_module"
 +                    and isinstance(node.value.value, ast.Name)
-+                    and node.value.value.id in importlib_modules
++                    and (
++                        (node.value.attr == "import_module"
++                         and node.value.value.id in importlib_modules)
++                        or (node.value.attr == "__import__"
++                            and node.value.value.id in builtins_modules)
++                    )
 +                ):
 +                    for name in target_names:
 +                        if name not in dynamic_names:
 +                            dynamic_names.add(name)
 +                            changed = True
 +                else:
-+                    getattr_status = importlib_getattr_status(node.value)
++                    getattr_status = dynamic_getattr_status(node.value)
 +                    if getattr_status == "dynamic":
 +                        for name in target_names:
 +                            if name not in dynamic_names:
@@ -1365,14 +1387,14 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
 +                                changed = True
 +                    elif getattr_status == "indeterminate":
 +                        alias_indeterminate.add(
-+                            f"{rel} (computed importlib getattr alias)"
++                            f"{rel} (computed dynamic import getattr alias)"
 +                        )
 +        indeterminate.extend(sorted(alias_indeterminate))
 +        for node in ast.walk(tree):
              if isinstance(node, ast.ImportFrom) and node.module:
                  if node.module == "app.agent":
                      for a in node.names:
-@@ -844,17 +993,57 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -844,17 +1012,62 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
                      elif a.name == "app.agent":
                          bad.append(f"{rel}: import app.agent"
                                     f"{' as ' + a.asname if a.asname else ''} (package binding)")
@@ -1389,9 +1411,9 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
 -                            indeterminate.append(f"{rel} (computed import target)")
 +            elif isinstance(node, ast.Call):
 +                fn = node.func
-+                getattr_status = importlib_getattr_status(fn)
++                getattr_status = dynamic_getattr_status(fn)
 +                if getattr_status == "indeterminate":
-+                    indeterminate.append(f"{rel} (computed importlib getattr call)")
++                    indeterminate.append(f"{rel} (computed dynamic import getattr call)")
 +                    continue
 +                dynamic_call = (
 +                    isinstance(fn, ast.Name) and fn.id in dynamic_names
@@ -1400,6 +1422,11 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
 +                    and fn.attr == "import_module"
 +                    and isinstance(fn.value, ast.Name)
 +                    and fn.value.id in importlib_modules
++                ) or (
++                    isinstance(fn, ast.Attribute)
++                    and fn.attr == "__import__"
++                    and isinstance(fn.value, ast.Name)
++                    and fn.value.id in builtins_modules
 +                ) or getattr_status == "dynamic"
 +                if dynamic_call:
 +                    if not node.args:
@@ -1441,7 +1468,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..54274a0fc0d86bed2e1f3571ddeba15f
  
      for rel in reader.list_files():
          if not rel.endswith(".py") or rel.startswith("app/agent/") or rel.startswith("tests/"):
-@@ -874,7 +1063,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -874,7 +1087,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
          return RuleResult(False, f"indeterminate sources: {indeterminate[:5]}", "source_indeterminate")
      return (RuleResult(True, f"no private app.agent import outside app/agent/** "
                               f"(closed rule over verified objects)") if not bad
