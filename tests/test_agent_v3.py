@@ -9,6 +9,8 @@ import pytest
 
 from app.agent.v3.orchestrator import cards as cards_mod
 from app.agent.v3.orchestrator import edit_ops
+from app.agent.v3.recommend.graph import _coerce_flow, _recover_identity
+from app.schemas import Recommendation
 from app.agent.v3.orchestrator.harness import (
     attach_confidence,
     compute_flow_confidence,
@@ -224,6 +226,76 @@ def test_set_params_updates_var_refs():
     node = flow["steps"][0]["actions"][0]
     assert node["consumes"] == [{"name": "tData"}]
     assert node["produces"] == []
+
+
+def test_editop_coerces_string_action_spec():
+    """surgeon의 "패키지/액션" 문자열 슬립을 dict로 코얼스한다 (골드셋 평가 3회 실측 회귀).
+
+    검증 거부는 교정 라운드 통째 폐기로 이어지므로, 의도가 명백한 문자열은 살리고
+    패키지 불명 문자열만 None(무연산)으로 강등한다.
+    """
+    op = edit_ops.EditOp(op="insert", anchor="n1", position="after",
+                         action="Excel advanced/cloudExcelOpen")
+    assert op.action == {"package": "Excel advanced", "action": "cloudExcelOpen"}
+
+    # 패키지를 특정할 수 없는 축약 — 배치를 깨지 않고 해당 스펙만 무연산 강등
+    assert edit_ops.EditOp(op="insert", anchor="n1", action="messageBox").action is None
+
+    wrap = edit_ops.EditOp(
+        op="wrap", targets=["n1"], container="Error handler/errorHandlerTry",
+        siblings_after=["Error handler/errorHandlerCatch", "junk",
+                        {"package": "Error handler", "action": "errorHandlerFinally"}],
+    )
+    assert wrap.container == {"package": "Error handler", "action": "errorHandlerTry"}
+    assert wrap.siblings_after == [
+        {"package": "Error handler", "action": "errorHandlerCatch"},
+        {"package": "Error handler", "action": "errorHandlerFinally"},
+    ]
+
+
+def test_coerce_flow_recovers_null_action_nodes():
+    """null-action 노드(package는 살아있음)를 되살려 leaf 하나가 Recommendation 검증을
+    통째로 폭파(→빈 흐름도)시키는 회귀를 막는다 (정준환 실측 probe10: 깊은 If 중첩 8곳 null).
+
+    컨테이너 package는 canonical action으로 복원, 그 외는 Step 스캐폴드로 강등하되
+    label·children은 보존한다(자식의 실 액션 유실 방지). 정상 노드는 불변.
+    """
+    flow = {
+        "steps": [{
+            "step_id": "s1", "label": "정산",
+            "actions": [
+                _act("Loop", "cloudUsingLoopAction", children=[
+                    {"package": "If", "action": None, "label": "임계 초과 판정",
+                     "parameters": [], "children": [
+                         {"package": "Excel advanced", "action": None, "label": "값 기록",
+                          "parameters": [], "children": []},
+                     ]},
+                    {"package": None, "action": None, "label": "빈 껍데기",
+                     "parameters": [], "children": []},
+                ]),
+            ],
+        }],
+        "variables": [],
+    }
+    # 이전엔 여기서 ValidationError → 상위 폴백도 실패 → steps=[] 붕괴였다.
+    rec = Recommendation.model_validate(_coerce_flow(flow))
+
+    loop = rec.steps[0].actions[0]
+    assert (loop.package, loop.action) == ("Loop", "cloudUsingLoopAction")  # 정상 노드 불변
+    if_node = loop.children[0]
+    assert (if_node.package, if_node.action) == ("If", "if")               # 컨테이너 canonical 복원
+    assert if_node.label == "임계 초과 판정"                                  # label 보존
+    biz = if_node.children[0]
+    assert (biz.package, biz.action) == ("Step", "stepAction")             # 비컨테이너 → Step 바닥
+    assert biz.label == "값 기록"                                            # label 보존
+    assert (loop.children[1].package, loop.children[1].action) == ("Step", "stepAction")  # null/null
+
+
+def test_recover_identity_leaves_valid_nodes_untouched():
+    """package·action이 모두 채워진 정상 노드는 절대 건드리지 않는다."""
+    a = {"package": "Excel advanced", "action": "cloudExcelOpen", "label": "열기"}
+    _recover_identity(a)
+    assert (a["package"], a["action"]) == ("Excel advanced", "cloudExcelOpen")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
