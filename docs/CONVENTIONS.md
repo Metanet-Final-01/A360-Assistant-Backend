@@ -159,13 +159,21 @@ python scripts/migrate_shared_db.py --apply  # 적용 후 팀에 공지
 
 격리는 **메커니즘 + 검증**을 쌍으로 둔다. 메커니즘만 있으면 조용히 깨진다(실제로 2회 겪음).
 
-- **pytest**: `tests/conftest.py`가 import **전에** `APP_DATABASE_URL`을 제거하고,
+- **pytest**: `tests/conftest.py`가 import **전에** `APP_DATABASE_URL`을 **빈 문자열로 덮어쓰고**,
   `_assert_app_db_is_local`이 engine이 정말 로컬인지 fail-closed로 확인한다.
+  ⚠️ **`pop`(제거)이면 안 된다.** `app/db.py`가 import 시점에 `load_dotenv()`를 부르는데, 그게
+  `.env`에서 **지운 키를 되살린다**. `load_dotenv(override=False, 기본)`는 이미 os.environ에
+  있는 키를 안 건드리므로 **빈 문자열은 살아남는다**. (실제로 `pop`으로 짰다가 `.env`에 URL이
+  들어온 순간 623개가 전부 원격을 봤다 — 셸 env로만 시험해 통과했던 것.)
   ⚠️ 앱 DB는 `app/db.py`가 **import 시점에 engine을 만든다** — 관측·RAG처럼 fixture에서
   `delenv` 하는 방식은 **통하지 않는다**(이미 커넥션이 열린 뒤다).
+- **통합 테스트**: `tests/integration/conftest.py`는 자기 엔진을 따로 만들어 매 테스트 TRUNCATE
+  하므로 루트 가드 밖이다 → `_assert_local_target()`이 대상 host가 로컬인지 따로 확인한다.
+  (`_test` 접미사 강제는 DB '이름'만 막고 '호스트'는 못 막는다.)
 - **live 기동**: `manage.ps1`이 `scripts/check_smoke_isolation.py`로 검사한다.
-  env가 아니라 **`engine.url.host`를 본다** — "env가 비었다"와 "engine이 로컬을 본다"는
-  다른 명제이고, 물어야 할 건 후자다.
+
+세 가드 모두 env가 아니라 **실제 URL의 host**를 본다 — *"env가 비었다"*와 *"engine이 로컬을
+본다"*는 다른 명제이고, 물어야 할 건 후자다.
 
 가드를 추가·수정하면 **고의로 깨뜨려 빨간불을 확인**할 것. 안 깨지면 그건 가드가 아니다
 (2026-07-15: `load_dotenv` 미실행으로 **항상 LOCAL이라 답하던 가짜 가드**를 실제로 잡았다).

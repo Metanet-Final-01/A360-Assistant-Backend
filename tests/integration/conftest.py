@@ -6,8 +6,11 @@
 바로 그 구멍이다.
 
 **안전**: 루트 `tests/conftest.py`가 관측 DB(Neon)·RAG 공유 인프라(Bonsai)를 autouse 픽스처로,
-공유 앱 DB(`APP_DATABASE_URL`)를 **모듈 최상단 pop**으로 격리한다. 그 격리를 우회하지 말 것 —
+공유 앱 DB(`APP_DATABASE_URL`)를 **모듈 최상단에서 빈 문자열로 덮어써** 격리한다(`pop`이 아니다 —
+`app/db.py`의 `load_dotenv()`가 pop한 키를 .env에서 되살린다). 그 격리를 우회하지 말 것 —
 2026-07-15에 live uvicorn(격리 없음)이 실제로 공유 Neon을 오염시켰다.
+여기서 만드는 `integration_engine`은 루트 가드(`app.db.engine`만 봄) 밖이라 `_assert_local_target()`이
+따로 지킨다 — 매 테스트 TRUNCATE가 걸린 대상이다.
 
 ⚠️ 한때 여기 *"앱 DB는 각자 로컬 docker라 공유 자원이 아니다"*라고 적혀 있었다. **더는 사실이
 아니다** — RPA-186이 `APP_DATABASE_URL` 토글을 추가해 앱 DB도 공유일 수 있다. 지금 이 파일이
@@ -31,6 +34,7 @@ from urllib.parse import quote
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
@@ -74,9 +78,34 @@ def _url(dbname: str) -> str:
             f"@{host}:{port}/{dbname}")
 
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
+
+
+def _assert_local_target() -> None:
+    """대상이 **로컬**인지 확인한다 — 아니면 즉시 실패 (CodeRabbit #258).
+
+    `_url()`은 `APP_DATABASE_URL`만 안 볼 뿐 `DATABASE_HOST`는 그대로 쓴다. 루트 conftest의
+    가드는 `app.db.engine`만 보고 여기서 따로 만드는 엔진은 안 본다 — 즉 `DATABASE_HOST`가
+    원격을 가리키면 **원격에 DB를 만들고 TRUNCATE한다**. `_test` 접미사 강제는 DB '이름'만
+    막을 뿐 '호스트'는 못 막는다.
+
+    env가 아니라 **실제로 쓸 URL의 host**를 본다 — "env가 로컬처럼 생겼다"와 "붙을 곳이
+    로컬이다"는 다른 명제이고, 물어야 할 건 후자다.
+    """
+    host = (make_url(_url(TEST_DB_NAME)).host or "").lower()
+    if host not in _LOCAL_HOSTS:
+        raise RuntimeError(
+            f"통합 테스트 대상이 원격입니다 (DATABASE_HOST={host}). 이 스위트는 매 테스트마다 "
+            f"'{TEST_DB_NAME}'의 테이블을 TRUNCATE합니다 — 원격/공유 DB면 데이터가 날아갑니다. "
+            f"DATABASE_HOST를 로컬로 두세요."
+        )
+
+
 @pytest.fixture(scope="session")
 def integration_engine():
     """전용 테스트 DB를 만들고 마이그레이션을 적용한 엔진. 없으면 스위트를 skip한다."""
+    _assert_local_target()  # TRUNCATE 대상이 로컬인지 먼저 — skip보다 앞이다(원격이면 조용히 넘어가면 안 됨)
+
     # 1) maintenance DB로 붙어 테스트 DB를 만든다 (CREATE DATABASE는 트랜잭션 밖이라 AUTOCOMMIT)
     try:
         admin = create_engine(_url("postgres"), isolation_level="AUTOCOMMIT", pool_pre_ping=True)
