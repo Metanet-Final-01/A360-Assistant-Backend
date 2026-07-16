@@ -1071,7 +1071,7 @@ index de3024f2934b471042af35ba78b5dd7bf7c3d672..4b2fadc6aca40e2e7e2180ded03f0fb5
  reason: "compensating control never passes"
  compensating_control: CH-99
 diff --git a/rules.py b/rules.py
-index a2af0e2618d939794a66d585a954bcc603d151c1..85181add9a2ec472e8be976c1cdf112e788e4ab9 100644
+index a2af0e2618d939794a66d585a954bcc603d151c1..52489ff2857e772ea7b6016a70020b249eaf24b6 100644
 --- a/rules.py
 +++ b/rules.py
 @@ -223,9 +223,9 @@ def hl12(ctx: TrustedContext, manifest_art: Artifact, report_art: Artifact, deri
@@ -1274,7 +1274,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..85181add9a2ec472e8be976c1cdf112e
      """v1.5 P1-1: `from app import agent as x` + `getattr(x, "verify")` was accepted, and parse
      failures were treated as clean. v1.6 uses a closed rule: any binding of the `app.agent` package
      itself is rejected, so no alias can exist to call getattr on. Sources are read from the VERIFIED
-@@ -816,13 +883,43 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -816,13 +883,54 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
      bad: list = []
      indeterminate: list = []
  
@@ -1301,17 +1301,28 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..85181add9a2ec472e8be976c1cdf112e
 +        while changed:
 +            changed = False
 +            for node in ast.walk(tree):
-+                if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
++                if not isinstance(node, ast.Assign):
 +                    continue
 +                target_names = [
 +                    target.id for target in node.targets if isinstance(target, ast.Name)
 +                ]
-+                if node.value.id in importlib_modules:
-+                    for name in target_names:
-+                        if name not in importlib_modules:
-+                            importlib_modules.add(name)
-+                            changed = True
-+                if node.value.id in dynamic_names:
++                if isinstance(node.value, ast.Name):
++                    if node.value.id in importlib_modules:
++                        for name in target_names:
++                            if name not in importlib_modules:
++                                importlib_modules.add(name)
++                                changed = True
++                    if node.value.id in dynamic_names:
++                        for name in target_names:
++                            if name not in dynamic_names:
++                                dynamic_names.add(name)
++                                changed = True
++                elif (
++                    isinstance(node.value, ast.Attribute)
++                    and node.value.attr == "import_module"
++                    and isinstance(node.value.value, ast.Name)
++                    and node.value.value.id in importlib_modules
++                ):
 +                    for name in target_names:
 +                        if name not in dynamic_names:
 +                            dynamic_names.add(name)
@@ -1320,7 +1331,7 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..85181add9a2ec472e8be976c1cdf112e
              if isinstance(node, ast.ImportFrom) and node.module:
                  if node.module == "app.agent":
                      for a in node.names:
-@@ -844,17 +941,26 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -844,17 +952,53 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
                      elif a.name == "app.agent":
                          bad.append(f"{rel}: import app.agent"
                                     f"{' as ' + a.asname if a.asname else ''} (package binding)")
@@ -1351,14 +1362,41 @@ index a2af0e2618d939794a66d585a954bcc603d151c1..85181add9a2ec472e8be976c1cdf112e
 +                        continue
 +                    arg = node.args[0]
 +                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-+                        if arg.value == "app.agent" or arg.value.startswith("app.agent."):
-+                            bad.append(f"{rel}: dynamic import of {arg.value}")
++                        target = arg.value
++                        if target.startswith("."):
++                            if len(node.args) < 2:
++                                indeterminate.append(
++                                    f"{rel} (relative dynamic import without a package)"
++                                )
++                                continue
++                            package_arg = node.args[1]
++                            if not (
++                                isinstance(package_arg, ast.Constant)
++                                and isinstance(package_arg.value, str)
++                                and package_arg.value
++                            ):
++                                indeterminate.append(
++                                    f"{rel} (relative dynamic import with a computed package)"
++                                )
++                                continue
++                            level = len(target) - len(target.lstrip("."))
++                            package_parts = package_arg.value.split(".")
++                            if level > len(package_parts) or any(not part for part in package_parts):
++                                indeterminate.append(f"{rel} (invalid relative dynamic import)")
++                                continue
++                            suffix = target[level:]
++                            resolved_parts = package_parts[:len(package_parts) - level + 1]
++                            if suffix:
++                                resolved_parts.append(suffix)
++                            target = ".".join(resolved_parts)
++                        if target == "app.agent" or target.startswith("app.agent."):
++                            bad.append(f"{rel}: dynamic import of {target}")
 +                    else:
 +                        indeterminate.append(f"{rel} (computed import target)")
  
      for rel in reader.list_files():
          if not rel.endswith(".py") or rel.startswith("app/agent/") or rel.startswith("tests/"):
-@@ -874,7 +980,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+@@ -874,7 +1018,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
          return RuleResult(False, f"indeterminate sources: {indeterminate[:5]}", "source_indeterminate")
      return (RuleResult(True, f"no private app.agent import outside app/agent/** "
                               f"(closed rule over verified objects)") if not bad

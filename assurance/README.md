@@ -80,7 +80,11 @@ assurance/
    ├─ finding-matrix.yaml            # 검토 28건과 회귀 case 연결
    ├─ materialize.py                 # 무결성 확인 후 임시 교정본 조립
    ├─ regression.py                  # 실행 대상 25건 회귀
-   └─ verify.py                      # 독립 조립·실행 2회 결정론 검증
+   ├─ verify.py                      # 독립 조립·실행 2회 결정론 검증
+   ├─ verification-result.schema.json # 검증 evidence의 정확한 계약
+   └─ evidence/
+      ├─ verification.json           # 마지막 독립 검증 결과
+      └─ verification.sha256         # 결과 파일의 sha256 sidecar
 ```
 
 ## 판정 언어

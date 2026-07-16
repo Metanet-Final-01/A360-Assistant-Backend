@@ -41,7 +41,11 @@ def load_verifier():
 def run_regression(source: Path, output: Path) -> dict:
     env = os.environ.copy()
     for key in tuple(env):
-        if key.startswith("COV_CORE_") or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}:
+        if (
+            key.upper().startswith("PYTHON")
+            or key.startswith("COV_CORE_")
+            or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}
+        ):
             env.pop(key, None)
     env.update({
         "A360_HARNESS_OUT": str(output / "generated"),
@@ -49,6 +53,7 @@ def run_regression(source: Path, output: Path) -> dict:
         "GIT_COMMITTER_DATE": "2026-07-15T00:00:00Z",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1",
     })
     report = output / "regression.json"
     result = subprocess.run(
@@ -100,8 +105,21 @@ def test_reference_materializes_deterministically_and_covers_all_findings(
         assert not (first / ".git").exists()
         assert not (second / ".git").exists()
 
-        first_report = run_regression(first, test_root / "first")
-        second_report = run_regression(second, test_root / "second")
+        poison = test_root / "poison"
+        poison_home = test_root / "poison-home"
+        poison.mkdir()
+        poison_home.mkdir()
+        marker = test_root / "sitecustomize-loaded"
+        (poison / "sitecustomize.py").write_text(
+            f"from pathlib import Path\nPath({str(marker)!r}).write_text('loaded')\n",
+            encoding="utf-8",
+        )
+        with monkeypatch.context() as poisoned:
+            poisoned.setenv("PYTHONPATH", str(poison))
+            poisoned.setenv("PYTHONHOME", str(poison_home))
+            first_report = run_regression(first, test_root / "first")
+            second_report = run_regression(second, test_root / "second")
+        assert not marker.exists()
         assert first_report == second_report
         assert first_report["coverage_complete"] is True
         assert len(first_report["actionable_findings"]) == 25
@@ -132,11 +150,30 @@ def test_evidence_schema_rejects_incomplete_composition():
     )
     mutations.append(duplicate_command)
 
+    mismatched_command_payload = copy.deepcopy(evidence)
+    first_command = mismatched_command_payload["runs"][0]["commands"][0]
+    second_command = mismatched_command_payload["runs"][0]["commands"][1]
+    first_command["argv"], second_command["argv"] = second_command["argv"], first_command["argv"]
+    first_command["markers"], second_command["markers"] = (
+        second_command["markers"],
+        first_command["markers"],
+    )
+    mutations.append(mismatched_command_payload)
+
     duplicate_case = copy.deepcopy(evidence)
     duplicate_case["regression"]["cases"][-1] = copy.deepcopy(
         duplicate_case["regression"]["cases"][0]
     )
     mutations.append(duplicate_case)
+
+    mismatched_case_payload = copy.deepcopy(evidence)
+    first_case = mismatched_case_payload["regression"]["cases"][0]
+    second_case = mismatched_case_payload["regression"]["cases"][2]
+    first_case["findings"], second_case["findings"] = (
+        second_case["findings"],
+        first_case["findings"],
+    )
+    mutations.append(mismatched_case_payload)
 
     divergent_findings = copy.deepcopy(evidence)
     divergent_findings["regression"]["covered_findings"][-1] = "CR-22"
@@ -178,6 +215,47 @@ def test_repository_head_rejects_dirty_tree():
             verifier.repository_head(repository)
     finally:
         shutil.rmtree(repository, ignore_errors=True)
+
+
+def test_materialize_writes_the_verified_bytes(monkeypatch: pytest.MonkeyPatch):
+    materializer = load_materializer()
+    destination = REPO / ".rpa179-test" / f"bytes-{os.getpid():x}-{secrets.token_hex(3)}"
+    expected = {relative.as_posix() for _, relative in materializer.manifest_entries()}
+    reads: dict[str, int] = {}
+    real_read_bytes = Path.read_bytes
+
+    def counted_read_bytes(path: Path) -> bytes:
+        try:
+            relative = path.relative_to(materializer.FROZEN).as_posix()
+        except ValueError:
+            pass
+        else:
+            if path != materializer.BASE_MANIFEST:
+                reads[relative] = reads.get(relative, 0) + 1
+        return real_read_bytes(path)
+
+    try:
+        with monkeypatch.context() as counted:
+            counted.setattr(Path, "read_bytes", counted_read_bytes)
+            materializer.materialize(destination)
+        assert set(reads) == expected
+        assert set(reads.values()) == {1}
+    finally:
+        shutil.rmtree(destination, ignore_errors=True)
+
+
+def test_verifier_strips_inherited_python_environment(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as poisoned:
+        poisoned.setenv("PYTHONPATH", "poison-path")
+        poisoned.setenv("PYTHONHOME", "poison-home")
+        poisoned.setenv("PYTHONWARNINGS", "error")
+        verifier = load_verifier()
+        env = verifier.command_environment(REFERENCE, REFERENCE / ".work" / "env-test")
+
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert "PYTHONWARNINGS" not in env
+    assert env["PYTHONNOUSERSITE"] == "1"
 
 
 def test_materialize_failure_can_retry(monkeypatch: pytest.MonkeyPatch):

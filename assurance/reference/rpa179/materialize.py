@@ -30,7 +30,8 @@ def sha256(path: Path) -> str:
 
 
 def manifest_entries() -> list[tuple[str, Path]]:
-    actual_manifest = sha256(BASE_MANIFEST)
+    manifest_bytes = BASE_MANIFEST.read_bytes()
+    actual_manifest = hashlib.sha256(manifest_bytes).hexdigest()
     if actual_manifest != EXPECTED_BASE_MANIFEST_SHA256:
         raise RuntimeError(
             "frozen manifest digest changed: "
@@ -38,7 +39,7 @@ def manifest_entries() -> list[tuple[str, Path]]:
         )
     entries = []
     seen = set()
-    for line in BASE_MANIFEST.read_text(encoding="utf-8").splitlines():
+    for line in manifest_bytes.decode("utf-8").splitlines():
         if not line or line.startswith("#"):
             continue
         digest, token = line.split(maxsplit=1)
@@ -60,20 +61,34 @@ def manifest_entries() -> list[tuple[str, Path]]:
     return entries
 
 
-def verify_frozen() -> dict:
+def read_verified_frozen() -> tuple[dict, tuple[tuple[Path, bytes], ...]]:
     entries = manifest_entries()
     failures = []
+    verified = []
     for expected, relative in entries:
         path = FROZEN / relative
-        actual = sha256(path) if path.is_file() else "missing"
+        try:
+            payload = path.read_bytes()
+            actual = hashlib.sha256(payload).hexdigest()
+        except OSError as exc:
+            payload = b""
+            actual = f"unreadable:{type(exc).__name__}"
         if actual != expected:
             failures.append({"path": relative.as_posix(), "expected": expected, "actual": actual})
+        else:
+            verified.append((relative, payload))
     if failures:
         raise RuntimeError(f"frozen v1.10 integrity failed: {failures[:3]}")
-    return {
+    metadata = {
         "verified_files": len(entries),
-        "manifest_sha256": "sha256:" + sha256(BASE_MANIFEST),
+        "manifest_sha256": "sha256:" + EXPECTED_BASE_MANIFEST_SHA256,
     }
+    return metadata, tuple(verified)
+
+
+def verify_frozen() -> dict:
+    metadata, _ = read_verified_frozen()
+    return metadata
 
 
 def corrected_tree(destination: Path) -> dict:
@@ -92,18 +107,17 @@ def corrected_tree(destination: Path) -> dict:
 
 
 def materialize(destination: Path) -> dict:
-    frozen = verify_frozen()
+    frozen, frozen_files = read_verified_frozen()
     if destination.exists() and any(destination.iterdir()):
         raise RuntimeError(f"destination must not exist or must be empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
 
-    for _, relative in manifest_entries():
+    for relative, payload in frozen_files:
         if relative.name in HISTORICAL_REGRESSIONS:
             continue
-        source = FROZEN / relative
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
+        target.write_bytes(payload)
 
     # A destination below another worktree makes `git apply` silently filter every
     # root-relative patch path. A disposable nested repository pins destination as

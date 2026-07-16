@@ -40,16 +40,21 @@ def canonical_digest(value: object) -> str:
     return digest_bytes(raw)
 
 
-def without_coverage_environment(env: dict[str, str]) -> dict[str, str]:
-    """Keep fixture subprocesses out of a parent pytest-cov data session."""
+def isolated_python_environment(env: dict[str, str]) -> dict[str, str]:
+    """Remove inherited Python and coverage hooks before a fixture subprocess."""
     for key in tuple(env):
-        if key.startswith("COV_CORE_") or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}:
+        if (
+            key.upper().startswith("PYTHON")
+            or key.startswith("COV_CORE_")
+            or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}
+        ):
             env.pop(key, None)
+    env["PYTHONNOUSERSITE"] = "1"
     return env
 
 
 def command_environment(source: Path, output: Path) -> dict[str, str]:
-    env = without_coverage_environment(os.environ.copy())
+    env = isolated_python_environment(os.environ.copy())
     env.update({
         "A360_HARNESS_OUT": str(output),
         "A360_TEST_SUBJECT_REPO": str(source),

@@ -43,11 +43,16 @@ def require(condition: bool, detail: str) -> None:
         raise AssertionError(detail)
 
 
-def without_coverage_environment(env: dict[str, str]) -> dict[str, str]:
-    """Do not let nested fixture processes join a parent pytest-cov run."""
+def isolated_python_environment(env: dict[str, str]) -> dict[str, str]:
+    """Remove inherited Python and coverage hooks before a fixture subprocess."""
     for key in tuple(env):
-        if key.startswith("COV_CORE_") or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}:
+        if (
+            key.upper().startswith("PYTHON")
+            or key.startswith("COV_CORE_")
+            or key in {"COVERAGE_FILE", "COVERAGE_PROCESS_START"}
+        ):
             env.pop(key, None)
+    env["PYTHONNOUSERSITE"] = "1"
     return env
 
 
@@ -321,6 +326,30 @@ def dynamic_import_alias():
     result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, rebound)
     require(not result.ok and result.reason == "private_agent_import",
             "rebound importlib module escaped HL-06")
+    callable_alias = {
+        "app/api/callable_alias.py": (
+            "import importlib\nload = importlib.import_module\nload('app.agent.verify')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, callable_alias)
+    require(not result.ok and result.reason == "private_agent_import",
+            "import_module callable alias escaped HL-06")
+    relative = {
+        "app/api/relative.py": (
+            "import importlib\nimportlib.import_module('.verify', 'app.agent')\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, relative)
+    require(not result.ok and result.reason == "private_agent_import",
+            "relative private Agent import escaped HL-06")
+    computed_package = {
+        "app/api/computed_package.py": (
+            "import importlib\nimportlib.import_module('.verify', package)\n"
+        )
+    }
+    result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, computed_package)
+    require(not result.ok and result.reason == "source_indeterminate",
+            "computed relative import package did not fail closed")
     computed = {"app/api/computed.py": "from importlib import import_module as load\nload(target)\n"}
     result = rules.hl06(cst._EmptyReader(), cst.PUBLIC, computed)
     require(not result.ok and result.reason == "source_indeterminate", "computed import did not fail closed")
@@ -384,7 +413,7 @@ def waiver_approval():
 @case("selfcheck_exit", "CR-16")
 def selfcheck_exit():
     with case_temp("rpa179-selfcheck-") as td:
-        env = without_coverage_environment(os.environ.copy())
+        env = isolated_python_environment(os.environ.copy())
         env["A360_HARNESS_OUT"] = str(Path(td) / "generated")
         result = subprocess.run(
             [sys.executable, "-B", "selfattack.py"], cwd=SRC, env=env,
