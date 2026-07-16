@@ -85,6 +85,15 @@ def run_migrations(*, allow_shared: bool = False) -> None:
     공유 DB에 적용하는 건 `dev` 머지 후 **한 명이 명시적으로**:
         python scripts/migrate_shared_db.py
     (그 스크립트만 allow_shared=True로 부른다.)
+
+    ⚠️ 아래 가드와 마이그레이션 **대상**(_database_url())은 **둘 다 호출 시점** env를 읽는다 —
+       의도한 것이고, 그래서 서로 항상 일치한다. 모듈 전역 `engine`(import 시점 고정)과는
+       갈릴 수 있지만 이 함수는 engine을 쓰지 않는다. 이 성질에 통합 테스트가 의존한다:
+       `mp.setenv("DATABASE_NAME", "a360_test")` 후 호출하면 그 DB로 간다(tests/integration).
+
+    ⚠️ "공유"의 판정을 host 기반(원격이면 차단)으로 바꾸지 말 것 — **프로덕션 RDS도 원격**이라
+       배포 시 마이그레이션이 막힌다. "원격"과 "팀 공유 개발 DB"는 다르고, 후자를 가리키는 건
+       APP_DATABASE_URL뿐이다. (프로덕션은 DATABASE_* 조각을 쓰고 이 값을 설정하지 않는다.)
     """
     shared = os.getenv("APP_DATABASE_URL", "").strip()
     if shared and not allow_shared:
