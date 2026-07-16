@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "c99260d739eca37ae53cb6d8997c6d1a71615534",
+  "baseline_commit": "135c7548bce8922a95c52632d94bade249ae058c",
   "determinism": {
     "regression_equal": true,
     "transcripts_equal": true,
@@ -26,14 +26,14 @@
   ],
   "reference": {
     "corrected_file_count": 52,
-    "corrected_tree_digest": "sha256:95a1b42ca6d24a1a38b7670af0727cbbb176308cac852d654cee1d1f200408d8",
-    "corrections_sha256": "sha256:faeae79f9d7daca2e4d41e379579d4f2b7f62212d902840791e0af5b3d6f292b",
+    "corrected_tree_digest": "sha256:21a28a51bab4ace5074af4cb778b88452786c23ee737c3f43689e72e4b5b99c1",
+    "corrections_sha256": "sha256:170cddc6e9b014dbff9fae4190f7b328e9bc196c9c295fab8d95561e1beddfbe",
     "finding_matrix_sha256": "sha256:0dfaaa6dd43fd4b709574963cf2fbfd2907757494cee0ca838867d999fe8c661",
     "source": "assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src",
     "source_manifest_sha256": "sha256:d0ad43c2a705d0522cba8e287b31fe040c953bb2ba89a5d3d9788cc0b07a666f",
     "verification_tools": {
-      "materialize.py": "sha256:79c5cd60726be1764eb906c9f096044085048bb994b4a67e8cb2aa2e7ced0d8e",
-      "regression.py": "sha256:9ac40f78b255432c53987ce5c846bdba096ada9c98f8b23edc43f6f99fbf6293",
+      "materialize.py": "sha256:c584ab14565920950762bd304941c59d3db91c008893e1d0b9524235ab4bfb5c",
+      "regression.py": "sha256:7c91980ef9f30ac903b49a02d68269721307818fcfb24fa00aaf203b391d9c60",
       "verification-result.schema.json": "sha256:a77464230ece73b508684ab97c82af528cb07d8582f08ebecd4a52eacb90c1f8",
       "verify.py": "sha256:74d2b6d80ce779c26596c20557f1772ed5f2fa21c287b9ec45b5a18cc79eaf9a"
     },
@@ -319,7 +319,7 @@
           "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
           "passed": true,
           "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "stdout_sha256": "sha256:428c1dedcb1b11bb3cc561ad9fd1f952d29a1fcee6d3eb79c29591bd6134c709"
+          "stdout_sha256": "sha256:47443d9f3d0fc1cd5d55d3c8340507ee05552377687b1161532d66ba44413182"
         },
         {
           "argv": [
@@ -347,7 +347,7 @@
       ],
       "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
       "run_id": "run-1",
-      "tree_digest": "sha256:95a1b42ca6d24a1a38b7670af0727cbbb176308cac852d654cee1d1f200408d8"
+      "tree_digest": "sha256:21a28a51bab4ace5074af4cb778b88452786c23ee737c3f43689e72e4b5b99c1"
     },
     {
       "commands": [
@@ -404,7 +404,7 @@
           "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
           "passed": true,
           "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "stdout_sha256": "sha256:4a34563959faf9b348360f250c0f2078d84f65649e9d1c56272fff9e3f8fe3fd"
+          "stdout_sha256": "sha256:7ca2a0bca45fd79453e1fc3886c28b01134d41954e4a21ecdece3ce1f62d7a39"
         },
         {
           "argv": [
@@ -432,7 +432,7 @@
       ],
       "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
       "run_id": "run-2",
-      "tree_digest": "sha256:95a1b42ca6d24a1a38b7670af0727cbbb176308cac852d654cee1d1f200408d8"
+      "tree_digest": "sha256:21a28a51bab4ace5074af4cb778b88452786c23ee737c3f43689e72e4b5b99c1"
     }
   ],
   "schema_version": "rpa179.verification.1",
@@ -444,5 +444,5 @@
     "regression_cases": 23,
     "selfattack_expected_residuals": 4
   },
-  "verified_at": "2026-07-16T06:22:03.169772Z"
+  "verified_at": "2026-07-16T06:50:41.566413Z"
 }
