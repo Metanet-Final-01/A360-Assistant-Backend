@@ -49,7 +49,8 @@ _LOCAL_DB_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 def _assert_app_db_is_local():
     """테스트가 공유 앱 DB를 절대 못 보게 **확인**한다 (RPA-186) — fail-closed.
 
-    위 `os.environ.pop`이 격리 **메커니즘**이고, 이 가드는 그게 실제로 먹었는지 **검증**한다.
+    위 `os.environ["APP_DATABASE_URL"] = ""`가 격리 **메커니즘**이고, 이 가드는 그게 실제로
+    먹었는지 **검증**한다. (`pop`이 아니다 — 그 이유는 위 주석 참고.)
     둘을 나눈 이유: 메커니즘은 import 순서에 의존해서 조용히 깨질 수 있다(누가 conftest 위쪽에
     import를 추가하거나, 플러그인이 app.db를 먼저 끌어오면). 깨지면 팀 DB가 오염되므로
     바라지 말고 확인한다 — `scripts/check_smoke_isolation.py`와 같은 철학이다.
@@ -62,8 +63,9 @@ def _assert_app_db_is_local():
     host = (app.db.engine.url.host or "").lower()
     assert host in _LOCAL_DB_HOSTS, (
         f"테스트가 원격 앱 DB({host})에 연결돼 있다 — 팀 공유 DB를 오염시킨다.\n"
-        f"conftest 최상단의 APP_DATABASE_URL pop이 app.db import보다 늦게 실행됐을 수 있다"
-        f"{' (APP_DATABASE_URL이 .env에 설정돼 있음)' if _SHARED_APP_DB_URL else ''}.\n"
+        f"conftest 최상단의 `os.environ['APP_DATABASE_URL'] = \"\"`가 app.db import보다 늦게 "
+        f"실행됐거나, 누가 pop으로 되돌렸을 수 있다(pop이면 load_dotenv가 .env에서 되살린다)"
+        f"{' — APP_DATABASE_URL이 셸 env에 설정돼 있음' if _SHARED_APP_DB_URL else ''}.\n"
         f"import 순서를 확인할 것 — 이 가드가 깨진 채 돌면 매 pytest가 공유 DB에 쓴다."
     )
 
