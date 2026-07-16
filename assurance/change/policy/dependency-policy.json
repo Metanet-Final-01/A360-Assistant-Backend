@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0",
+  "rollout_mode": "observe",
+  "policy_decision_state": "decision_needed",
+  "requirement_files": [
+    "requirements.txt",
+    "requirements-dev.txt"
+  ],
+  "dependency_paths": [
+    "requirements.txt",
+    "requirements-dev.txt",
+    "pyproject.toml"
+  ],
+  "local_roots": [
+    "app",
+    "assurance",
+    "scripts",
+    "tests"
+  ],
+  "protected_paths": [
+    ".github/workflows/",
+    ".github/CODEOWNERS",
+    "assurance/change/",
+    "tests/",
+    "app/agent/"
+  ],
+  "import_distribution_map": {
+    "PIL": "pillow",
+    "alembic": "alembic",
+    "apscheduler": "apscheduler",
+    "bcrypt": "bcrypt",
+    "boto3": "boto3",
+    "bs4": "beautifulsoup4",
+    "docx": "python-docx",
+    "dotenv": "python-dotenv",
+    "email_validator": "email-validator",
+    "fastapi": "fastapi",
+    "httpx": "httpx",
+    "jsonschema": "jsonschema",
+    "jwt": "pyjwt",
+    "langchain_core": "langchain-core",
+    "langchain_openai": "langchain-openai",
+    "langchain_text_splitters": "langchain-text-splitters",
+    "langgraph": "langgraph",
+    "langgraph.checkpoint": "langgraph-checkpoint",
+    "langgraph.prebuilt": "langgraph-prebuilt",
+    "multipart": "python-multipart",
+    "olefile": "olefile",
+    "openai": "openai",
+    "opensearchpy": "opensearch-py",
+    "pdfplumber": "pdfplumber",
+    "psycopg": "psycopg",
+    "psycopg_pool": "psycopg-pool",
+    "pptx": "python-pptx",
+    "pypdf": "pypdf",
+    "pypdfium2": "pypdfium2",
+    "pytest": "pytest",
+    "reportlab": "reportlab",
+    "sqlalchemy": "sqlalchemy",
+    "tiktoken": "tiktoken",
+    "uvicorn": "uvicorn",
+    "yaml": "pyyaml"
+  },
+  "approved_additions": {},
+  "license_policy": {
+    "allowed_spdx": [
+      "Apache-2.0",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "ISC",
+      "MIT",
+      "MPL-2.0",
+      "PSF-2.0"
+    ]
+  },
+  "vulnerability_policy": {
+    "source": "initial empty Observe snapshot; operational OSV approval is decision-needed",
+    "snapshot_generated_at": "2026-07-16T00:00:00Z",
+    "max_age_days": 30,
+    "deny_at_or_above": "high",
+    "packages": {}
+  }
+}
