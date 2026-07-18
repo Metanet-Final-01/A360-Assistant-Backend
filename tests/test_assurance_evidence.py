@@ -5,6 +5,7 @@ from copy import deepcopy
 
 from app.services.assurance_evidence import (
     build_output_receipt,
+    digest,
     persist_output_receipt,
     receipt_integrity,
 )
@@ -112,12 +113,36 @@ def test_tampered_observation_cannot_produce_valid_evidence():
     assert summary["assurance_verdict"] == "refused"
 
 
+def test_unknown_decision_is_normalized_and_refused_even_with_valid_digest():
+    observation = _observation()
+    observation["decision"] = "invented_allow"
+    observation.pop("observation_id")
+    observation["observation_id"] = digest(observation)
+
+    row, summary = build_output_receipt(
+        observation, recommendation_id=uuid.uuid4(), recommendation_version=1
+    )
+
+    assert row.evidence_valid is True
+    assert row.decision == "unassured"
+    assert summary["assurance_verdict"] == "refused"
+
+
 def test_receipt_integrity_detects_payload_tampering():
     row, _ = build_output_receipt(
         _observation(), recommendation_id=uuid.uuid4(), recommendation_version=1
     )
     row.receipt_payload = deepcopy(row.receipt_payload)
     row.receipt_payload["decision"] = "deny"
+
+    assert receipt_integrity(row) is False
+
+
+def test_receipt_integrity_detects_indexed_column_mismatch():
+    row, _ = build_output_receipt(
+        _observation(), recommendation_id=uuid.uuid4(), recommendation_version=1
+    )
+    row.candidate_id = "sha256:" + "f" * 64
 
     assert receipt_integrity(row) is False
 

@@ -193,6 +193,10 @@ class AssuranceReceipt(Base):
             name="ck_assurance_receipts_completeness",
         ),
         CheckConstraint(
+            "decision IN ('allow_candidate', 'deny', 'unassured')",
+            name="ck_assurance_receipts_decision",
+        ),
+        CheckConstraint(
             "assurance_verdict IN ('observed', 'deny', 'refused')",
             name="ck_assurance_receipts_verdict",
         ),

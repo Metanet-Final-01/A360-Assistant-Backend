@@ -115,33 +115,57 @@ def test_service_api_key_disabled_when_unset(monkeypatch):
 
 
 def _receipt_row():
+    row_id = uuid.uuid4()
     recommendation_id = uuid.uuid4()
     session_id = uuid.uuid4()
+    candidate_id = "sha256:" + "a" * 64
+    payload_digest = "sha256:" + "b" * 64
+    policy_digest = "sha256:" + "c" * 64
+    catalog_digest = "sha256:" + "d" * 64
+    observation_id = "sha256:" + "e" * 64
     payload = {
         "schema_version": "1.0",
         "harness": "output",
         "record_kind": "output_observation",
         "writer_authority": "backend_boundary_observer",
+        "source": "drag",
+        "source_observation_id": observation_id,
         "subject": {
             "recommendation_id": str(recommendation_id),
-            "payload_digest": "sha256:" + "b" * 64,
+            "recommendation_version": 2,
+            "session_id": str(session_id),
+            "request_id": "request-1",
+            "candidate_id": candidate_id,
+            "payload_digest": payload_digest,
         },
         "decision": "deny",
         "assurance_verdict": "deny",
-        "completeness": {"missing": []},
+        "assurance_status": "unassured_observe",
+        "evidence_valid": True,
+        "completeness": {"status": "complete", "missing": []},
+        "provenance": {
+            "validator_version": "v1",
+            "policy_digest": policy_digest,
+            "catalog_digest": catalog_digest,
+            "requested_agent_version": None,
+            "resolved_agent_version": None,
+        },
+        "enforcement": {"mode": "observe", "effect": "none"},
+        "business_outcome": {"persisted": True},
     }
     from app.services.assurance_evidence import digest
 
     return SimpleNamespace(
-        receipt_digest=digest(payload), schema_version="1.0", harness="output",
+        id=row_id, receipt_digest=digest(payload), schema_version="1.0", harness="output",
         record_kind="output_observation", writer_authority="backend_boundary_observer",
         source="drag", request_id="request-1", session_id=session_id,
         recommendation_id=recommendation_id, recommendation_version=2,
-        candidate_id="sha256:" + "a" * 64, payload_digest="sha256:" + "b" * 64,
+        candidate_id=candidate_id, payload_digest=payload_digest,
+        source_observation_id=observation_id,
         evidence_valid=True, completeness_status="complete", decision="deny",
         assurance_verdict="deny", assurance_status="unassured_observe", rollout_mode="observe",
         enforcement_effect="none", business_persisted=True, validator_version="v1",
-        policy_digest="sha256:" + "c" * 64, catalog_digest="sha256:" + "d" * 64,
+        policy_digest=policy_digest, catalog_digest=catalog_digest,
         requested_agent_version=None, resolved_agent_version=None,
         receipt_payload=payload, created_at=datetime(2026, 7, 19, tzinfo=timezone.utc),
     )
@@ -158,6 +182,8 @@ def test_assurance_receipts_are_admin_only_and_read_only(monkeypatch):
 
     assert listed.status_code == 200
     assert listed.json()["receipts"][0]["integrity_valid"] is True
+    cursor_time, cursor_id = admin_api._decode_assurance_cursor(listed.json()["next_cursor"])
+    assert cursor_time == row.created_at and cursor_id == row.id
     assert "receipt_payload" not in listed.json()["receipts"][0]
     assert detail.status_code == 200
     assert detail.json()["receipt_payload"]["decision"] == "deny"
@@ -179,6 +205,15 @@ def test_assurance_receipts_invalid_session_id_400():
     with TestClient(app) as c:
         r = c.get("/api/admin/assurance-receipts", params={"session_id": "not-a-uuid"})
     assert r.status_code == 400
+
+
+def test_assurance_receipts_invalid_composite_cursor_400():
+    app.dependency_overrides[get_db] = lambda: FakeDB()
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/assurance-receipts", params={"cursor": "not-base64"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "INVALID_CURSOR"
 
 
 # --- llm-usage/stats ---

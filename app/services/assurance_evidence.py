@@ -18,6 +18,7 @@ from app.core.masking import mask_pii
 logger = logging.getLogger(__name__)
 
 RECEIPT_SCHEMA_VERSION = "1.0"
+ALLOWED_OUTPUT_DECISIONS = frozenset(("allow_candidate", "deny", "unassured"))
 OUTPUT_EXPECTED_COMMON = (
     "source_observation_id",
     "candidate_id",
@@ -118,7 +119,12 @@ def build_output_receipt(
         expected.extend(OUTPUT_EXPECTED_AGENT)
     missing = sorted(key for key in expected if values.get(key) is None)
     evidence_valid = _observation_integrity(observation)
-    decision = str(observation.get("decision") or "unassured")
+    raw_decision = observation.get("decision")
+    decision = (
+        raw_decision
+        if isinstance(raw_decision, str) and raw_decision in ALLOWED_OUTPUT_DECISIONS
+        else "unassured"
+    )
     if not evidence_valid or missing or decision == "unassured":
         verdict = "refused"
     elif decision == "deny":
@@ -143,6 +149,7 @@ def build_output_receipt(
         "harness": "output",
         "record_kind": "output_observation",
         "writer_authority": "backend_boundary_observer",
+        "source": str(source) if source is not None else None,
         "source_observation_id": values["source_observation_id"],
         "subject": {
             "recommendation_id": str(recommendation_id),
@@ -270,10 +277,37 @@ def receipt_integrity(row: models.AssuranceReceipt) -> bool:
     if not matches_digest:
         return False
     subject = payload.get("subject") if isinstance(payload.get("subject"), dict) else {}
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    completeness = payload.get("completeness") if isinstance(payload.get("completeness"), dict) else {}
+    enforcement = payload.get("enforcement") if isinstance(payload.get("enforcement"), dict) else {}
+    business_outcome = (
+        payload.get("business_outcome") if isinstance(payload.get("business_outcome"), dict) else {}
+    )
     return all((
+        payload.get("schema_version") == row.schema_version,
         payload.get("harness") == row.harness,
+        payload.get("record_kind") == row.record_kind,
+        payload.get("writer_authority") == row.writer_authority,
+        payload.get("source") == row.source,
+        payload.get("source_observation_id") == row.source_observation_id,
         payload.get("decision") == row.decision,
         payload.get("assurance_verdict") == row.assurance_verdict,
-        subject.get("recommendation_id") == str(row.recommendation_id),
+        payload.get("assurance_status") == row.assurance_status,
+        payload.get("evidence_valid") == row.evidence_valid,
+        subject.get("recommendation_id")
+        == (str(row.recommendation_id) if row.recommendation_id else None),
+        subject.get("recommendation_version") == row.recommendation_version,
+        subject.get("session_id") == (str(row.session_id) if row.session_id else None),
+        subject.get("request_id") == row.request_id,
+        subject.get("candidate_id") == row.candidate_id,
         subject.get("payload_digest") == row.payload_digest,
+        completeness.get("status") == row.completeness_status,
+        provenance.get("validator_version") == row.validator_version,
+        provenance.get("policy_digest") == row.policy_digest,
+        provenance.get("catalog_digest") == row.catalog_digest,
+        provenance.get("requested_agent_version") == row.requested_agent_version,
+        provenance.get("resolved_agent_version") == row.resolved_agent_version,
+        enforcement.get("mode") == row.rollout_mode,
+        enforcement.get("effect") == row.enforcement_effect,
+        business_outcome.get("persisted") == row.business_persisted,
     ))

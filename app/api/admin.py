@@ -6,6 +6,8 @@
 기반 세밀한 권한은 스키마 확장이 필요해 후속으로 두되, 그 전까지 이 게이트가 격리를 보장한다.
 """
 
+import base64
+import binascii
 import logging
 import os
 import secrets
@@ -13,7 +15,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app import models
@@ -66,7 +68,7 @@ def require_admin(
 
 
 def _parse_since(value: str) -> datetime:
-    """증분 수집 커서(ISO8601) 파싱 — naive면 UTC로 간주, 형식 오류는 400.
+    """최초 증분 수집 기준시각(ISO8601) 파싱 — naive면 UTC로 간주, 형식 오류는 400.
 
     백오피스 수집기가 '마지막으로 받은 created_at'을 그대로 되돌려주는 용도라
     응답의 isoformat()과 왕복 가능해야 한다.
@@ -226,6 +228,23 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
     return result
 
 
+def _encode_assurance_cursor(row: models.AssuranceReceipt) -> str:
+    value = f"{row.created_at.isoformat()}|{row.id}"
+    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+
+def _decode_assurance_cursor(value: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        timestamp, row_id = base64.urlsafe_b64decode(padded.encode()).decode().rsplit("|", 1)
+        return _parse_since(timestamp), uuid.UUID(row_id)
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            400,
+            detail={"code": "INVALID_CURSOR", "message": "cursor 형식이 올바르지 않습니다."},
+        ) from exc
+
+
 @router.get("/assurance-receipts")
 def assurance_receipts(
     limit: int = Query(100, ge=1, le=500),
@@ -234,22 +253,13 @@ def assurance_receipts(
     assurance_verdict: str | None = Query(None, pattern="^(observed|deny|refused)$"),
     request_id: str | None = Query(None, max_length=32),
     session_id: str | None = Query(None),
-    since: str | None = Query(None, description="ISO8601 — 이 시각 이후만 (증분 수집 커서)"),
+    since: str | None = Query(None, description="ISO8601 — 최초 증분 수집의 기준 시각"),
+    cursor: str | None = Query(None, description="응답 next_cursor — created_at+id 복합 커서"),
     db: Session = Depends(get_db),
     user: models.User = Depends(require_admin),
 ) -> dict:
     """보증 영수증 목록 — 백오피스 read-only 대사와 증분 수집용."""
-    if since:
-        q = (
-            select(models.AssuranceReceipt)
-            .where(models.AssuranceReceipt.created_at > _parse_since(since))
-            .order_by(models.AssuranceReceipt.created_at.asc(), models.AssuranceReceipt.id.asc())
-            .limit(limit)
-        )
-    else:
-        q = select(models.AssuranceReceipt).order_by(
-            models.AssuranceReceipt.created_at.desc(), models.AssuranceReceipt.id.desc()
-        ).limit(limit)
+    q = select(models.AssuranceReceipt)
     if harness:
         q = q.where(models.AssuranceReceipt.harness == harness)
     if decision:
@@ -266,8 +276,31 @@ def assurance_receipts(
                 400, detail={"code": "INVALID_ID", "message": "session_id 형식이 올바르지 않습니다."}
             ) from None
         q = q.where(models.AssuranceReceipt.session_id == sid)
+    if cursor:
+        cursor_time, cursor_id = _decode_assurance_cursor(cursor)
+        q = q.where(or_(
+            models.AssuranceReceipt.created_at > cursor_time,
+            and_(
+                models.AssuranceReceipt.created_at == cursor_time,
+                models.AssuranceReceipt.id > cursor_id,
+            ),
+        )).order_by(
+            models.AssuranceReceipt.created_at.asc(), models.AssuranceReceipt.id.asc()
+        )
+    elif since:
+        q = q.where(models.AssuranceReceipt.created_at > _parse_since(since)).order_by(
+            models.AssuranceReceipt.created_at.asc(), models.AssuranceReceipt.id.asc()
+        )
+    else:
+        q = q.order_by(
+            models.AssuranceReceipt.created_at.desc(), models.AssuranceReceipt.id.desc()
+        )
+    q = q.limit(limit)
     rows = db.execute(q).scalars().all()
-    return {"receipts": [_assurance_receipt_out(row) for row in rows]}
+    return {
+        "receipts": [_assurance_receipt_out(row) for row in rows],
+        "next_cursor": _encode_assurance_cursor(rows[-1]) if rows else None,
+    }
 
 
 @router.get("/assurance-receipts/{receipt_digest}")
