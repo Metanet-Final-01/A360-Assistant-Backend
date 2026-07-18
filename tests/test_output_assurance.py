@@ -1,5 +1,7 @@
 """Deterministic tests for the Backend Output Boundary Observe detector."""
 
+import pytest
+
 from app.services.output_assurance import OutputBoundaryContext, observe_recommendation_candidate
 
 
@@ -107,6 +109,26 @@ def test_unknown_nested_action_field_is_a_strict_schema_denial():
 def test_invalid_nested_entries_remain_schema_denials():
     payload = recommendation()
     payload["steps"] = [None]
+
+    result = observe_recommendation_candidate(payload, context(), catalog=FixtureCatalog())
+
+    assert result["decision"] == "deny"
+    assert result["controls"][0]["status"] == "fail"
+    assert all(item["status"] != "error" for item in result["controls"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("steps", None),
+        ("variables", None),
+        ("needs_input", None),
+        ("spec", {"requirements": None, "unknowns": None}),
+    ],
+)
+def test_malformed_collections_remain_schema_denials(field, value):
+    payload = recommendation()
+    payload[field] = value
 
     result = observe_recommendation_candidate(payload, context(), catalog=FixtureCatalog())
 

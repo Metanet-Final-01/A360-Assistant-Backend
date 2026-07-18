@@ -28,6 +28,7 @@ from app.schemas import ProgressEvent, Recommendation
 from app.services import alerts, budget
 from app.services.output_assurance import (
     OutputBoundaryContext,
+    build_unassured_observation,
     finalize_persistence_observation,
     observe_recommendation_candidate,
 )
@@ -263,18 +264,23 @@ def _save_recommendation(
 
     from app.db import SessionLocal
 
-    observation = observe_recommendation_candidate(
-        payload,
-        OutputBoundaryContext(
-            session_id=str(session_id),
-            request_id=request_id,
-            source=source,
-            requested_agent_version=requested_agent_version,
-            resolved_agent_version=resolved_agent_version,
-            agent_registry_snapshot=agent_registry_snapshot,
-            producer_advisory=producer_advisory,
-        ),
+    boundary_context = OutputBoundaryContext(
+        session_id=str(session_id),
+        request_id=request_id,
+        source=source,
+        requested_agent_version=requested_agent_version,
+        resolved_agent_version=resolved_agent_version,
+        agent_registry_snapshot=agent_registry_snapshot,
+        producer_advisory=producer_advisory,
     )
+    try:
+        observation = observe_recommendation_candidate(payload, boundary_context)
+    except Exception as exc:
+        # Observe mode records detector failure without changing the existing save outcome.
+        logger.warning("Output Boundary Observe 관측 실패", exc_info=True)
+        observation = build_unassured_observation(
+            boundary_context, error_type=type(exc).__name__
+        )
     for attempt in range(3):
         try:
             with SessionLocal() as s:

@@ -92,7 +92,11 @@ def _finding(control: str, code: str, path: str, message: str) -> dict[str, str]
     return {"control": control, "code": code, "path": path, "message": message}
 
 
-def _unknown_field_findings(payload: dict) -> list[dict[str, str]]:
+def _list_items(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _unknown_field_findings(payload: Any) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
 
     def check(obj: Any, kind: str, path: str) -> None:
@@ -103,28 +107,29 @@ def _unknown_field_findings(payload: dict) -> list[dict[str, str]]:
             findings.append(_finding("strict_schema", "UNKNOWN_FIELD", f"{path}.{key}", "허용되지 않은 필드"))
 
     check(payload, "recommendation", "recommendation")
-    for si, step in enumerate(payload.get("steps", [])):
+    root = payload if isinstance(payload, dict) else {}
+    for si, step in enumerate(_list_items(root.get("steps"))):
         sp = f"recommendation.steps[{si}]"
         check(step, "step", sp)
         if not isinstance(step, dict):
             continue
         for _ in _walk_actions(step.get("actions", []), f"{sp}.actions", check):
             pass
-    for vi, variable in enumerate(payload.get("variables", [])):
+    for vi, variable in enumerate(_list_items(root.get("variables"))):
         check(variable, "variable", f"recommendation.variables[{vi}]")
-    for qi, question in enumerate(payload.get("needs_input", [])):
+    for qi, question in enumerate(_list_items(root.get("needs_input"))):
         qp = f"recommendation.needs_input[{qi}]"
         check(question, "question", qp)
         if not isinstance(question, dict):
             continue
-        for ti, target in enumerate(question.get("targets", [])):
+        for ti, target in enumerate(_list_items(question.get("targets"))):
             check(target, "target", f"{qp}.targets[{ti}]")
-    spec = payload.get("spec")
+    spec = root.get("spec")
     if isinstance(spec, dict):
         check(spec, "spec", "recommendation.spec")
-        for ri, requirement in enumerate(spec.get("requirements", [])):
+        for ri, requirement in enumerate(_list_items(spec.get("requirements"))):
             check(requirement, "requirement", f"recommendation.spec.requirements[{ri}]")
-        for ui, unknown in enumerate(spec.get("unknowns", [])):
+        for ui, unknown in enumerate(_list_items(spec.get("unknowns"))):
             check(unknown, "unknown", f"recommendation.spec.unknowns[{ui}]")
     return findings
 
@@ -138,18 +143,18 @@ def _walk_actions(actions: Any, path: str, check=None):
         action_path = f"{path}[{index}]"
         if check is not None:
             check(action, "action", action_path)
-            for pi, parameter in enumerate(action.get("parameters", [])):
+            for pi, parameter in enumerate(_list_items(action.get("parameters"))):
                 check(parameter, "parameter", f"{action_path}.parameters[{pi}]")
-            for si, source in enumerate(action.get("sources", [])):
+            for si, source in enumerate(_list_items(action.get("sources"))):
                 check(source, "source", f"{action_path}.sources[{si}]")
             for field in ("produces", "consumes"):
-                for vi, ref in enumerate(action.get(field, [])):
+                for vi, ref in enumerate(_list_items(action.get(field))):
                     check(ref, "var_ref", f"{action_path}.{field}[{vi}]")
         yield action_path, action
         yield from _walk_actions(action.get("children", []), f"{action_path}.children", check)
 
 
-def _strict_schema(payload: dict) -> tuple[str, list[dict[str, str]], int]:
+def _strict_schema(payload: Any) -> tuple[str, list[dict[str, str]], int]:
     findings: list[dict[str, str]] = []
     validation_error_count = 0
     try:
@@ -167,7 +172,7 @@ def _strict_schema(payload: dict) -> tuple[str, list[dict[str, str]], int]:
     return ("fail" if total_count else "pass"), findings, total_count
 
 
-def _catalog_closure(payload: dict, catalog) -> tuple[str, str, list[dict[str, str]]]:
+def _catalog_closure(payload: Any, catalog) -> tuple[str, str, list[dict[str, str]]]:
     snapshot = sorted(
         list(catalog.iter_action_schemas()),
         key=lambda item: (str(item.get("package", "")), str(item.get("action", ""))),
@@ -179,7 +184,8 @@ def _catalog_closure(payload: dict, catalog) -> tuple[str, str, list[dict[str, s
         if isinstance(item.get("package"), str) and isinstance(item.get("action"), str)
     }
     findings = []
-    for si, step in enumerate(payload.get("steps", [])):
+    root = payload if isinstance(payload, dict) else {}
+    for si, step in enumerate(_list_items(root.get("steps"))):
         if not isinstance(step, dict):
             continue
         for path, action in _walk_actions(step.get("actions", []), f"recommendation.steps[{si}].actions"):
@@ -301,3 +307,49 @@ def finalize_persistence_observation(
     finalized.pop("observation_id", None)
     finalized["observation_id"] = _digest(finalized)
     return finalized
+
+
+def build_unassured_observation(
+    context: OutputBoundaryContext, *, error_type: str,
+) -> dict[str, Any]:
+    """Build safe evidence when the Observe detector itself cannot complete."""
+    registry_digest, registry_digest_error = _optional_digest(context.agent_registry_snapshot)
+    observation = {
+        "schema_version": SCHEMA_VERSION,
+        "validator_version": VALIDATOR_VERSION,
+        "rollout_mode": "observe",
+        "decision": "unassured",
+        "assurance_status": "unassured_observe",
+        "validated": False,
+        "candidate_id": None,
+        "payload_digest": None,
+        "request_id": context.request_id,
+        "session_id": context.session_id,
+        "source": context.source,
+        "controls": [{
+            "control_id": "output_boundary",
+            "status": "error",
+            "error_type": error_type,
+        }],
+        "boundary_findings": [],
+        "boundary_finding_count": 0,
+        "boundary_findings_truncated": False,
+        "producer_advisory": {
+            "present": context.producer_advisory is not None,
+            "raw_digest": None,
+            "digest_error": "observation_unavailable",
+        },
+        "catalog_digest": None,
+        "agent_provenance": {
+            "requested_agent_version": context.requested_agent_version,
+            "resolved_agent_version": context.resolved_agent_version,
+            "resolved_version_observability": "not_observable",
+            "agent_registry_digest": registry_digest,
+            "agent_registry_digest_error": registry_digest_error,
+            "public_contract_version": context.public_contract_version,
+        },
+        "enforcement": {"mode": "observe", "blocks_persistence": False},
+        "business_outcome": {"persisted": None},
+    }
+    observation["observation_id"] = _digest(observation)
+    return observation

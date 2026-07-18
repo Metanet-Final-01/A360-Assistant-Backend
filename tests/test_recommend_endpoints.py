@@ -159,6 +159,37 @@ def test_save_recommendation_records_failed_business_outcome(monkeypatch, caplog
     assert '"business_outcome":{"error_type":"RuntimeError","persisted":false}' in caplog.text
 
 
+def test_save_recommendation_continues_when_observer_fails(monkeypatch):
+    saved = {}
+
+    class _Persist:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, stmt): return SimpleNamespace(scalar=lambda: 1)
+        def add(self, row): saved["row"] = row
+        def commit(self): pass
+
+    monkeypatch.setattr("app.db.SessionLocal", _Persist)
+    monkeypatch.setattr(
+        sessions_api,
+        "observe_recommendation_candidate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("observer failed")),
+    )
+
+    result = sessions_api._save_recommendation(
+        SID, AID, _valid_recommendation(), source="drag", parent_version=1,
+        request_id="request-1",
+    )
+
+    assert saved["row"].payload == _valid_recommendation()
+    assurance = result["output_assurance"]
+    assert assurance["decision"] == "unassured"
+    assert assurance["controls"] == [{
+        "control_id": "output_boundary", "status": "error", "error_type": "RuntimeError"
+    }]
+    assert assurance["business_outcome"] == {"persisted": True}
+
+
 def test_save_recommendation_retries_on_version_conflict(monkeypatch):
     """동시 저장 version 충돌(IntegrityError) 시 재계산 재시도로 성공한다 (CodeRabbit)."""
     from sqlalchemy.exc import IntegrityError
