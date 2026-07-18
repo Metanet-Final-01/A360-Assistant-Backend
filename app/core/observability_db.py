@@ -131,6 +131,8 @@ def ensure_observability_schema() -> bool:
         # idempotent ALTER로 기존 관측 DB에도 보장한다 (RPA-158, Postgres IF NOT EXISTS).
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS request_id VARCHAR(32)"))
+            # 프롬프트 캐시 적중분 (RPA-199) — nullable: 과거 행 NULL(측정 안 함)과 0(캐시 없음) 구분
+            conn.execute(text("ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS cached_tokens INTEGER"))
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS ix_llm_usage_request_id ON llm_usage (request_id)")
             )

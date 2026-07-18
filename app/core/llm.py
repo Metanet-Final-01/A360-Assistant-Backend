@@ -99,11 +99,35 @@ _AUX_MODEL_PRICES: dict[str, tuple[float, float]] = {
 }
 
 
-def cost_usd(input_tokens: int, output_tokens: int, model: str | None = None) -> float | None:
-    """비용(USD)을 모델별 단가로 계산한다 (RPA-97).
+def normalize_cached_tokens(cached_tokens: int | None, input_tokens: int) -> int | None:
+    """캐시 토큰을 [0, input_tokens]로 정규화한다 (RPA-199). None(측정 안 됨)은 유지.
 
-    - 보조 모델(임베딩·리랭커)은 내장 공식 단가 테이블로.
+    ⚠️ **저장값과 계산값이 같아야 한다** — 비용 계산에서만 클램프하고 원본을 저장하면,
+    `cached > input`인 이상 응답에서 비용은 맞는데 DB엔 적중률 100% 초과가 남는다(#271 리뷰).
+    그래서 record_usage가 기록 **전에** 한 번 정규화해 저장·계산에 같은 값을 쓴다.
+    """
+    if cached_tokens is None:
+        return None
+    return min(max(int(cached_tokens), 0), max(int(input_tokens), 0))
+
+
+def cost_usd(
+    input_tokens: int,
+    output_tokens: int,
+    model: str | None = None,
+    cached_tokens: int | None = None,
+) -> float | None:
+    """비용(USD)을 모델별 단가로 계산한다 (RPA-97, 캐시 반영 RPA-199).
+
+    - 보조 모델(임베딩·리랭커)은 내장 공식 단가 테이블로 — 프롬프트 캐시 개념이 없어
+      cached_tokens는 무시한다.
     - 주 챗 모델 등 그 외는 env 단가(LLM_INPUT/OUTPUT_COST_PER_1M) — 데모 조정·하위호환.
+    - cached_tokens(입력 중 프롬프트 캐시 적중분)는 LLM_CACHED_INPUT_COST_PER_1M이 설정된
+      경우에만 그 단가로 갈라 계산한다: (input−cached)×정가 + cached×캐시단가 + output×출력단가.
+      캐시 단가 미설정이면 기존식(전액)으로 폴백 — 회귀 없음. 캐시 미반영이 곧 4.7배
+      과대계상의 주원인이었다(캐시 입력은 정가의 10%).
+    - cached > input인 이상 응답은 input으로 클램프 — 음수 비용을 만들지 않는다(호출부가
+      normalize_cached_tokens로 이미 정규화해 넘기지만, 이 함수는 공개 API라 자체 방어한다).
     - 단가를 못 구하면(미지 모델 + env 미설정) None.
     """
     if model:
@@ -118,7 +142,16 @@ def cost_usd(input_tokens: int, output_tokens: int, model: str | None = None) ->
         out_price = float(os.environ["LLM_OUTPUT_COST_PER_1M"])
     except (KeyError, ValueError):
         return None
-    return (input_tokens * in_price + output_tokens * out_price) / 1_000_000
+    base = input_tokens * in_price + output_tokens * out_price
+    if cached_tokens:
+        try:
+            cached_price = float(os.environ["LLM_CACHED_INPUT_COST_PER_1M"])
+        except (KeyError, ValueError):
+            cached_price = None  # 캐시 단가 미설정 — 전액 계산 유지(기존 동작과 100% 동일)
+        if cached_price is not None:
+            cached = normalize_cached_tokens(cached_tokens, input_tokens) or 0
+            base -= cached * (in_price - cached_price)
+    return base / 1_000_000
 
 
 def chat(
@@ -157,11 +190,16 @@ def chat(
     latency_ms = int((time.monotonic() - started) * 1000)
 
     usage = response.usage
+    # 캐시 적중분 (RPA-199) — details가 없으면 None(측정 안 됨)으로 남긴다. 0으로 채우면
+    # "캐시 없음"과 "모름"이 섞여 대사가 거짓말을 하게 된다.
+    details = getattr(usage, "prompt_tokens_details", None) if usage else None
+    cached = getattr(details, "cached_tokens", None) if details is not None else None
     record_usage(
         purpose=purpose,
         model=model,
         input_tokens=usage.prompt_tokens if usage else 0,
         output_tokens=usage.completion_tokens if usage else 0,
+        cached_tokens=cached,
         latency_ms=latency_ms,
         session_id=session_id,
     )
@@ -174,6 +212,7 @@ def record_usage(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    cached_tokens: int | None = None,
     latency_ms: int | None = None,
     session_id: uuid.UUID | None = None,
     ctx: UsageContext | None = None,
@@ -188,6 +227,8 @@ def record_usage(
     기록 실패가 호출을 실패시키면 안 되므로 예외는 삼킨다.
     """
     ctx = ctx or current_usage_context()
+    # 저장 전에 한 번 정규화 — 저장값과 비용 계산값이 갈리면 리포트의 적중률이 100%를 넘는다.
+    cached_tokens = normalize_cached_tokens(cached_tokens, input_tokens)
     try:
         from app.core.observability_db import observability_sessionmaker
         from app.models import LlmUsage
@@ -205,7 +246,8 @@ def record_usage(
                     model=model,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    cost_usd=cost_usd(input_tokens, output_tokens, model),
+                    cached_tokens=cached_tokens,
+                    cost_usd=cost_usd(input_tokens, output_tokens, model, cached_tokens),
                     latency_ms=latency_ms,
                     # request_id로 audit/turn/rag와 턴 단위 비용 조인 (RPA-158). 명시값(콜백의
                     # 생성-시점 스냅샷) 우선, 없으면 현재 ContextVar — 워커 스레드 유실 방지.
@@ -249,23 +291,28 @@ class UsageCallbackHandler(BaseCallbackHandler):
         self._started = time.monotonic()
 
     def on_llm_end(self, response, **kwargs) -> None:
-        input_tokens, output_tokens, model = _extract_tokens(response)
+        input_tokens, output_tokens, model, cached_tokens = _extract_tokens(response)
         latency_ms = int((time.monotonic() - self._started) * 1000)
         record_usage(
             purpose=self._purpose,
             model=model or os.getenv("OPENAI_MODEL", "unknown"),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
             latency_ms=latency_ms,
             ctx=self._ctx,
             request_id=self._request_id,  # 생성-시점 스냅샷 (워커 스레드 유실 방지, RPA-158)
         )
 
 
-def _extract_tokens(response) -> tuple[int, int, str | None]:
-    """LangChain LLMResult에서 (input, output, model)을 뽑는다.
+def _extract_tokens(response) -> tuple[int, int, str | None, int | None]:
+    """LangChain LLMResult에서 (input, output, model, cached)를 뽑는다.
 
     usage_metadata(스트림·비스트림 공통) 우선, llm_output.token_usage(비스트림) 폴백.
+    cached(프롬프트 캐시 적중분, RPA-199)는 경로별 위치가 다르다:
+    usage_metadata는 input_token_details.cache_read(LangChain 표준),
+    token_usage는 prompt_tokens_details.cached_tokens(OpenAI 원형).
+    못 찾으면 None — "측정 안 됨"과 "캐시 0"을 구분해 기록한다.
     """
     model = None
     try:
@@ -279,11 +326,23 @@ def _extract_tokens(response) -> tuple[int, int, str | None]:
     except (IndexError, AttributeError, TypeError):
         um = None
     if um:
-        return int(um.get("input_tokens", 0)), int(um.get("output_tokens", 0)), model
+        cached = (um.get("input_token_details") or {}).get("cache_read")
+        return (
+            int(um.get("input_tokens", 0)),
+            int(um.get("output_tokens", 0)),
+            model,
+            int(cached) if cached is not None else None,
+        )
 
     # 2) 폴백: llm_output.token_usage (OpenAI 원형: prompt_tokens/completion_tokens)
     try:
         tu = (response.llm_output or {}).get("token_usage") or {}
     except AttributeError:
         tu = {}
-    return int(tu.get("prompt_tokens", 0)), int(tu.get("completion_tokens", 0)), model
+    cached = (tu.get("prompt_tokens_details") or {}).get("cached_tokens")
+    return (
+        int(tu.get("prompt_tokens", 0)),
+        int(tu.get("completion_tokens", 0)),
+        model,
+        int(cached) if cached is not None else None,
+    )
