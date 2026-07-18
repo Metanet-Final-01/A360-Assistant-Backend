@@ -30,6 +30,10 @@ from pathlib import Path
 # scripts/에서 실행해도 app 패키지를 찾도록 리포 루트를 path에 추가
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# 날짜 경계 산식은 서비스와 단일 공급원 — 여기서 자체 산식을 쓰면 "예산은 KST인데
+# 리포트는 다른 날짜"로 갈린다(app/core/localtime 모듈 docstring 참조).
+from app.core.localtime import SQL_LOCAL_DATE  # noqa: E402
+
 # Windows 콘솔(cp949)에서도 한글·기호가 깨지지 않게
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -113,7 +117,10 @@ def main() -> int:
     p = {"d": args.days} if args.days else {}
 
     # ── 표본
-    r = _rows(f"select count(*), min(created_at)::date, max(created_at)::date, "
+    # 날짜 묶음은 KST(SQL_LOCAL_DATE) — 서비스의 일 경계(app/core/localtime)와 같은 축이어야
+    # 한다. UTC ::date로 산출하면 '일 최대'가 KST 09:00~09:00 창 기준이 돼 임계 근거가
+    # 왜곡된다(실측: 07-15가 실제로는 07-15 09:00~07-16 09:00 KST 합계였다).
+    r = _rows(f"select count(*), min({SQL_LOCAL_DATE}), max({SQL_LOCAL_DATE}), "
               f"count(distinct user_id), count(distinct session_id), count(request_id) "
               f"from llm_usage where {where}", **p)[0]
     total, d0, d1, n_users, n_sessions, n_rid = r
@@ -163,8 +170,8 @@ def main() -> int:
 
     # ── 주체별 일 사용량 → 일 상한 유도
     user_days = [float(x[2]) for x in _rows(
-        f"select user_id, created_at::date, sum(cost_usd) from llm_usage "
-        f"where user_id is not null and {where} group by user_id, created_at::date "
+        f"select user_id, {SQL_LOCAL_DATE}, sum(cost_usd) from llm_usage "
+        f"where user_id is not null and {where} group by user_id, {SQL_LOCAL_DATE} "
         f"having sum(cost_usd) > 0", **p)]
     print("\n── 사용자별 하루 비용 (일 상한의 직접 근거)")
     subject_daily = 0.0
@@ -176,8 +183,8 @@ def main() -> int:
         print("  (사용자 귀속 비용 없음 — 익명 트래픽뿐이면 session 기준으로 봐야 한다)")
 
     global_days = [float(x[1]) for x in _rows(
-        f"select created_at::date, sum(cost_usd) from llm_usage where {where} "
-        f"group by created_at::date having sum(cost_usd) > 0", **p)]
+        f"select {SQL_LOCAL_DATE}, sum(cost_usd) from llm_usage where {where} "
+        f"group by {SQL_LOCAL_DATE} having sum(cost_usd) > 0", **p)]
     print("\n── 전역 하루 비용 (전역 상한의 직접 근거)")
     global_daily = max(global_days) if global_days else 0.0
     if global_days:

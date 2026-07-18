@@ -40,7 +40,9 @@ _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
 # 부재 → Continue 오용, 세션 opener 부재 → 세션 생명주기 통누락) 결정론으로 보완한다.
 _STRUCTURAL_CANDIDATES: list[tuple[str, str]] = [
     ("Loop", "cloudUsingLoopAction"),
-    ("If", "ifPackageIfAction"),
+    # plain If 액션명은 카탈로그상 "if"다 — 과거 "ifPackageIfAction"으로 적어 카탈로그 조회에
+    # 걸려(MISS) 구조 보완 메뉴에서 탈락, composer가 단독 조건에도 Else If를 오용했다(정준환 실측).
+    ("If", "if"),
     ("If", "ifPackageElseIfOptionalAction"),
     ("If", "ifPackageElseAction"),
     ("Error handler", "errorHandlerTry"),

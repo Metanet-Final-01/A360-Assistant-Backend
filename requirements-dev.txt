@@ -1,5 +1,6 @@
 pytest==8.3.4
 pytest-cov==6.0.0  # 테스트 커버리지 측정 (CI에서 결과 확인)
+pytest-xdist==3.8.0  # 병렬 실행: pytest -n auto --dist loadfile (loadfile=파일 단위 분배 — 통합 테스트의 TRUNCATE가 한 워커에 묶인다)
 reportlab==4.2.5  # 테스트용 PDF(표 포함) 픽스처 생성
 jsonschema==4.26.0  # Phase 0 보증 계약/증거 JSON Schema 검증
 PyYAML==6.0.3  # Phase 0 정책 registry와 회귀 matrix 파싱
