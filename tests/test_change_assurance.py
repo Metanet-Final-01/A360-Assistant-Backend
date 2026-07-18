@@ -17,6 +17,7 @@ from assurance.change.checker import (
     load_policy,
     write_error_report,
 )
+from assurance.change.dependency_checks import derive_risk_profiles, parse_imports
 from assurance.change.foundation import GitRepository
 from assurance.change.cli import main as cli_main
 from tests.change_assurance_adapter import FixtureDependencyEnvironment
@@ -285,6 +286,16 @@ def test_rename_out_of_protected_path_keeps_old_path_evidence(tmp_path: Path) ->
     assert "tests/test_example.py" in protected["protected_paths_changed"]
 
 
+def test_rename_keeps_old_path_risk_profile() -> None:
+    profiles = derive_risk_profiles(
+        [{"status": "R100", "old_path": "app/api/legacy.py", "path": "docs/legacy.md"}],
+        _policy(_load_scenarios()["good_import"]),
+    )
+    assert "api_contract" in profiles
+    assert "source" in profiles
+    assert "docs" in profiles
+
+
 def test_added_package_install_fallback_is_denied(tmp_path: Path) -> None:
     scenario = {
         "base_files": {
@@ -298,6 +309,26 @@ def test_added_package_install_fallback_is_denied(tmp_path: Path) -> None:
                 "def run():\n"
                 "    return subprocess.run(['pip', 'install', 'invented-sdk'])\n"
             ),
+        },
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "deny",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert report["assurance_decision"] == "deny"
+    assert evidence["rules"]["dep.no_silent_install"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("container_file", ["Dockerfile", "Containerfile.dev"])
+def test_container_package_install_fallback_is_denied(
+    tmp_path: Path, container_file: str
+) -> None:
+    scenario = {
+        "base_files": {"requirements.txt": "", container_file: "FROM python:3.11\n"},
+        "head_files": {
+            "requirements.txt": "",
+            container_file: "FROM python:3.11\nRUN pip install invented-sdk\n",
         },
         "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
         "snapshot": {},
@@ -378,6 +409,34 @@ def test_mapped_external_import_without_requirement_is_denied(tmp_path: Path) ->
     assert "not declared" in evidence["package_checks"]["demo-sdk"]["allowlist"]["detail"]
 
 
+def test_aliased_builtin_dynamic_import_is_detected() -> None:
+    imports, errors = parse_imports(
+        "task.py", b"from builtins import __import__ as load\nload('demo_sdk')\n"
+    )
+    assert errors == []
+    assert any(item.module == "demo_sdk" and item.kind == "dynamic_literal" for item in imports)
+
+
+def test_non_python_to_python_rename_treats_import_as_new(tmp_path: Path) -> None:
+    content = "import demo_sdk\n"
+    scenario = {
+        "base_files": {"requirements.txt": "", "task.txt": content},
+        "head_files": {"requirements.txt": "", "task.py": content},
+        "environment": {
+            "inventory": {},
+            "import_map": {"demo_sdk": ["demo-sdk"]},
+            "imports": {"demo_sdk:": True},
+            "distributions": {},
+        },
+        "snapshot": {},
+        "expected_decision": "deny",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert report["assurance_decision"] == "deny"
+    assert any(item["module"] == "demo_sdk" for item in evidence["new_imports"])
+
+
 def test_unknown_stale_evidence_is_rejected(tmp_path: Path) -> None:
     scenario = _load_scenarios()["good_import"]
     repo, base, head = _fixture_repo(tmp_path, scenario)
@@ -412,6 +471,8 @@ def test_observe_workflow_exposes_fatal_checker_failure() -> None:
     assert "working-directory: trusted-runner" in workflow
     assert '--repo "$ASSURANCE_SUBJECT"' in workflow
     assert "BOOTSTRAP_UNASSURED.md" in workflow
+    assert "-r requirements.txt -r requirements-dev.txt" in workflow
+    assert "working-directory: subject" not in workflow
     assert "coverage" not in policy["import_distribution_map"]
 
 
@@ -440,6 +501,88 @@ def test_policy_loader_enforces_complete_schema(tmp_path: Path) -> None:
         path.write_text(json.dumps(policy), encoding="utf-8")
         with pytest.raises(AssuranceError, match="schema validation failed"):
             load_policy(path)
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ('{"schema_version":"1.0","schema_version":"2.0"}', "duplicate JSON key"),
+        ('{"schema_version":NaN}', "invalid JSON constant"),
+    ],
+)
+def test_policy_loader_rejects_ambiguous_json(
+    tmp_path: Path, raw: str, message: str
+) -> None:
+    path = tmp_path / "ambiguous.json"
+    path.write_text(raw, encoding="utf-8")
+    with pytest.raises(AssuranceError, match=message):
+        load_policy(path)
+
+
+def test_diverged_base_uses_merge_base_for_dependency_baseline(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.name", "A360 fixture")
+    _git(repo, "config", "user.email", "fixture@invalid.local")
+    _replace_files(
+        repo,
+        {"requirements.txt": "demo-sdk==1.0.0\n", "task.py": "def run():\n    return 1\n"},
+    )
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "--quiet", "-m", "common")
+    common = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "--quiet", "-b", "head-branch")
+    (repo / "task.py").write_text("import demo_sdk\n", encoding="utf-8")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "--quiet", "-m", "head")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "--quiet", "-b", "base-branch", common)
+    (repo / "requirements.txt").write_text("demo-sdk==2.0.0\n", encoding="utf-8")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "--quiet", "-m", "base advanced")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--quiet", "head-branch")
+
+    scenario = {
+        "environment": {
+            "inventory": {"demo-sdk": "1.0.0"},
+            "import_map": {"demo_sdk": ["demo-sdk"]},
+            "imports": {"demo_sdk:": True},
+            "distributions": {
+                "demo-sdk": {
+                    "installed": True,
+                    "version": "1.0.0",
+                    "license": "MIT",
+                }
+            },
+        },
+        "snapshot": {
+            "demo-sdk": {
+                "version": "1.0.0",
+                "reviewed": True,
+                "advisories": [],
+            }
+        },
+    }
+    policy = _policy(scenario)
+    report = AssuranceRunner(
+        repo_root=repo,
+        base_sha=base,
+        head_sha=head,
+        repository="Metanet-Final-01/fixture",
+        output=tmp_path / "out",
+        policy=policy,
+        policy_uri="fixture-policy.json",
+        policy_digest=canonical_digest(policy),
+        environment=FixtureDependencyEnvironment(scenario["environment"]),
+        now=FIXED_NOW,
+    ).run()
+    assert report["assurance_decision"] == "allow_candidate"
+    manifest = json.loads((tmp_path / "out" / "change-manifest.json").read_text())
+    assert manifest["subject"]["merge_base_sha"] == common
 
 
 def test_git_read_failures_are_not_converted_to_missing_evidence(

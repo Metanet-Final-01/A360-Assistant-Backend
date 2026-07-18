@@ -37,6 +37,27 @@ from .schema_validation import SchemaValidationError, validate_json_schema
 POLICY_SCHEMA = Path(__file__).resolve().parent / "schemas" / "dependency-policy.schema.json"
 
 
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SchemaValidationError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise SchemaValidationError(f"invalid JSON constant: {value}")
+
+
+def _strict_json_loads(value: bytes | str) -> Any:
+    return json.loads(
+        value,
+        object_pairs_hook=_strict_json_object,
+        parse_constant=_reject_json_constant,
+    )
+
+
 class AssuranceRunner:
     def __init__(
         self,
@@ -71,10 +92,10 @@ class AssuranceRunner:
         base = self.repo.commit(self.base_sha)
         head = self.repo.commit(self.head_sha)
         merge_base = self.repo.merge_base(base, head)
-        changes = self.repo.changes(base, head)
+        changes = self.repo.changes(merge_base, head)
         if not changes:
             raise AssuranceError("the trusted Git diff is empty")
-        diff_digest = digest_bytes(self.repo.diff_bytes(base, head))
+        diff_digest = digest_bytes(self.repo.diff_bytes(merge_base, head))
         actual_head = self.repo.head()
         tracked_clean = self.repo.tracked_clean()
         environment_evidence = _environment_evidence(self.repo, head, self.environment)
@@ -102,11 +123,11 @@ class AssuranceRunner:
         validate_manifest(manifest)
 
         protected = derive_protected_evidence(
-            self.repo, base, head, changes, self.policy
+            self.repo, merge_base, head, changes, self.policy
         )
         dependency = derive_dependency_evidence(
             self.repo,
-            base,
+            merge_base,
             head,
             changes,
             self.policy,
@@ -274,11 +295,11 @@ class AssuranceRunner:
 def load_policy(path: Path) -> tuple[dict[str, Any], str]:
     raw = path.read_bytes()
     try:
-        policy = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        policy = _strict_json_loads(raw)
+    except (json.JSONDecodeError, SchemaValidationError) as exc:
         raise AssuranceError(f"dependency policy is invalid JSON: {_safe_detail(str(exc))}") from exc
     try:
-        schema = json.loads(POLICY_SCHEMA.read_text(encoding="utf-8"))
+        schema = _strict_json_loads(POLICY_SCHEMA.read_text(encoding="utf-8"))
         validate_json_schema(policy, schema)
     except (OSError, json.JSONDecodeError, SchemaValidationError) as exc:
         raise AssuranceError(

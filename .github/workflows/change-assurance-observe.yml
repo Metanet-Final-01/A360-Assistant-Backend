@@ -57,13 +57,15 @@ jobs:
           ASSURANCE_REPOSITORY: ${{ github.repository }}
           ASSURANCE_SUBJECT: ${{ github.workspace }}/subject
           ASSURANCE_OUTPUT: ${{ runner.temp }}/change-assurance-${{ github.run_id }}-${{ github.run_attempt }}
-        run: >-
-          python -m assurance.change.cli
-          --repo "$ASSURANCE_SUBJECT"
-          --base-sha "$ASSURANCE_BASE_SHA"
-          --head-sha "$ASSURANCE_HEAD_SHA"
-          --repository "$ASSURANCE_REPOSITORY"
-          --output "$ASSURANCE_OUTPUT"
+        run: |
+          python -m pip install --disable-pip-version-check \
+            -r requirements.txt -r requirements-dev.txt
+          python -m assurance.change.cli \
+            --repo "$ASSURANCE_SUBJECT" \
+            --base-sha "$ASSURANCE_BASE_SHA" \
+            --head-sha "$ASSURANCE_HEAD_SHA" \
+            --repository "$ASSURANCE_REPOSITORY" \
+            --output "$ASSURANCE_OUTPUT"
 
       - name: Record bootstrap as unassured
         if: steps.trusted_runner.outputs.available != 'true'

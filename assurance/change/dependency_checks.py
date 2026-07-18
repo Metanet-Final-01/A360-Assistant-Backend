@@ -36,6 +36,7 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
     imports: list[ImportSpec] = []
     importlib_aliases = {"importlib"}
     import_module_aliases: set[str] = set()
+    builtin_import_aliases = {"__import__"}
     builtins_aliases = {"builtins"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -53,6 +54,10 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
                 for alias in node.names:
                     if alias.name == "import_module":
                         import_module_aliases.add(alias.asname or alias.name)
+            elif module == "builtins":
+                for alias in node.names:
+                    if alias.name == "__import__":
+                        builtin_import_aliases.add(alias.asname or alias.name)
             for alias in node.names:
                 imports.append(
                     ImportSpec(path, module, None if alias.name == "*" else alias.name, node.lineno, "from")
@@ -64,7 +69,10 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
             continue
         is_dynamic = False
         if isinstance(node.func, ast.Name):
-            is_dynamic = node.func.id == "__import__" or node.func.id in import_module_aliases
+            is_dynamic = (
+                node.func.id in builtin_import_aliases
+                or node.func.id in import_module_aliases
+            )
         elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
             is_dynamic = (
                 node.func.attr == "import_module" and node.func.value.id in importlib_aliases
@@ -140,32 +148,35 @@ def derive_risk_profiles(changes: list[dict[str, str]], policy: dict[str, Any]) 
     profiles: set[str] = set()
     dependency_paths = set(policy["dependency_paths"])
     for change in changes:
-        path = change["path"].replace("\\", "/")
-        lower = path.lower()
-        if path in dependency_paths:
-            profiles.add("dependency")
-        if path.startswith(".github/workflows/"):
-            profiles.add("workflow")
-        if path.startswith("tests/"):
-            profiles.add("test_oracle")
-        if path.startswith("assurance/change/") or path == ".github/CODEOWNERS":
-            profiles.add("assurance_policy")
-        if path.startswith("app/agent/"):
-            profiles.add("agent_owned")
-        if path.startswith("migrations/") or path == "app/models.py":
-            profiles.add("database_contract")
-        if path.startswith(("app/api/", "app/schemas/")) or "interface" in lower:
-            profiles.add("api_contract")
-        if "auth" in lower or "security" in lower:
-            profiles.add("auth")
-        if path.startswith("app/rag/"):
-            profiles.add("rag")
-        if path.startswith("infra/") or path.startswith("docker"):
-            profiles.add("infra")
-        if path.endswith(".py"):
-            profiles.add("source")
-        if path.startswith("docs/") or path.endswith(".md"):
-            profiles.add("docs")
+        for candidate in (change["path"], change.get("old_path")):
+            if not candidate:
+                continue
+            path = candidate.replace("\\", "/")
+            lower = path.lower()
+            if path in dependency_paths:
+                profiles.add("dependency")
+            if path.startswith(".github/workflows/"):
+                profiles.add("workflow")
+            if path.startswith("tests/"):
+                profiles.add("test_oracle")
+            if path.startswith("assurance/change/") or path == ".github/CODEOWNERS":
+                profiles.add("assurance_policy")
+            if path.startswith("app/agent/"):
+                profiles.add("agent_owned")
+            if path.startswith("migrations/") or path == "app/models.py":
+                profiles.add("database_contract")
+            if path.startswith(("app/api/", "app/schemas/")) or "interface" in lower:
+                profiles.add("api_contract")
+            if "auth" in lower or "security" in lower:
+                profiles.add("auth")
+            if path.startswith("app/rag/"):
+                profiles.add("rag")
+            if path.startswith("infra/") or path.startswith("docker"):
+                profiles.add("infra")
+            if path.endswith(".py"):
+                profiles.add("source")
+            if path.startswith("docs/") or path.endswith(".md"):
+                profiles.add("docs")
     return [profile for profile in RISK_ORDER if profile in profiles] or ["docs"]
 
 
@@ -205,7 +216,11 @@ def derive_protected_evidence(
     )
     for change in changes:
         path = change["path"]
-        if not path.endswith(SENSITIVE_SUFFIXES):
+        filename = Path(path).name
+        if not (
+            path.endswith(SENSITIVE_SUFFIXES)
+            or filename.startswith(("Dockerfile", "Containerfile"))
+        ):
             continue
         for line in repo.added_lines(base, head, path):
             for pattern, code in indicator_patterns:
@@ -276,7 +291,12 @@ def _new_imports(
             continue
         old_path = change.get("old_path", path)
         head_imports, head_errors = parse_imports(path, repo.show(head, path))
-        base_imports, base_errors = parse_imports(old_path, repo.show(base, old_path))
+        if old_path.endswith(".py"):
+            base_imports, base_errors = parse_imports(
+                old_path, repo.show(base, old_path)
+            )
+        else:
+            base_imports, base_errors = [], []
         errors.extend(head_errors)
         errors.extend(base_errors)
         existing = {item.key for item in base_imports}
