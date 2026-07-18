@@ -246,6 +246,9 @@ def chat(
     try:
         response = _get_client().chat.completions.create(**create_kwargs)
     except AuthenticationError as e:
+        # 인증 실패도 관측에 남긴다 — 키 만료·교체 사고는 "어느 시점부터 전부 실패했나"를
+        # 봐야 원인을 좁힐 수 있는데, 여기가 비어 있으면 그 흔적이 없다(#279 리뷰).
+        _log_llm_failure(purpose, model, "auth", started, e)
         raise RuntimeError("OpenAI 인증 실패 — API 키를 확인하세요") from e
     except RateLimitError as e:
         # ⚠️ 여기는 **SDK 재시도(기본 2회)를 이미 소진한 뒤**다. 그래도 원인을 단정하지 않는다 —

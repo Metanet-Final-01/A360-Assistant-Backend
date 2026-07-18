@@ -68,6 +68,10 @@ def test_claim_is_atomic_under_real_concurrency(issued_refresh_token, integratio
         with Session(integration_engine) as s:  # 스레드마다 독립 커넥션
             barrier.wait()
             got = auth_mod._claim_refresh_token(token_hash, s)
+            # 프로덕션은 선점과 발급을 **함께 커밋**한다(_issue_tokens) — 여기서도 같게 닫는다.
+            # 커밋하지 않으면 세션 종료 시 롤백돼 폐기가 되돌아가고, 다음 스레드가 또 선점해
+            # 8건 전부 성공한다(경합이 아니라 순차 재시도가 된다).
+            s.commit() if got else s.rollback()
         with lock:
             wins.append(got)
 
@@ -159,3 +163,68 @@ def test_concurrent_logout_and_refresh_leaves_no_live_token(client, issued_refre
             f"로그아웃 후 유효 토큰이 {len(alive)}개 남았다 — 갱신(refresh={outcome['refresh']})이 "
             f"경합에서 이겨 발급한 후손이 살아남으면 로그아웃이 사실이 아니라 주장이 된다"
         )
+
+
+def test_logout_waits_while_refresh_is_mid_transaction(client, issued_refresh_token, integration_engine):
+    """🔴 **결정론적 증명** — 갱신이 트랜잭션 중일 때 로그아웃은 기다려야 한다.
+
+    앞의 확률적 테스트들은 타이밍이 맞아야 결함을 잡는다(자문 잠금을 빼도 4회 중 1회만 실패).
+    여기서는 순서를 강제해 **직렬화 자체**를 못 박는다:
+
+      1) 갱신이 토큰을 선점한 직후 멈춘다(아직 커밋 전 — 계열 잠금을 쥔 상태)
+      2) 그 사이 로그아웃을 부른다 → 잠금이 있으면 **완료되지 못하고 대기**해야 한다
+      3) 갱신을 풀어주면 로그아웃이 이어서 끝나고, 살아남은 토큰이 없어야 한다
+
+    잠금이 없으면 (2)에서 로그아웃이 즉시 끝나고 (3)의 갱신이 새 토큰을 남긴다 —
+    사용자는 204를 받았는데 세션이 유지되는 그 결함이다.
+    """
+    import threading
+
+    from sqlalchemy.orm import Session
+
+    from app.api import auth as auth_mod
+
+    claimed = threading.Event()   # 갱신이 선점을 마쳤다
+    release = threading.Event()   # 갱신에게 계속 진행하라
+    logout_done = threading.Event()
+    real_issue = auth_mod._issue_tokens
+
+    def paused_issue(user_id, db, **kw):
+        claimed.set()
+        release.wait(timeout=30)  # 잠금을 쥔 채 대기
+        return real_issue(user_id, db, **kw)
+
+    auth_mod._issue_tokens = paused_issue
+    try:
+        t_refresh = threading.Thread(
+            target=lambda: client.post("/api/auth/refresh",
+                                       json={"refresh_token": issued_refresh_token}))
+        t_refresh.start()
+        assert claimed.wait(timeout=30), "갱신이 선점 단계까지 오지 못했다"
+
+        def do_logout():
+            client.post("/api/auth/logout", json={"refresh_token": issued_refresh_token})
+            logout_done.set()
+
+        t_logout = threading.Thread(target=do_logout)
+        t_logout.start()
+
+        # 잠금이 살아 있으면 로그아웃은 여기서 끝나지 못한다.
+        assert not logout_done.wait(timeout=3), (
+            "갱신이 트랜잭션 중인데 로그아웃이 끝났다 — 계열 직렬화가 깨졌다. "
+            "이 상태면 로그아웃의 폐기가 지나간 뒤 갱신이 새 토큰을 남긴다"
+        )
+
+        release.set()
+        t_refresh.join(timeout=30)
+        t_logout.join(timeout=30)
+        assert logout_done.is_set(), "잠금 해제 후에도 로그아웃이 끝나지 않았다"
+    finally:
+        auth_mod._issue_tokens = real_issue
+        release.set()
+
+    with Session(integration_engine) as s:
+        alive = s.scalars(
+            select(models.RefreshToken).where(models.RefreshToken.revoked_at.is_(None))
+        ).all()
+        assert alive == [], f"로그아웃 후 유효 토큰이 {len(alive)}개 남았다"

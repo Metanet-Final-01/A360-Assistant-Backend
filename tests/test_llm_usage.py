@@ -554,3 +554,26 @@ def test_observation_failure_does_not_mask_llm_error(monkeypatch):
     monkeypatch.setattr("app.rag.observability.log_event", _boom)
     with pytest.raises(RuntimeError, match="연결하지 못했습니다"):
         llm.chat([{"role": "user", "content": "x"}], purpose="chat")
+
+
+def test_auth_failure_is_observed(monkeypatch):
+    """인증 실패도 관측에 남는다 (#279 리뷰).
+
+    키 만료·교체 사고는 "어느 시점부터 전부 실패했나"를 봐야 원인을 좁힐 수 있는데,
+    여기가 비어 있으면 그 흔적이 없다.
+    """
+    from openai import AuthenticationError
+
+    events = []
+    monkeypatch.setattr(llm, "_get_client", lambda: _raising_client(_openai_error(AuthenticationError)))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: None)
+    monkeypatch.setattr("app.rag.observability.log_event",
+                        lambda event, **f: events.append((event, f)))
+
+    with pytest.raises(RuntimeError, match="인증 실패"):
+        llm.chat([{"role": "user", "content": "x"}], purpose="vision_parse")
+
+    assert events, "인증 실패가 관측에 안 남으면 키 사고의 시작 시점을 못 찾는다"
+    name, fields = events[0]
+    assert name == "external_api_attempt" and fields["failure_kind"] == "auth"
+    assert "error_message" not in fields  # 예외 문자열은 남기지 않는다
