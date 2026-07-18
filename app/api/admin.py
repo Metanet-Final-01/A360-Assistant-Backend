@@ -25,6 +25,7 @@ from app.schemas.budget import BudgetLimitsUpdate
 from app.schemas.retrieval import RetrievalParamsUpdate
 from app.services import budget as budget_service
 from app.services import retrieval_params as rp_service
+from app.services.assurance_evidence import receipt_integrity
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,113 @@ def audit_logs(
             for r in rows
         ]
     }
+
+
+def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False) -> dict:
+    payload = row.receipt_payload if isinstance(row.receipt_payload, dict) else {}
+    completeness = payload.get("completeness")
+    completeness = completeness if isinstance(completeness, dict) else {}
+    result = {
+        "receipt_digest": row.receipt_digest,
+        "schema_version": row.schema_version,
+        "harness": row.harness,
+        "record_kind": row.record_kind,
+        "writer_authority": row.writer_authority,
+        "source": row.source,
+        "request_id": row.request_id,
+        "session_id": str(row.session_id) if row.session_id else None,
+        "recommendation_id": str(row.recommendation_id) if row.recommendation_id else None,
+        "recommendation_version": row.recommendation_version,
+        "candidate_id": row.candidate_id,
+        "payload_digest": row.payload_digest,
+        "evidence_valid": row.evidence_valid,
+        "completeness_status": row.completeness_status,
+        "missing_evidence": completeness.get("missing", []),
+        "decision": row.decision,
+        "assurance_verdict": row.assurance_verdict,
+        "assurance_status": row.assurance_status,
+        "rollout_mode": row.rollout_mode,
+        "enforcement_effect": row.enforcement_effect,
+        "business_persisted": row.business_persisted,
+        "validator_version": row.validator_version,
+        "policy_digest": row.policy_digest,
+        "catalog_digest": row.catalog_digest,
+        "requested_agent_version": row.requested_agent_version,
+        "resolved_agent_version": row.resolved_agent_version,
+        "integrity_valid": receipt_integrity(row),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+    if detail:
+        result["receipt_payload"] = payload
+    return result
+
+
+@router.get("/assurance-receipts")
+def assurance_receipts(
+    limit: int = Query(100, ge=1, le=500),
+    harness: str | None = Query(None, pattern="^(change|output)$"),
+    decision: str | None = Query(None, pattern="^(allow_candidate|deny|unassured)$"),
+    assurance_verdict: str | None = Query(None, pattern="^(observed|deny|refused)$"),
+    request_id: str | None = Query(None, max_length=32),
+    session_id: str | None = Query(None),
+    since: str | None = Query(None, description="ISO8601 — 이 시각 이후만 (증분 수집 커서)"),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """보증 영수증 목록 — 백오피스 read-only 대사와 증분 수집용."""
+    if since:
+        q = (
+            select(models.AssuranceReceipt)
+            .where(models.AssuranceReceipt.created_at > _parse_since(since))
+            .order_by(models.AssuranceReceipt.created_at.asc(), models.AssuranceReceipt.id.asc())
+            .limit(limit)
+        )
+    else:
+        q = select(models.AssuranceReceipt).order_by(
+            models.AssuranceReceipt.created_at.desc(), models.AssuranceReceipt.id.desc()
+        ).limit(limit)
+    if harness:
+        q = q.where(models.AssuranceReceipt.harness == harness)
+    if decision:
+        q = q.where(models.AssuranceReceipt.decision == decision)
+    if assurance_verdict:
+        q = q.where(models.AssuranceReceipt.assurance_verdict == assurance_verdict)
+    if request_id:
+        q = q.where(models.AssuranceReceipt.request_id == request_id)
+    if session_id:
+        try:
+            sid = uuid.UUID(session_id)
+        except ValueError:
+            raise HTTPException(
+                400, detail={"code": "INVALID_ID", "message": "session_id 형식이 올바르지 않습니다."}
+            ) from None
+        q = q.where(models.AssuranceReceipt.session_id == sid)
+    rows = db.execute(q).scalars().all()
+    return {"receipts": [_assurance_receipt_out(row) for row in rows]}
+
+
+@router.get("/assurance-receipts/{receipt_digest}")
+def assurance_receipt_detail(
+    receipt_digest: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """보증 영수증 상세 — 마스킹된 control·finding과 무결성 재검증 결과를 반환."""
+    if not receipt_digest.startswith("sha256:") or len(receipt_digest) != 71:
+        raise HTTPException(
+            400,
+            detail={"code": "INVALID_RECEIPT_DIGEST", "message": "receipt digest 형식이 올바르지 않습니다."},
+        )
+    row = db.execute(
+        select(models.AssuranceReceipt).where(
+            models.AssuranceReceipt.receipt_digest == receipt_digest
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "NOT_FOUND", "message": "보증 영수증을 찾을 수 없습니다."}
+        )
+    return _assurance_receipt_out(row, detail=True)
 
 
 @router.get("/metrics-daily")

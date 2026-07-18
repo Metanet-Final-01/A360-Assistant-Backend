@@ -27,6 +27,7 @@ A360은 개발 과정에서 AI를 적극적으로 사용했다. 그래서 결과
 | 6 | [증거 안내](phase0/v1.10/evidence/README.md) | 동결 원본과 검증 코드의 역할 및 읽는 법 |
 | 7 | [RPA-179 교정 참조](reference/rpa179/README.md) | 동결 원본을 보존하며 28건을 어떻게 교정·회귀하는지 |
 | 8 | [RPA-180 Change Assurance](change/README.md) | 실제 PR diff를 Observe하고 증거를 남기는 첫 제품 연결 |
+| 9 | [RPA-182 Evidence & Governance](evidence/README.md) | 판정 영수증의 저장·무결성·조회 계약과 현재 한계 |
 
 ## 세 가지 하네스
 
@@ -50,6 +51,7 @@ Backend 하네스는 Agent의 공개 계약을 소비하고 저장 경계를 감
 | RPA-179 교정 참조 | 실행 대상 25/25, 독립 실행 2회 결정론 검증 PASS |
 | RPA-180 Change Assurance | Observe 검사기·결정론적 결함 fixture·비차단 CI 연결 |
 | RPA-181 Output Boundary Assurance | Backend 저장 경계의 strict schema·catalog 독립 검사와 Observe 판정 연결 |
+| RPA-182 Evidence & Governance | Output receipt의 제품 DB append-only 저장과 관리자 read-only API 첫 슬라이스 |
 | 참조 구현의 제품·운영 사용 | 금지, RPA-179도 fixture 참조만 제공 |
 | 제품 코드 연결 | RPA-180은 PR CI, RPA-181은 추천 저장 경계에 `Observe`로만 연결 |
 | 현재 허용 rollout | `Observe`만 허용 |
@@ -58,8 +60,8 @@ Backend 하네스는 Agent의 공개 계약을 소비하고 저장 경계를 감
 
 Phase 0와 RPA-179는 **검토 가능한 계약과 결정론적 참조 구현**이며 생산 사용 승인이 아니다.
 RPA-180과 RPA-181은 실제 PR·추천 저장 경로에 연결됐지만 아직 비차단 `Observe`다. required check,
-보호 writer, 판정 영속화와 정책 소유권을 갖춘 운영 하네스 승격은 아니며 후속 구현은 Jira
-`RPA-182`부터 `RPA-184`까지 추적한다.
+Output 판정은 영속화되지만 Change receipt의 보호된 수집 경로, Backoffice 화면, 정책 소유권을 모두
+갖춘 운영 하네스 승격은 아니다. 후속 구현은 Jira `RPA-182`부터 `RPA-184`까지 추적한다.
 
 ## 디렉터리 구조
 

@@ -14,6 +14,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Enum,
@@ -174,6 +175,68 @@ class RecommendationVersion(Base):
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     session: Mapped[AnalysisSession] = relationship(back_populates="recommendations")
+
+
+class AssuranceReceipt(Base):
+    """보증 판정의 append-only 증거 영수증 (RPA-182).
+
+    일반 관측 로그와 달리 향후 latest/export 차단 판단에 사용될 권위 후보이므로 제품 DB에
+    저장한다. 추천·세션 FK를 의도적으로 두지 않는다. 사용자가 세션을 삭제해도 원문 payload나
+    PII 없이 digest와 판정 이력은 보존되어야 하기 때문이다. UPDATE/DELETE는 DB trigger가 막는다.
+    """
+
+    __tablename__ = "assurance_receipts"
+    __table_args__ = (
+        CheckConstraint("harness IN ('change', 'output')", name="ck_assurance_receipts_harness"),
+        CheckConstraint(
+            "completeness_status IN ('complete', 'incomplete')",
+            name="ck_assurance_receipts_completeness",
+        ),
+        CheckConstraint(
+            "assurance_verdict IN ('observed', 'deny', 'refused')",
+            name="ck_assurance_receipts_verdict",
+        ),
+        CheckConstraint(
+            "rollout_mode IN ('observe', 'warn', 'enforce')",
+            name="ck_assurance_receipts_rollout",
+        ),
+        CheckConstraint(
+            "enforcement_effect IN ('none', 'warned', 'blocked')",
+            name="ck_assurance_receipts_effect",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    receipt_digest: Mapped[str] = mapped_column(String(71), unique=True)
+    schema_version: Mapped[str] = mapped_column(String(20))
+    harness: Mapped[str] = mapped_column(String(20), index=True)  # change | output
+    record_kind: Mapped[str] = mapped_column(String(40))
+    writer_authority: Mapped[str] = mapped_column(String(60))
+    source: Mapped[str | None] = mapped_column(String(20))
+    request_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    recommendation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    recommendation_version: Mapped[int | None] = mapped_column(Integer)
+    candidate_id: Mapped[str | None] = mapped_column(String(71), index=True)
+    payload_digest: Mapped[str | None] = mapped_column(String(71))
+    source_observation_id: Mapped[str | None] = mapped_column(String(71))
+    evidence_valid: Mapped[bool] = mapped_column(Boolean)
+    completeness_status: Mapped[str] = mapped_column(String(20))  # complete | incomplete
+    decision: Mapped[str] = mapped_column(String(30), index=True)
+    assurance_verdict: Mapped[str] = mapped_column(String(20), index=True)
+    assurance_status: Mapped[str] = mapped_column(String(40))
+    rollout_mode: Mapped[str] = mapped_column(String(20))
+    enforcement_effect: Mapped[str] = mapped_column(String(20))
+    business_persisted: Mapped[bool | None] = mapped_column(Boolean)
+    validator_version: Mapped[str | None] = mapped_column(String(100))
+    policy_digest: Mapped[str | None] = mapped_column(String(71))
+    catalog_digest: Mapped[str | None] = mapped_column(String(71))
+    requested_agent_version: Mapped[str | None] = mapped_column(String(50))
+    resolved_agent_version: Mapped[str | None] = mapped_column(String(50))
+    receipt_payload: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
 
 
 class ChatMessage(Base):

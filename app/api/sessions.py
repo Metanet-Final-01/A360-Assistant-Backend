@@ -26,6 +26,7 @@ from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
 from app.schemas import ProgressEvent, Recommendation
 from app.services import alerts, budget
+from app.services.assurance_evidence import persist_output_receipt
 from app.services.output_assurance import (
     OutputBoundaryContext,
     build_unassured_observation,
@@ -290,6 +291,7 @@ def _save_recommendation(
                 ).scalar()
                 version = (last or 0) + 1
                 row = models.RecommendationVersion(
+                    id=uuid.uuid4(),
                     session_id=session_id,
                     analysis_id=analysis_id,
                     version=version,
@@ -317,7 +319,16 @@ def _save_recommendation(
         else:
             finalized = finalize_persistence_observation(observation, persisted=True)
             _log_output_observation(finalized)
-            return {**_recommendation_out(row), "output_assurance": finalized}
+            receipt = persist_output_receipt(
+                finalized,
+                recommendation_id=row.id,
+                recommendation_version=row.version,
+            )
+            return {
+                **_recommendation_out(row),
+                "output_assurance": finalized,
+                "assurance_receipt": receipt,
+            }
 
 
 @router.get("/{session_id}/recommendations")

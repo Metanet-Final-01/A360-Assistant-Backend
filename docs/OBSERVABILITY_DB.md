@@ -5,6 +5,12 @@
 
 앱은 `app/core/observability_db.py`가 `OBSERVABILITY_DATABASE_URL`로 앱 DB와 분리 연결(RPA-90). FK 없는 동형 테이블이며, 모든 쓰기는 **best-effort**(관측 DB 장애가 요청을 죽이지 않는다). 조회는 관리자 전용 API(`/api/admin/*`, `require_admin`).
 
+> **보증 영수증은 별도다.** `assurance_receipts`는 일반 관측 로그가 아니라 이후 저장·조회·export
+> 정책의 근거가 될 수 있는 무결성 증거이므로 관측 DB가 아닌 제품 DB에 저장한다. 일반 로그처럼
+> 유실을 허용하지 않으며 UPDATE/DELETE는 DB trigger가 거부한다. 현재는 Observe 결과 기록용이고
+> 영수증 하나만으로 사용자 출력이나 배포를 승인하지 않는다. 상세 계약은
+> [`assurance/evidence/README.md`](../assurance/evidence/README.md)를 참고한다.
+
 ## 1. 테이블 요약
 
 | 테이블 | 무슨 로그인가 | 모델 | 채워지는 경로 |

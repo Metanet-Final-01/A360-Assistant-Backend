@@ -35,6 +35,13 @@ VALIDATOR_VERSION = "output-boundary-observe-v1"
 PUBLIC_CONTRACT_VERSION = "turn.done.v1"
 MAX_FINDINGS = 100
 MAX_CATALOG_NAME = 200
+OUTPUT_POLICY = {
+    "rollout_mode": "observe",
+    "controls": ["strict_schema", "catalog_closure"],
+    "fail_decision": "deny",
+    "detector_error_decision": "unassured",
+    "blocks_persistence": False,
+}
 
 _MODEL_FIELDS = {
     "recommendation": set(Recommendation.model_fields),
@@ -77,6 +84,9 @@ def _canonical(value: Any) -> bytes:
 
 def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
+
+
+OUTPUT_POLICY_DIGEST = _digest(OUTPUT_POLICY)
 
 
 def _optional_digest(value: Any) -> tuple[str | None, str | None]:
@@ -266,6 +276,7 @@ def observe_recommendation_candidate(
     observation = {
         "schema_version": SCHEMA_VERSION,
         "validator_version": VALIDATOR_VERSION,
+        "policy_digest": OUTPUT_POLICY_DIGEST,
         "rollout_mode": "observe",
         "decision": decision,
         "assurance_status": "unassured_observe",
@@ -317,6 +328,7 @@ def build_unassured_observation(
     observation = {
         "schema_version": SCHEMA_VERSION,
         "validator_version": VALIDATOR_VERSION,
+        "policy_digest": OUTPUT_POLICY_DIGEST,
         "rollout_mode": "observe",
         "decision": "unassured",
         "assurance_status": "unassured_observe",

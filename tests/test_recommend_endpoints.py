@@ -166,7 +166,9 @@ def test_save_recommendation_continues_when_observer_fails(monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *args): return False
         def execute(self, stmt): return SimpleNamespace(scalar=lambda: 1)
-        def add(self, row): saved["row"] = row
+        def add(self, row):
+            if type(row).__name__ == "RecommendationVersion":
+                saved["row"] = row
         def commit(self): pass
 
     monkeypatch.setattr("app.db.SessionLocal", _Persist)
@@ -188,6 +190,8 @@ def test_save_recommendation_continues_when_observer_fails(monkeypatch):
         "control_id": "output_boundary", "status": "error", "error_type": "RuntimeError"
     }]
     assert assurance["business_outcome"] == {"persisted": True}
+    assert result["assurance_receipt"]["status"] == "persisted"
+    assert result["assurance_receipt"]["assurance_verdict"] == "refused"
 
 
 def test_save_recommendation_retries_on_version_conflict(monkeypatch):

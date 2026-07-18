@@ -1,7 +1,7 @@
 """운영·모니터링 집계 조회 API 테스트 (RPA-81)."""
 
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import app.api.admin as admin_api
 from app.core.observability_db import get_obs_db
+from app.db import get_db
 from app.main import app
 
 
@@ -22,6 +23,7 @@ class FakeDB:
         return SimpleNamespace(
             all=lambda: self.agg_rows,
             scalars=lambda: SimpleNamespace(all=lambda: self.scalar_rows),
+            scalar_one_or_none=lambda: (self.scalar_rows[0] if self.scalar_rows else None),
         )
 
 
@@ -110,6 +112,73 @@ def test_service_api_key_disabled_when_unset(monkeypatch):
     with TestClient(app) as c:
         r = c.get("/api/admin/audit-logs", headers={"X-API-Key": ""})
     assert r.status_code == 403
+
+
+def _receipt_row():
+    recommendation_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    payload = {
+        "schema_version": "1.0",
+        "harness": "output",
+        "record_kind": "output_observation",
+        "writer_authority": "backend_boundary_observer",
+        "subject": {
+            "recommendation_id": str(recommendation_id),
+            "payload_digest": "sha256:" + "b" * 64,
+        },
+        "decision": "deny",
+        "assurance_verdict": "deny",
+        "completeness": {"missing": []},
+    }
+    from app.services.assurance_evidence import digest
+
+    return SimpleNamespace(
+        receipt_digest=digest(payload), schema_version="1.0", harness="output",
+        record_kind="output_observation", writer_authority="backend_boundary_observer",
+        source="drag", request_id="request-1", session_id=session_id,
+        recommendation_id=recommendation_id, recommendation_version=2,
+        candidate_id="sha256:" + "a" * 64, payload_digest="sha256:" + "b" * 64,
+        evidence_valid=True, completeness_status="complete", decision="deny",
+        assurance_verdict="deny", assurance_status="unassured_observe", rollout_mode="observe",
+        enforcement_effect="none", business_persisted=True, validator_version="v1",
+        policy_digest="sha256:" + "c" * 64, catalog_digest="sha256:" + "d" * 64,
+        requested_agent_version=None, resolved_agent_version=None,
+        receipt_payload=payload, created_at=datetime(2026, 7, 19, tzinfo=timezone.utc),
+    )
+
+
+def test_assurance_receipts_are_admin_only_and_read_only(monkeypatch):
+    row = _receipt_row()
+    app.dependency_overrides[get_db] = lambda: FakeDB(scalar_rows=[row])
+    _auth()
+    with TestClient(app) as c:
+        listed = c.get("/api/admin/assurance-receipts")
+        detail = c.get(f"/api/admin/assurance-receipts/{row.receipt_digest}")
+        write = c.post("/api/admin/assurance-receipts", json={"decision": "allow_candidate"})
+
+    assert listed.status_code == 200
+    assert listed.json()["receipts"][0]["integrity_valid"] is True
+    assert "receipt_payload" not in listed.json()["receipts"][0]
+    assert detail.status_code == 200
+    assert detail.json()["receipt_payload"]["decision"] == "deny"
+    assert write.status_code == 405
+
+
+def test_assurance_receipts_reject_non_admin(monkeypatch):
+    monkeypatch.delenv("OPS_API_KEY", raising=False)
+    app.dependency_overrides[get_db] = lambda: FakeDB()
+    _as_user(is_admin=False)
+    with TestClient(app) as c:
+        r = c.get("/api/admin/assurance-receipts")
+    assert r.status_code == 403
+
+
+def test_assurance_receipts_invalid_session_id_400():
+    app.dependency_overrides[get_db] = lambda: FakeDB()
+    _auth()
+    with TestClient(app) as c:
+        r = c.get("/api/admin/assurance-receipts", params={"session_id": "not-a-uuid"})
+    assert r.status_code == 400
 
 
 # --- llm-usage/stats ---
