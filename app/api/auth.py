@@ -9,7 +9,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app import models
@@ -84,33 +84,8 @@ def _issue_tokens(
             expires_at=datetime.now(timezone.utc) + timedelta(days=expire_days),
         )
     )
-    # 회전 경로에서는 이 커밋이 **선점 UPDATE와 같은 트랜잭션**을 닫는다 — 둘이 함께
-    # 반영돼야 "옛 토큰은 폐기됐는데 새 토큰이 없는/살아남는" 중간 상태가 없다(#279).
     db.commit()
     return TokenResponse(access_token=create_access_token(user_id), refresh_token=refresh)
-
-
-def _lock_family(family_id: uuid.UUID, db: Session) -> None:
-    """이 계열에 대한 갱신·로그아웃을 **직렬화**한다 (자문 잠금, 트랜잭션 종료 시 자동 해제).
-
-    ⚠️ 왜 행 잠금이 아니라 자문 잠금인가 — 막아야 하는 것이 **삽입**이기 때문이다.
-    로그아웃은 `UPDATE ... WHERE family_id = ?`로 기존 행만 폐기하는데, 그 UPDATE가 지나간
-    뒤 갱신이 **새 행을 INSERT**하면 그 토큰은 살아남는다. 사용자는 204를 받았는데 세션이
-    유지된다. 기존 행에 `FOR UPDATE`를 걸어도 팬텀 삽입은 막지 못한다(Postgres 행 잠금의 한계).
-    계열 식별자 자체를 잠그면 삽입까지 포함해 순서가 강제된다.
-
-    dev CI가 실제로 이 경합으로 빨간불이 됐다(65ddd01) — 로컬에선 타이밍이 안 맞아 통과했다.
-
-    SQLite(유닛 테스트)에는 이 함수가 없으므로 조용히 넘어간다 — 그쪽은 단일 커넥션이라
-    애초에 이 경합이 성립하지 않는다. 실제 검증은 통합 테스트(Postgres)가 한다.
-    """
-    if db.bind is None or db.bind.dialect.name != "postgresql":
-        return
-    # uuid(128비트) → 부호 있는 bigint 하나. 2인자 형식은 int4 두 개라 bigint가 안 들어간다.
-    # 서로 다른 계열이 같은 키로 접힐 확률은 무시할 만하고, 접혀도 결과는 '불필요한 직렬화'일
-    # 뿐 정확성은 깨지지 않는다.
-    key = (family_id.int >> 64) - (1 << 63)
-    db.execute(text("select pg_advisory_xact_lock(cast(:key as bigint))"), {"key": key})
 
 
 def _claim_refresh_token(token_hash: str, db: Session) -> bool:
@@ -119,9 +94,7 @@ def _claim_refresh_token(token_hash: str, db: Session) -> bool:
     조건부 UPDATE(`WHERE revoked_at IS NULL`)라 DB가 한 승자만 보장한다. 조회 후 갱신으로
     나누면 동시 요청 둘이 **같은 토큰으로 각각 새 쌍을 발급**받아 회전(1회용)이 깨진다
     — 그러면 재사용 탐지도 무의미해진다(둘 다 '아직 유효'로 보였으므로 탐지가 안 걸린다).
-
-    ⚠️ **커밋하지 않는다.** 선점과 새 토큰 발급이 한 트랜잭션에 있어야 로그아웃과의 경합에서
-    "폐기됐는데 후손이 살아남는" 중간 상태가 안 생긴다(#279). 커밋은 호출부가 한다.
+    logout과의 경합도 같은 이유로 여기서 닫힌다.
     """
     from datetime import datetime, timezone
 
@@ -133,6 +106,7 @@ def _claim_refresh_token(token_hash: str, db: Session) -> bool:
         )
         .values(revoked_at=datetime.now(timezone.utc))
     )
+    db.commit()
     return result.rowcount == 1
 
 
@@ -334,23 +308,11 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
         # 만료는 탈취가 아니다 — 계열을 끊지 않는다(오래 쉰 사용자가 다른 기기까지 잃지 않게).
         raise invalid
 
-    # ④ 계열 잠금 — 여기부터 발급까지가 로그아웃과 **직렬화**된다 (#279).
-    #    잠금 없이는 로그아웃의 폐기 UPDATE가 지나간 뒤 우리가 새 행을 INSERT해 살아남는다.
-    _lock_family(row.family_id, db)
-
-    # 잠금을 기다리는 동안 로그아웃이 이 계열을 끊었을 수 있다 — 다시 읽어 확인한다.
-    # (잠금 전에 읽은 row는 낡은 스냅샷이다. 가드가 읽는 것과 동작이 읽는 것이 같아야 한다.)
-    db.refresh(row)
-    if row.revoked_at is not None:
-        raise invalid
-
-    # ⑤ 회전 — **원자적으로** 선점한 요청만 새 쌍을 받는다 (CodeRabbit #273)
+    # ④ 회전 — **원자적으로** 선점한 요청만 새 쌍을 받는다 (CodeRabbit #273)
     if not _claim_refresh_token(row.token_hash, db):
         # 동시 요청이 먼저 선점했다. ③에서 방금 '유효'로 확인했으므로 옛 토큰의 재생(replay)이
         # 아니라 경합이다 — 탈취로 단정해 계열을 끊으면 더블클릭·재시도가 전 기기 로그아웃이 된다.
-        db.rollback()
         raise invalid
-    # 선점과 발급이 한 트랜잭션 — _issue_tokens의 commit이 둘을 함께 닫는다
     return _issue_tokens(user_uuid, db, family_id=row.family_id)  # 계열을 잇는다
 
 
@@ -372,9 +334,6 @@ def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
         )
     )
     if row is not None:
-        # 갱신과 같은 잠금을 잡는다 — 이게 없으면 우리 UPDATE가 지나간 직후 갱신이 새 행을
-        # INSERT해 살아남는다(dev CI를 빨간불로 만든 그 경합, #279).
-        _lock_family(row.family_id, db)
         _revoke_family(row.family_id, db)
 
 
