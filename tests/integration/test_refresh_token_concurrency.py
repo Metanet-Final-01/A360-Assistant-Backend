@@ -11,15 +11,36 @@
 """
 
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app import models
 from app.main import app
 
 _CONCURRENCY = 8
+
+
+def _wait_for_refresh_token_lock_wait(integration_engine, *, timeout: float = 30) -> None:
+    """경쟁 요청이 PostgreSQL row lock에서 실제 대기 중일 때만 반환한다."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with integration_engine.connect() as connection:
+            waiting = connection.scalar(text("""
+                select exists (
+                    select 1
+                    from pg_stat_activity
+                    where datname = current_database()
+                      and wait_event_type = 'Lock'
+                      and query ilike '%refresh_tokens%'
+                )
+            """))
+        if waiting:
+            return
+        time.sleep(0.02)
+    raise AssertionError("경쟁 요청이 refresh_tokens row lock 대기에 진입하지 않았습니다")
 
 
 @pytest.fixture()
@@ -158,6 +179,7 @@ def test_refresh_commit_then_logout_revokes_the_new_child(
     logout_thread = threading.Thread(target=do_logout)
     logout_thread.start()
     assert logout_started.wait(timeout=30)
+    _wait_for_refresh_token_lock_wait(integration_engine)
     allow_refresh_commit.set()
     refresh_thread.join(timeout=60)
     logout_thread.join(timeout=60)
@@ -202,6 +224,7 @@ def test_logout_commit_then_refresh_cannot_create_a_child(
     refresh_thread = threading.Thread(target=do_refresh)
     refresh_thread.start()
     assert refresh_started.wait(timeout=30)
+    _wait_for_refresh_token_lock_wait(integration_engine)
     allow_logout_commit.set()
     logout_thread.join(timeout=60)
     refresh_thread.join(timeout=60)
