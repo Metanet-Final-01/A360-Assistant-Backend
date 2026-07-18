@@ -88,26 +88,18 @@ def _issue_tokens(
     return TokenResponse(access_token=create_access_token(user_id), refresh_token=refresh)
 
 
-def _claim_refresh_token(token_hash: str, db: Session) -> bool:
-    """토큰을 **원자적으로 선점**한다 — 폐기에 성공한 요청만 True (RPA-200).
+def _get_refresh_token_for_update(token_hash: str, db: Session) -> models.RefreshToken | None:
+    """같은 원본 토큰의 refresh·logout을 한 DB 행에서 직렬화한다 (RPA-201).
 
-    조건부 UPDATE(`WHERE revoked_at IS NULL`)라 DB가 한 승자만 보장한다. 조회 후 갱신으로
-    나누면 동시 요청 둘이 **같은 토큰으로 각각 새 쌍을 발급**받아 회전(1회용)이 깨진다
-    — 그러면 재사용 탐지도 무의미해진다(둘 다 '아직 유효'로 보였으므로 탐지가 안 걸린다).
-    logout과의 경합도 같은 이유로 여기서 닫힌다.
+    lock은 호출자의 transaction이 끝날 때까지 유지된다. refresh는 부모 폐기와 후손 INSERT를
+    같은 commit에 넣고, logout은 그 commit 뒤 family 전체를 폐기한다. 중간 commit을 두면
+    logout이 빈 틈을 지나간 뒤 refresh가 살아 있는 후손을 만들 수 있다.
     """
-    from datetime import datetime, timezone
-
-    result = db.execute(
-        update(models.RefreshToken)
-        .where(
-            models.RefreshToken.token_hash == token_hash,
-            models.RefreshToken.revoked_at.is_(None),
-        )
-        .values(revoked_at=datetime.now(timezone.utc))
+    return db.scalar(
+        select(models.RefreshToken)
+        .where(models.RefreshToken.token_hash == token_hash)
+        .with_for_update()
     )
-    db.commit()
-    return result.rowcount == 1
 
 
 def _revoke_family(family_id: uuid.UUID, db: Session) -> int:
@@ -276,11 +268,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
         raise invalid
 
     # ② 서버가 아는 토큰인지 (해시로 조회 — 원문은 저장돼 있지 않다)
-    row = db.scalar(
-        select(models.RefreshToken).where(
-            models.RefreshToken.token_hash == hash_token(payload.refresh_token)
-        )
-    )
+    row = _get_refresh_token_for_update(hash_token(payload.refresh_token), db)
     if row is None:
         raise invalid
 
@@ -308,12 +296,10 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
         # 만료는 탈취가 아니다 — 계열을 끊지 않는다(오래 쉰 사용자가 다른 기기까지 잃지 않게).
         raise invalid
 
-    # ④ 회전 — **원자적으로** 선점한 요청만 새 쌍을 받는다 (CodeRabbit #273)
-    if not _claim_refresh_token(row.token_hash, db):
-        # 동시 요청이 먼저 선점했다. ③에서 방금 '유효'로 확인했으므로 옛 토큰의 재생(replay)이
-        # 아니라 경합이다 — 탈취로 단정해 계열을 끊으면 더블클릭·재시도가 전 기기 로그아웃이 된다.
-        raise invalid
-    return _issue_tokens(user_uuid, db, family_id=row.family_id)  # 계열을 잇는다
+    # ④ 회전 — 부모 폐기와 후손 INSERT를 같은 transaction으로 commit한다. 위 FOR UPDATE lock이
+    # 동시 refresh와 logout을 직렬화하므로 중간에 계열 폐기가 빠져나갈 틈이 없다.
+    row.revoked_at = now
+    return _issue_tokens(user_uuid, db, family_id=row.family_id)  # 계열을 잇고 함께 commit
 
 
 @router.post("/logout", status_code=204)
@@ -328,11 +314,7 @@ def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
     (#273 리뷰 지적). 로그아웃은 "이 로그인을 끝낸다"는 뜻이므로 계열이 단위여야 한다.
     다른 기기(다른 계열)는 영향받지 않는다.
     """
-    row = db.scalar(
-        select(models.RefreshToken).where(
-            models.RefreshToken.token_hash == hash_token(payload.refresh_token)
-        )
-    )
+    row = _get_refresh_token_for_update(hash_token(payload.refresh_token), db)
     if row is not None:
         _revoke_family(row.family_id, db)
 

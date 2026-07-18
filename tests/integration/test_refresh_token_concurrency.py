@@ -45,45 +45,6 @@ def issued_refresh_token(client):
     return r.json()["refresh_token"]
 
 
-def test_claim_is_atomic_under_real_concurrency(issued_refresh_token, integration_engine):
-    """🔴 **핵심 회귀** — N개 스레드가 각자 커넥션으로 같은 토큰을 선점해도 성공은 정확히 1건.
-
-    원자성이 사는 지점은 선점 프리미티브라 여기를 직접 겨냥한다. HTTP 계층으로만 재현하려 하면
-    요청이 사실상 직렬화돼 조회 후 갱신(TOCTOU)으로 되돌려도 통과한다 — 실측으로 확인했다.
-
-    barrier로 전원을 같은 순간에 풀어 조회~갱신 구간을 겹친다. 조건부 UPDATE면 DB가 승자를
-    하나로 만들고, TOCTOU면 여러 스레드가 전부 '아직 유효'를 보고 각자 True를 받는다.
-    """
-    from sqlalchemy.orm import Session
-
-    from app.api import auth as auth_mod
-    from app.core.security import hash_token
-
-    token_hash = hash_token(issued_refresh_token)
-    barrier = threading.Barrier(_CONCURRENCY)
-    wins: list[bool] = []
-    lock = threading.Lock()
-
-    def claim() -> None:
-        with Session(integration_engine) as s:  # 스레드마다 독립 커넥션
-            barrier.wait()
-            got = auth_mod._claim_refresh_token(token_hash, s)
-        with lock:
-            wins.append(got)
-
-    threads = [threading.Thread(target=claim) for _ in range(_CONCURRENCY)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=60)
-
-    assert len(wins) == _CONCURRENCY, "모든 스레드가 결과를 내야 한다"
-    assert wins.count(True) == 1, (
-        f"선점 성공이 {wins.count(True)}건 — 정확히 1건이어야 한다. "
-        f"1건보다 많으면 하나의 토큰에서 세션이 갈라진다(회전 무력화)."
-    )
-
-
 def test_concurrent_refresh_grants_exactly_one_new_pair(client, issued_refresh_token, integration_engine):
     """🔴 동시 갱신 N건 중 **성공은 정확히 1건**이어야 한다.
 
@@ -159,3 +120,100 @@ def test_concurrent_logout_and_refresh_leaves_no_live_token(client, issued_refre
             f"로그아웃 후 유효 토큰이 {len(alive)}개 남았다 — 갱신(refresh={outcome['refresh']})이 "
             f"경합에서 이겨 발급한 후손이 살아남으면 로그아웃이 사실이 아니라 주장이 된다"
         )
+
+
+def test_refresh_commit_then_logout_revokes_the_new_child(
+    client, issued_refresh_token, integration_engine, monkeypatch
+):
+    """refresh가 lock을 먼저 잡아도 logout은 commit을 기다린 뒤 새 후손까지 폐기한다."""
+    from app.api import auth as auth_mod
+
+    refresh_inside_lock = threading.Event()
+    allow_refresh_commit = threading.Event()
+    logout_started = threading.Event()
+    real_issue = auth_mod._issue_tokens
+    outcome: dict[str, int] = {}
+
+    def paused_issue(*args, **kwargs):
+        refresh_inside_lock.set()
+        assert allow_refresh_commit.wait(timeout=30)
+        return real_issue(*args, **kwargs)
+
+    monkeypatch.setattr(auth_mod, "_issue_tokens", paused_issue)
+
+    def do_refresh() -> None:
+        outcome["refresh"] = client.post(
+            "/api/auth/refresh", json={"refresh_token": issued_refresh_token}
+        ).status_code
+
+    def do_logout() -> None:
+        logout_started.set()
+        outcome["logout"] = client.post(
+            "/api/auth/logout", json={"refresh_token": issued_refresh_token}
+        ).status_code
+
+    refresh_thread = threading.Thread(target=do_refresh)
+    refresh_thread.start()
+    assert refresh_inside_lock.wait(timeout=30)
+    logout_thread = threading.Thread(target=do_logout)
+    logout_thread.start()
+    assert logout_started.wait(timeout=30)
+    allow_refresh_commit.set()
+    refresh_thread.join(timeout=60)
+    logout_thread.join(timeout=60)
+
+    assert outcome == {"refresh": 200, "logout": 204}
+    _assert_no_live_tokens(integration_engine)
+
+
+def test_logout_commit_then_refresh_cannot_create_a_child(
+    client, issued_refresh_token, integration_engine, monkeypatch
+):
+    """logout이 lock을 먼저 잡으면 refresh는 폐기 상태를 보고 401로 끝난다."""
+    from app.api import auth as auth_mod
+
+    logout_inside_lock = threading.Event()
+    allow_logout_commit = threading.Event()
+    refresh_started = threading.Event()
+    real_revoke = auth_mod._revoke_family
+    outcome: dict[str, int] = {}
+
+    def paused_revoke(*args, **kwargs):
+        logout_inside_lock.set()
+        assert allow_logout_commit.wait(timeout=30)
+        return real_revoke(*args, **kwargs)
+
+    monkeypatch.setattr(auth_mod, "_revoke_family", paused_revoke)
+
+    def do_logout() -> None:
+        outcome["logout"] = client.post(
+            "/api/auth/logout", json={"refresh_token": issued_refresh_token}
+        ).status_code
+
+    def do_refresh() -> None:
+        refresh_started.set()
+        outcome["refresh"] = client.post(
+            "/api/auth/refresh", json={"refresh_token": issued_refresh_token}
+        ).status_code
+
+    logout_thread = threading.Thread(target=do_logout)
+    logout_thread.start()
+    assert logout_inside_lock.wait(timeout=30)
+    refresh_thread = threading.Thread(target=do_refresh)
+    refresh_thread.start()
+    assert refresh_started.wait(timeout=30)
+    allow_logout_commit.set()
+    logout_thread.join(timeout=60)
+    refresh_thread.join(timeout=60)
+
+    assert outcome == {"logout": 204, "refresh": 401}
+    _assert_no_live_tokens(integration_engine)
+
+
+def _assert_no_live_tokens(integration_engine) -> None:
+    from sqlalchemy.orm import Session
+
+    with Session(integration_engine) as session:
+        assert session.scalars(
+            select(models.RefreshToken).where(models.RefreshToken.revoked_at.is_(None))
+        ).all() == []
