@@ -64,3 +64,7 @@ app/rag/_investigation_notes/
 /.rpa179-rebuild-*/
 /.rpa179-run-*/
 /.rpa179-work/
+
+# Change Assurance deterministic fixture outputs
+/.rpa180-test/
+/.artifacts/change-assurance/

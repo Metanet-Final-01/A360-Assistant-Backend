@@ -26,6 +26,7 @@ A360은 개발 과정에서 AI를 적극적으로 사용했다. 그래서 결과
 | 5 | [재검증 결과](phase0/v1.10/evidence/verification.md) | 무엇을 어느 환경에서 재현했는지 |
 | 6 | [증거 안내](phase0/v1.10/evidence/README.md) | 동결 원본과 검증 코드의 역할 및 읽는 법 |
 | 7 | [RPA-179 교정 참조](reference/rpa179/README.md) | 동결 원본을 보존하며 28건을 어떻게 교정·회귀하는지 |
+| 8 | [RPA-180 Change Assurance](change/README.md) | 실제 PR diff를 Observe하고 증거를 남기는 첫 제품 연결 |
 
 ## 세 가지 하네스
 
@@ -47,15 +48,16 @@ Backend 하네스는 Agent의 공개 계약을 소비하고 저장 경계를 감
 | 사람의 핵심 결정 | D-16, D-17, D-21~D-24 채택 |
 | 동결 후 참조 구현 검토 | 28건 처분 완료, `corrective-action-required` |
 | RPA-179 교정 참조 | 실행 대상 25/25, 독립 실행 2회 결정론 검증 PASS |
+| RPA-180 Change Assurance | Observe 검사기·결정론적 결함 fixture·비차단 CI 연결 |
 | 참조 구현의 제품·운영 사용 | 금지, RPA-179도 fixture 참조만 제공 |
-| 제품 코드 연결 | 아직 없음 |
-| 현재 허용 rollout | 다음 구현은 `Observe`만 허용 |
+| 제품 코드 연결 | RPA-180이 PR CI에 `Observe`로만 연결 |
+| 현재 허용 rollout | `Observe`만 허용 |
 | `Warn`·`Enforce` | 별도 증거와 사람 승인 전 금지 |
 | 운영 보안 인증 | 아님 |
 
-즉, 현재 저장된 코드는 **운영 하네스가 아니라 검토 가능한 계약과 결정론적 참조 구현**이다.
-RPA-179 결과도 fixture 참조이며 생산 사용 승인이 아니다. 실제 제품 경로에 연결되는 구현은
-Jira `RPA-180`부터 `RPA-184`까지 별도로 추적한다.
+Phase 0와 RPA-179는 **검토 가능한 계약과 결정론적 참조 구현**이며 생산 사용 승인이 아니다.
+RPA-180은 실제 PR 경로에 연결되는 첫 구현이지만 아직 비차단 `Observe`다. required check, 보호 writer,
+정책 소유권을 갖춘 운영 하네스 승격은 아니며 후속 구현은 Jira `RPA-181`부터 `RPA-184`까지 추적한다.
 
 ## 디렉터리 구조
 
@@ -74,6 +76,16 @@ assurance/
       ├─ verification.md             # 재실행 환경과 결과
       ├─ artifact-manifest.sha256    # 동결 원본 무결성
       └─ frozen/                     # 당시 원본, 내용 수정 금지
+├─ change/
+   ├─ README.md                      # RPA-180 목적, 실행법, 한계
+   ├─ foundation.py                  # 공통 계약, Git·실행환경 증거 수집
+   ├─ dependency_checks.py           # 의존성·import·보호 경로 판정
+   ├─ evidence.py                    # 증거 계약 검증과 무결성 작성
+   ├─ schema_validation.py           # 오프라인 정책 JSON Schema 검증
+   ├─ checker.py                     # control 조합과 최종 판정
+   ├─ cli.py                         # 판정 비차단 Observe CLI
+   ├─ policy/                        # 의존성·취약점·license 정책
+   └─ schemas/                       # manifest·report JSON Schema
 └─ reference/rpa179/
    ├─ README.md                      # 교정 구조, 실행법과 한계
    ├─ corrections.patch              # 동결 원본 대비 교정만 담은 diff

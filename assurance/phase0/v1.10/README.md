@@ -159,6 +159,9 @@ PR #255에서 CodeRabbit가 첫 리뷰 24건과 후속 리뷰 4건, 총 28개의
 | 5 | RPA-182 | 영수증·감사로그·Backoffice 읽기 전용 조회 | Observe |
 | 6 | RPA-183 | 보호 writer, 정책 보호, 승격 기준 | Observe 후 평가 |
 
+RPA-180의 실제 구현과 현재 한계는 [Change Assurance Observe MVP](../../change/README.md)에 기록한다.
+이 연결은 위 순서를 진전시키지만 required check나 보호 writer를 완성한 것은 아니며, `Warn`·`Enforce` 승격 근거도 아니다.
+
 `Warn`과 `Enforce`는 정상 fixture, 결함 fixture, 우회 시험, 오탐 측정, 보호 writer 확인과 사람 승인을
 모두 만족한 control만 승격한다.
 
