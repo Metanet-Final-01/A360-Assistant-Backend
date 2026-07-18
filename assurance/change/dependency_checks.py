@@ -426,6 +426,19 @@ def derive_dependency_evidence(
     now: datetime,
 ) -> dict[str, Any]:
     files = list(policy["requirement_files"])
+    parsed_files = set(files)
+    dependency_paths = set(policy["dependency_paths"])
+    unparsed_manifest_errors = [
+        f"{path}: changed dependency manifest has no trusted parser"
+        for path in sorted(
+            {
+                candidate
+                for change in changes
+                for candidate in (change["path"], change.get("old_path"))
+                if candidate in dependency_paths and candidate not in parsed_files
+            }
+        )
+    ]
     base_requirements, base_errors = parse_requirements(repo, base, files)
     head_requirements, head_errors = parse_requirements(repo, head, files)
     requirement_delta = requirement_changes(base_requirements, head_requirements)
@@ -462,10 +475,16 @@ def derive_dependency_evidence(
         )
 
     parse_errors = sorted(
-        set(base_errors + head_errors + import_errors + head_inventory_errors)
+        set(
+            base_errors
+            + head_errors
+            + import_errors
+            + head_inventory_errors
+            + unparsed_manifest_errors
+        )
     )
     if parse_errors:
-        for rule_id in ("dep.lock_match", "dep.import_symbol"):
+        for rule_id in ("dep.allowlist", "dep.lock_match", "dep.import_symbol"):
             rules[rule_id] = _rule("error", parse_errors)
 
     imports_by_package: dict[str, list[ImportSpec]] = {}

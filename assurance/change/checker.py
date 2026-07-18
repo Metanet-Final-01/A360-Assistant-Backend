@@ -58,7 +58,7 @@ def _strict_json_loads(value: bytes | str) -> Any:
     )
 
 
-class AssuranceRunner:
+class _AssuranceRunner:
     def __init__(
         self,
         *,
@@ -324,7 +324,7 @@ def run_assurance(
         policy_uri = policy_path.resolve().relative_to(repo_root.resolve()).as_posix()
     except ValueError:
         policy_uri = policy_path.name
-    runner = AssuranceRunner(
+    runner = _AssuranceRunner(
         repo_root=repo_root,
         base_sha=base_sha,
         head_sha=head_sha,

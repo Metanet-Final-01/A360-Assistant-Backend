@@ -38,7 +38,8 @@ RISK_ORDER = (
 )
 SENSITIVE_SUFFIXES = (".py", ".yml", ".yaml", ".sh", ".ps1")
 DETAIL_SECRET = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|token|secret|password)\b(\s*[:=]\s*)([^\s,;]+)"
+    r"(?i)(?P<key>[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?token|token|secret|password)"
+    r"[A-Za-z0-9_.-]*)(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)"
 )
 URL_CREDENTIAL = re.compile(r"(://[^:/@\s]+:)[^@\s]+@")
 BEARER_CREDENTIAL = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
@@ -144,7 +145,8 @@ def _safe_detail(value: str, limit: int = 300) -> str:
     redacted = URL_CREDENTIAL.sub(r"\1<redacted>@", value.replace("\x00", ""))
     redacted = BEARER_CREDENTIAL.sub("Bearer <redacted>", redacted)
     redacted = DETAIL_SECRET.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}<redacted>", redacted
+        lambda match: f"{match.group('key')}{match.group('separator')}<redacted>",
+        redacted,
     )
     compact = " ".join(redacted.split())
     return compact[:limit] or "no detail"

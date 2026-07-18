@@ -10,9 +10,10 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
+import assurance.change as change_api
 from assurance.change.checker import (
     AssuranceError,
-    AssuranceRunner,
+    _AssuranceRunner,
     canonical_digest,
     load_policy,
     write_error_report,
@@ -137,7 +138,7 @@ def _run_scenario(tmp_path: Path, scenario: dict, output_name: str = "out") -> t
     repo, base, head = _fixture_repo(tmp_path, scenario)
     policy = _policy(scenario)
     output = tmp_path / output_name
-    report = AssuranceRunner(
+    report = _AssuranceRunner(
         repo_root=repo,
         base_sha=base,
         head_sha=head,
@@ -197,7 +198,7 @@ def test_fixture_runs_are_byte_deterministic(tmp_path: Path) -> None:
     policy = _policy(scenario)
 
     def run(output: Path) -> None:
-        AssuranceRunner(
+        _AssuranceRunner(
             repo_root=repo,
             base_sha=base,
             head_sha=head,
@@ -232,7 +233,7 @@ def test_unapproved_operational_policy_cannot_allow_external_import(tmp_path: Pa
     repo, base, head = _fixture_repo(tmp_path, scenario)
     policy = _policy(scenario)
     policy["policy_decision_state"] = "decision_needed"
-    report = AssuranceRunner(
+    report = _AssuranceRunner(
         repo_root=repo,
         base_sha=base,
         head_sha=head,
@@ -445,7 +446,7 @@ def test_unknown_stale_evidence_is_rejected(tmp_path: Path) -> None:
     (output / "stale.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(AssuranceError, match="unknown entry"):
-        AssuranceRunner(
+        _AssuranceRunner(
             repo_root=repo,
             base_sha=base,
             head_sha=head,
@@ -474,6 +475,33 @@ def test_observe_workflow_exposes_fatal_checker_failure() -> None:
     assert "-r requirements.txt -r requirements-dev.txt" in workflow
     assert "working-directory: subject" not in workflow
     assert "coverage" not in policy["import_distribution_map"]
+
+
+def test_public_api_does_not_export_unvalidated_runner() -> None:
+    assert not hasattr(change_api, "AssuranceRunner")
+    assert "AssuranceRunner" not in change_api.__all__
+
+
+def test_unparsed_dependency_manifest_change_is_unassured(tmp_path: Path) -> None:
+    scenario = {
+        "base_files": {
+            "requirements.txt": "",
+            "pyproject.toml": "[project]\ndependencies=[]\n",
+        },
+        "head_files": {
+            "requirements.txt": "",
+            "pyproject.toml": "[project]\ndependencies=['demo-sdk==1.0.0']\n",
+        },
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "unassured",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    ch04 = next(item for item in report["controls"] if item["control_id"] == "CH-04")
+    assert report["assurance_decision"] == "unassured"
+    assert ch04["status"] == "error"
+    assert any("pyproject.toml" in detail for detail in evidence["parse_errors"])
 
 
 def test_policy_loader_enforces_complete_schema(tmp_path: Path) -> None:
@@ -568,7 +596,7 @@ def test_diverged_base_uses_merge_base_for_dependency_baseline(tmp_path: Path) -
         },
     }
     policy = _policy(scenario)
-    report = AssuranceRunner(
+    report = _AssuranceRunner(
         repo_root=repo,
         base_sha=base,
         head_sha=head,
@@ -622,7 +650,9 @@ def test_detector_error_receipt_is_nonpassing_and_schema_valid(tmp_path: Path) -
         head_sha="b" * 40,
         error=RuntimeError(
             "injected failure password=visible-secret Bearer abc.def "
-            "postgresql://service:database-secret@example.invalid/db"
+            "postgresql://service:database-secret@example.invalid/db "
+            "AWS_SECRET_ACCESS_KEY=visible-aws CLIENT_SECRET=visible-client "
+            "GITHUB_TOKEN=visible-github"
         ),
         now=FIXED_NOW,
     )
@@ -632,7 +662,10 @@ def test_detector_error_receipt_is_nonpassing_and_schema_valid(tmp_path: Path) -
     assert "visible-secret" not in error_evidence
     assert "abc.def" not in error_evidence
     assert "database-secret" not in error_evidence
-    assert error_evidence.count("<redacted>") == 3
+    assert "visible-aws" not in error_evidence
+    assert "visible-client" not in error_evidence
+    assert "visible-github" not in error_evidence
+    assert error_evidence.count("<redacted>") == 6
     schema = json.loads(REPORT_SCHEMA.read_text(encoding="utf-8"))
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(report)
 
