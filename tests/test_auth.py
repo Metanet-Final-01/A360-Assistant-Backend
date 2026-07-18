@@ -250,12 +250,13 @@ def test_refresh_rotates_old_token_becomes_invalid(client):
     assert again.status_code == 401  # 옛 토큰 재사용 불가
 
 
-def test_reuse_of_revoked_token_revokes_whole_family(client):
-    """재사용 탐지 — 폐기된 토큰이 다시 오면 탈취로 보고 그 사용자 토큰을 전부 끊는다.
+def test_reuse_of_revoked_token_revokes_whole_family(client, monkeypatch):
+    """재사용 탐지 — 폐기된 토큰이 (유예창 밖에서) 다시 오면 탈취로 보고 계열 전체를 끊는다.
 
     회전만 있고 이 방어가 없으면, 탈취자가 먼저 갱신했을 때 정상 사용자의 새 토큰은
     그대로 살아 있어 공격이 조용히 지속된다.
     """
+    monkeypatch.setenv("REFRESH_REUSE_GRACE_SECONDS", "0")  # 경합 유예 없음 = 즉시 탈취 판정
     body = _login(client)
     stolen = body["refresh_token"]
     rotated = client.post("/api/auth/refresh", json={"refresh_token": stolen}).json()["refresh_token"]
@@ -263,6 +264,21 @@ def test_reuse_of_revoked_token_revokes_whole_family(client):
     assert client.post("/api/auth/refresh", json={"refresh_token": stolen}).status_code == 401
     # 회전으로 받은 정상 토큰까지 무효여야 한다
     assert client.post("/api/auth/refresh", json={"refresh_token": rotated}).status_code == 401
+
+
+def test_immediate_resubmit_within_grace_keeps_family_alive(client):
+    """🔴 유예창 안의 재제시는 탈취가 아니라 경합이다 — 계열을 끊지 않는다.
+
+    실 동시성 테스트(tests/integration/test_refresh_token_concurrency.py)에서 드러난 결함:
+    동시 요청의 진 쪽들이 '폐기된 토큰 재사용'으로 분류돼 **방금 발급된 정상 토큰까지** 폐기했다.
+    클라이언트 더블클릭·네트워크 재시도가 전 기기 로그아웃이 되면 안 된다.
+    """
+    body = _login(client, email="grace@example.com")
+    old = body["refresh_token"]
+    rotated = client.post("/api/auth/refresh", json={"refresh_token": old}).json()["refresh_token"]
+    # 곧바로 옛 토큰을 다시 제출(재시도 시뮬레이션) — 거절은 하되 계열은 살려둔다
+    assert client.post("/api/auth/refresh", json={"refresh_token": old}).status_code == 401
+    assert client.post("/api/auth/refresh", json={"refresh_token": rotated}).status_code == 200
 
 
 def test_logout_revokes_refresh_token(client):

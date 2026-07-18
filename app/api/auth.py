@@ -277,9 +277,20 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
     if row is None:
         raise invalid
 
-    # ③ 재사용 탐지 — 폐기된 토큰이 다시 왔다 = 탈취 신호
+    # ③ 재사용 탐지 — 폐기된 토큰이 다시 왔다. 다만 **방금** 폐기된 것이면 탈취가 아니라 경합이다.
+    #
+    # 실 동시성 테스트에서 확인한 것: 같은 토큰으로 동시 요청이 오면 승자가 폐기를 커밋한 뒤
+    # 나머지가 조회하므로, 진 요청들이 전부 여기로 들어와 **방금 발급된 정상 토큰까지 폐기**했다
+    # (유효 토큰 0개). 클라이언트의 더블클릭·네트워크 재시도가 전 기기 로그아웃이 되는 셈이다.
+    # 그래서 짧은 유예창 안의 재제시는 경합으로 보고 401만 돌려준다(계열 유지).
+    # 창 밖의 재제시는 원문이 오래 살아 있었다는 뜻이므로 그대로 탈취로 처리한다.
     if row.revoked_at is not None:
-        _revoke_all_for_user(row.user_id, db)
+        revoked_at = row.revoked_at
+        if revoked_at.tzinfo is None:
+            revoked_at = revoked_at.replace(tzinfo=timezone.utc)
+        grace = int(os.getenv("REFRESH_REUSE_GRACE_SECONDS", "10"))
+        if (datetime.now(timezone.utc) - revoked_at).total_seconds() > grace:
+            _revoke_all_for_user(row.user_id, db)
         raise invalid
 
     now = datetime.now(timezone.utc)
