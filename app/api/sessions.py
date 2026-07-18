@@ -26,6 +26,12 @@ from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
 from app.schemas import ProgressEvent, Recommendation
 from app.services import alerts, budget
+from app.services.output_assurance import (
+    OutputBoundaryContext,
+    build_unassured_observation,
+    finalize_persistence_observation,
+    observe_recommendation_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -217,9 +223,37 @@ def _recommendation_out(row: models.RecommendationVersion) -> dict:
     }
 
 
+def _current_request_id() -> str | None:
+    from app.rag.observability import get_request_id
+
+    return get_request_id()
+
+
+def _agent_registry_snapshot() -> dict | None:
+    registry = _get_agent_versions()
+    if registry is None:
+        return None
+    available_versions, default_version = registry
+    try:
+        return {"versions": available_versions(), "default": default_version()}
+    except Exception:  # 공개 registry 관측 실패는 Output Boundary가 미관측으로 기록한다.
+        logger.warning("Agent 공개 버전 registry 관측 실패", exc_info=True)
+        return None
+
+
+def _log_output_observation(observation: dict) -> None:
+    logger.info(
+        "output_boundary_observe %s",
+        json.dumps(observation, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _save_recommendation(
     session_id: uuid.UUID, analysis_id: uuid.UUID, payload: dict,
     source: str, parent_version: int | None, change_summary: str | None = None,
+    request_id: str | None = None, requested_agent_version: str | None = None,
+    resolved_agent_version: str | None = None, agent_registry_snapshot: Any = None,
+    producer_advisory: Any = None,
 ) -> dict:
     """새 추천안 버전을 저장한다 (version은 세션 내 max+1). 새 세션 사용(스트리밍 후에도 안전).
 
@@ -230,6 +264,23 @@ def _save_recommendation(
 
     from app.db import SessionLocal
 
+    boundary_context = OutputBoundaryContext(
+        session_id=str(session_id),
+        request_id=request_id,
+        source=source,
+        requested_agent_version=requested_agent_version,
+        resolved_agent_version=resolved_agent_version,
+        agent_registry_snapshot=agent_registry_snapshot,
+        producer_advisory=producer_advisory,
+    )
+    try:
+        observation = observe_recommendation_candidate(payload, boundary_context)
+    except Exception as exc:
+        # Observe mode records detector failure without changing the existing save outcome.
+        logger.warning("Output Boundary Observe 관측 실패", exc_info=True)
+        observation = build_unassured_observation(
+            boundary_context, error_type=type(exc).__name__
+        )
     for attempt in range(3):
         try:
             with SessionLocal() as s:
@@ -249,11 +300,24 @@ def _save_recommendation(
                 )
                 s.add(row)
                 s.commit()
-                return _recommendation_out(row)
-        except IntegrityError:
+        except IntegrityError as exc:
             if attempt == 2:  # 마지막 시도까지 충돌하면 상위에서 처리
+                failed = finalize_persistence_observation(
+                    observation, persisted=False, error_type=type(exc).__name__
+                )
+                _log_output_observation(failed)
                 raise
             logger.warning("추천안 version 충돌 — 재계산 재시도 (session=%s)", session_id)
+        except Exception as exc:
+            failed = finalize_persistence_observation(
+                observation, persisted=False, error_type=type(exc).__name__
+            )
+            _log_output_observation(failed)
+            raise
+        else:
+            finalized = finalize_persistence_observation(observation, persisted=True)
+            _log_output_observation(finalized)
+            return {**_recommendation_out(row), "output_assurance": finalized}
 
 
 @router.get("/{session_id}/recommendations")
@@ -343,6 +407,7 @@ def save_edited_recommendation(
         session.id, base.analysis_id, payload.recommendation,
         source=payload.source, parent_version=payload.parent_version if payload.parent_version is not None else base.version,
         change_summary=payload.change_summary,
+        request_id=_current_request_id(),
     )
     return saved
 
@@ -695,6 +760,11 @@ def _persist_turn_result(
         saved = _save_recommendation(
             session_id, analysis_id, rec, source="chat",
             parent_version=None, change_summary=result.get("change_summary"),
+            request_id=result.get("_backend_request_id"),
+            requested_agent_version=result.get("_backend_requested_agent_version"),
+            resolved_agent_version=result.get("resolved_agent_version"),
+            agent_registry_snapshot=_agent_registry_snapshot(),
+            producer_advisory=result.get("violations"),
         )
         out.update(saved)  # id, version, parent_version, source, change_summary, created_at
         out["recommendation"] = rec
@@ -1102,8 +1172,12 @@ async def agent_turn(
                 _tev("error", "agent", "클라이언트 연결 끊김 — 전송 생략")
                 disconnected = True
             if result_data is not None:
+                persistence_result = dict(result_data)
+                # Backend가 관측한 값으로 덮어써 Agent payload가 provenance를 자기신고하지 못하게 한다.
+                persistence_result["_backend_request_id"] = turn_request_id
+                persistence_result["_backend_requested_agent_version"] = payload.agent_version
                 final = _persist_turn_result(
-                    session_key, rec_analysis_id, document_id, message, result_data
+                    session_key, rec_analysis_id, document_id, message, persistence_result
                 )
                 # 대화 누적 게이지 — compact 턴은 intake가 없어 갱신 안 함(다음 대화 턴에서 압축값 반영).
                 # best-effort: 게이지 조회 실패가 정상 응답을 error로 바꾸지 않게 한다.
