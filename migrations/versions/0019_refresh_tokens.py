@@ -35,6 +35,8 @@ def upgrade() -> None:
             sa.ForeignKey("users.id", ondelete="CASCADE"),
             nullable=False,
         ),
+        # 한 로그인에서 회전으로 이어지는 토큰들의 계열 — 로그아웃·탈취 대응의 단위다
+        sa.Column("family_id", sa.UUID(as_uuid=True), nullable=False),
         # unique — 같은 토큰이 두 행으로 갈리면 폐기가 한쪽만 걸린다
         sa.Column("token_hash", sa.String(length=64), nullable=False, unique=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
@@ -48,9 +50,11 @@ def upgrade() -> None:
     )
     op.create_index("ix_refresh_tokens_user_id", "refresh_tokens", ["user_id"])
     op.create_index("ix_refresh_tokens_token_hash", "refresh_tokens", ["token_hash"])
+    op.create_index("ix_refresh_tokens_family_id", "refresh_tokens", ["family_id"])
 
 
 def downgrade() -> None:
+    op.drop_index("ix_refresh_tokens_family_id", table_name="refresh_tokens")
     op.drop_index("ix_refresh_tokens_token_hash", table_name="refresh_tokens")
     op.drop_index("ix_refresh_tokens_user_id", table_name="refresh_tokens")
     op.drop_table("refresh_tokens")

@@ -63,6 +63,11 @@ class RefreshToken(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    # 한 번의 로그인에서 회전으로 이어지는 토큰들의 계열 식별자.
+    # 로그아웃·탈취 대응은 **계열 단위**여야 한다: 로그아웃한 토큰만 끊으면 경합 중 회전으로
+    # 발급된 후손이 살아남고(사용자는 204를 받았는데 세션이 유지된다), 반대로 사용자의 토큰을
+    # 전부 끊으면 무관한 다른 기기까지 로그아웃된다.
+    family_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     # SHA-256 hex(64자). unique — 같은 토큰이 두 행으로 갈리면 폐기가 한쪽만 걸린다.
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

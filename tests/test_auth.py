@@ -325,8 +325,11 @@ def test_expired_refresh_token_rejected(client, monkeypatch):
     assert r.status_code == 401
 
 
-def test_concurrent_refresh_yields_only_one_new_pair(client, monkeypatch):
-    """🔴 동시 갱신 경합 — 같은 토큰으로 두 요청이 오면 **한 건만** 성공해야 한다 (CodeRabbit #273).
+def test_losing_a_claim_race_returns_401_and_keeps_family(client, monkeypatch):
+    """선점에서 진 요청의 **결과 로직** — 401을 주되 계열은 끊지 않는다 (CodeRabbit #273).
+
+    ⚠️ 이 테스트는 순차 시뮬레이션이라 원자성 자체를 증명하지 못한다(TOCTOU로 되돌려도 통과).
+    실제 동시성 증명은 tests/integration/test_refresh_token_concurrency.py에 있다.
 
     조회 후 갱신으로 나뉘어 있으면 둘 다 '아직 유효'로 보고 각각 새 쌍을 발급받아
     회전(1회용)이 깨진다. 그러면 재사용 탐지도 무의미해진다 — 둘 다 폐기 전 상태였으므로

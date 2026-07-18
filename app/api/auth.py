@@ -64,10 +64,13 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-def _issue_tokens(user_id: uuid.UUID, db: Session) -> TokenResponse:
+def _issue_tokens(
+    user_id: uuid.UUID, db: Session, *, family_id: uuid.UUID | None = None
+) -> TokenResponse:
     """액세스+리프레시 쌍을 발급하고 리프레시는 **해시로만** 저장한다 (RPA-200).
 
     원문은 응답으로 한 번 나가고 서버엔 남지 않는다 — DB가 유출돼도 세션을 복원할 수 없다.
+    family_id를 주면 그 계열을 잇고(회전), 없으면 새 계열을 연다(신규 로그인).
     """
     from datetime import datetime, timedelta, timezone
 
@@ -76,6 +79,7 @@ def _issue_tokens(user_id: uuid.UUID, db: Session) -> TokenResponse:
     db.add(
         models.RefreshToken(
             user_id=user_id,
+            family_id=family_id or uuid.uuid4(),
             token_hash=hash_token(refresh),
             expires_at=datetime.now(timezone.utc) + timedelta(days=expire_days),
         )
@@ -106,25 +110,28 @@ def _claim_refresh_token(token_hash: str, db: Session) -> bool:
     return result.rowcount == 1
 
 
-def _revoke_all_for_user(user_id: uuid.UUID, db: Session) -> int:
-    """그 사용자의 유효한 리프레시 토큰을 전부 폐기하고 건수를 반환한다.
+def _revoke_family(family_id: uuid.UUID, db: Session) -> int:
+    """그 **계열**의 유효한 리프레시 토큰을 전부 폐기하고 건수를 반환한다.
 
-    재사용 탐지 시 호출한다 — 폐기된 토큰이 다시 왔다는 건 원문이 두 곳에 있다는 뜻이고,
-    어느 쪽이 공격자인지 서버는 알 수 없다. 그래서 **계열 전체를 끊고** 재로그인을 요구한다.
+    계열이 단위인 이유(두 방향 모두 실패를 막는다):
+    - 제시된 토큰만 끊으면 **경합 중 회전으로 발급된 후손이 살아남는다** — 로그아웃이 204를
+      돌려줘도 세션이 유지된다(#273 리뷰에서 지적된 실제 구멍).
+    - 사용자의 토큰을 전부 끊으면 무관한 **다른 기기까지 로그아웃**된다.
+
+    로그아웃과 재사용 탐지가 같은 함수를 쓴다 — 둘 다 "이 로그인 계열을 끝낸다"는 같은 의미다.
     """
     from datetime import datetime, timezone
 
-    rows = db.scalars(
-        select(models.RefreshToken).where(
-            models.RefreshToken.user_id == user_id,
+    result = db.execute(
+        update(models.RefreshToken)
+        .where(
+            models.RefreshToken.family_id == family_id,
             models.RefreshToken.revoked_at.is_(None),
         )
-    ).all()
-    now = datetime.now(timezone.utc)
-    for row in rows:
-        row.revoked_at = now
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
     db.commit()
-    return len(rows)
+    return result.rowcount
 
 
 def admin_seed_emails() -> set[str]:
@@ -290,7 +297,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
             revoked_at = revoked_at.replace(tzinfo=timezone.utc)
         grace = int(os.getenv("REFRESH_REUSE_GRACE_SECONDS", "10"))
         if (datetime.now(timezone.utc) - revoked_at).total_seconds() > grace:
-            _revoke_all_for_user(row.user_id, db)
+            _revoke_family(row.family_id, db)
         raise invalid
 
     now = datetime.now(timezone.utc)
@@ -306,7 +313,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
         # 동시 요청이 먼저 선점했다. ③에서 방금 '유효'로 확인했으므로 옛 토큰의 재생(replay)이
         # 아니라 경합이다 — 탈취로 단정해 계열을 끊으면 더블클릭·재시도가 전 기기 로그아웃이 된다.
         raise invalid
-    return _issue_tokens(user_uuid, db)
+    return _issue_tokens(user_uuid, db, family_id=row.family_id)  # 계열을 잇는다
 
 
 @router.post("/logout", status_code=204)
@@ -315,10 +322,19 @@ def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
 
     이미 없거나 폐기된 토큰이어도 204 — 멱등하게 두고 토큰 존재 여부를 알려주지 않는다.
     액세스 토큰은 짧은 수명(기본 60분)이라 그대로 만료를 기다린다(무상태 JWT의 트레이드오프).
-    refresh와 같은 원자적 선점을 쓴다 — 조회 후 갱신으로 나누면 동시 refresh가 로그아웃을
-    앞질러 새 토큰을 발급받고 살아남는다(CodeRabbit #273).
+
+    **계열 전체를 끊는다.** 제시된 토큰만 폐기하면, 동시에 진행되던 갱신이 먼저 회전해
+    발급한 후손이 살아남는다 — 사용자는 204를 받았는데 그 토큰을 쥔 쪽의 세션은 유지된다
+    (#273 리뷰 지적). 로그아웃은 "이 로그인을 끝낸다"는 뜻이므로 계열이 단위여야 한다.
+    다른 기기(다른 계열)는 영향받지 않는다.
     """
-    _claim_refresh_token(hash_token(payload.refresh_token), db)
+    row = db.scalar(
+        select(models.RefreshToken).where(
+            models.RefreshToken.token_hash == hash_token(payload.refresh_token)
+        )
+    )
+    if row is not None:
+        _revoke_family(row.family_id, db)
 
 
 @router.get("/me", response_model=UserOut)

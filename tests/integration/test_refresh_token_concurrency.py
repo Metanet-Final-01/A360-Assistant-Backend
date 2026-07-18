@@ -148,13 +148,14 @@ def test_concurrent_logout_and_refresh_leaves_no_live_token(client, issued_refre
     assert outcome["logout"] == 204  # 로그아웃은 멱등이라 항상 성공한다
     from sqlalchemy.orm import Session
 
+    # 🔴 **승패와 무관하게** 살아 있는 토큰이 없어야 한다 (CodeRabbit #273 2차 지적).
+    # 갱신이 먼저 이겨 새 토큰을 발급했더라도, 로그아웃은 그 토큰의 **계열 전체**를 끊는다.
+    # 이게 없으면 사용자가 204를 받고도 같은 토큰을 쥔 쪽의 세션이 유지된다.
     with Session(integration_engine) as s:
         alive = s.scalars(
             select(models.RefreshToken).where(models.RefreshToken.revoked_at.is_(None))
         ).all()
-        if outcome["refresh"] == 200:
-            # 갱신이 먼저 이겼다면 새 토큰 1개만 살아 있어야 한다(옛 토큰은 회전으로 폐기됨)
-            assert len(alive) == 1
-        else:
-            # 로그아웃이 이겼다면 살아 있는 토큰이 없어야 한다
-            assert alive == []
+        assert alive == [], (
+            f"로그아웃 후 유효 토큰이 {len(alive)}개 남았다 — 갱신(refresh={outcome['refresh']})이 "
+            f"경합에서 이겨 발급한 후손이 살아남으면 로그아웃이 사실이 아니라 주장이 된다"
+        )
