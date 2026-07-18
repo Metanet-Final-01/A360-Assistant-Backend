@@ -264,7 +264,8 @@ def test_coerce_flow_recovers_null_action_nodes():
         "steps": [{
             "step_id": "s1", "label": "정산",
             "actions": [
-                _act("Loop", "cloudUsingLoopAction", children=[
+                # Loop도 action을 비워 canonical 복원 경로를 실제로 태운다(단일의미 컨테이너).
+                _act("Loop", None, children=[
                     {"package": "If", "action": None, "label": "임계 초과 판정",
                      "parameters": [], "children": [
                          {"package": "Excel advanced", "action": None, "label": "값 기록",
@@ -281,6 +282,7 @@ def test_coerce_flow_recovers_null_action_nodes():
     rec = Recommendation.model_validate(_coerce_flow(flow))
 
     loop = rec.steps[0].actions[0]
+    # null-action Loop → canonical(Loop/cloudUsingLoopAction)으로 복원(복구 로직이 없으면 실패).
     assert (loop.package, loop.action) == ("Loop", "cloudUsingLoopAction")  # 단일의미 컨테이너 canonical
     if_node = loop.children[0]
     # If는 action(if/elseIf/else)이 비면 어느 분기인지 모르므로 canonical(If/if)로 되살리지
