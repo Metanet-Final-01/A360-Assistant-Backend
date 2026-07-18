@@ -191,6 +191,24 @@ def main() -> int:
         print(f"  {len(global_days)}일 | 중앙 ${statistics.median(global_days):.4f} | "
               f"**최대 ${global_daily:.4f}** | 기간 총 ${sum(global_days):.4f}")
 
+    # ── 프롬프트 캐시 관측 (RPA-199) — 실청구서 대사용.
+    # cached_tokens는 NULL(측정 전 행)과 0(캐시 없음)이 다르다. 측정 커버리지가 낮으면
+    # 아래 비용·권장값은 여전히 과대계상이다(측정 전 행은 캐시분도 전액으로 계산돼 있다).
+    ct, ci, n_measured, n_all = _rows(
+        f"select coalesce(sum(cached_tokens),0), "
+        f"coalesce(sum(input_tokens) filter (where cached_tokens is not null),0), "
+        f"count(cached_tokens), count(id) from llm_usage where {where}", **p)[0]
+    print("\n── 프롬프트 캐시 (실청구서 대사용)")
+    if n_measured:
+        hit = f" (적중률 {int(ct) * 100 // int(ci)}%)" if int(ci) else ""
+        print(f"  측정 행 {n_measured}/{n_all} ({n_measured * 100 // n_all}%) | "
+              f"캐시 {int(ct):,} / 측정 입력 {int(ci):,} 토큰{hit}")
+        if n_measured < n_all:
+            print("  ⚠️  측정 전(NULL) 행은 캐시분도 전액 계산돼 있다 — 비용 합계는 상한으로 볼 것")
+    else:
+        print("  (측정 행 없음 — 배포 후 새 트래픽부터 쌓인다. 그때까지 비용은 전액 계산 = 상한)")
+    print("  ⚠️  대시보드 대조는 기간 합계로 — OpenAI 대시보드는 UTC 일자, 이 리포트는 KST 일자")
+
     # ── 권장값
     print("\n" + "=" * 72)
     print(f"권장 상한 (관측 최대치 × 여유 {args.headroom}배)")

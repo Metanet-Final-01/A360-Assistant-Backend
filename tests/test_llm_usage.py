@@ -10,6 +10,8 @@ import contextvars
 import uuid
 from types import SimpleNamespace
 
+import pytest
+
 import app.core.llm as llm
 from app.core.llm import (
     UsageCallbackHandler,
@@ -284,3 +286,144 @@ def test_cost_usd_none_when_no_price(monkeypatch):
     assert llm.cost_usd(1000, 500, None) is None
     # 단, 보조 모델은 env 없어도 내장 단가로 계산된다
     assert llm.cost_usd(1_000_000, 0, "text-embedding-3-small") == 0.02
+
+
+# --- 프롬프트 캐시 (RPA-199) — 미반영이 실청구 대비 4.7배 과대계상의 주원인 ---
+
+def _chat_prices(monkeypatch, cached_price="0.075"):
+    monkeypatch.setenv("LLM_INPUT_COST_PER_1M", "0.75")
+    monkeypatch.setenv("LLM_OUTPUT_COST_PER_1M", "4.50")
+    if cached_price is None:
+        monkeypatch.delenv("LLM_CACHED_INPUT_COST_PER_1M", raising=False)
+    else:
+        monkeypatch.setenv("LLM_CACHED_INPUT_COST_PER_1M", cached_price)
+
+
+def test_cost_usd_cached_tokens_discounted(monkeypatch):
+    """캐시 적중분은 캐시 단가(정가의 10%)로 갈라 계산된다."""
+    _chat_prices(monkeypatch)
+    # 전부 캐시: 1M in → $0.075 (전액이면 $0.75 — 이 10배가 과대계상의 실체)
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=1_000_000) == pytest.approx(0.075)
+    # 절반 캐시: 0.5×0.75 + 0.5×0.075
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=500_000) == pytest.approx(0.4125)
+    # output은 캐시와 무관 — 출력 단가 그대로
+    assert llm.cost_usd(0, 1_000_000, "gpt-5.4-mini", cached_tokens=999) == pytest.approx(4.50)
+
+
+def test_cost_usd_cached_env_missing_keeps_old_formula(monkeypatch):
+    """LLM_CACHED_INPUT_COST_PER_1M 미설정이면 cached가 있어도 전액 — 배포 회귀 없음."""
+    _chat_prices(monkeypatch, cached_price=None)
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=1_000_000) == pytest.approx(0.75)
+
+
+def test_cost_usd_cached_none_or_zero_is_full_price(monkeypatch):
+    """cached None(측정 안 됨)·0(캐시 없음) 둘 다 전액 — 기존 호출부와 결과 동일."""
+    _chat_prices(monkeypatch)
+    full = llm.cost_usd(1_000_000, 0, "gpt-5.4-mini")
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=None) == full == pytest.approx(0.75)
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=0) == full
+
+
+def test_cost_usd_cached_clamped_to_input(monkeypatch):
+    """cached > input 이상 응답은 input으로 클램프 — 음수 비용을 만들지 않는다."""
+    _chat_prices(monkeypatch)
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=2_000_000) == pytest.approx(0.075)
+    assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=-5) == pytest.approx(0.75)
+
+
+def test_cost_usd_aux_model_ignores_cached(monkeypatch):
+    """보조 모델(임베딩·리랭커)은 프롬프트 캐시 개념이 없다 — cached를 무시하고 자기 단가."""
+    _chat_prices(monkeypatch)
+    assert llm.cost_usd(1_000_000, 0, "text-embedding-3-small", cached_tokens=1_000_000) == 0.02
+
+
+def _mock_client_usage(captured, usage):
+    def _create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))], usage=usage)
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+
+
+def test_chat_records_cached_tokens(monkeypatch):
+    """chat() 직접 경로: usage.prompt_tokens_details.cached_tokens → record_usage로 전달."""
+    recorded = {}
+    usage = SimpleNamespace(
+        prompt_tokens=10, completion_tokens=2,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=7),
+    )
+    monkeypatch.setattr(llm, "_get_client", lambda: _mock_client_usage({}, usage))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: recorded.update(k))
+    llm.chat([{"role": "user", "content": "x"}], purpose="chat")
+    assert recorded["cached_tokens"] == 7
+
+
+def test_chat_cached_none_when_details_missing(monkeypatch):
+    """details가 없으면 None(측정 안 됨) — 0으로 채우면 '캐시 없음'과 '모름'이 섞인다."""
+    recorded = {}
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=2)  # details 없음 (구 SDK/모델)
+    monkeypatch.setattr(llm, "_get_client", lambda: _mock_client_usage({}, usage))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: recorded.update(k))
+    llm.chat([{"role": "user", "content": "x"}], purpose="chat")
+    assert recorded["cached_tokens"] is None
+
+
+def test_callback_reads_cache_read_from_usage_metadata(monkeypatch):
+    """콜백(스트리밍 포함): usage_metadata.input_token_details.cache_read → cached_tokens."""
+    recorded = {}
+    monkeypatch.setattr(llm, "record_usage", lambda **kw: recorded.update(kw))
+    cb = UsageCallbackHandler()
+    cb.on_llm_end(_llm_result(usage_metadata={
+        "input_tokens": 123, "output_tokens": 45,
+        "input_token_details": {"cache_read": 100},
+    }))
+    assert recorded["cached_tokens"] == 100
+    assert recorded["input_tokens"] == 123  # input은 캐시 포함 총량 그대로
+
+
+def test_callback_reads_cached_from_token_usage_fallback(monkeypatch):
+    """비스트리밍 폴백: llm_output.token_usage.prompt_tokens_details.cached_tokens."""
+    recorded = {}
+    monkeypatch.setattr(llm, "record_usage", lambda **kw: recorded.update(kw))
+    cb = UsageCallbackHandler()
+    cb.on_llm_end(_llm_result(usage_metadata=None, llm_output={
+        "token_usage": {"prompt_tokens": 200, "completion_tokens": 80,
+                        "prompt_tokens_details": {"cached_tokens": 55}},
+        "model_name": "gpt-x",
+    }))
+    assert recorded["cached_tokens"] == 55
+
+
+def test_callback_cached_none_when_absent(monkeypatch):
+    """양쪽 경로 다 캐시 정보가 없으면 None — 기존 형태 응답에 회귀 없음."""
+    recorded = {}
+    monkeypatch.setattr(llm, "record_usage", lambda **kw: recorded.update(kw))
+    cb = UsageCallbackHandler()
+    cb.on_llm_end(_llm_result(usage_metadata={"input_tokens": 1, "output_tokens": 1}))
+    assert recorded["cached_tokens"] is None
+
+
+def test_record_usage_persists_cached_and_costs_with_it(monkeypatch):
+    """record_usage가 cached_tokens를 행에 싣고, cost_usd 계산에도 같은 값을 쓴다 —
+    기록과 비용이 다른 값을 읽으면 대사가 애초에 불가능하다."""
+    _chat_prices(monkeypatch)
+    captured = {}
+
+    class _FakeDB:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def add(self, row): captured.update(vars(row))
+        def commit(self): pass
+
+    import app.core.observability_db as obs
+    monkeypatch.setattr(obs, "observability_sessionmaker", lambda: (lambda: _FakeDB()))
+    monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
+
+    class _Row:
+        def __init__(self, **kw): self.__dict__.update(kw)
+    monkeypatch.setattr("app.models.LlmUsage", _Row)
+
+    record_usage(purpose="chat", model="gpt-5.4-mini",
+                 input_tokens=1_000_000, output_tokens=0, cached_tokens=1_000_000)
+    assert captured["cached_tokens"] == 1_000_000
+    assert captured["cost_usd"] == pytest.approx(0.075)  # 전액이면 0.75 — 캐시 단가가 실제로 쓰였다

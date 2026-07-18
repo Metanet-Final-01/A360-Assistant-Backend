@@ -108,7 +108,7 @@ def test_date_grouping_reads_localtime_sql(monkeypatch):
         captured.append(sql)
         if "count(*)" in sql:  # 표본 요약 행
             return [(10, date(2026, 7, 1), date(2026, 7, 10), 3, 5, 8)]
-        return [(2.0, 2.0, 2.0)]
+        return [(2.0, 2.0, 2.0, 2.0)]  # 소비처마다 앞 일부만 쓴다 — 최대 4열이면 전부 커버
 
     monkeypatch.setattr(rpt, "_rows", fake_rows)
     monkeypatch.setattr(rpt, "SQL_LOCAL_DATE", sentinel)

@@ -236,6 +236,10 @@ class LlmUsage(Base):
     model: Mapped[str] = mapped_column(String(100))
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # 입력 중 프롬프트 캐시 적중분 (RPA-199) — 캐시 입력은 정가의 10%라 비용식이 갈린다.
+    # NULL=측정 전 기록(런타임 값이라 소급 복원 불가 — request_id와 동일), 0=측정했고 캐시 없음.
+    # 이 구분이 있어야 실청구서 대사에서 "모르는 구간"을 정직하게 표시할 수 있다.
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
     cost_usd: Mapped[float | None] = mapped_column(Float)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     # 같은 요청(턴)을 묶는 키 (RPA-158) — audit_logs·turn_events·rag_events와 동일 request_id로
