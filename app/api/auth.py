@@ -9,7 +9,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app import models
@@ -82,6 +82,28 @@ def _issue_tokens(user_id: uuid.UUID, db: Session) -> TokenResponse:
     )
     db.commit()
     return TokenResponse(access_token=create_access_token(user_id), refresh_token=refresh)
+
+
+def _claim_refresh_token(token_hash: str, db: Session) -> bool:
+    """토큰을 **원자적으로 선점**한다 — 폐기에 성공한 요청만 True (RPA-200).
+
+    조건부 UPDATE(`WHERE revoked_at IS NULL`)라 DB가 한 승자만 보장한다. 조회 후 갱신으로
+    나누면 동시 요청 둘이 **같은 토큰으로 각각 새 쌍을 발급**받아 회전(1회용)이 깨진다
+    — 그러면 재사용 탐지도 무의미해진다(둘 다 '아직 유효'로 보였으므로 탐지가 안 걸린다).
+    logout과의 경합도 같은 이유로 여기서 닫힌다.
+    """
+    from datetime import datetime, timezone
+
+    result = db.execute(
+        update(models.RefreshToken)
+        .where(
+            models.RefreshToken.token_hash == token_hash,
+            models.RefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
+    db.commit()
+    return result.rowcount == 1
 
 
 def _revoke_all_for_user(user_id: uuid.UUID, db: Session) -> int:
@@ -265,11 +287,14 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
     if expires_at.tzinfo is None:  # 드라이버가 naive로 주는 경우 UTC로 간주
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at <= now:
+        # 만료는 탈취가 아니다 — 계열을 끊지 않는다(오래 쉰 사용자가 다른 기기까지 잃지 않게).
         raise invalid
 
-    # ④ 회전 — 옛 토큰 폐기 후 새 쌍 발급
-    row.revoked_at = now
-    db.commit()
+    # ④ 회전 — **원자적으로** 선점한 요청만 새 쌍을 받는다 (CodeRabbit #273)
+    if not _claim_refresh_token(row.token_hash, db):
+        # 동시 요청이 먼저 선점했다. ③에서 방금 '유효'로 확인했으므로 옛 토큰의 재생(replay)이
+        # 아니라 경합이다 — 탈취로 단정해 계열을 끊으면 더블클릭·재시도가 전 기기 로그아웃이 된다.
+        raise invalid
     return _issue_tokens(user_uuid, db)
 
 
@@ -279,17 +304,10 @@ def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
 
     이미 없거나 폐기된 토큰이어도 204 — 멱등하게 두고 토큰 존재 여부를 알려주지 않는다.
     액세스 토큰은 짧은 수명(기본 60분)이라 그대로 만료를 기다린다(무상태 JWT의 트레이드오프).
+    refresh와 같은 원자적 선점을 쓴다 — 조회 후 갱신으로 나누면 동시 refresh가 로그아웃을
+    앞질러 새 토큰을 발급받고 살아남는다(CodeRabbit #273).
     """
-    from datetime import datetime, timezone
-
-    row = db.scalar(
-        select(models.RefreshToken).where(
-            models.RefreshToken.token_hash == hash_token(payload.refresh_token)
-        )
-    )
-    if row is not None and row.revoked_at is None:
-        row.revoked_at = datetime.now(timezone.utc)
-        db.commit()
+    _claim_refresh_token(hash_token(payload.refresh_token), db)
 
 
 @router.get("/me", response_model=UserOut)

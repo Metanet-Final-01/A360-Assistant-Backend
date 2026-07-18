@@ -307,3 +307,64 @@ def test_expired_refresh_token_rejected(client, monkeypatch):
     body = _login(client, email="exp@example.com")
     r = client.post("/api/auth/refresh", json={"refresh_token": body["refresh_token"]})
     assert r.status_code == 401
+
+
+def test_concurrent_refresh_yields_only_one_new_pair(client, monkeypatch):
+    """🔴 동시 갱신 경합 — 같은 토큰으로 두 요청이 오면 **한 건만** 성공해야 한다 (CodeRabbit #273).
+
+    조회 후 갱신으로 나뉘어 있으면 둘 다 '아직 유효'로 보고 각각 새 쌍을 발급받아
+    회전(1회용)이 깨진다. 그러면 재사용 탐지도 무의미해진다 — 둘 다 폐기 전 상태였으므로
+    탐지가 걸리지 않는다.
+
+    경쟁을 결정론적으로 재현한다: 라우트가 선점을 부르기 직전에 **다른 요청이 이미 선점한**
+    상황을 만든다(선점 함수를 한 번 가로채 먼저 실행).
+    """
+    from app.api import auth as auth_mod
+
+    body = _login(client, email="race@example.com")
+    token = body["refresh_token"]
+
+    real_claim = auth_mod._claim_refresh_token
+    state = {"raced": False}
+
+    def racing_claim(token_hash, db):
+        if not state["raced"]:
+            state["raced"] = True
+            real_claim(token_hash, db)  # 경쟁자가 먼저 선점 (동시 요청 시뮬레이션)
+        return real_claim(token_hash, db)
+
+    monkeypatch.setattr(auth_mod, "_claim_refresh_token", racing_claim)
+    r = client.post("/api/auth/refresh", json={"refresh_token": token})
+    assert r.status_code == 401  # 진 쪽은 새 쌍을 못 받는다
+
+    # 경합은 탈취가 아니다 — 계열을 끊지 않아야 한다(더블클릭이 전 기기 로그아웃이 되면 안 됨).
+    monkeypatch.undo()
+    with TestClient(app):
+        pass
+    assert client.post("/api/auth/login",
+                       json={"email": "race@example.com", "password": "pw12345678"}).status_code == 200
+
+
+def test_claim_is_one_shot(client):
+    """선점 프리미티브 자체 — 같은 토큰을 두 번 선점할 수 없다(DB가 승자를 하나로 만든다)."""
+    from app.api import auth as auth_mod
+    from app.core.security import hash_token
+    from app.db import get_db
+    from app.main import app as fastapi_app
+
+    body = _login(client, email="claim@example.com")
+    h = hash_token(body["refresh_token"])
+    gen = fastapi_app.dependency_overrides[get_db]()
+    db = next(gen)
+    try:
+        assert auth_mod._claim_refresh_token(h, db) is True   # 첫 선점 성공
+        assert auth_mod._claim_refresh_token(h, db) is False  # 두 번째는 실패
+    finally:
+        gen.close()
+
+
+def test_logout_wins_over_later_refresh(client):
+    """로그아웃이 원자적이라, 그 뒤 갱신은 새 토큰을 못 받는다."""
+    body = _login(client, email="lo@example.com")
+    assert client.post("/api/auth/logout", json={"refresh_token": body["refresh_token"]}).status_code == 204
+    assert client.post("/api/auth/refresh", json={"refresh_token": body["refresh_token"]}).status_code == 401
