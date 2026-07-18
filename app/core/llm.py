@@ -75,6 +75,34 @@ def current_usage_context() -> UsageContext:
     return _usage_ctx.get()
 
 
+# LLM 호출의 시간 상한 (RPA-202) — SDK 기본값을 그대로 쓰면 **read timeout이 600초(10분)**다.
+# 응답이 안 오는 상황에서 요청 하나가 10분간 워커를 붙잡는다. `/turn`·vision 파싱은 사용자가
+# 화면에서 기다리는 경로라 사실상 무한대다.
+#
+# ⚠️ 값은 실측에서 뽑았다 (관측 DB llm_usage, 챗 모델 5,441콜):
+#     turn_generate  p50 3.5초 / p95 34초 / p99 73초 / 최대 152초
+#     전체 챗 호출    p99 46초 / 최대 152초
+# 처음에 60초로 잡으려 했으나 **정상 요청을 잘랐을 값**이다(turn_generate p99가 73초).
+# 관측 최대(152초)에 여유를 둬 180초로 정한다 — 600초 대비 3.3배 조인 값이면서
+# 지금까지 성공한 어떤 호출도 자르지 않는다. 임계는 감이 아니라 실측에서 나와야 한다(RPA-171 교훈).
+#
+# connect는 짧게 유지한다(5초) — 연결 자체가 안 되는 상황은 기다릴 이유가 없다.
+_DEFAULT_TIMEOUT_SECONDS = 180.0
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 5.0
+# SDK 기본과 동일(2회). 명시하는 이유는 값이 코드에 보이고 env로 조정 가능해지기 때문이다.
+# 재시도 대상은 SDK가 정한다: 408·409·429·5xx·연결 오류 (지수 백오프 + Retry-After 존중).
+_DEFAULT_MAX_RETRIES = 2
+
+
+def _client_timeout():
+    """httpx Timeout — read만 늘리고 connect는 짧게 유지한다."""
+    import httpx
+
+    read = float(os.getenv("LLM_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS))
+    connect = float(os.getenv("LLM_CONNECT_TIMEOUT_SECONDS", _DEFAULT_CONNECT_TIMEOUT_SECONDS))
+    return httpx.Timeout(read, connect=connect)
+
+
 def _get_client():
     global _client
     if _client is None:
@@ -83,7 +111,11 @@ def _get_client():
             raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
         from openai import OpenAI
 
-        _client = OpenAI(api_key=api_key)
+        _client = OpenAI(
+            api_key=api_key,
+            timeout=_client_timeout(),
+            max_retries=int(os.getenv("LLM_MAX_RETRIES", _DEFAULT_MAX_RETRIES)),
+        )
     return _client
 
 
@@ -154,6 +186,34 @@ def cost_usd(
     return base / 1_000_000
 
 
+def _log_llm_failure(purpose: str, model: str, kind: str, started: float, exc: Exception) -> None:
+    """LLM 호출 실패를 관측에 남긴다 (RPA-202).
+
+    임베딩 경로(`app/rag/retrieval/embed.py`)는 시도마다 `external_api_attempt`를 남기는데
+    LLM은 SDK가 **조용히** 재시도하고 실패해서 우리 관측에 흔적이 없었다 — "이 턴이 왜 오래
+    걸렸나"에 답할 수 없었다. 같은 이벤트 이름을 써서 두 경로를 한 축에서 볼 수 있게 한다.
+
+    ⚠️ 예외 문자열을 남기지 않는다 — OpenAI 오류 본문에 요청 페이로드 일부가 실릴 수 있다.
+    타입명과 소요만 남긴다(SLACK 웹훅 토큰 유출 선례, RPA-189).
+    기록 실패가 호출 실패를 덮으면 안 되므로 예외는 삼킨다.
+    """
+    try:
+        from app.rag.observability import log_event
+
+        log_event(
+            "external_api_attempt",
+            url="openai:chat.completions",
+            purpose=purpose,
+            model=model,
+            status="error",
+            error_type=type(exc).__name__,
+            failure_kind=kind,
+            duration_ms=round((time.monotonic() - started) * 1000, 2),
+        )
+    except Exception:  # noqa: BLE001 — 관측 실패가 호출 경로를 죽이면 안 된다
+        logger.warning("LLM 실패 관측 기록 실패 (호출 오류는 그대로 전파): %s", kind)
+
+
 def chat(
     messages: list[dict],
     *,
@@ -180,13 +240,29 @@ def chat(
     create_kwargs: dict = {"model": model, "messages": messages}
     if response_format is not None:
         create_kwargs["response_format"] = response_format
+    from openai import APIConnectionError, APITimeoutError
+
     started = time.monotonic()
     try:
         response = _get_client().chat.completions.create(**create_kwargs)
     except AuthenticationError as e:
         raise RuntimeError("OpenAI 인증 실패 — API 키를 확인하세요") from e
     except RateLimitError as e:
-        raise RuntimeError("OpenAI 사용량 한도 초과 — 크레딧/요금제를 확인하세요") from e
+        # ⚠️ 여기는 **SDK 재시도(기본 2회)를 이미 소진한 뒤**다. 그래도 원인을 단정하지 않는다 —
+        # 429는 크레딧 소진일 수도, 순간 요청 폭주일 수도 있다. "요금제를 확인하라"고 단정하면
+        # 일시적 폭주일 때 운영자가 엉뚱한 곳을 본다(RPA-202).
+        _log_llm_failure(purpose, model, "rate_limit", started, e)
+        raise RuntimeError(
+            "OpenAI 요청이 한도에 걸렸습니다 — 잠시 후 다시 시도하세요. "
+            "반복되면 크레딧/요금제를 확인하세요."
+        ) from e
+    except APITimeoutError as e:
+        # 타임아웃은 그냥 터뜨리면 raw 예외가 사용자에게 올라간다. 관측에 남기고 친화적 메시지로.
+        _log_llm_failure(purpose, model, "timeout", started, e)
+        raise RuntimeError("LLM 응답이 제한 시간을 넘겼습니다 — 잠시 후 다시 시도하세요.") from e
+    except APIConnectionError as e:
+        _log_llm_failure(purpose, model, "connection", started, e)
+        raise RuntimeError("LLM 서버에 연결하지 못했습니다 — 잠시 후 다시 시도하세요.") from e
     latency_ms = int((time.monotonic() - started) * 1000)
 
     usage = response.usage
