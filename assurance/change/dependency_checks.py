@@ -33,6 +33,51 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
     except (UnicodeDecodeError, SyntaxError) as exc:
         return [], [f"{path}: {_safe_detail(str(exc))}"]
 
+    parent: dict[ast.AST, tuple[ast.AST, str]] = {}
+    for container in ast.walk(tree):
+        for field, value in ast.iter_fields(container):
+            children = value if isinstance(value, list) else [value]
+            for child in children:
+                if isinstance(child, ast.AST):
+                    parent[child] = (container, field)
+
+    typing_aliases: set[str] = set()
+    type_checking_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "typing":
+                    typing_aliases.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "typing":
+            for alias in node.names:
+                if alias.name == "TYPE_CHECKING":
+                    type_checking_aliases.add(alias.asname or alias.name)
+
+    def execution_context(node: ast.AST) -> str:
+        current = node
+        while current in parent:
+            container, field = parent[current]
+            if isinstance(container, (ast.If, ast.While)):
+                test = container.test
+                type_checking = (
+                    isinstance(test, ast.Name) and test.id in type_checking_aliases
+                ) or (
+                    isinstance(test, ast.Attribute)
+                    and isinstance(test.value, ast.Name)
+                    and test.value.id in typing_aliases
+                    and test.attr == "TYPE_CHECKING"
+                )
+                constant_known = isinstance(test, ast.Constant)
+                constant = test.value if constant_known else None
+                if field == "body" and (
+                    type_checking or (constant_known and not bool(constant))
+                ):
+                    return "non_executing"
+                if field == "orelse" and constant_known and bool(constant):
+                    return "non_executing"
+            current = container
+        return "runtime"
+
     imports: list[ImportSpec] = []
     importlib_aliases = {"importlib"}
     import_module_aliases: set[str] = set()
@@ -45,7 +90,16 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
                     importlib_aliases.add(alias.asname or alias.name)
                 elif alias.name == "builtins":
                     builtins_aliases.add(alias.asname or alias.name)
-                imports.append(ImportSpec(path, alias.name, None, node.lineno, "import"))
+                imports.append(
+                    ImportSpec(
+                        path,
+                        alias.name,
+                        None,
+                        node.lineno,
+                        "import",
+                        execution_context(node),
+                    )
+                )
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 continue
@@ -60,7 +114,14 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
                         builtin_import_aliases.add(alias.asname or alias.name)
             for alias in node.names:
                 imports.append(
-                    ImportSpec(path, module, None if alias.name == "*" else alias.name, node.lineno, "from")
+                    ImportSpec(
+                        path,
+                        module,
+                        None if alias.name == "*" else alias.name,
+                        node.lineno,
+                        "from",
+                        execution_context(node),
+                    )
                 )
 
     assignments: list[tuple[list[ast.expr], ast.expr]] = []
@@ -116,12 +177,29 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
         if not is_dynamic:
             continue
         if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-            imports.append(ImportSpec(path, node.args[0].value, None, node.lineno, "dynamic_literal"))
+            imports.append(
+                ImportSpec(
+                    path,
+                    node.args[0].value,
+                    None,
+                    node.lineno,
+                    "dynamic_literal",
+                    execution_context(node),
+                )
+            )
         else:
             dynamic_errors.append(f"{path}:{node.lineno}: non-literal dynamic import cannot be verified")
 
     deduped = {item.key: item for item in imports if item.module}
-    return sorted(deduped.values(), key=lambda item: (item.module, item.symbol or "", item.kind)), dynamic_errors
+    return sorted(
+        deduped.values(),
+        key=lambda item: (
+            item.module,
+            item.symbol or "",
+            item.kind,
+            item.execution_context,
+        ),
+    ), dynamic_errors
 
 
 def parse_requirements(
@@ -247,7 +325,9 @@ def derive_protected_evidence(
         (re.compile(r"permissions\s*:\s*write-all", re.I), "CI_WRITE_ALL"),
     )
     install_pattern = re.compile(
-        r"(?:^|[\s'\"\[])\b(?:pip|pip3)\b(?:[\s'\",]+)install\b|python\s+-m\s+pip\s+install",
+        r"(?:^|[\s'\"\[])(?:[^\s'\"\[\],;|&]+[\\/])?"
+        r"(?:pip|pip3)(?:\.exe)?\b(?:[\s'\",]+)install\b|"
+        r"python\s+-m\s+pip\s+install",
         re.I,
     )
 
@@ -351,7 +431,14 @@ def _new_imports(
         additions.extend(item for item in head_imports if item.key not in existing)
     deduped = {(item.path, *item.key): item for item in additions}
     return sorted(
-        deduped.values(), key=lambda item: (item.path, item.module, item.symbol or "", item.kind)
+        deduped.values(),
+        key=lambda item: (
+            item.path,
+            item.module,
+            item.symbol or "",
+            item.kind,
+            item.execution_context,
+        ),
     ), sorted(set(errors))
 
 
@@ -370,7 +457,14 @@ def _head_import_inventory(
         errors.extend(parse_errors)
     deduped = {(item.path, *item.key): item for item in imports}
     return sorted(
-        deduped.values(), key=lambda item: (item.path, item.module, item.symbol or "", item.kind)
+        deduped.values(),
+        key=lambda item: (
+            item.path,
+            item.module,
+            item.symbol or "",
+            item.kind,
+            item.execution_context,
+        ),
     ), sorted(set(errors))
 
 
@@ -379,6 +473,7 @@ def _imports_for_distribution(
     distribution: str,
     policy: dict[str, Any],
     environment: DependencyEnvironment,
+    local_roots: set[str],
 ) -> tuple[list[ImportSpec], bool]:
     """Return proven references and whether policy has a stable import-root mapping."""
     matches: list[ImportSpec] = []
@@ -389,7 +484,8 @@ def _imports_for_distribution(
         if normalize_distribution(value) == distribution
     }
     for spec in imports:
-        if spec.module.split(".", 1)[0] in sys.stdlib_module_names:
+        root = spec.module.split(".", 1)[0]
+        if root in sys.stdlib_module_names or root in local_roots:
             continue
         candidates = {
             normalize_distribution(value)
@@ -567,7 +663,7 @@ def derive_dependency_evidence(
                 allow_reason = "imported dependency is not declared with an exact requirement"
             else:
                 remaining, mapping_known = _imports_for_distribution(
-                    head_imports, package, policy, environment
+                    head_imports, package, policy, environment, local_roots
                 )
                 if remaining:
                     locations = ", ".join(

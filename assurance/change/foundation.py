@@ -82,10 +82,11 @@ class ImportSpec:
     symbol: str | None
     line: int
     kind: str
+    execution_context: str = "runtime"
 
     @property
-    def key(self) -> tuple[str, str | None, str]:
-        return self.module, self.symbol, self.kind
+    def key(self) -> tuple[str, str | None, str, str]:
+        return self.module, self.symbol, self.kind, self.execution_context
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +95,7 @@ class ImportSpec:
             "symbol": self.symbol,
             "line": self.line,
             "kind": self.kind,
+            "execution_context": self.execution_context,
         }
 
 

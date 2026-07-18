@@ -349,6 +349,31 @@ def test_container_package_install_fallback_is_denied(
     assert evidence["rules"]["dep.no_silent_install"]["status"] == "fail"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/pip install invented-sdk",
+        ".venv/bin/pip3 install invented-sdk",
+        r"C:\venv\Scripts\pip.exe install invented-sdk",
+    ],
+)
+def test_path_qualified_pip_install_is_denied(tmp_path: Path, command: str) -> None:
+    scenario = {
+        "base_files": {"requirements.txt": "", "Dockerfile": "FROM python:3.11\n"},
+        "head_files": {
+            "requirements.txt": "",
+            "Dockerfile": f"FROM python:3.11\nRUN {command}\n",
+        },
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "deny",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert report["assurance_decision"] == "deny"
+    assert evidence["rules"]["dep.no_silent_install"]["status"] == "fail"
+
+
 def test_rename_into_sensitive_path_scans_the_complete_head_blob(tmp_path: Path) -> None:
     content = "FROM python:3.11\nRUN pip install invented-sdk\n"
     scenario = {
@@ -373,6 +398,30 @@ def test_dependency_removal_without_remaining_import_is_allowed(tmp_path: Path) 
         "head_files": {
             "requirements.txt": "",
             "task.py": "def run():\n    return 'ready'\n",
+        },
+        "environment": {
+            "inventory": {},
+            "import_map": {"demo_sdk": ["demo-sdk"]},
+            "imports": {},
+            "distributions": {},
+        },
+        "snapshot": {},
+        "expected_decision": "allow_candidate",
+    }
+    report, _ = _run_scenario(tmp_path, scenario)
+    assert report["assurance_decision"] == "allow_candidate"
+
+
+def test_dependency_removal_ignores_a_same_named_local_package(tmp_path: Path) -> None:
+    scenario = {
+        "base_files": {
+            "requirements.txt": "demo-sdk==1.0.0\n",
+            "task.py": "import demo_sdk\n",
+        },
+        "head_files": {
+            "requirements.txt": "",
+            "task.py": "import demo_sdk\n",
+            "demo_sdk/__init__.py": "def run():\n    return 'local'\n",
         },
         "environment": {
             "inventory": {},
@@ -439,6 +488,48 @@ def test_aliased_builtin_dynamic_import_is_detected() -> None:
     )
     assert errors == []
     assert any(item.module == "demo_sdk" and item.kind == "dynamic_literal" for item in imports)
+
+
+@pytest.mark.parametrize(
+    "guarded_import",
+    [
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import demo_sdk\n",
+        "import typing as t\nif t.TYPE_CHECKING:\n    import demo_sdk\n",
+        "if False:\n    import demo_sdk\n",
+    ],
+)
+def test_import_moved_from_non_executing_block_to_runtime_is_new(
+    tmp_path: Path, guarded_import: str
+) -> None:
+    scenario = {
+        "base_files": {"requirements.txt": "", "task.py": guarded_import},
+        "head_files": {"requirements.txt": "", "task.py": "import demo_sdk\n"},
+        "environment": {
+            "inventory": {},
+            "import_map": {"demo_sdk": ["demo-sdk"]},
+            "imports": {"demo_sdk:": True},
+            "distributions": {},
+        },
+        "snapshot": {},
+        "expected_decision": "deny",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert report["assurance_decision"] == "deny"
+    assert any(
+        item["module"] == "demo_sdk" and item["execution_context"] == "runtime"
+        for item in evidence["new_imports"]
+    )
+
+
+def test_user_variable_named_type_checking_does_not_hide_runtime_import() -> None:
+    imports, errors = parse_imports(
+        "task.py",
+        b"TYPE_CHECKING = True\nif TYPE_CHECKING:\n    import demo_sdk\n",
+    )
+    assert errors == []
+    demo = next(item for item in imports if item.module == "demo_sdk")
+    assert demo.execution_context == "runtime"
 
 
 @pytest.mark.parametrize(
