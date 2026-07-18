@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 import assurance.change as change_api
 from assurance.change.checker import (
@@ -18,8 +18,16 @@ from assurance.change.checker import (
     load_policy,
     write_error_report,
 )
-from assurance.change.dependency_checks import derive_risk_profiles, parse_imports
-from assurance.change.foundation import GitRepository
+from assurance.change.dependency_checks import (
+    _combine_rule_status,
+    _license_matches,
+    _local_roots,
+    _overall_dependency_status,
+    derive_risk_profiles,
+    parse_imports,
+)
+from assurance.change.foundation import CONTROL_ORDER, GitRepository
+from assurance.change.schema_validation import SchemaValidationError, validate_json_schema
 from assurance.change.cli import main as cli_main
 from tests.change_assurance_adapter import FixtureDependencyEnvironment
 
@@ -341,6 +349,21 @@ def test_container_package_install_fallback_is_denied(
     assert evidence["rules"]["dep.no_silent_install"]["status"] == "fail"
 
 
+def test_rename_into_sensitive_path_scans_the_complete_head_blob(tmp_path: Path) -> None:
+    content = "FROM python:3.11\nRUN pip install invented-sdk\n"
+    scenario = {
+        "base_files": {"requirements.txt": "", "notes.txt": content},
+        "head_files": {"requirements.txt": "", "Dockerfile": content},
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "deny",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert report["assurance_decision"] == "deny"
+    assert evidence["rules"]["dep.no_silent_install"]["status"] == "fail"
+
+
 def test_dependency_removal_without_remaining_import_is_allowed(tmp_path: Path) -> None:
     scenario = {
         "base_files": {
@@ -416,6 +439,91 @@ def test_aliased_builtin_dynamic_import_is_detected() -> None:
     )
     assert errors == []
     assert any(item.module == "demo_sdk" and item.kind == "dynamic_literal" for item in imports)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from importlib import import_module\nload = import_module\nload('demo_sdk')\n",
+        "import importlib\nload: object = importlib.import_module\nload('demo_sdk')\n",
+        "import builtins\nload = builtins.__import__\nload('demo_sdk')\n",
+        "from builtins import __import__\nfirst = __import__\nload = first\nload('demo_sdk')\n",
+    ],
+)
+def test_assigned_dynamic_import_alias_is_detected(source: str) -> None:
+    imports, errors = parse_imports("task.py", source.encode())
+    assert errors == []
+    assert any(item.module == "demo_sdk" and item.kind == "dynamic_literal" for item in imports)
+
+
+def test_assigned_dynamic_import_alias_with_nonliteral_target_is_unassured() -> None:
+    _, errors = parse_imports(
+        "task.py",
+        b"from importlib import import_module\nload = import_module\nload(module_name)\n",
+    )
+    assert errors == ["task.py:3: non-literal dynamic import cannot be verified"]
+
+
+def test_nested_python_file_does_not_create_a_local_import_root(tmp_path: Path) -> None:
+    scenario = {
+        "base_files": {"requirements.txt": "", "task.py": "pass\n"},
+        "head_files": {
+            "requirements.txt": "",
+            "task.py": "pass\n",
+            "requests/helper.py": "pass\n",
+            "owned_package/__init__.py": "pass\n",
+        },
+    }
+    repo_path, _, head = _fixture_repo(tmp_path, scenario)
+    roots = _local_roots(GitRepository(repo_path), head, {"local_roots": []})
+    assert "requests" not in roots
+    assert "owned_package" in roots
+
+
+@pytest.mark.parametrize("ambiguous", ["Apache Software License", "BSD License"])
+def test_ambiguous_license_label_is_not_converted_to_spdx(ambiguous: str) -> None:
+    status, _ = _license_matches(ambiguous, {"Apache-2.0", "BSD-3-Clause"})
+    assert status == "fail"
+
+
+def test_explicit_dependency_failure_takes_precedence_over_detector_error() -> None:
+    evidence = {
+        "rules": {
+            "dep.allowlist": {"status": "fail"},
+            "dep.manifest": {"status": "error"},
+        },
+        "package_checks": {},
+    }
+    assert _overall_dependency_status(evidence) == "fail"
+    assert _combine_rule_status("fail", "error") == "fail"
+    assert _combine_rule_status("error", "fail") == "fail"
+
+
+@pytest.mark.parametrize(
+    ("value", "schema"),
+    [(1, {"const": True}), (True, {"const": 1}), (1, {"enum": [True]})],
+)
+def test_offline_schema_validator_uses_json_type_aware_equality(
+    value: object, schema: dict
+) -> None:
+    with pytest.raises(SchemaValidationError):
+        validate_json_schema(value, schema)
+
+
+def test_allow_candidate_schema_requires_every_control(tmp_path: Path) -> None:
+    report, output = _run_scenario(tmp_path, _load_scenarios()["good_import"])
+    report["controls"] = [report["controls"][0]] * len(CONTROL_ORDER)
+    schema = json.loads(REPORT_SCHEMA.read_text(encoding="utf-8"))
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(report)
+
+    manifest = json.loads((output / "change-manifest.json").read_text(encoding="utf-8"))
+    manifest["applicable_controls"] = list(CONTROL_ORDER[:-1])
+    manifest_schema = json.loads(MANIFEST_SCHEMA.read_text(encoding="utf-8"))
+    with pytest.raises(ValidationError):
+        Draft202012Validator(
+            manifest_schema, format_checker=FormatChecker()
+        ).validate(manifest)
 
 
 def test_non_python_to_python_rename_treats_import_as_new(tmp_path: Path) -> None:

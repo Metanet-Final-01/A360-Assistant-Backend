@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .foundation import (
+    CONTROL_ORDER,
     GIT_SHA,
     SCHEMA_VERSION,
     AssuranceError,
@@ -58,6 +59,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise AssuranceError("manifest diff digest is missing")
     if manifest["policy"].get("rollout_mode") != "observe":
         raise AssuranceError("RPA-180 only permits Observe rollout")
+    if manifest["applicable_controls"] != list(CONTROL_ORDER):
+        raise AssuranceError("manifest must declare the complete ordered control set")
 
 
 def validate_report(report: dict[str, Any]) -> None:
@@ -87,6 +90,8 @@ def validate_report(report: dict[str, Any]) -> None:
     control_ids = [control["control_id"] for control in report["controls"]]
     if len(control_ids) != len(set(control_ids)):
         raise AssuranceError("assurance report contains duplicate control results")
+    if not set(control_ids) <= set(CONTROL_ORDER):
+        raise AssuranceError("assurance report contains an unknown control ID")
     for control in report["controls"]:
         evidence = control["evidence"]
         if evidence["subject_sha"] != report["subject"]["head_sha"]:
@@ -94,6 +99,8 @@ def validate_report(report: dict[str, Any]) -> None:
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", evidence["sha256"]):
             raise AssuranceError("control evidence digest is malformed")
     if report["assurance_decision"] == "allow_candidate":
+        if control_ids != list(CONTROL_ORDER):
+            raise AssuranceError("allow_candidate requires the complete ordered control set")
         if not report["evidence_complete"] or report["manifest_evidence"] is None:
             raise AssuranceError("allow_candidate requires complete evidence")
         if statuses & {"fail", "error", "unassured"}:

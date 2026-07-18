@@ -63,6 +63,42 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
                     ImportSpec(path, module, None if alias.name == "*" else alias.name, node.lineno, "from")
                 )
 
+    assignments: list[tuple[list[ast.expr], ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            assignments.append((list(node.targets), node.value))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            assignments.append(([node.target], node.value))
+
+    changed = True
+    while changed:
+        changed = False
+        for targets, value in assignments:
+            importer_kind: str | None = None
+            if isinstance(value, ast.Name):
+                if value.id in import_module_aliases:
+                    importer_kind = "import_module"
+                elif value.id in builtin_import_aliases:
+                    importer_kind = "builtin"
+            elif isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+                if value.attr == "import_module" and value.value.id in importlib_aliases:
+                    importer_kind = "import_module"
+                elif value.attr == "__import__" and value.value.id in builtins_aliases:
+                    importer_kind = "builtin"
+            if importer_kind is None:
+                continue
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                aliases = (
+                    import_module_aliases
+                    if importer_kind == "import_module"
+                    else builtin_import_aliases
+                )
+                if target.id not in aliases:
+                    aliases.add(target.id)
+                    changed = True
+
     dynamic_errors: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -214,15 +250,29 @@ def derive_protected_evidence(
         r"(?:^|[\s'\"\[])\b(?:pip|pip3)\b(?:[\s'\",]+)install\b|python\s+-m\s+pip\s+install",
         re.I,
     )
+
+    def is_sensitive(candidate: str) -> bool:
+        filename = Path(candidate).name
+        return candidate.endswith(SENSITIVE_SUFFIXES) or filename.startswith(
+            ("Dockerfile", "Containerfile")
+        )
+
     for change in changes:
         path = change["path"]
-        filename = Path(path).name
-        if not (
-            path.endswith(SENSITIVE_SUFFIXES)
-            or filename.startswith(("Dockerfile", "Containerfile"))
-        ):
+        if not is_sensitive(path):
             continue
-        for line in repo.added_lines(base, head, path):
+        old_path = change.get("old_path")
+        renamed_into_sensitive_path = (
+            change["status"].startswith(("R", "C"))
+            and old_path is not None
+            and not is_sensitive(old_path)
+        )
+        if renamed_into_sensitive_path:
+            content = repo.show(head, path)
+            lines = content.decode("utf-8", "replace").splitlines() if content else []
+        else:
+            lines = repo.added_lines(base, head, path)
+        for line in lines:
             for pattern, code in indicator_patterns:
                 if pattern.search(line):
                     indicators.append({"path": path, "code": code, "line_sha256": digest_bytes(line.encode())})
@@ -244,12 +294,10 @@ def derive_protected_evidence(
 def _local_roots(repo: GitRepository, head: str, policy: dict[str, Any]) -> set[str]:
     roots = set(policy["local_roots"])
     for path in repo.paths(head):
-        if not path.endswith(".py"):
-            continue
-        if "/" in path:
-            roots.add(path.split("/", 1)[0])
-        else:
+        if path.endswith(".py") and "/" not in path:
             roots.add(Path(path).stem)
+        elif path.endswith("/__init__.py") and path.count("/") == 1:
+            roots.add(path.split("/", 1)[0])
     return roots
 
 
@@ -363,7 +411,7 @@ def _rule(status: str, reasons: list[str] | None = None) -> dict[str, Any]:
 
 
 def _combine_rule_status(current: str, candidate: str) -> str:
-    rank = {"not_applicable": 0, "pass": 1, "unassured": 2, "fail": 3, "error": 4}
+    rank = {"not_applicable": 0, "pass": 1, "unassured": 2, "error": 3, "fail": 4}
     return candidate if rank[candidate] > rank[current] else current
 
 
@@ -373,8 +421,6 @@ def _license_matches(expression: str | None, allowed: set[str]) -> tuple[str, st
     normalized = expression.strip()
     aliases = {
         "MIT License": "MIT",
-        "Apache Software License": "Apache-2.0",
-        "BSD License": "BSD-3-Clause",
         "Python Software Foundation License": "PSF-2.0",
         "Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0",
     }
@@ -676,10 +722,10 @@ def derive_dependency_evidence(
 
 def _overall_dependency_status(evidence: dict[str, Any]) -> str:
     statuses = {value["status"] for value in evidence["rules"].values()}
-    if "error" in statuses:
-        return "error"
     if "fail" in statuses:
         return "fail"
+    if "error" in statuses:
+        return "error"
     if "unassured" in statuses:
         return "unassured"
     if statuses == {"not_applicable", "pass"} and not evidence["package_checks"]:

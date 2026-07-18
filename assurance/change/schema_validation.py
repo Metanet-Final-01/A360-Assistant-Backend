@@ -32,6 +32,25 @@ class SchemaValidationError(ValueError):
     """Raised when an instance or schema cannot be validated without ambiguity."""
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _json_equal(left[key], right[key]) for key in left
+        )
+    return left == right
+
+
 def _resolve_ref(root: dict[str, Any], reference: str) -> dict[str, Any]:
     if not reference.startswith("#/"):
         raise SchemaValidationError(f"unsupported schema reference: {reference}")
@@ -70,9 +89,9 @@ def _validate(value: Any, schema: dict[str, Any], root: dict[str, Any], path: st
     if "$ref" in schema:
         _validate(value, _resolve_ref(root, schema["$ref"]), root, path)
         return
-    if "const" in schema and value != schema["const"]:
+    if "const" in schema and not _json_equal(value, schema["const"]):
         raise SchemaValidationError(f"{path}: value must equal {schema['const']!r}")
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not any(_json_equal(value, item) for item in schema["enum"]):
         raise SchemaValidationError(f"{path}: value is outside the allowed enum")
     expected_type = schema.get("type")
     if expected_type is not None and not _matches_type(value, expected_type):
