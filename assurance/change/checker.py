@@ -31,6 +31,10 @@ from .foundation import (
     isoformat,
     utc_now,
 )
+from .schema_validation import SchemaValidationError, validate_json_schema
+
+
+POLICY_SCHEMA = Path(__file__).resolve().parent / "schemas" / "dependency-policy.schema.json"
 
 
 class AssuranceRunner:
@@ -273,24 +277,13 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
         policy = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise AssuranceError(f"dependency policy is invalid JSON: {_safe_detail(str(exc))}") from exc
-    if not isinstance(policy, dict):
-        raise AssuranceError("dependency policy root must be an object")
-    required = {
-        "schema_version",
-        "rollout_mode",
-        "policy_decision_state",
-        "requirement_files",
-        "dependency_paths",
-        "local_roots",
-        "protected_paths",
-        "import_distribution_map",
-        "approved_additions",
-        "license_policy",
-        "vulnerability_policy",
-    }
-    missing = sorted(required - set(policy))
-    if missing:
-        raise AssuranceError(f"dependency policy is missing fields: {', '.join(missing)}")
+    try:
+        schema = json.loads(POLICY_SCHEMA.read_text(encoding="utf-8"))
+        validate_json_schema(policy, schema)
+    except (OSError, json.JSONDecodeError, SchemaValidationError) as exc:
+        raise AssuranceError(
+            f"dependency policy schema validation failed: {_safe_detail(str(exc))}"
+        ) from exc
     return policy, digest_bytes(raw)
 
 

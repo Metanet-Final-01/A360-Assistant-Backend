@@ -155,6 +155,7 @@ class GitRepository:
 
     def __init__(self, root: Path):
         self.root = root.resolve()
+        self._paths_cache: dict[str, list[str]] = {}
 
     @staticmethod
     def _environment() -> dict[str, str]:
@@ -241,25 +242,26 @@ class GitRepository:
         return sorted(changes, key=lambda item: (item["path"], item["status"]))
 
     def show(self, commit: str, path: str) -> bytes | None:
-        result = self.run("show", f"{commit}:{path}", check=False)
-        if result.returncode == 0:
-            return result.stdout
-        return None
+        if path not in set(self.paths(commit)):
+            return None
+        return self.run("show", f"{commit}:{path}").stdout
 
     def paths(self, commit: str) -> list[str]:
-        raw = self.run("ls-tree", "-r", "--name-only", "-z", commit).stdout
-        return sorted(
-            field.decode("utf-8", "surrogateescape")
-            for field in raw.split(b"\x00")
-            if field
-        )
+        if commit not in self._paths_cache:
+            raw = self.run("ls-tree", "-r", "--name-only", "-z", commit).stdout
+            self._paths_cache[commit] = sorted(
+                field.decode("utf-8", "surrogateescape")
+                for field in raw.split(b"\x00")
+                if field
+            )
+        return list(self._paths_cache[commit])
 
     def added_lines(self, base: str, head: str, path: str) -> list[str]:
-        result = self.run(
-            "diff", "--unified=0", "--no-color", f"{base}...{head}", "--", path, check=False
-        )
-        if result.returncode != 0:
+        if path not in set(self.paths(base)) and path not in set(self.paths(head)):
             return []
+        result = self.run(
+            "diff", "--unified=0", "--no-color", f"{base}...{head}", "--", path
+        )
         lines = result.stdout.decode("utf-8", "replace").splitlines()
         return [line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")]
 

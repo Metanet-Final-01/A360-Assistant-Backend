@@ -181,9 +181,15 @@ def derive_protected_evidence(
     policy: dict[str, Any],
 ) -> dict[str, Any]:
     protected = sorted(
-        change["path"]
-        for change in changes
-        if any(_matches_prefix(change["path"], prefix) for prefix in policy["protected_paths"])
+        {
+            candidate
+            for change in changes
+            for candidate in (change["path"], change.get("old_path"))
+            if candidate
+            and any(
+                _matches_prefix(candidate, prefix) for prefix in policy["protected_paths"]
+            )
+        }
     )
     indicators: list[dict[str, str]] = []
     silent_install_hits: list[dict[str, str]] = []
@@ -471,21 +477,25 @@ def derive_dependency_evidence(
         package_checks[package] = checks
 
         if head_record is None:
-            remaining, mapping_known = _imports_for_distribution(
-                head_imports, package, policy, environment
-            )
-            if remaining:
-                locations = ", ".join(
-                    f"{item.path}:{item.line}" for item in remaining[:5]
-                )
+            if base_record is None:
                 allow_status = "fail"
-                allow_reason = f"dependency was removed while imports remain at {locations}"
-            elif head_inventory_errors or not mapping_known:
-                allow_status = "unassured"
-                allow_reason = "dependency removal could not prove that no imports remain"
+                allow_reason = "imported dependency is not declared with an exact requirement"
             else:
-                allow_status = "pass"
-                allow_reason = "dependency was removed and no tracked Python import remains"
+                remaining, mapping_known = _imports_for_distribution(
+                    head_imports, package, policy, environment
+                )
+                if remaining:
+                    locations = ", ".join(
+                        f"{item.path}:{item.line}" for item in remaining[:5]
+                    )
+                    allow_status = "fail"
+                    allow_reason = f"dependency was removed while imports remain at {locations}"
+                elif head_inventory_errors or not mapping_known:
+                    allow_status = "unassured"
+                    allow_reason = "dependency removal could not prove that no imports remain"
+                else:
+                    allow_status = "pass"
+                    allow_reason = "dependency was removed and no tracked Python import remains"
         elif base_record and base_record.version == head_record.version:
             allow_status, allow_reason = "pass", "exact version is present in trusted base requirements"
         else:

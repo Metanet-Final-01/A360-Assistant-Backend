@@ -14,8 +14,10 @@ from assurance.change.checker import (
     AssuranceError,
     AssuranceRunner,
     canonical_digest,
+    load_policy,
     write_error_report,
 )
+from assurance.change.foundation import GitRepository
 from assurance.change.cli import main as cli_main
 from tests.change_assurance_adapter import FixtureDependencyEnvironment
 
@@ -91,6 +93,8 @@ def _policy(scenario: dict) -> dict:
         for root, distributions in scenario["environment"].get("import_map", {}).items()
         if distributions
     }
+    if not import_map:
+        import_map["fixture_sentinel"] = "fixture-sentinel"
     return {
         "schema_version": "1.0",
         "rollout_mode": "observe",
@@ -264,6 +268,23 @@ def test_protected_oracle_change_requires_separate_review(tmp_path: Path) -> Non
     assert ch06["reason_code"] == "PROTECTED_ORACLE_REVIEW_REQUIRED"
 
 
+def test_rename_out_of_protected_path_keeps_old_path_evidence(tmp_path: Path) -> None:
+    content = "def test_value():\n    assert 1 == 1\n"
+    scenario = {
+        "base_files": {"requirements.txt": "", "tests/test_example.py": content},
+        "head_files": {"requirements.txt": "", "app/example.py": content},
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "unassured",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    protected = json.loads(
+        (output / "protected-change-evidence.json").read_text(encoding="utf-8")
+    )
+    assert report["assurance_decision"] == "unassured"
+    assert "tests/test_example.py" in protected["protected_paths_changed"]
+
+
 def test_added_package_install_fallback_is_denied(tmp_path: Path) -> None:
     scenario = {
         "base_files": {
@@ -334,6 +355,29 @@ def test_dependency_removal_with_remaining_import_is_denied(tmp_path: Path) -> N
     assert report["assurance_decision"] == "deny"
 
 
+def test_mapped_external_import_without_requirement_is_denied(tmp_path: Path) -> None:
+    scenario = {
+        "base_files": {"requirements.txt": "", "task.py": "def run():\n    return 'ready'\n"},
+        "head_files": {
+            "requirements.txt": "",
+            "task.py": "import demo_sdk\n\ndef run():\n    return demo_sdk.run()\n",
+        },
+        "environment": {
+            "inventory": {},
+            "import_map": {"demo_sdk": ["demo-sdk"]},
+            "imports": {"demo_sdk:": True},
+            "distributions": {},
+        },
+        "snapshot": {},
+        "expected_decision": "deny",
+    }
+    report, output = _run_scenario(tmp_path, scenario)
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert report["assurance_decision"] == "deny"
+    assert evidence["package_checks"]["demo-sdk"]["allowlist"]["status"] == "fail"
+    assert "not declared" in evidence["package_checks"]["demo-sdk"]["allowlist"]["detail"]
+
+
 def test_unknown_stale_evidence_is_rejected(tmp_path: Path) -> None:
     scenario = _load_scenarios()["good_import"]
     repo, base, head = _fixture_repo(tmp_path, scenario)
@@ -365,7 +409,66 @@ def test_observe_workflow_exposes_fatal_checker_failure() -> None:
     )
     assert "continue-on-error: true" not in workflow
     assert "${{ runner.temp }}" in workflow
+    assert "working-directory: trusted-runner" in workflow
+    assert '--repo "$ASSURANCE_SUBJECT"' in workflow
+    assert "BOOTSTRAP_UNASSURED.md" in workflow
     assert "coverage" not in policy["import_distribution_map"]
+
+
+def test_policy_loader_enforces_complete_schema(tmp_path: Path) -> None:
+    valid = _policy(_load_scenarios()["good_import"])
+    invalid_policies = []
+
+    wrong_type = json.loads(json.dumps(valid))
+    wrong_type["requirement_files"] = "requirements.txt"
+    invalid_policies.append(wrong_type)
+
+    extra_field = json.loads(json.dumps(valid))
+    extra_field["unexpected"] = True
+    invalid_policies.append(extra_field)
+
+    invalid_age = json.loads(json.dumps(valid))
+    invalid_age["vulnerability_policy"]["max_age_days"] = 0
+    invalid_policies.append(invalid_age)
+
+    invalid_timestamp = json.loads(json.dumps(valid))
+    invalid_timestamp["vulnerability_policy"]["snapshot_generated_at"] = "not-a-date"
+    invalid_policies.append(invalid_timestamp)
+
+    for index, policy in enumerate(invalid_policies):
+        path = tmp_path / f"invalid-{index}.json"
+        path.write_text(json.dumps(policy), encoding="utf-8")
+        with pytest.raises(AssuranceError, match="schema validation failed"):
+            load_policy(path)
+
+
+def test_git_read_failures_are_not_converted_to_missing_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = {
+        "base_files": {"requirements.txt": "", "task.py": "def run():\n    return 1\n"},
+        "head_files": {"requirements.txt": "", "task.py": "def run():\n    return 2\n"},
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "allow_candidate",
+    }
+    repo_path, base, head = _fixture_repo(tmp_path, scenario)
+    repo = GitRepository(repo_path)
+    repo.paths(base)
+    repo.paths(head)
+    original_run = repo.run
+
+    def injected_failure(*args: str, check: bool = True):
+        if args[0] in {"show", "diff"}:
+            assert check is True
+            raise AssuranceError("injected Git read failure")
+        return original_run(*args, check=check)
+
+    monkeypatch.setattr(repo, "run", injected_failure)
+    with pytest.raises(AssuranceError, match="injected Git read failure"):
+        repo.show(head, "task.py")
+    with pytest.raises(AssuranceError, match="injected Git read failure"):
+        repo.added_lines(base, head, "task.py")
 
 
 def test_detector_error_receipt_is_nonpassing_and_schema_valid(tmp_path: Path) -> None:

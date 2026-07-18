@@ -17,31 +17,74 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check out the exact PR head
+      - name: Check out the exact PR head as the analysis subject
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
+          path: subject
+
+      - name: Check out the trusted base runner
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: trusted-runner
 
       - name: Use Python 3.11
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
-      - name: Run Change Assurance without installing PR dependencies
+      - name: Detect trusted runner availability
+        id: trusted_runner
+        shell: bash
+        run: |
+          if [[ -f "$GITHUB_WORKSPACE/trusted-runner/assurance/change/cli.py" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run the trusted base Change Assurance
+        if: steps.trusted_runner.outputs.available == 'true'
+        working-directory: trusted-runner
         env:
           ASSURANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           ASSURANCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ASSURANCE_REPOSITORY: ${{ github.repository }}
+          ASSURANCE_SUBJECT: ${{ github.workspace }}/subject
           ASSURANCE_OUTPUT: ${{ runner.temp }}/change-assurance-${{ github.run_id }}-${{ github.run_attempt }}
         run: >-
           python -m assurance.change.cli
-          --repo .
+          --repo "$ASSURANCE_SUBJECT"
           --base-sha "$ASSURANCE_BASE_SHA"
           --head-sha "$ASSURANCE_HEAD_SHA"
           --repository "$ASSURANCE_REPOSITORY"
           --output "$ASSURANCE_OUTPUT"
+
+      - name: Record bootstrap as unassured
+        if: steps.trusted_runner.outputs.available != 'true'
+        shell: bash
+        env:
+          ASSURANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ASSURANCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ASSURANCE_OUTPUT: ${{ runner.temp }}/change-assurance-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          mkdir -p "$ASSURANCE_OUTPUT"
+          printf '%s\n' \
+            '# Change Assurance bootstrap: UNASSURED' \
+            '' \
+            "Base SHA: $ASSURANCE_BASE_SHA" \
+            "Subject SHA: $ASSURANCE_HEAD_SHA" \
+            '' \
+            'The trusted base does not contain the Change Assurance runner.' \
+            'No code from the PR head was executed as an assurance checker.' \
+            'Merge this Observe bootstrap before relying on later PR evidence.' \
+            > "$ASSURANCE_OUTPUT/BOOTSTRAP_UNASSURED.md"
+          cat "$ASSURANCE_OUTPUT/BOOTSTRAP_UNASSURED.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Observe evidence
         if: always()
@@ -50,5 +93,5 @@ jobs:
           name: change-assurance-pr-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/change-assurance-${{ github.run_id }}-${{ github.run_attempt }}/
           include-hidden-files: true
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14

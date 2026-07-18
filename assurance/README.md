@@ -81,6 +81,7 @@ assurance/
    ├─ foundation.py                  # 공통 계약, Git·실행환경 증거 수집
    ├─ dependency_checks.py           # 의존성·import·보호 경로 판정
    ├─ evidence.py                    # 증거 계약 검증과 무결성 작성
+   ├─ schema_validation.py           # 오프라인 정책 JSON Schema 검증
    ├─ checker.py                     # control 조합과 최종 판정
    ├─ cli.py                         # 판정 비차단 Observe CLI
    ├─ policy/                        # 의존성·취약점·license 정책
