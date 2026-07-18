@@ -53,21 +53,63 @@ def _secret() -> str:
     return "dev-only-insecure-secret-do-not-use-in-prod"  # 로컬 개발 전용
 
 
-def create_access_token(user_id: uuid.UUID | str) -> str:
-    expire_minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+# 토큰 용도 — 같은 시크릿으로 서명되므로 **용도를 클레임으로 구분하고 검증 때 대조**해야 한다.
+# 이게 없으면 수명이 긴 리프레시 토큰이 액세스 토큰으로 통과해 60분 만료 정책이 무의미해진다
+# (타입 혼동, RPA-200). 옛 토큰(typ 없음)은 access로 간주해 하위호환을 유지한다.
+TOKEN_TYPE_ACCESS = "access"
+TOKEN_TYPE_REFRESH = "refresh"
+
+
+def _create_token(user_id: uuid.UUID | str, *, typ: str, ttl_seconds: int) -> str:
     now = int(time.time())
     payload = {
         "sub": str(user_id),
+        "typ": typ,
         "iat": now,
-        "exp": now + expire_minutes * 60,
+        "exp": now + ttl_seconds,
+        # 같은 사용자·같은 초에 발급해도 토큰이 겹치지 않게 — 리프레시는 해시가 PK라 충돌하면 안 된다
+        "jti": uuid.uuid4().hex,
     }
     return jwt.encode(payload, _secret(), algorithm=_JWT_ALGORITHM)
 
 
-def decode_access_token(token: str) -> str | None:
-    """유효하면 user_id(sub)를, 만료·위조·형식오류면 None을 반환한다."""
+def create_access_token(user_id: uuid.UUID | str) -> str:
+    expire_minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+    return _create_token(user_id, typ=TOKEN_TYPE_ACCESS, ttl_seconds=expire_minutes * 60)
+
+
+def create_refresh_token(user_id: uuid.UUID | str) -> str:
+    """장수명 갱신 토큰. 원문은 클라이언트만 갖고, 서버는 해시만 저장한다(RPA-200)."""
+    expire_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "14"))
+    return _create_token(user_id, typ=TOKEN_TYPE_REFRESH, ttl_seconds=expire_days * 86400)
+
+
+def _decode(token: str, *, expected_typ: str) -> str | None:
+    """서명·만료·**용도**까지 검증해 user_id(sub)를 반환한다. 하나라도 어긋나면 None."""
     try:
         payload = jwt.decode(token, _secret(), algorithms=[_JWT_ALGORITHM])
     except jwt.PyJWTError:
         return None
+    # typ 부재 = RPA-200 이전에 발급된 액세스 토큰 → access로만 인정(리프레시로는 못 쓴다)
+    if payload.get("typ", TOKEN_TYPE_ACCESS) != expected_typ:
+        return None
     return payload.get("sub")
+
+
+def decode_access_token(token: str) -> str | None:
+    """유효한 **액세스** 토큰이면 user_id(sub)를, 아니면 None. 리프레시 토큰은 거부한다."""
+    return _decode(token, expected_typ=TOKEN_TYPE_ACCESS)
+
+
+def decode_refresh_token(token: str) -> str | None:
+    """유효한 **리프레시** 토큰이면 user_id(sub)를, 아니면 None. 액세스 토큰은 거부한다."""
+    return _decode(token, expected_typ=TOKEN_TYPE_REFRESH)
+
+
+def hash_token(token: str) -> str:
+    """리프레시 토큰 저장용 해시 — DB가 유출돼도 세션을 복원할 수 없게 원문을 저장하지 않는다.
+
+    비밀번호와 달리 bcrypt를 쓰지 않는다: 토큰은 128비트 랜덤(jti)을 포함한 고엔트로피
+    문자열이라 사전 공격 대상이 아니고, 매 갱신마다 조회 키로 써야 해 **결정적 해시**여야 한다.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()

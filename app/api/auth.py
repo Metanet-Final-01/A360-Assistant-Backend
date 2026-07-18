@@ -3,6 +3,7 @@
 get_current_user 의존성을 다른 라우터가 import해 보호 대상 엔드포인트에 건다.
 """
 
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,8 +15,11 @@ from sqlalchemy.orm import Session
 from app import models
 from app.core.security import (
     create_access_token,
+    create_refresh_token,
     decode_access_token,
+    decode_refresh_token,
     hash_password,
+    hash_token,
     verify_dummy,
     verify_password,
 )
@@ -42,7 +46,13 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    # RPA-200에서 추가. 기존 클라이언트는 이 필드를 무시하면 되므로 하위호환이 유지된다.
+    refresh_token: str | None = None
     token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=1, max_length=4096)
 
 
 class UserOut(BaseModel):
@@ -52,6 +62,47 @@ class UserOut(BaseModel):
 
 def _normalize_email(email: str) -> str:
     return email.strip().lower()
+
+
+def _issue_tokens(user_id: uuid.UUID, db: Session) -> TokenResponse:
+    """액세스+리프레시 쌍을 발급하고 리프레시는 **해시로만** 저장한다 (RPA-200).
+
+    원문은 응답으로 한 번 나가고 서버엔 남지 않는다 — DB가 유출돼도 세션을 복원할 수 없다.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    refresh = create_refresh_token(user_id)
+    expire_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "14"))
+    db.add(
+        models.RefreshToken(
+            user_id=user_id,
+            token_hash=hash_token(refresh),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=expire_days),
+        )
+    )
+    db.commit()
+    return TokenResponse(access_token=create_access_token(user_id), refresh_token=refresh)
+
+
+def _revoke_all_for_user(user_id: uuid.UUID, db: Session) -> int:
+    """그 사용자의 유효한 리프레시 토큰을 전부 폐기하고 건수를 반환한다.
+
+    재사용 탐지 시 호출한다 — 폐기된 토큰이 다시 왔다는 건 원문이 두 곳에 있다는 뜻이고,
+    어느 쪽이 공격자인지 서버는 알 수 없다. 그래서 **계열 전체를 끊고** 재로그인을 요구한다.
+    """
+    from datetime import datetime, timezone
+
+    rows = db.scalars(
+        select(models.RefreshToken).where(
+            models.RefreshToken.user_id == user_id,
+            models.RefreshToken.revoked_at.is_(None),
+        )
+    ).all()
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        row.revoked_at = now
+    db.commit()
+    return len(rows)
 
 
 def admin_seed_emails() -> set[str]:
@@ -155,7 +206,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
     # 공개 가입은 관리자 권한을 절대 부여하지 않는다 — 시드 이메일을 선점한 공격자가
     # 관리자가 되는 권한 상승을 막기 위함(CodeRabbit #179). 승격은 운영자 설정
     # ADMIN_EMAILS 기반 기동 백필로만 일어난다(backfill_seed_admins).
-    return TokenResponse(access_token=create_access_token(user.id))
+    return _issue_tokens(user.id, db)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -168,7 +219,77 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         raise _error(401, "INVALID_CREDENTIALS", "이메일 또는 비밀번호가 올바르지 않습니다.")
     if not verify_password(payload.password, user.password_hash):
         raise _error(401, "INVALID_CREDENTIALS", "이메일 또는 비밀번호가 올바르지 않습니다.")
-    return TokenResponse(access_token=create_access_token(user.id))
+    return _issue_tokens(user.id, db)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    """리프레시 토큰으로 새 토큰 쌍을 받는다 — 재로그인 없이 세션을 잇는다 (RPA-200).
+
+    **회전(rotation)**: 쓴 토큰은 즉시 폐기하고 새로 발급한다. 그래서 원문이 한 번만 유효하다.
+    **재사용 탐지**: 이미 폐기된 토큰이 오면 원문이 두 곳에 존재한다는 뜻이고 어느 쪽이 공격자인지
+    알 수 없으므로, 그 사용자의 토큰을 **전부** 끊고 재로그인을 요구한다(OAuth 2.0 Security BCP).
+
+    실패 사유는 401 하나로 합친다 — 서명 위조·만료·폐기를 구분해 알려주면 공격자에게
+    토큰 상태를 알려주는 오라클이 된다.
+    """
+    from datetime import datetime, timezone
+
+    invalid = _error(401, "INVALID_REFRESH_TOKEN", "다시 로그인해 주세요.")
+
+    # ① 서명·만료·용도(typ=refresh) 검증 — 액세스 토큰은 여기서 걸러진다
+    user_id = decode_refresh_token(payload.refresh_token)
+    if user_id is None:
+        raise invalid
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except (ValueError, TypeError):
+        raise invalid
+
+    # ② 서버가 아는 토큰인지 (해시로 조회 — 원문은 저장돼 있지 않다)
+    row = db.scalar(
+        select(models.RefreshToken).where(
+            models.RefreshToken.token_hash == hash_token(payload.refresh_token)
+        )
+    )
+    if row is None:
+        raise invalid
+
+    # ③ 재사용 탐지 — 폐기된 토큰이 다시 왔다 = 탈취 신호
+    if row.revoked_at is not None:
+        _revoke_all_for_user(row.user_id, db)
+        raise invalid
+
+    now = datetime.now(timezone.utc)
+    expires_at = row.expires_at
+    if expires_at.tzinfo is None:  # 드라이버가 naive로 주는 경우 UTC로 간주
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        raise invalid
+
+    # ④ 회전 — 옛 토큰 폐기 후 새 쌍 발급
+    row.revoked_at = now
+    db.commit()
+    return _issue_tokens(user_uuid, db)
+
+
+@router.post("/logout", status_code=204)
+def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
+    """리프레시 토큰을 폐기한다. 서버가 무효를 알아야 로그아웃이 주장이 아니라 사실이 된다.
+
+    이미 없거나 폐기된 토큰이어도 204 — 멱등하게 두고 토큰 존재 여부를 알려주지 않는다.
+    액세스 토큰은 짧은 수명(기본 60분)이라 그대로 만료를 기다린다(무상태 JWT의 트레이드오프).
+    """
+    from datetime import datetime, timezone
+
+    row = db.scalar(
+        select(models.RefreshToken).where(
+            models.RefreshToken.token_hash == hash_token(payload.refresh_token)
+        )
+    )
+    if row is not None and row.revoked_at is None:
+        row.revoked_at = datetime.now(timezone.utc)
+        db.commit()
 
 
 @router.get("/me", response_model=UserOut)

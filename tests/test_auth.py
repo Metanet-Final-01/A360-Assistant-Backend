@@ -1,5 +1,7 @@
 """인증(JWT) 테스트 (RPA-23) — DB는 인메모리 SQLite로 격리."""
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -21,6 +23,7 @@ def client(monkeypatch):
         poolclass=StaticPool,
     )
     models.User.__table__.create(engine)
+    models.RefreshToken.__table__.create(engine)  # RPA-200 — 갱신 토큰 폐기 상태 저장
     TestingSession = sessionmaker(bind=engine)
 
     def _override_get_db():
@@ -130,6 +133,7 @@ def test_expired_token_rejected(monkeypatch):
 def _mem_engine():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     models.User.__table__.create(engine)
+    models.RefreshToken.__table__.create(engine)  # register가 발급 시 기록한다 (RPA-200)
     return engine
 
 
@@ -187,3 +191,119 @@ def test_backfill_no_seed_is_noop(monkeypatch):
     # SessionLocal을 건드리면 실패하도록 — 시드 없으면 호출 전에 반환해야 함
     monkeypatch.setattr("app.db.SessionLocal", lambda: (_ for _ in ()).throw(AssertionError("DB 접근 금지")))
     assert auth_mod.backfill_seed_admins() == 0
+
+
+# --- 리프레시 토큰 (RPA-200) ---
+
+def _login(client, email="ref@example.com", password="pw12345678"):
+    """가입 후 토큰 쌍을 돌려준다."""
+    r = client.post("/api/auth/register", json={"email": email, "password": password})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_register_and_login_issue_refresh_token(client):
+    """가입·로그인 모두 갱신 토큰을 함께 준다 — 60분마다 재로그인하던 문제의 해소 지점."""
+    body = _login(client)
+    assert body["refresh_token"]
+    r = client.post("/api/auth/login", json={"email": "ref@example.com", "password": "pw12345678"})
+    assert r.json()["refresh_token"]
+    assert r.json()["access_token"]  # 기존 필드도 그대로 (하위호환)
+
+
+def test_refresh_returns_new_usable_access_token(client):
+    """만료를 기다리지 않고도 갱신이 동작하고, 받은 액세스 토큰이 실제로 통한다."""
+    body = _login(client)
+    r = client.post("/api/auth/refresh", json={"refresh_token": body["refresh_token"]})
+    assert r.status_code == 200, r.text
+    new = r.json()
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {new['access_token']}"})
+    assert me.status_code == 200 and me.json()["email"] == "ref@example.com"
+
+
+def test_refresh_token_is_rejected_as_access_token(client):
+    """🔴 타입 혼동 차단 — 리프레시 토큰으로 보호 API에 접근할 수 없어야 한다.
+
+    같은 시크릿으로 서명되므로 typ 검증이 없으면 그냥 통과한다. 그러면 수명이 긴 토큰이
+    액세스 토큰처럼 쓰여 60분 만료 정책이 통째로 무의미해진다.
+    """
+    body = _login(client)
+    r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {body['refresh_token']}"})
+    assert r.status_code == 401
+
+
+def test_access_token_is_rejected_as_refresh_token(client):
+    """역방향도 성립해야 한다 — 액세스 토큰으로는 갱신할 수 없다."""
+    body = _login(client)
+    r = client.post("/api/auth/refresh", json={"refresh_token": body["access_token"]})
+    assert r.status_code == 401
+
+
+def test_refresh_rotates_old_token_becomes_invalid(client):
+    """회전 — 한 번 쓴 갱신 토큰은 즉시 무효가 된다(원문이 한 번만 유효)."""
+    body = _login(client)
+    old = body["refresh_token"]
+    first = client.post("/api/auth/refresh", json={"refresh_token": old})
+    assert first.status_code == 200
+    assert first.json()["refresh_token"] != old  # 새 토큰이 나왔다
+    again = client.post("/api/auth/refresh", json={"refresh_token": old})
+    assert again.status_code == 401  # 옛 토큰 재사용 불가
+
+
+def test_reuse_of_revoked_token_revokes_whole_family(client):
+    """재사용 탐지 — 폐기된 토큰이 다시 오면 탈취로 보고 그 사용자 토큰을 전부 끊는다.
+
+    회전만 있고 이 방어가 없으면, 탈취자가 먼저 갱신했을 때 정상 사용자의 새 토큰은
+    그대로 살아 있어 공격이 조용히 지속된다.
+    """
+    body = _login(client)
+    stolen = body["refresh_token"]
+    rotated = client.post("/api/auth/refresh", json={"refresh_token": stolen}).json()["refresh_token"]
+    # 공격자가 옛 토큰을 다시 제시 → 계열 전체 폐기
+    assert client.post("/api/auth/refresh", json={"refresh_token": stolen}).status_code == 401
+    # 회전으로 받은 정상 토큰까지 무효여야 한다
+    assert client.post("/api/auth/refresh", json={"refresh_token": rotated}).status_code == 401
+
+
+def test_logout_revokes_refresh_token(client):
+    """로그아웃 후에는 그 토큰으로 갱신할 수 없다 — 서버가 무효를 안다."""
+    body = _login(client)
+    assert client.post("/api/auth/logout", json={"refresh_token": body["refresh_token"]}).status_code == 204
+    assert client.post("/api/auth/refresh", json={"refresh_token": body["refresh_token"]}).status_code == 401
+    # 멱등 — 이미 폐기된 토큰이어도 204, 존재 여부를 알려주지 않는다
+    assert client.post("/api/auth/logout", json={"refresh_token": body["refresh_token"]}).status_code == 204
+
+
+def test_refresh_token_stored_only_as_hash(client):
+    """DB에 원문이 남지 않는다 — 유출돼도 세션을 복원할 수 없어야 한다."""
+    body = _login(client)
+    from app.db import get_db
+    from app.main import app
+
+    gen = app.dependency_overrides[get_db]()
+    db = next(gen)
+    try:
+        rows = db.scalars(select(models.RefreshToken)).all()
+        assert rows, "발급 기록이 있어야 한다"
+        for row in rows:
+            assert row.token_hash != body["refresh_token"]        # 원문 아님
+            assert row.token_hash == security.hash_token(body["refresh_token"]) or row.revoked_at
+            assert len(row.token_hash) == 64                       # SHA-256 hex
+    finally:
+        gen.close()
+
+
+def test_unknown_or_garbage_refresh_token_rejected(client):
+    """서버가 모르는 토큰·쓰레기 문자열은 401 (사유를 구분해 알려주지 않는다)."""
+    assert client.post("/api/auth/refresh", json={"refresh_token": "garbage"}).status_code == 401
+    # 서명은 유효하지만 DB에 없는 토큰 (다른 배포에서 발급된 것 등)
+    orphan = security.create_refresh_token(uuid.uuid4())
+    assert client.post("/api/auth/refresh", json={"refresh_token": orphan}).status_code == 401
+
+
+def test_expired_refresh_token_rejected(client, monkeypatch):
+    """만료된 갱신 토큰은 거부 — 무기한 세션이 되지 않는다."""
+    monkeypatch.setenv("REFRESH_TOKEN_EXPIRE_DAYS", "0")
+    body = _login(client, email="exp@example.com")
+    r = client.post("/api/auth/refresh", json={"refresh_token": body["refresh_token"]})
+    assert r.status_code == 401

@@ -9,6 +9,7 @@ RAG 지식베이스(rag_documents)는 app/rag 가 원시 SQL로 관리하므로 
 """
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -42,6 +43,31 @@ class User(Base):
     # 관리자 여부 — 인가의 서버 속성(원천). 문자열 화이트리스트가 아니라 이 값으로 게이트한다
     # (RPA-118). ADMIN_EMAILS는 이 값을 세팅하는 부트스트랩 시드로만 쓴다.
     is_admin: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
+    created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RefreshToken(Base):
+    """갱신 토큰 (RPA-200) — 액세스 토큰이 만료돼도 재로그인 없이 이어가게 한다.
+
+    **원문이 아니라 해시만 저장한다**: DB가 유출돼도 세션을 만들 수 없어야 한다(비밀번호와 같은 원칙).
+    스테이트리스 JWT 대신 테이블을 두는 이유는 **폐기**다 — 로그아웃과 탈취 대응이 "클라이언트가
+    지웠다"는 주장에 그치지 않으려면 서버가 무효를 알아야 한다.
+
+    회전(rotation): 갱신할 때마다 옛 토큰을 폐기하고 새로 발급한다. 그래서 **이미 폐기된 토큰이
+    다시 제시되면 탈취 신호**로 보고 그 사용자의 토큰 전체를 폐기한다(OAuth 2.0 Security BCP).
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # SHA-256 hex(64자). unique — 같은 토큰이 두 행으로 갈리면 폐기가 한쪽만 걸린다.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 폐기 시각 — NULL이면 유효. 행을 지우지 않는 이유: 재사용 탐지가 "폐기된 걸 또 냈다"를 봐야 한다.
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[str] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
