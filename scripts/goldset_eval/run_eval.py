@@ -24,6 +24,34 @@ logger = logging.getLogger("goldset_eval")
 logger.setLevel(logging.INFO)
 
 
+def _within(root: Path, seg: str) -> bool:
+    """seg를 root 아래 하위경로로 붙였을 때 결과가 root 안에 머무는지 — 절대경로·`..`로
+    root 밖을 가리키면 False. 매니페스트(외부 입력)의 case_dir가 goldset 밖을 읽거나 out_dir
+    밖에 파일을 덮어쓰는 경로 탈출을 차단한다.
+    """
+    if not seg or not isinstance(seg, str):
+        return False
+    root_r = root.resolve()
+    target = (root_r / seg).resolve()
+    return target == root_r or root_r in target.parents
+
+
+def _safe_entries(entries: list[dict], goldset: Path, out_dir: Path) -> list[dict]:
+    """case_dir가 읽기 루트(goldset/정답셋·업무정의서_정규화)와 쓰기 루트(out_dir) 안에
+    모두 머무는 항목만 남긴다. 탈출 항목은 경고 후 제외(실패 격리 — 나머지는 계속 진행).
+    """
+    read_roots = [goldset / "정답셋", goldset / "업무정의서_정규화"]
+    safe: list[dict] = []
+    for e in entries:
+        cd = e.get("case_dir", "")
+        if all(_within(r, cd) for r in read_roots) and _within(out_dir, cd):
+            safe.append(e)
+        else:
+            logger.warning("[%s] case_dir 경로 탈출 차단 — 제외: %r",
+                           e.get("index"), cd)
+    return safe
+
+
 def _pred_sequence(rec: dict) -> list[tuple[str, str]]:
     """Recommendation dict → pre-order (package, action) 시퀀스.
 
@@ -181,8 +209,8 @@ async def _run_case(entry: dict, goldset: Path, case_out: Path, timeout: float, 
 
 
 _AGG_KEYS = ("precision", "recall", "recall_achv", "f1", "pkg_f1", "order",
-             "coverage", "n_pred", "n_matched", "kb_gaps", "flow_confidence", "cards",
-             "analyze_sec", "recommend_sec")
+             "coverage", "cov_covered", "cov_total", "n_pred", "n_matched", "kb_gaps",
+             "flow_confidence", "cards", "analyze_sec", "recommend_sec")
 
 
 def _aggregate_reps(entry: dict, reps: list[dict]) -> dict:
@@ -286,6 +314,8 @@ async def main() -> int:
                     help="동시에 실행할 (케이스,반복) 작업 수 상한. 기본 1(순차). v3는 케이스당 "
                          "내부 LLM 호출이 많아(20~40회) 무제한 병렬은 레이트리밋을 터뜨림 — 2~4 권장")
     args = ap.parse_args()
+    if args.repeat < 1:
+        ap.error("--repeat 는 1 이상이어야 합니다 (0·음수면 실행할 반복이 없습니다)")
 
     goldset = Path(args.goldset)
     manifest = json.loads((goldset / "정답셋" / "manifest.json").read_text(encoding="utf-8"))
@@ -297,6 +327,12 @@ async def main() -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = Path(args.out) / f"{stamp}-{args.tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 매니페스트(외부 입력)의 case_dir 경로 탈출 차단 — goldset/out_dir 밖 읽기·덮어쓰기 방지.
+    entries = _safe_entries(entries, goldset, out_dir)
+    if not entries:
+        print("실행할 유효 케이스 없음 (case_dir 검증 실패 또는 --cases 불일치)", file=sys.stderr)
+        return 2
 
     # 환경 사전 점검 — 카탈로그·키 없이 13케이스를 돌다 말면 낭비다
     from app.agent.v3 import config as agent_config

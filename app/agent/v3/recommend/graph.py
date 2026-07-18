@@ -82,24 +82,33 @@ def _to_dict(analysis: Any) -> dict:
 
 
 # 컨테이너 패키지 → 카탈로그 canonical (package, action). null-action 복원용.
-# compose가 깊은 If/Loop 안 leaf의 action을 비운 채 내보내면(정준환 실측 probe10) package는
+# compose가 깊은 Loop 안 leaf의 action을 비운 채 내보내면(정준환 실측 probe10) package는
 # 살아있으므로 여기서 되살린다 — research.py _STRUCTURAL_CANDIDATES와 같은 표기.
+#
+# ⚠ **분기·실패경로를 action이 결정하는 컨테이너(If·Error handler)는 여기 넣지 않는다.**
+# If의 action은 {if, elseIf, else}, Error handler는 {errorHandlerTry, errorHandlerCatch,
+# errorHandlerFinally} 중 하나로, action이 비면 elseIf를 if로·catch를 try로 되살려 제어흐름을
+# 뒤집는다(새 조건 분기가 열리거나, 오류 처리 구간이 보호 구간으로 둔갑). 형제를 포함한 문맥
+# 없이는 어느 변형인지 판별 불가하므로, 이 모호 컨테이너는 아래에서 Step 스캐폴드로 보수적
+# 강등한다 — children·label을 보존한 채 순차 실행되는 안전한 과실행이, 틀린 분기 주장보다 낫다.
 _CONTAINER_CANON: dict[str, tuple[str, str]] = {
-    "if": ("If", "if"),
     "loop": ("Loop", "cloudUsingLoopAction"),
-    "error handler": ("Error handler", "errorHandlerTry"),
-    "errorhandler": ("Error handler", "errorHandlerTry"),
     "step": ("Step", "stepAction"),
 }
 
 
 def _recover_identity(a: dict) -> None:
-    """package/action이 빈(=검증 폭파) 노드를 되살린다 — 컨테이너면 canonical action으로,
-    그 외엔 Step 스캐폴드로. label·children은 보존한다(자식의 실 액션 유실 방지).
+    """package/action이 빈(=검증 폭파) 노드를 되살린다 — action이 흐름 의미를 고정하지 않는
+    단일의미 컨테이너(Loop)만 canonical action으로, 그 외(모호 컨테이너 If/Error handler 포함)는
+    Step 스캐폴드로. label·children은 보존한다(자식의 실 액션 유실 방지).
 
     RecommendedAction.package/action은 필수 str이다. compose가 leaf 하나의 action을 null로
     흘리면 model_validate가 통째 거부돼 흐름도 전체가 빈 폴백으로 붕괴한다(정준환 실측 probe10:
     깊은 If 중첩 8곳 null → steps=[]). 정상 노드(둘 다 채워짐)는 손대지 않는다.
+
+    분기(If: if/elseIf/else)·실패경로(Error handler: try/catch/finally) 컨테이너는 action이
+    비면 어느 변형인지 판별 불가하므로 canonical로 되살리지 않고(→_CONTAINER_CANON 미포함)
+    Step으로 강등한다 — elseIf를 if로, catch를 try로 잘못 복원해 제어흐름을 뒤집지 않기 위함.
     """
     act_ok = isinstance(a.get("action"), str) and a["action"].strip()
     pkg_ok = isinstance(a.get("package"), str) and a["package"].strip()

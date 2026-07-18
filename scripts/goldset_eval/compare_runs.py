@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-_KEYS = ["precision", "recall", "recall_achv", "f1", "pkg_f1", "order"]
+_KEYS = ["coverage", "precision", "recall", "recall_achv", "f1", "pkg_f1", "order"]
 
 
 def _rows(run_dir: Path) -> dict[int, dict]:

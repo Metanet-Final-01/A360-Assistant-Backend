@@ -118,6 +118,10 @@ async def main() -> int:
         return 2
 
     probes = sorted(Path(args.probes).glob("*.md"))
+    if not probes:
+        # 경로 오류·빈 디렉터리를 성공(exit 0)으로 위장하지 않는다 — summary.json도 안 만들고 종료.
+        print(f"프로브 문서를 찾을 수 없습니다(*.md): {args.probes}", file=sys.stderr)
+        return 2
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = Path(args.out) / f"{stamp}-probe"
     out_dir.mkdir(parents=True, exist_ok=True)

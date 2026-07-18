@@ -90,7 +90,16 @@ def score_coverage(doc_text: str, flow: dict, *, purpose: str = "recommend") -> 
         logger.warning("커버리지 심판 실패: %s", e)
         return None
 
-    reqs = data.get("requirements") or []
+    # JSON mode는 유효 JSON만 보장할 뿐 requirements의 배열·객체 형태는 보장하지 않는다.
+    # 원소가 dict가 아니면 .get()에서 예외가 나 의도한 실패 격리(None)가 무너지므로 선검증한다.
+    reqs = data.get("requirements") if isinstance(data, dict) else None
+    valid_statuses = {"covered", "partial", "missing"}
+    if not isinstance(reqs, list) or any(
+        not isinstance(req, dict) or req.get("status") not in valid_statuses
+        for req in reqs
+    ):
+        logger.warning("커버리지 심판 응답 형식 오류 — 지표 결측(None) 강등")
+        return None
     n_cov = sum(1 for r in reqs if r.get("status") == "covered")
     n_par = sum(1 for r in reqs if r.get("status") == "partial")
     n_mis = sum(1 for r in reqs if r.get("status") == "missing")
