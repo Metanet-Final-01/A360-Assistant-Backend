@@ -12,9 +12,9 @@
 - 한국은 DST가 없어 고정 오프셋이 항상 정확하다.
 - `ZoneInfo("Asia/Seoul")`은 tzdata가 없는 배포 이미지(slim 계열)에서 죽을 수 있다 —
   의존성 0인 쪽을 택한다.
-- SQL 쪽 대응 산식은 `(created_at + interval '9 hours')::date` — 파이썬과 같은 계산이어야
-  스크립트 집계와 서비스 판정이 일치한다(AT TIME ZONE 'Asia/Seoul'도 결과는 같지만,
-  파이썬이 고정 오프셋인 이상 SQL도 고정 오프셋으로 맞춰 산식을 하나로 둔다).
+- SQL 쪽 대응 산식은 `SQL_LOCAL_DATE` **상수를 그대로 임포트**해 쓴다 — 파이썬과 같은
+  계산이어야 스크립트 집계와 서비스 판정이 일치한다(AT TIME ZONE 'Asia/Seoul'도 결과는
+  같지만, 파이썬이 고정 오프셋인 이상 SQL도 고정 오프셋으로 맞춰 산식을 하나로 둔다).
 
 저장은 그대로 UTC(timestamptz)다 — **바뀌는 건 "하루의 경계"를 어디에 긋느냐뿐**이다.
 """
@@ -24,7 +24,11 @@ from datetime import date, datetime, time, timedelta, timezone
 KST = timezone(timedelta(hours=9), "KST")
 
 # SQL에서 같은 경계를 쓸 때 붙일 표현식 조각 (budget_calibration_report 등).
-SQL_LOCAL_DATE = "(created_at + interval '9 hours')::date"
+# timestamptz에 바로 `::date`를 붙이면 **세션 TimeZone** 기준으로 잘린다 — 세션이 UTC일 때만
+# 우연히 맞고, 세션/서버 설정이 Asia/Seoul이면 +9가 두 번 먹는다(실측: 세션 Seoul에서
+# 06:30Z가 구식으로는 다음 날). `at time zone 'utc'`로 naive UTC를 먼저 만들어
+# 세션 설정과 무관하게 항상 같은 KST 날짜가 나오게 한다.
+SQL_LOCAL_DATE = "((created_at at time zone 'utc') + interval '9 hours')::date"
 
 
 def local_date(now: datetime) -> date:
