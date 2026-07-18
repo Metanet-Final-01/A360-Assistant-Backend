@@ -13,7 +13,7 @@ checker, prompt, graph, repair 구현을 import하거나 복제하지 않는다.
 ## 현재 검사
 
 1. `strict_schema`: Pydantic strict 검증과 알 수 없는 필드 탐지
-2. `catalog_closure`: 모든 `package/action`이 같은 시점의 Backend catalog snapshot에 존재하는지 확인
+2. `catalog_closure`: digest를 만든 동일 Backend catalog snapshot에서 모든 `package/action`을 확인
 3. payload, request, session, source, catalog, validator를 digest로 결속
 4. Agent의 `producer_advisory`와 Backend의 `boundary_findings`를 별도 필드로 유지
 

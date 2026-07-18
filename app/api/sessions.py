@@ -26,7 +26,11 @@ from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
 from app.schemas import ProgressEvent, Recommendation
 from app.services import alerts, budget
-from app.services.output_assurance import OutputBoundaryContext, observe_recommendation_candidate
+from app.services.output_assurance import (
+    OutputBoundaryContext,
+    finalize_persistence_observation,
+    observe_recommendation_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +240,13 @@ def _agent_registry_snapshot() -> dict | None:
         return None
 
 
+def _log_output_observation(observation: dict) -> None:
+    logger.info(
+        "output_boundary_observe %s",
+        json.dumps(observation, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _save_recommendation(
     session_id: uuid.UUID, analysis_id: uuid.UUID, payload: dict,
     source: str, parent_version: int | None, change_summary: str | None = None,
@@ -264,11 +275,6 @@ def _save_recommendation(
             producer_advisory=producer_advisory,
         ),
     )
-    logger.info(
-        "output_boundary_observe %s",
-        json.dumps(observation, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-    )
-
     for attempt in range(3):
         try:
             with SessionLocal() as s:
@@ -288,11 +294,24 @@ def _save_recommendation(
                 )
                 s.add(row)
                 s.commit()
-                return {**_recommendation_out(row), "output_assurance": observation}
-        except IntegrityError:
+        except IntegrityError as exc:
             if attempt == 2:  # 마지막 시도까지 충돌하면 상위에서 처리
+                failed = finalize_persistence_observation(
+                    observation, persisted=False, error_type=type(exc).__name__
+                )
+                _log_output_observation(failed)
                 raise
             logger.warning("추천안 version 충돌 — 재계산 재시도 (session=%s)", session_id)
+        except Exception as exc:
+            failed = finalize_persistence_observation(
+                observation, persisted=False, error_type=type(exc).__name__
+            )
+            _log_output_observation(failed)
+            raise
+        else:
+            finalized = finalize_persistence_observation(observation, persisted=True)
+            _log_output_observation(finalized)
+            return {**_recommendation_out(row), "output_assurance": finalized}
 
 
 @router.get("/{session_id}/recommendations")

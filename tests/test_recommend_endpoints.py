@@ -134,7 +134,29 @@ def test_save_edited_creates_new_version(monkeypatch):
     assurance = r.json()["output_assurance"]
     assert assurance["rollout_mode"] == "observe"
     assert assurance["validated"] is False
+    assert assurance["business_outcome"] == {"persisted": True}
     assert saved["row"].source == "drag" and saved["row"].change_summary == "Task1 액션 교체"
+
+
+def test_save_recommendation_records_failed_business_outcome(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="app.api.sessions")
+
+    class _FailPersist:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, stmt): return SimpleNamespace(scalar=lambda: 1)
+        def add(self, row): pass
+        def commit(self): raise RuntimeError("database write failed")
+
+    monkeypatch.setattr("app.db.SessionLocal", _FailPersist)
+
+    with pytest.raises(RuntimeError, match="database write failed"):
+        sessions_api._save_recommendation(
+            SID, AID, _valid_recommendation(), source="drag", parent_version=1,
+            request_id="request-1",
+        )
+
+    assert '"business_outcome":{"error_type":"RuntimeError","persisted":false}' in caplog.text
 
 
 def test_save_recommendation_retries_on_version_conflict(monkeypatch):

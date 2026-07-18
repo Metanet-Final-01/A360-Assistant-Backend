@@ -106,6 +106,8 @@ def _unknown_field_findings(payload: dict) -> list[dict[str, str]]:
     for si, step in enumerate(payload.get("steps", [])):
         sp = f"recommendation.steps[{si}]"
         check(step, "step", sp)
+        if not isinstance(step, dict):
+            continue
         for _ in _walk_actions(step.get("actions", []), f"{sp}.actions", check):
             pass
     for vi, variable in enumerate(payload.get("variables", [])):
@@ -113,6 +115,8 @@ def _unknown_field_findings(payload: dict) -> list[dict[str, str]]:
     for qi, question in enumerate(payload.get("needs_input", [])):
         qp = f"recommendation.needs_input[{qi}]"
         check(question, "question", qp)
+        if not isinstance(question, dict):
+            continue
         for ti, target in enumerate(question.get("targets", [])):
             check(target, "target", f"{qp}.targets[{ti}]")
     spec = payload.get("spec")
@@ -145,18 +149,22 @@ def _walk_actions(actions: Any, path: str, check=None):
         yield from _walk_actions(action.get("children", []), f"{action_path}.children", check)
 
 
-def _strict_schema(payload: dict) -> tuple[str, list[dict[str, str]]]:
+def _strict_schema(payload: dict) -> tuple[str, list[dict[str, str]], int]:
     findings: list[dict[str, str]] = []
+    validation_error_count = 0
     try:
         Recommendation.model_validate(payload, strict=True)
     except ValidationError as exc:
+        validation_error_count = exc.error_count()
         for error in exc.errors()[:50]:
             path = "recommendation" + "".join(
                 f"[{part}]" if isinstance(part, int) else f".{part}" for part in error["loc"]
             )
             findings.append(_finding("strict_schema", "SCHEMA_INVALID", path, error["msg"]))
-    findings.extend(_unknown_field_findings(payload))
-    return ("fail" if findings else "pass"), findings
+    unknown_findings = _unknown_field_findings(payload)
+    findings.extend(unknown_findings)
+    total_count = validation_error_count + len(unknown_findings)
+    return ("fail" if total_count else "pass"), findings, total_count
 
 
 def _catalog_closure(payload: dict, catalog) -> tuple[str, str, list[dict[str, str]]]:
@@ -165,13 +173,20 @@ def _catalog_closure(payload: dict, catalog) -> tuple[str, str, list[dict[str, s
         key=lambda item: (str(item.get("package", "")), str(item.get("action", ""))),
     )
     catalog_digest = _digest(snapshot)
+    valid_actions = {
+        (item.get("package"), item.get("action"))
+        for item in snapshot
+        if isinstance(item.get("package"), str) and isinstance(item.get("action"), str)
+    }
     findings = []
     for si, step in enumerate(payload.get("steps", [])):
+        if not isinstance(step, dict):
+            continue
         for path, action in _walk_actions(step.get("actions", []), f"recommendation.steps[{si}].actions"):
             package, name = action.get("package"), action.get("action")
             if not isinstance(package, str) or not isinstance(name, str):
                 continue  # strict_schema owns structural failures
-            if catalog.get_action_schema(package, name) is None:
+            if (package, name) not in valid_actions:
                 display_package = package[:MAX_CATALOG_NAME]
                 display_name = name[:MAX_CATALOG_NAME]
                 findings.append(
@@ -199,12 +214,14 @@ def observe_recommendation_candidate(
     })
     controls: list[dict[str, Any]] = []
     findings: list[dict[str, str]] = []
+    finding_count = 0
     catalog_digest = None
 
     try:
-        status, schema_findings = _strict_schema(payload)
+        status, schema_findings, schema_finding_count = _strict_schema(payload)
         controls.append({"control_id": "strict_schema", "status": status})
         findings.extend(schema_findings)
+        finding_count += schema_finding_count
     except Exception as exc:  # detector failure is evidence, never an allow
         controls.append({"control_id": "strict_schema", "status": "error", "error_type": type(exc).__name__})
 
@@ -214,6 +231,7 @@ def observe_recommendation_candidate(
         )
         controls.append({"control_id": "catalog_closure", "status": status})
         findings.extend(catalog_findings)
+        finding_count += len(catalog_findings)
     except Exception as exc:  # infrastructure/catalog absence is unassured, not pass
         controls.append({"control_id": "catalog_closure", "status": "error", "error_type": type(exc).__name__})
 
@@ -238,7 +256,7 @@ def observe_recommendation_candidate(
         "raw_digest": advisory_digest,
         "digest_error": advisory_digest_error,
     }
-    finding_count = len(findings)
+    displayed_findings = findings[:MAX_FINDINGS]
     observation = {
         "schema_version": SCHEMA_VERSION,
         "validator_version": VALIDATOR_VERSION,
@@ -252,9 +270,9 @@ def observe_recommendation_candidate(
         "session_id": context.session_id,
         "source": context.source,
         "controls": controls,
-        "boundary_findings": findings[:MAX_FINDINGS],
+        "boundary_findings": displayed_findings,
         "boundary_finding_count": finding_count,
-        "boundary_findings_truncated": finding_count > MAX_FINDINGS,
+        "boundary_findings_truncated": finding_count > len(displayed_findings),
         "producer_advisory": producer_advisory,
         "catalog_digest": catalog_digest,
         "agent_provenance": {
@@ -266,7 +284,20 @@ def observe_recommendation_candidate(
             "public_contract_version": context.public_contract_version,
         },
         "enforcement": {"mode": "observe", "blocks_persistence": False},
-        "business_outcome": {"persisted": True},
+        "business_outcome": {"persisted": None},
     }
     observation["observation_id"] = _digest(observation)
     return observation
+
+
+def finalize_persistence_observation(
+    observation: dict[str, Any], *, persisted: bool, error_type: str | None = None,
+) -> dict[str, Any]:
+    """Bind the final database outcome and derive a new content-addressed observation ID."""
+    outcome: dict[str, Any] = {"persisted": persisted}
+    if error_type is not None:
+        outcome["error_type"] = error_type
+    finalized = {**observation, "business_outcome": outcome}
+    finalized.pop("observation_id", None)
+    finalized["observation_id"] = _digest(finalized)
+    return finalized

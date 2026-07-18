@@ -22,6 +22,11 @@ class BrokenCatalog:
         raise ConnectionError("catalog unavailable")
 
 
+class SnapshotOnlyCatalog(FixtureCatalog):
+    def get_action_schema(self, package, action):
+        raise AssertionError("closure must use the digested snapshot")
+
+
 def recommendation(package="Excel_MS", action="GoToCell"):
     return {
         "schema_version": "1.0",
@@ -58,6 +63,7 @@ def test_known_action_is_allow_candidate_but_never_validated():
     assert result["decision"] == "allow_candidate"
     assert result["validated"] is False
     assert result["assurance_status"] == "unassured_observe"
+    assert result["business_outcome"]["persisted"] is None
     assert [item["status"] for item in result["controls"]] == ["pass", "pass"]
 
 
@@ -96,6 +102,37 @@ def test_unknown_nested_action_field_is_a_strict_schema_denial():
         item["path"] == "recommendation.steps[0].actions[0].invented_runtime_flag"
         for item in result["boundary_findings"]
     )
+
+
+def test_invalid_nested_entries_remain_schema_denials():
+    payload = recommendation()
+    payload["steps"] = [None]
+
+    result = observe_recommendation_candidate(payload, context(), catalog=FixtureCatalog())
+
+    assert result["decision"] == "deny"
+    assert result["controls"][0]["status"] == "fail"
+    assert all(item["status"] != "error" for item in result["controls"])
+
+
+def test_schema_error_truncation_reports_full_count():
+    payload = recommendation()
+    payload["steps"] = [None] * 60
+
+    result = observe_recommendation_candidate(payload, context(), catalog=FixtureCatalog())
+
+    assert len(result["boundary_findings"]) == 50
+    assert result["boundary_finding_count"] == 60
+    assert result["boundary_findings_truncated"] is True
+
+
+def test_catalog_closure_uses_the_same_snapshot_as_digest():
+    result = observe_recommendation_candidate(
+        recommendation(), context(), catalog=SnapshotOnlyCatalog()
+    )
+
+    assert result["decision"] == "allow_candidate"
+    assert result["catalog_digest"].startswith("sha256:")
 
 
 def test_documented_flow_editor_metadata_is_allowed():
