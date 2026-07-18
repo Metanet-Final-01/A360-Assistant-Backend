@@ -17,6 +17,8 @@
 - `wrap`: 연속한 형제들(targets)을 새 컨테이너(container)의 children으로 감싼다.
   Try/Catch/Finally·If/Else·Loop 감싸기 전부 이걸로. siblings_after에 Catch/Finally/Else를 잇는다.
 - `insert`: anchor 노드 기준 position(before|after|into_start|into_end)에 새 액션(action)을 넣는다.
+  ⚠ `action`·`container`·`siblings_after` 항목은 반드시 **객체**다 — `{"package": "…", "action": "…",
+  "label": "…", "parameters": […]}`. `"Excel advanced/cloudExcelOpen"` 같은 문자열 축약 금지.
 - `remove`: target 노드를 지운다.
 - `move`: target 노드를 anchor 기준 position으로 옮긴다.
 - `set_params`: target 노드의 파라미터를 name 기준 병합한다 (parameters: [{name, value, value_source}]).

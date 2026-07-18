@@ -25,12 +25,29 @@ id는 프롬프트에 보여줄 때만 임시로 붙였다가(_annotate_ids) 적
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # 임시 노드 id를 다는 전이(transient) 키 — 프롬프트 참조용, 적용 후 제거한다.
 _ID = "_id"
 
 _POSITIONS = frozenset({"before", "after", "into_start", "into_end"})
+
+
+def _coerce_spec(v):
+    """액션 스펙 자리의 "패키지/액션" 문자열 슬립을 최소 dict로 코얼스한다.
+
+    골드셋 베이스라인 평가에서 3회 실측(`operations.N.action: dict_type`) — 검증 거부는
+    1회 재출력 후 교정 라운드 통째 폐기(현재본 유지)로 이어져 검수 위반이 미교정 출고된다.
+    "Pkg/act" 꼴이면 최소 스펙 dict로, 패키지를 특정할 수 없는 문자열은 None으로 강등한다
+    (해당 연산만 적용부에서 no-op — 배치 전체를 살린다). 그 외 타입은 그대로 반환해
+    기존 검증에 맡긴다.
+    """
+    if isinstance(v, str):
+        pkg, sep, act = v.strip().partition("/")
+        if sep and pkg.strip() and act.strip():
+            return {"package": pkg.strip(), "action": act.strip()}
+        return None
+    return v
 
 
 class EditOp(BaseModel):
@@ -56,6 +73,24 @@ class EditOp(BaseModel):
     produces: list[dict] | None = None        # set_params/update: 변수 연결 동반 갱신 (v3)
     consumes: list[dict] | None = None        # set_params/update: 변수 연결 동반 갱신 (v3)
     step_id: str | None = None                # split_step/merge_step: 대상 단계
+
+    @field_validator("action", "container", mode="before")
+    @classmethod
+    def _coerce_action_spec(cls, v):
+        """surgeon이 액션 스펙을 dict 대신 "패키지/액션" 문자열로 축약하는 슬립을 관대 수용 (_coerce_spec)."""
+        return _coerce_spec(v)
+
+    @field_validator("siblings_after", mode="before")
+    @classmethod
+    def _coerce_sibling_specs(cls, v):
+        """siblings_after(wrap의 Catch/Finally/Else 목록)에도 같은 문자열 슬립 코얼스를 적용.
+
+        코얼스 불가 항목(None 강등)은 목록에서 걷어내 나머지 형제들을 살린다.
+        """
+        if isinstance(v, list):
+            out = [c for c in (_coerce_spec(item) for item in v) if c is not None]
+            return out
+        return v
 
 
 class EditOps(BaseModel):

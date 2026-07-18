@@ -9,6 +9,8 @@ import pytest
 
 from app.agent.v3.orchestrator import cards as cards_mod
 from app.agent.v3.orchestrator import edit_ops
+from app.agent.v3.recommend.graph import _coerce_flow, _recover_identity
+from app.schemas import Recommendation
 from app.agent.v3.orchestrator.harness import (
     attach_confidence,
     compute_flow_confidence,
@@ -224,6 +226,118 @@ def test_set_params_updates_var_refs():
     node = flow["steps"][0]["actions"][0]
     assert node["consumes"] == [{"name": "tData"}]
     assert node["produces"] == []
+
+
+def test_editop_coerces_string_action_spec():
+    """surgeon의 "패키지/액션" 문자열 슬립을 dict로 코얼스한다 (골드셋 평가 3회 실측 회귀).
+
+    검증 거부는 교정 라운드 통째 폐기로 이어지므로, 의도가 명백한 문자열은 살리고
+    패키지 불명 문자열만 None(무연산)으로 강등한다.
+    """
+    op = edit_ops.EditOp(op="insert", anchor="n1", position="after",
+                         action="Excel advanced/cloudExcelOpen")
+    assert op.action == {"package": "Excel advanced", "action": "cloudExcelOpen"}
+
+    # 패키지를 특정할 수 없는 축약 — 배치를 깨지 않고 해당 스펙만 무연산 강등
+    assert edit_ops.EditOp(op="insert", anchor="n1", action="messageBox").action is None
+
+    wrap = edit_ops.EditOp(
+        op="wrap", targets=["n1"], container="Error handler/errorHandlerTry",
+        siblings_after=["Error handler/errorHandlerCatch", "junk",
+                        {"package": "Error handler", "action": "errorHandlerFinally"}],
+    )
+    assert wrap.container == {"package": "Error handler", "action": "errorHandlerTry"}
+    assert wrap.siblings_after == [
+        {"package": "Error handler", "action": "errorHandlerCatch"},
+        {"package": "Error handler", "action": "errorHandlerFinally"},
+    ]
+
+
+def test_coerce_flow_recovers_null_action_nodes():
+    """null-action 노드(package는 살아있음)를 되살려 leaf 하나가 Recommendation 검증을
+    통째로 폭파(→빈 흐름도)시키는 회귀를 막는다 (정준환 실측 probe10: 깊은 If 중첩 8곳 null).
+
+    단일의미 컨테이너(Loop)만 canonical action으로 복원, 그 외(모호 분기 컨테이너 If·비컨테이너·
+    null/null)는 Step 스캐폴드로 강등하되 label·children은 보존한다. 정상 노드는 불변.
+    """
+    flow = {
+        "steps": [{
+            "step_id": "s1", "label": "정산",
+            "actions": [
+                # Loop도 action을 비워 canonical 복원 경로를 실제로 태운다(단일의미 컨테이너).
+                _act("Loop", None, children=[
+                    {"package": "If", "action": None, "label": "임계 초과 판정",
+                     "parameters": [], "children": [
+                         {"package": "Excel advanced", "action": None, "label": "값 기록",
+                          "parameters": [], "children": []},
+                     ]},
+                    {"package": None, "action": None, "label": "빈 껍데기",
+                     "parameters": [], "children": []},
+                ]),
+            ],
+        }],
+        "variables": [],
+    }
+    # 이전엔 여기서 ValidationError → 상위 폴백도 실패 → steps=[] 붕괴였다.
+    rec = Recommendation.model_validate(_coerce_flow(flow))
+
+    loop = rec.steps[0].actions[0]
+    # null-action Loop → canonical(Loop/cloudUsingLoopAction)으로 복원(복구 로직이 없으면 실패).
+    assert (loop.package, loop.action) == ("Loop", "cloudUsingLoopAction")  # 단일의미 컨테이너 canonical
+    if_node = loop.children[0]
+    # If는 action(if/elseIf/else)이 비면 어느 분기인지 모르므로 canonical(If/if)로 되살리지
+    # 않고 Step으로 보수적 강등 — elseIf/else를 if로 둔갑시켜 제어흐름을 뒤집지 않는다.
+    assert (if_node.package, if_node.action) == ("Step", "stepAction")
+    assert if_node.label == "임계 초과 판정"                                  # label 보존
+    assert len(if_node.children) == 1                                       # children 보존
+    biz = if_node.children[0]
+    assert (biz.package, biz.action) == ("Step", "stepAction")             # 비컨테이너 → Step 바닥
+    assert biz.label == "값 기록"                                            # label 보존
+    assert (loop.children[1].package, loop.children[1].action) == ("Step", "stepAction")  # null/null
+
+
+@pytest.mark.parametrize("pkg", ["If", "Error handler", "errorHandler", "ERROR HANDLER"])
+def test_recover_identity_downgrades_ambiguous_containers_to_step(pkg):
+    """분기/실패경로 컨테이너(If={if,elseIf,else}, Error handler={try,catch,finally})는
+    action이 비면 canonical로 복원하지 않고 Step으로 강등한다 — elseIf를 if로, catch를 try로
+    되살려 제어흐름을 뒤집는 회귀를 막는다(CodeRabbit RPA-195 리뷰 반영).
+    """
+    a = {"package": pkg, "action": None, "label": "분기/실패 처리", "children": []}
+    _recover_identity(a)
+    assert (a["package"], a["action"]) == ("Step", "stepAction")
+    assert a["label"] == "분기/실패 처리"  # label 보존
+
+
+def test_recover_identity_keeps_labeled_else_catch_finally_children():
+    """null-action Else/Catch/Finally가 Step으로 강등돼도 children(실 액션)은 보존한다."""
+    flow = {
+        "steps": [{
+            "step_id": "s1", "label": "예외 처리",
+            "actions": [
+                {"package": "Error handler", "action": None, "label": "복구",  # catch였을 수 있음
+                 "parameters": [], "children": [
+                     {"package": "Message box", "action": "showMessage", "label": "오류 알림",
+                      "parameters": [], "children": []},
+                 ]},
+            ],
+        }],
+        "variables": [],
+    }
+    rec = Recommendation.model_validate(_coerce_flow(flow))
+    node = rec.steps[0].actions[0]
+    assert (node.package, node.action) == ("Step", "stepAction")  # try로 둔갑 안 함
+    assert node.children[0].label == "오류 알림"                    # 복구 액션 유실 없음
+
+
+def test_recover_identity_leaves_valid_nodes_untouched():
+    """package·action이 모두 채워진 정상 노드는 절대 건드리지 않는다 — 유효한 If/Catch 포함."""
+    a = {"package": "Excel advanced", "action": "cloudExcelOpen", "label": "열기"}
+    _recover_identity(a)
+    assert (a["package"], a["action"]) == ("Excel advanced", "cloudExcelOpen")
+    # action이 채워진 elseIf/catch는 그대로 둔다(강등 대상은 오직 null-action)
+    b = {"package": "Error handler", "action": "errorHandlerCatch", "label": "복구"}
+    _recover_identity(b)
+    assert (b["package"], b["action"]) == ("Error handler", "errorHandlerCatch")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
