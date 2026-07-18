@@ -24,7 +24,14 @@ _CONCURRENCY = 8
 
 
 def _wait_for_refresh_token_lock_wait(integration_engine, *, timeout: float = 30) -> None:
-    """경쟁 요청이 PostgreSQL row lock에서 실제 대기 중일 때만 반환한다."""
+    """경쟁 요청이 PostgreSQL lock에서 실제 대기 중일 때만 반환한다.
+
+    ⚠️ **잠금 구현에 종속되지 않게 판정한다.** 예전엔 `query ilike '%refresh_tokens%'`로만
+    봤는데, 그건 행 잠금(`SELECT ... FOR UPDATE on refresh_tokens`)일 때만 맞는 대리 지표다.
+    계열 잠금으로 바꾸자 대기 쿼리가 `select pg_advisory_xact_lock(...)`이 되어 같은 대기를
+    **탐지하지 못했다** — 테스트가 구현을 검증한 게 아니라 구현의 문자열을 검증하고 있었다.
+    지금은 대기 종류(`Lock`/`advisory`)를 함께 보고, 쿼리는 둘 중 하나면 인정한다.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with integration_engine.connect() as connection:
@@ -33,14 +40,15 @@ def _wait_for_refresh_token_lock_wait(integration_engine, *, timeout: float = 30
                     select 1
                     from pg_stat_activity
                     where datname = current_database()
-                      and wait_event_type = 'Lock'
-                      and query ilike '%refresh_tokens%'
+                      and wait_event_type in ('Lock', 'LWLock')
+                      and (query ilike '%refresh_tokens%'
+                           or query ilike '%advisory%')
                 )
             """))
         if waiting:
             return
         time.sleep(0.02)
-    raise AssertionError("경쟁 요청이 refresh_tokens row lock 대기에 진입하지 않았습니다")
+    raise AssertionError("경쟁 요청이 잠금 대기에 진입하지 않았습니다")
 
 
 @pytest.fixture()
@@ -240,3 +248,72 @@ def _assert_no_live_tokens(integration_engine) -> None:
         assert session.scalars(
             select(models.RefreshToken).where(models.RefreshToken.revoked_at.is_(None))
         ).all() == []
+
+def test_logout_with_stale_token_still_kills_session(client, integration_engine):
+    """🔴 **로그아웃이 회전된 옛 토큰으로 들어와도** 세션이 끊겨야 한다.
+
+    멀티탭·모바일 캐시·네트워크 재시도에서 흔하다: A가 t2로 갱신하는 사이 B는 아직
+    t1(회전 전)을 들고 로그아웃을 누른다.
+
+    ⚠️ **잠금 단위가 갈리는 지점이다.** 잠금을 '제시된 토큰의 행'에 걸면 t1과 t2는 서로 다른
+    행이라 잠금이 갈린다 — 로그아웃의 계열 UPDATE는 t2에서 잠깐 막히지만, 풀린 뒤에도 그 사이
+    INSERT된 t3는 **자기 스냅샷에 없어 폐기하지 못한다**(실측: 블록됐던 UPDATE는 그동안
+    삽입된 행을 보지 못한다). 그래서 잠금은 **계열 단위**여야 한다.
+
+    사용자가 로그아웃을 눌렀으면, 어느 토큰을 냈든 그 로그인은 끝나야 한다.
+    """
+    import threading
+
+    from sqlalchemy.orm import Session
+
+    from app.api import auth as auth_mod
+
+    t1 = client.post(
+        "/api/auth/register",
+        json={"email": "stale@integration.example.com", "password": "pw12345678"},
+    ).json()["refresh_token"]
+    t2 = client.post("/api/auth/refresh", json={"refresh_token": t1}).json()["refresh_token"]
+    # t1은 폐기됨, t2가 살아 있다. B 탭은 아직 t1을 들고 있다.
+
+    claimed, release = threading.Event(), threading.Event()
+    real_issue = auth_mod._issue_tokens
+
+    def paused_issue(user_id, db, **kw):
+        claimed.set()
+        release.wait(timeout=30)
+        return real_issue(user_id, db, **kw)
+
+    auth_mod._issue_tokens = paused_issue
+    try:
+        tr = threading.Thread(
+            target=lambda: client.post("/api/auth/refresh", json={"refresh_token": t2}))
+        tr.start()
+        assert claimed.wait(timeout=30), "갱신이 선점 단계까지 오지 못했다"
+
+        logout_done = threading.Event()
+
+        def do_logout():
+            client.post("/api/auth/logout", json={"refresh_token": t1})  # ← 회전된 옛 토큰
+            logout_done.set()
+
+        tl = threading.Thread(target=do_logout)
+        tl.start()
+        # ⚠️ 여기서 **기다려야** 경합이 재현된다. 곧바로 release하면 갱신이 먼저 끝나버려
+        #    잠금 단위와 무관하게 통과한다(실제로 이 대기를 빠뜨려 행 잠금 구현도 통과시켰다).
+        #    로그아웃이 계열 UPDATE를 실행할 시간을 준 뒤에 갱신을 풀어준다.
+        logout_done.wait(timeout=3)
+        release.set()
+        tr.join(timeout=30)
+        tl.join(timeout=30)
+    finally:
+        auth_mod._issue_tokens = real_issue
+        release.set()
+
+    with Session(integration_engine) as s:
+        alive = s.scalars(
+            select(models.RefreshToken).where(models.RefreshToken.revoked_at.is_(None))
+        ).all()
+    assert alive == [], (
+        f"옛 토큰으로 로그아웃했더니 유효 토큰이 {len(alive)}개 남았다 — "
+        f"잠금이 계열이 아니라 행 단위면 여기서 새 토큰이 살아남는다"
+    )
