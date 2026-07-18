@@ -40,6 +40,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from app.core import localtime
 from app import models
 
 logger = logging.getLogger(__name__)
@@ -221,10 +222,15 @@ def bust_cache() -> None:
 
 
 def _period_start(period: str, now: datetime) -> datetime:
-    """일별=UTC 자정, 월별=UTC 월초."""
+    """일별=KST 자정, 월별=KST 월초 (app.core.localtime — 날짜 경계의 단일 진실 공급원).
+
+    UTC 자정이었을 때는 **일 상한이 한국시간 오전 9시에 리셋**됐다 — 아침에 예산이 풀리고,
+    KST 0~9시의 지출이 "어제"로 묶였다. 경계 계산을 여기서 자체로 하지 말 것 — rollup 집계·
+    alerts 당일 판정과 같은 모듈(localtime)을 읽어야 셋이 같은 "오늘"을 본다.
+    """
     if period == "daily":
-        return now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return localtime.day_start(now)
+    return localtime.month_start(now)
 
 
 def _period_end(period: str, start: datetime) -> datetime:

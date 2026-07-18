@@ -87,3 +87,33 @@ def test_project_month_scales_to_30_days():
 def test_project_month_guards_zero_days():
     """표본 기간이 0이면 ZeroDivision 대신 0 — 리포트가 죽으면 안 된다."""
     assert rpt.project_month(10.0, 0) == 0.0
+
+
+# --- 날짜 경계 SQL 단일 공급원 ---
+
+def test_date_grouping_reads_localtime_sql(monkeypatch):
+    """리포트의 날짜 묶음 SQL 전부가 app/core/localtime.SQL_LOCAL_DATE 하나에서 나와야 한다.
+
+    소스 문자열 검사 대신 sentinel 주입 — 상수를 바꿔치기하고 실행되는 SQL을 캡처해,
+    (a) 날짜 묶음 3곳(표본 구간 min/max·사용자-일·전역-일)이 전부 상수를 따라오고
+    (b) 자체 산식(`::date`)이 한 곳도 남지 않았음을 확인한다. 인라인 복사가 하나라도
+    생기면 세션 TimeZone 의존(#269 리뷰) 같은 결함이 그 복사본에만 남는다.
+    """
+    from datetime import date
+
+    sentinel = "sentinel_kst_date"
+    captured = []
+
+    def fake_rows(sql, **kw):
+        captured.append(sql)
+        if "count(*)" in sql:  # 표본 요약 행
+            return [(10, date(2026, 7, 1), date(2026, 7, 10), 3, 5, 8)]
+        return [(2.0, 2.0, 2.0)]
+
+    monkeypatch.setattr(rpt, "_rows", fake_rows)
+    monkeypatch.setattr(rpt, "SQL_LOCAL_DATE", sentinel)
+    monkeypatch.setattr(sys, "argv", ["budget_calibration_report.py"])
+    assert rpt.main() == 0
+
+    assert sum(sentinel in s for s in captured) == 3
+    assert not any("::date" in s for s in captured)
