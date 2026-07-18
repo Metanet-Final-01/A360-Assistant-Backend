@@ -378,7 +378,7 @@ def test_alert_and_endpoint_share_one_judge(sent, monkeypatch):
     알림은 조용"이 된다. 이 프로젝트에서 그 계열 버그를 여러 번 냈다(CONVENTIONS §9).
 
     ⚠️ 처음엔 `inspect.getsource(...)`에서 "compute_health" **문자열**을 찾았다. 장식이었다 —
-       **docstring에 그 단어가 있어서** 판정 코드를 통째로 지워도 통과했다(prove_teeth.py가
+       **docstring에 그 단어가 있어서** 판정 코드를 통째로 지워도 통과했다(mutation_test.py가
        잡았다). 언급이 아니라 **호출**을 봐야 한다. 그래서 하나를 가짜로 바꾸고 **양쪽이 다
        그 가짜를 따라오는지** 본다.
     """
