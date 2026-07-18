@@ -291,6 +291,7 @@ def test_cost_usd_none_when_no_price(monkeypatch):
 # --- 프롬프트 캐시 (RPA-199) — 미반영이 실청구 대비 4.7배 과대계상의 주원인 ---
 
 def _chat_prices(monkeypatch, cached_price="0.075"):
+    """챗 모델 단가 3종을 세팅한다. cached_price=None이면 캐시 단가 미설정(구 동작)."""
     monkeypatch.setenv("LLM_INPUT_COST_PER_1M", "0.75")
     monkeypatch.setenv("LLM_OUTPUT_COST_PER_1M", "4.50")
     if cached_price is None:
@@ -331,6 +332,15 @@ def test_cost_usd_cached_clamped_to_input(monkeypatch):
     assert llm.cost_usd(1_000_000, 0, "gpt-5.4-mini", cached_tokens=-5) == pytest.approx(0.75)
 
 
+def test_normalize_cached_tokens_bounds():
+    """정규화는 [0, input] 범위로. None(측정 안 됨)은 0으로 바꾸지 않고 그대로 유지한다."""
+    assert llm.normalize_cached_tokens(None, 100) is None   # '모름'을 '캐시 0'으로 만들면 안 된다
+    assert llm.normalize_cached_tokens(150, 100) == 100
+    assert llm.normalize_cached_tokens(-5, 100) == 0
+    assert llm.normalize_cached_tokens(30, 100) == 30
+    assert llm.normalize_cached_tokens(10, 0) == 0
+
+
 def test_cost_usd_aux_model_ignores_cached(monkeypatch):
     """보조 모델(임베딩·리랭커)은 프롬프트 캐시 개념이 없다 — cached를 무시하고 자기 단가."""
     _chat_prices(monkeypatch)
@@ -338,6 +348,8 @@ def test_cost_usd_aux_model_ignores_cached(monkeypatch):
 
 
 def _mock_client_usage(captured, usage):
+    """주어진 usage 객체를 그대로 돌려주는 OpenAI 클라이언트 목업."""
+
     def _create(**kwargs):
         captured.update(kwargs)
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))], usage=usage)
@@ -427,3 +439,11 @@ def test_record_usage_persists_cached_and_costs_with_it(monkeypatch):
                  input_tokens=1_000_000, output_tokens=0, cached_tokens=1_000_000)
     assert captured["cached_tokens"] == 1_000_000
     assert captured["cost_usd"] == pytest.approx(0.075)  # 전액이면 0.75 — 캐시 단가가 실제로 쓰였다
+
+    # cached > input 이상 응답: **저장값도** 클램프돼야 한다 (#271 리뷰).
+    # 비용만 보정하고 원본을 저장하면 리포트 적중률이 100%를 넘는다.
+    captured.clear()
+    record_usage(purpose="chat", model="gpt-5.4-mini",
+                 input_tokens=1_000, output_tokens=0, cached_tokens=9_999)
+    assert captured["cached_tokens"] == 1_000
+    assert captured["cached_tokens"] <= captured["input_tokens"]

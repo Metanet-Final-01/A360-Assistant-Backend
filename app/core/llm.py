@@ -99,6 +99,18 @@ _AUX_MODEL_PRICES: dict[str, tuple[float, float]] = {
 }
 
 
+def normalize_cached_tokens(cached_tokens: int | None, input_tokens: int) -> int | None:
+    """캐시 토큰을 [0, input_tokens]로 정규화한다 (RPA-199). None(측정 안 됨)은 유지.
+
+    ⚠️ **저장값과 계산값이 같아야 한다** — 비용 계산에서만 클램프하고 원본을 저장하면,
+    `cached > input`인 이상 응답에서 비용은 맞는데 DB엔 적중률 100% 초과가 남는다(#271 리뷰).
+    그래서 record_usage가 기록 **전에** 한 번 정규화해 저장·계산에 같은 값을 쓴다.
+    """
+    if cached_tokens is None:
+        return None
+    return min(max(int(cached_tokens), 0), max(int(input_tokens), 0))
+
+
 def cost_usd(
     input_tokens: int,
     output_tokens: int,
@@ -114,7 +126,8 @@ def cost_usd(
       경우에만 그 단가로 갈라 계산한다: (input−cached)×정가 + cached×캐시단가 + output×출력단가.
       캐시 단가 미설정이면 기존식(전액)으로 폴백 — 회귀 없음. 캐시 미반영이 곧 4.7배
       과대계상의 주원인이었다(캐시 입력은 정가의 10%).
-    - cached > input인 이상 응답은 input으로 클램프 — 음수 비용을 만들지 않는다.
+    - cached > input인 이상 응답은 input으로 클램프 — 음수 비용을 만들지 않는다(호출부가
+      normalize_cached_tokens로 이미 정규화해 넘기지만, 이 함수는 공개 API라 자체 방어한다).
     - 단가를 못 구하면(미지 모델 + env 미설정) None.
     """
     if model:
@@ -136,7 +149,7 @@ def cost_usd(
         except (KeyError, ValueError):
             cached_price = None  # 캐시 단가 미설정 — 전액 계산 유지(기존 동작과 100% 동일)
         if cached_price is not None:
-            cached = min(max(int(cached_tokens), 0), input_tokens)
+            cached = normalize_cached_tokens(cached_tokens, input_tokens) or 0
             base -= cached * (in_price - cached_price)
     return base / 1_000_000
 
@@ -214,6 +227,8 @@ def record_usage(
     기록 실패가 호출을 실패시키면 안 되므로 예외는 삼킨다.
     """
     ctx = ctx or current_usage_context()
+    # 저장 전에 한 번 정규화 — 저장값과 비용 계산값이 갈리면 리포트의 적중률이 100%를 넘는다.
+    cached_tokens = normalize_cached_tokens(cached_tokens, input_tokens)
     try:
         from app.core.observability_db import observability_sessionmaker
         from app.models import LlmUsage
