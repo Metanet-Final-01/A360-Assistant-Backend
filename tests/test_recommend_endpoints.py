@@ -131,6 +131,9 @@ def test_save_edited_creates_new_version(monkeypatch):
                          "change_summary": "Task1 액션 교체"})
     assert r.status_code == 201
     assert r.json()["version"] == 3
+    assurance = r.json()["output_assurance"]
+    assert assurance["rollout_mode"] == "observe"
+    assert assurance["validated"] is False
     assert saved["row"].source == "drag" and saved["row"].change_summary == "Task1 액션 교체"
 
 
