@@ -111,8 +111,9 @@ _ACTION_ALIASES: dict[tuple[str, str], frozenset] = {
     ("email", "closeemail"): frozenset({"disconnect"}),
     # If 본체 (KB에는 else/elseif만 있음 — if 본체는 gap으로 드러난다)
     ("if", "if"): frozenset({"if"}),
-    # MessageBox
+    # MessageBox (v2 문서 정본 표기 "Message box"까지 — 2026-07-19 v2 카탈로그 평가 대비)
     ("messagebox", "messagebox"): frozenset({"show"}),
+    ("messagebox", "message box"): frozenset({"show"}),
     ("messagebox", "usingmessageboxaction"): frozenset({"show"}),
     # 브라우저 열기 계열: launchWebsite/openbrowser ↔ browserPackageOpenAction
     ("browser", "launchwebsite"): frozenset({"open"}),

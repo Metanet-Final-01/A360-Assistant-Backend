@@ -56,6 +56,13 @@ def build_kb_tools(sources_sink: list[dict], source_types: list[str] | None = No
         spec = catalog.get_action_schema(package, action)
         if spec is None:
             return json.dumps({"error": f"'{package}/{action}'은(는) 카탈로그에 없습니다."}, ensure_ascii=False)
+        if spec.get("parameters") is None:
+            # params_unknown 행 — '스펙 미상'을 '파라미터 없음'으로 오독해 지어내지 않게 명시.
+            return json.dumps(
+                {**spec, "note": "액션은 존재하지만 파라미터 스펙이 카탈로그에 없습니다 — "
+                                 "문서 근거가 있는 파라미터만 신중히 기입하세요."},
+                ensure_ascii=False,
+            )
         return json.dumps(spec, ensure_ascii=False)
 
     return [search_kb, get_action_schema]
