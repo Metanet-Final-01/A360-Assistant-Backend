@@ -28,6 +28,10 @@ class BackendCatalog:
 
     카탈로그는 정적 참조 데이터라 최초 조회 시 전체 액션 스펙을 1회 적재해 메모리에
     캐싱한다 — 병렬 step 노드가 매번 DB를 때리지 않게 한다(RPA-27 리뷰의 캐싱 취지와 동일).
+
+    schema가 없는 행은 {package, action, params_unknown: True} 최소 스펙으로 적재한다 —
+    존재 판정(R1)은 행의 존재만으로 성립하고, 파라미터 판정(R2~R5)은 스펙이 있을 때만
+    가능하다는 분리. 제외해 버리면 실존 액션이 R1에서 환각으로 오판된다.
     """
 
     def __init__(self) -> None:
@@ -57,17 +61,29 @@ class BackendCatalog:
 
         for package_name, action_name, metadata in rows:
             key = (package_name, action_name)
-            if key in index:
+            if key in index and not index[key].get("params_unknown"):
                 # 청킹으로 (pkg, act)당 여러 행이 있을 수 있으나 metadata.schema는 동일 — 첫 행이면 충분.
                 continue
             if isinstance(metadata, str):  # jsonb는 dict로 오지만 드라이버 차이에 방어적으로
                 metadata = json.loads(metadata)
             schema = (metadata or {}).get("schema")
             if not isinstance(schema, dict):
+                # schema 없는 행도 어휘로는 실존한다(v2 문서 카탈로그의 보강 미도달 행 —
+                # --enrich 생략 빌드면 액션의 ~92%). parameters 키를 아예 두지 않아
+                # 소비처(.get("parameters"))가 '스펙 미상'(None)을 '파라미터 없음'([])과
+                # 구분하게 한다. 같은 키의 schema 보유 행이 나중에 오면 위에서 덮어쓴다.
+                index.setdefault(key, {"package": package_name, "action": action_name, "params_unknown": True})
                 continue
             # package/action을 상위 키로 부여해 문서화된 스펙 형태와 맞춘다
             # (schema에는 두 키가 없으므로 덮어쓰지 않는다).
-            index[key] = {"package": package_name, "action": action_name, **schema}
+            spec = {"package": package_name, "action": action_name, **schema}
+            if spec.get("parameters") is None:
+                # v2 보강은 '파라미터 미상'을 schema.parameters=None으로 기록한다 — 키를
+                # 제거해 schema 없는 행과 같은 params_unknown 형태로 정규화한다. None인 채로
+                # 흘리면 v1/v2 검수의 spec.get("parameters", [])가 None을 받아 순회에서 깨진다.
+                spec.pop("parameters", None)
+                spec["params_unknown"] = True
+            index[key] = spec
 
         logger.info("BackendCatalog 적재 완료: 액션 스펙 %d개", len(index))
         return index

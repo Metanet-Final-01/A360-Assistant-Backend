@@ -669,3 +669,40 @@ def test_judge_hard_gate_and_llm_failure_fallback(monkeypatch):
     out = judge_candidates({"requirements": []}, [strong_but_gated, weaker_but_clean])
     assert out["winner"].candidate_id == "B"
     assert any(r["gate_failed"] for r in out["verdict"]["scores"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# params_unknown 스펙 (RPA-206 후속 — 존재 판정과 스펙 판정의 분리)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _UnknownParamsCatalog:
+    """schema 없는 행의 BackendCatalog 적재 형태 — parameters 키가 아예 없다."""
+
+    def get_action_schema(self, package, action):
+        return {"package": package, "action": action, "params_unknown": True}
+
+
+class _EmptyParamsCatalog:
+    """파라미터가 '없음'으로 확정된 스펙 — 빈 목록은 미상과 달리 R2 판정 대상."""
+
+    def get_action_schema(self, package, action):
+        return {"package": package, "action": action, "parameters": []}
+
+
+def test_params_unknown_spec_passes_r1_and_skips_r2_to_r5():
+    # 존재는 성립(R1 없음), 파라미터 스펙은 미상이라 R2~R5 침묵 — '모름 → 침묵'.
+    v = checker.run_checks(
+        [_act("Google Drive", "Move file", params=[_param("fileId", "x")])],
+        _UnknownParamsCatalog(),
+    )
+    assert v == []
+
+
+def test_empty_param_spec_still_flags_r2():
+    # 빈 목록([])은 '파라미터 없음' 확정 — 미상 스킵에 휩쓸리지 않고 R2가 잡아야 한다.
+    v = checker.run_checks(
+        [_act("Clipboard", "Clear", params=[_param("bogus", "x")])],
+        _EmptyParamsCatalog(),
+    )
+    assert [x.rule for x in v] == ["R2"]

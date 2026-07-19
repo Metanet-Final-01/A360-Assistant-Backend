@@ -38,11 +38,29 @@ _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
 # 제어 흐름 구조 액션 후보 — 카탈로그에 실재하는 것만 메뉴에 실린다. 요구사항 문장에는
 # 이런 액션이 명시되지 않아 검색 질의가 생성되지 않으므로(0374 JIRA 봇 실측: Loop 이터레이터
 # 부재 → Continue 오용, 세션 opener 부재 → 세션 생명주기 통누락) 결정론으로 보완한다.
+# 카탈로그 표기 세대가 바뀔 때마다 이 목록이 깨지는 회귀가 반복됐다(과거 "ifPackageIfAction"
+# MISS로 Else If 오용 — 정준환 실측 / 2026-07-18 재적재로 9개 중 8개 MISS 재발).
+# 대응: 알려진 표기 세대를 전부 병기한다 — structural_complement가 카탈로그 조회로 존재하는
+# 것만 남기므로, 현재 연결된 카탈로그(네온 구표기든 v2 문서 정본이든)에 맞는 이름이 자동
+# 선택되고 나머지는 무해하게 걸러진다. 정본 어휘층(별칭 사전)이 생기면 그쪽으로 이관 예정.
 _STRUCTURAL_CANDIDATES: list[tuple[str, str]] = [
+    # v2 문서 정본 표기 (khub identity 카탈로그, 2026-07-19)
+    ("Loop", "Loop"),
+    ("Loop", "Break"),
+    ("Loop", "Continue"),
+    ("If", "If"),
+    ("If", "Else if (optional)"),
+    ("If", "Else"),
+    ("Error handler", "Try"),
+    ("Error handler", "Catch"),
+    ("Error handler", "Finally"),
+    ("Error handler", "Throw"),
+    ("Step", "Step"),
+    # llm_agent 재파싱 표기 (RPA-141 시절 카탈로그 — 문서 슬러그 camelCase. 테스트 스텁
+    # FakeCatalog가 이 세대를 사용하며, 재적재로 이 세대가 돌아올 수 있어 유지)
     ("Loop", "cloudUsingLoopAction"),
-    # plain If 액션명은 카탈로그상 "if"다 — 과거 "ifPackageIfAction"으로 적어 카탈로그 조회에
-    # 걸려(MISS) 구조 보완 메뉴에서 탈락, composer가 단독 조건에도 Else If를 오용했다(정준환 실측).
-    ("If", "if"),
+    ("Loop", "loopPackageBreakAction"),
+    ("Loop", "loopPackageContinueAction"),
     ("If", "ifPackageElseIfOptionalAction"),
     ("If", "ifPackageElseAction"),
     ("Error handler", "errorHandlerTry"),
@@ -50,6 +68,19 @@ _STRUCTURAL_CANDIDATES: list[tuple[str, str]] = [
     ("Error handler", "errorHandlerFinally"),
     ("Error handler", "errorHandlerThrow"),
     ("Step", "stepAction"),
+    # 구 JAR 표기 (2026-07-18 재적재 후 네온 카탈로그 실측: ErrorHandler/try·catch,
+    # Loop/loop.commands.*, If/if·elseIf·else, Step/step)
+    ("Loop", "loop.commands.start"),
+    ("Loop", "loop.commands.break"),
+    ("Loop", "loop.commands.continue"),
+    ("If", "if"),
+    ("If", "elseIf"),
+    ("If", "else"),
+    ("ErrorHandler", "try"),
+    ("ErrorHandler", "catch"),
+    ("ErrorHandler", "finally"),
+    ("ErrorHandler", "throw"),
+    ("Step", "step"),
 ]
 
 
@@ -162,10 +193,13 @@ async def build_dossier(spec: dict, sink: list[dict]) -> dict:
             for p in spec_dict.get("parameters", [])
         )
         rt = spec_dict.get("return_type")
+        # 스펙 미상(params_unknown 행)을 '없음'으로 표기하면 파라미터가 정말 없는 액션과
+        # 구분이 안 돼 composer가 스펙 확인을 건너뛴다 — '미상'으로 구분 표기한다.
+        unknown = spec_dict.get("parameters") is None
         return (
             f"- {pkg}/{act} «{spec_dict.get('label') or act}»"
             + (f" → 리턴 {rt}" if rt else "")
-            + f"\n    파라미터: {params or '없음'}"
+            + f"\n    파라미터: {params or ('미상 — get_action_schema로 확인' if unknown else '없음')}"
         )
 
     blocks: list[str] = []
