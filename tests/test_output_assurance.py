@@ -2,7 +2,12 @@
 
 import pytest
 
-from app.services.output_assurance import OutputBoundaryContext, observe_recommendation_candidate
+from app.services.output_assurance import (
+    OUTPUT_POLICY,
+    OutputBoundaryContext,
+    build_unassured_observation,
+    observe_recommendation_candidate,
+)
 
 
 class FixtureCatalog:
@@ -67,6 +72,18 @@ def test_known_action_is_allow_candidate_but_never_validated():
     assert result["assurance_status"] == "unassured_observe"
     assert result["business_outcome"]["persisted"] is None
     assert [item["status"] for item in result["controls"]] == ["pass", "pass"]
+
+
+def test_runtime_observation_fields_are_derived_from_output_policy():
+    result = observe_recommendation_candidate(recommendation(), context(), catalog=FixtureCatalog())
+    failed = build_unassured_observation(context(), error_type="DetectorError")
+
+    assert result["decision"] == OUTPUT_POLICY["pass_decision"]
+    assert result["rollout_mode"] == OUTPUT_POLICY["rollout_mode"]
+    assert result["validated"] == OUTPUT_POLICY["validated"]
+    assert result["enforcement"]["blocks_persistence"] == OUTPUT_POLICY["blocks_persistence"]
+    assert failed["decision"] == OUTPUT_POLICY["detector_error_decision"]
+    assert failed["assurance_status"] == OUTPUT_POLICY["assurance_status"]
 
 
 def test_made_up_package_and_action_are_denied_by_backend_detector():

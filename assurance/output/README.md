@@ -29,13 +29,18 @@ checker, prompt, graph, repair 구현을 import하거나 복제하지 않는다.
 | Warn | 별도 승인 전 사용 금지 | 별도 승인 전 사용 금지 | 별도 승인 전 사용 금지 |
 | Enforce | `deny`·`unassured` 활성 저장 차단 | 검증된 활성 버전만 노출 | 검증된 버전만 허용 |
 
-RPA-182가 receipt와 판정을 append-only로 영속화하기 전에는 조회 경계에서 과거 판정을 신뢰성 있게
-재구성할 수 없다. 따라서 이 MVP는 latest/history/export에 임시 상태를 지어내지 않는다.
+RPA-182의 첫 Backend 슬라이스는 저장이 성공한 추천 버전마다 내용 주소형 receipt를 제품 DB의
+`assurance_receipts`에 append-only로 남긴다. receipt 저장이 실패하면 기존 추천 저장은 유지하되
+API 응답에 `assurance_receipt.status=refused`를 명시한다. Observe 단계이므로 이 receipt는 통과
+증명이나 배포 승인이 아니며 latest/history/export의 노출 정책도 아직 바꾸지 않는다.
+
+상세 계약과 관리자 조회 방법은 [Evidence & Governance](../evidence/README.md)를 참고한다.
 
 ## 남은 의존성
 
 - RPA-184: Agent 공개 응답의 `resolved_agent_version` 계약
-- RPA-182: receipt·감사 증거 영속화와 백오피스 read-only 조회
+- RPA-182: Change receipt 수집 경로와 Backoffice 화면 연결. Backend Output receipt 및 read-only
+  API는 첫 슬라이스 구현
 - RPA-183: 보호 writer, 정책 보호, 승격 기준
 
 위 의존성과 사람 승인이 완료되기 전에는 `Warn`이나 `Enforce`로 승격하지 않는다.

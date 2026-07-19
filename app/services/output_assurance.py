@@ -35,6 +35,16 @@ VALIDATOR_VERSION = "output-boundary-observe-v1"
 PUBLIC_CONTRACT_VERSION = "turn.done.v1"
 MAX_FINDINGS = 100
 MAX_CATALOG_NAME = 200
+OUTPUT_POLICY = {
+    "rollout_mode": "observe",
+    "controls": ["strict_schema", "catalog_closure"],
+    "pass_decision": "allow_candidate",
+    "fail_decision": "deny",
+    "detector_error_decision": "unassured",
+    "assurance_status": "unassured_observe",
+    "validated": False,
+    "blocks_persistence": False,
+}
 
 _MODEL_FIELDS = {
     "recommendation": set(Recommendation.model_fields),
@@ -242,12 +252,14 @@ def observe_recommendation_candidate(
         controls.append({"control_id": "catalog_closure", "status": "error", "error_type": type(exc).__name__})
 
     statuses = {item["status"] for item in controls}
+    expected_controls = set(OUTPUT_POLICY["controls"])
+    observed_controls = {item["control_id"] for item in controls}
     if "fail" in statuses:
-        decision = "deny"
-    elif "error" in statuses or len(controls) != 2:
-        decision = "unassured"
+        decision = OUTPUT_POLICY["fail_decision"]
+    elif "error" in statuses or observed_controls != expected_controls:
+        decision = OUTPUT_POLICY["detector_error_decision"]
     else:
-        decision = "allow_candidate"
+        decision = OUTPUT_POLICY["pass_decision"]
 
     if context.source == "drag":
         version_observability = "not_applicable"
@@ -266,10 +278,11 @@ def observe_recommendation_candidate(
     observation = {
         "schema_version": SCHEMA_VERSION,
         "validator_version": VALIDATOR_VERSION,
-        "rollout_mode": "observe",
+        "policy_digest": _digest(OUTPUT_POLICY),
+        "rollout_mode": OUTPUT_POLICY["rollout_mode"],
         "decision": decision,
-        "assurance_status": "unassured_observe",
-        "validated": False,
+        "assurance_status": OUTPUT_POLICY["assurance_status"],
+        "validated": OUTPUT_POLICY["validated"],
         "candidate_id": candidate_id,
         "payload_digest": payload_digest,
         "request_id": context.request_id,
@@ -289,7 +302,10 @@ def observe_recommendation_candidate(
             "agent_registry_digest_error": registry_digest_error,
             "public_contract_version": context.public_contract_version,
         },
-        "enforcement": {"mode": "observe", "blocks_persistence": False},
+        "enforcement": {
+            "mode": OUTPUT_POLICY["rollout_mode"],
+            "blocks_persistence": OUTPUT_POLICY["blocks_persistence"],
+        },
         "business_outcome": {"persisted": None},
     }
     observation["observation_id"] = _digest(observation)
@@ -317,10 +333,11 @@ def build_unassured_observation(
     observation = {
         "schema_version": SCHEMA_VERSION,
         "validator_version": VALIDATOR_VERSION,
-        "rollout_mode": "observe",
-        "decision": "unassured",
-        "assurance_status": "unassured_observe",
-        "validated": False,
+        "policy_digest": _digest(OUTPUT_POLICY),
+        "rollout_mode": OUTPUT_POLICY["rollout_mode"],
+        "decision": OUTPUT_POLICY["detector_error_decision"],
+        "assurance_status": OUTPUT_POLICY["assurance_status"],
+        "validated": OUTPUT_POLICY["validated"],
         "candidate_id": None,
         "payload_digest": None,
         "request_id": context.request_id,
@@ -348,7 +365,10 @@ def build_unassured_observation(
             "agent_registry_digest_error": registry_digest_error,
             "public_contract_version": context.public_contract_version,
         },
-        "enforcement": {"mode": "observe", "blocks_persistence": False},
+        "enforcement": {
+            "mode": OUTPUT_POLICY["rollout_mode"],
+            "blocks_persistence": OUTPUT_POLICY["blocks_persistence"],
+        },
         "business_outcome": {"persisted": None},
     }
     observation["observation_id"] = _digest(observation)

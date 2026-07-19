@@ -6,6 +6,8 @@
 기반 세밀한 권한은 스키마 확장이 필요해 후속으로 두되, 그 전까지 이 게이트가 격리를 보장한다.
 """
 
+import base64
+import binascii
 import logging
 import os
 import secrets
@@ -13,7 +15,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app import models
@@ -25,6 +27,7 @@ from app.schemas.budget import BudgetLimitsUpdate
 from app.schemas.retrieval import RetrievalParamsUpdate
 from app.services import budget as budget_service
 from app.services import retrieval_params as rp_service
+from app.services.assurance_evidence import receipt_integrity
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +68,7 @@ def require_admin(
 
 
 def _parse_since(value: str) -> datetime:
-    """증분 수집 커서(ISO8601) 파싱 — naive면 UTC로 간주, 형식 오류는 400.
+    """최초 증분 수집 기준시각(ISO8601) 파싱 — naive면 UTC로 간주, 형식 오류는 400.
 
     백오피스 수집기가 '마지막으로 받은 created_at'을 그대로 되돌려주는 용도라
     응답의 isoformat()과 왕복 가능해야 한다.
@@ -184,6 +187,144 @@ def audit_logs(
             for r in rows
         ]
     }
+
+
+def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False) -> dict:
+    payload = row.receipt_payload if isinstance(row.receipt_payload, dict) else {}
+    completeness = payload.get("completeness")
+    completeness = completeness if isinstance(completeness, dict) else {}
+    result = {
+        "receipt_digest": row.receipt_digest,
+        "schema_version": row.schema_version,
+        "harness": row.harness,
+        "record_kind": row.record_kind,
+        "writer_authority": row.writer_authority,
+        "source": row.source,
+        "request_id": row.request_id,
+        "session_id": str(row.session_id) if row.session_id else None,
+        "recommendation_id": str(row.recommendation_id) if row.recommendation_id else None,
+        "recommendation_version": row.recommendation_version,
+        "candidate_id": row.candidate_id,
+        "payload_digest": row.payload_digest,
+        "evidence_valid": row.evidence_valid,
+        "completeness_status": row.completeness_status,
+        "missing_evidence": completeness.get("missing", []),
+        "decision": row.decision,
+        "assurance_verdict": row.assurance_verdict,
+        "assurance_status": row.assurance_status,
+        "rollout_mode": row.rollout_mode,
+        "enforcement_effect": row.enforcement_effect,
+        "business_persisted": row.business_persisted,
+        "validator_version": row.validator_version,
+        "policy_digest": row.policy_digest,
+        "catalog_digest": row.catalog_digest,
+        "requested_agent_version": row.requested_agent_version,
+        "resolved_agent_version": row.resolved_agent_version,
+        "integrity_valid": receipt_integrity(row),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+    if detail:
+        result["receipt_payload"] = payload
+    return result
+
+
+def _encode_assurance_cursor(row: models.AssuranceReceipt) -> str:
+    value = f"{row.created_at.isoformat()}|{row.id}"
+    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+
+def _decode_assurance_cursor(value: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        timestamp, row_id = base64.urlsafe_b64decode(padded.encode()).decode().rsplit("|", 1)
+        return _parse_since(timestamp), uuid.UUID(row_id)
+    except (binascii.Error, ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(
+            400,
+            detail={"code": "INVALID_CURSOR", "message": "cursor 형식이 올바르지 않습니다."},
+        ) from exc
+
+
+@router.get("/assurance-receipts")
+def assurance_receipts(
+    limit: int = Query(100, ge=1, le=500),
+    harness: str | None = Query(None, pattern="^(change|output)$"),
+    decision: str | None = Query(None, pattern="^(allow_candidate|deny|unassured)$"),
+    assurance_verdict: str | None = Query(None, pattern="^(observed|deny|refused)$"),
+    request_id: str | None = Query(None, max_length=32),
+    session_id: str | None = Query(None),
+    since: str | None = Query(None, description="ISO8601 — 최초 증분 수집의 기준 시각"),
+    cursor: str | None = Query(None, description="응답 next_cursor — created_at+id 복합 커서"),
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """보증 영수증 목록 — 백오피스 read-only 대사와 증분 수집용."""
+    q = select(models.AssuranceReceipt)
+    if harness:
+        q = q.where(models.AssuranceReceipt.harness == harness)
+    if decision:
+        q = q.where(models.AssuranceReceipt.decision == decision)
+    if assurance_verdict:
+        q = q.where(models.AssuranceReceipt.assurance_verdict == assurance_verdict)
+    if request_id:
+        q = q.where(models.AssuranceReceipt.request_id == request_id)
+    if session_id:
+        try:
+            sid = uuid.UUID(session_id)
+        except ValueError:
+            raise HTTPException(
+                400, detail={"code": "INVALID_ID", "message": "session_id 형식이 올바르지 않습니다."}
+            ) from None
+        q = q.where(models.AssuranceReceipt.session_id == sid)
+    if cursor:
+        cursor_time, cursor_id = _decode_assurance_cursor(cursor)
+        q = q.where(or_(
+            models.AssuranceReceipt.created_at > cursor_time,
+            and_(
+                models.AssuranceReceipt.created_at == cursor_time,
+                models.AssuranceReceipt.id > cursor_id,
+            ),
+        )).order_by(
+            models.AssuranceReceipt.created_at.asc(), models.AssuranceReceipt.id.asc()
+        )
+    elif since:
+        q = q.where(models.AssuranceReceipt.created_at > _parse_since(since)).order_by(
+            models.AssuranceReceipt.created_at.asc(), models.AssuranceReceipt.id.asc()
+        )
+    else:
+        q = q.order_by(
+            models.AssuranceReceipt.created_at.desc(), models.AssuranceReceipt.id.desc()
+        )
+    q = q.limit(limit)
+    rows = db.execute(q).scalars().all()
+    return {
+        "receipts": [_assurance_receipt_out(row) for row in rows],
+        "next_cursor": _encode_assurance_cursor(rows[-1]) if rows else None,
+    }
+
+
+@router.get("/assurance-receipts/{receipt_digest}")
+def assurance_receipt_detail(
+    receipt_digest: str,
+    db: Session = Depends(get_db),
+    user: models.User = Depends(require_admin),
+) -> dict:
+    """보증 영수증 상세 — 마스킹된 control·finding과 무결성 재검증 결과를 반환."""
+    if not receipt_digest.startswith("sha256:") or len(receipt_digest) != 71:
+        raise HTTPException(
+            400,
+            detail={"code": "INVALID_RECEIPT_DIGEST", "message": "receipt digest 형식이 올바르지 않습니다."},
+        )
+    row = db.execute(
+        select(models.AssuranceReceipt).where(
+            models.AssuranceReceipt.receipt_digest == receipt_digest
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "NOT_FOUND", "message": "보증 영수증을 찾을 수 없습니다."}
+        )
+    return _assurance_receipt_out(row, detail=True)
 
 
 @router.get("/metrics-daily")
