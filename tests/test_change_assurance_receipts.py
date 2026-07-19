@@ -494,17 +494,24 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     publisher = (ROOT / ".github/workflows/change-assurance-publish.yml").read_text(
         encoding="utf-8"
     )
+    workflow_header, jobs = publisher.split("jobs:", 1)
+    resolve_job, publish_job = jobs.split("\n  publish:", 1)
 
-    assert "workflow_run:" in publisher
+    assert "workflow_run:" in workflow_header
     assert "pull_request_target" not in publisher
-    assert "actions: read" in publisher
-    assert "contents: read" in publisher
-    assert "environment: change-assurance-writer" in publisher
-    assert "ASSURANCE_WRITER_ENABLED == 'true'" in publisher
-    assert "pull-requests: read" in publisher
-    assert "/commits/${HEAD_SHA}/pulls" in publisher
-    assert "needs.resolve_pr.outputs.pull_request_number" in publisher
-    assert "github.event.repository.default_branch" in publisher
-    assert "secrets.ASSURANCE_WRITER_TOKEN" in publisher
+    assert "actions: read" in workflow_header
+    assert "contents: read" in workflow_header
+    assert "pull-requests: read" in workflow_header
+    assert "ASSURANCE_WRITER_ENABLED == 'true'" in resolve_job
+    assert "/commits/${HEAD_SHA}/pulls" in resolve_job
+    assert 'api_output="$(mktemp)"' in resolve_job
+    assert '> "$api_output"' in resolve_job
+    assert 'mapfile -t matches < "$api_output"' in resolve_job
+    assert "< <(" not in resolve_job
+    assert "secrets." not in resolve_job
+    assert "environment: change-assurance-writer" in publish_job
+    assert "needs.resolve_pr.outputs.pull_request_number" in publish_job
+    assert "github.event.repository.default_branch" in publish_job
+    assert "secrets.ASSURANCE_WRITER_TOKEN" in publish_job
     assert "ASSURANCE_WRITER_TOKEN" not in observe
     assert "secrets." not in observe

@@ -37,12 +37,14 @@ jobs:
           if [[ -n "$EVENT_PULL_REQUEST" ]]; then
             matches=("$EVENT_PULL_REQUEST")
           else
-            mapfile -t matches < <(
-              gh api --paginate \
-                -H "Accept: application/vnd.github+json" \
-                "/repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
-                --jq ".[] | select(.state == \"open\" and .head.sha == \"${HEAD_SHA}\") | .number"
-            )
+            api_output="$(mktemp)"
+            trap 'rm -f "$api_output"' EXIT
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
+              --jq ".[] | select(.state == \"open\" and .head.sha == \"${HEAD_SHA}\") | .number" \
+              > "$api_output"
+            mapfile -t matches < "$api_output"
           fi
           if [[ ${#matches[@]} -ne 1 || ! "${matches[0]}" =~ ^[1-9][0-9]*$ ]]; then
             echo "Expected exactly one open pull request for the observed SHA" >&2
