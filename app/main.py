@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.api.admin import router as admin_router
 from app.api.agent import router as agent_router
+from app.api.assurance_writer import router as assurance_writer_router
 from app.api.auth import router as auth_router
 from app.api.debug import router as debug_router
 from app.api.documents import router as documents_router
@@ -113,6 +114,7 @@ app.include_router(debug_router)
 app.include_router(sessions_router)
 app.include_router(admin_router)
 app.include_router(agent_router)
+app.include_router(assurance_writer_router)
 
 
 class EchoRequest(BaseModel):

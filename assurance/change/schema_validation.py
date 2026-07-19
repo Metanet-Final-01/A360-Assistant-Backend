@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -25,6 +26,16 @@ SUPPORTED_KEYWORDS = {
     "minLength",
     "minimum",
     "format",
+    "pattern",
+    "maxItems",
+    "allOf",
+    "anyOf",
+    "oneOf",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contains",
 }
 
 
@@ -89,6 +100,44 @@ def _validate(value: Any, schema: dict[str, Any], root: dict[str, Any], path: st
     if "$ref" in schema:
         _validate(value, _resolve_ref(root, schema["$ref"]), root, path)
         return
+    for index, branch in enumerate(schema.get("allOf", [])):
+        _validate(value, branch, root, f"{path}.allOf[{index}]")
+    if "anyOf" in schema:
+        matches = 0
+        for branch in schema["anyOf"]:
+            try:
+                _validate(value, branch, root, path)
+            except SchemaValidationError:
+                continue
+            matches += 1
+        if matches == 0:
+            raise SchemaValidationError(f"{path}: value does not match any allowed schema")
+    if "oneOf" in schema:
+        matches = 0
+        for branch in schema["oneOf"]:
+            try:
+                _validate(value, branch, root, path)
+            except SchemaValidationError:
+                continue
+            matches += 1
+        if matches != 1:
+            raise SchemaValidationError(f"{path}: value must match exactly one allowed schema")
+    if "not" in schema:
+        try:
+            _validate(value, schema["not"], root, path)
+        except SchemaValidationError:
+            pass
+        else:
+            raise SchemaValidationError(f"{path}: value matches a forbidden schema")
+    if "if" in schema:
+        try:
+            _validate(value, schema["if"], root, path)
+        except SchemaValidationError:
+            conditional = schema.get("else")
+        else:
+            conditional = schema.get("then")
+        if conditional is not None:
+            _validate(value, conditional, root, path)
     if "const" in schema and not _json_equal(value, schema["const"]):
         raise SchemaValidationError(f"{path}: value must equal {schema['const']!r}")
     if "enum" in schema and not any(_json_equal(value, item) for item in schema["enum"]):
@@ -118,6 +167,8 @@ def _validate(value: Any, schema: dict[str, Any], root: dict[str, Any], path: st
     if isinstance(value, list):
         if len(value) < schema.get("minItems", 0):
             raise SchemaValidationError(f"{path}: array has too few items")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            raise SchemaValidationError(f"{path}: array has too many items")
         if schema.get("uniqueItems"):
             canonical = [json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value]
             if len(canonical) != len(set(canonical)):
@@ -125,10 +176,21 @@ def _validate(value: Any, schema: dict[str, Any], root: dict[str, Any], path: st
         if isinstance(schema.get("items"), dict):
             for index, item in enumerate(value):
                 _validate(item, schema["items"], root, f"{path}[{index}]")
+        if "contains" in schema:
+            for item in value:
+                try:
+                    _validate(item, schema["contains"], root, path)
+                except SchemaValidationError:
+                    continue
+                break
+            else:
+                raise SchemaValidationError(f"{path}: array has no required matching item")
 
     if isinstance(value, str):
         if len(value) < schema.get("minLength", 0):
             raise SchemaValidationError(f"{path}: string is too short")
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            raise SchemaValidationError(f"{path}: string does not match the required pattern")
         if schema.get("format") == "date-time":
             try:
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
