@@ -447,3 +447,133 @@ def test_record_usage_persists_cached_and_costs_with_it(monkeypatch):
                  input_tokens=1_000, output_tokens=0, cached_tokens=9_999)
     assert captured["cached_tokens"] == 1_000
     assert captured["cached_tokens"] <= captured["input_tokens"]
+
+
+# --- 호출 시간 상한·실패 관측 (RPA-202) ---
+
+def _fresh_client(monkeypatch):
+    """캐시된 전역 클라이언트를 비워 _get_client()가 다시 만들게 한다."""
+    monkeypatch.setattr(llm, "_client", None, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+
+def test_client_bounds_read_timeout_far_below_sdk_default(monkeypatch):
+    """🔴 SDK 기본 read timeout은 600초(10분)다 — 요청 하나가 그만큼 워커를 붙잡는다.
+
+    실측(llm_usage, 챗 5,441콜) 최대가 152초라 180초면 정상 호출을 자르지 않으면서
+    600초를 3.3배 조인다. 이 단언이 깨지면 '10분 매달림'이 되살아난 것이다.
+    """
+    _fresh_client(monkeypatch)
+    monkeypatch.delenv("LLM_TIMEOUT_SECONDS", raising=False)
+    c = llm._get_client()
+    assert c.timeout.read <= 300, "read timeout이 5분을 넘으면 요청 경로가 사실상 무한대가 된다"
+    assert c.timeout.read >= 160, "실측 최대(152초)보다 커야 정상 호출을 자르지 않는다"
+    assert c.timeout.connect <= 10, "연결 자체가 안 되는 상황은 오래 기다릴 이유가 없다"
+
+
+def test_timeout_and_retries_are_env_tunable(monkeypatch):
+    """데모 직전에 코드 수정 없이 조일 수 있어야 한다."""
+    _fresh_client(monkeypatch)
+    monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "42")
+    monkeypatch.setenv("LLM_CONNECT_TIMEOUT_SECONDS", "3")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "5")
+    c = llm._get_client()
+    assert c.timeout.read == 42 and c.timeout.connect == 3
+    assert c.max_retries == 5
+
+
+def test_retries_stay_enabled(monkeypatch):
+    """SDK 재시도(408·409·429·5xx·연결오류)를 죽이지 않았음을 못 박는다.
+
+    timeout을 명시하면서 max_retries=0을 같이 넣으면 일시적 429가 즉시 실패로 바뀐다 —
+    조용히 안정성을 깎는 회귀라 여기서 막는다.
+    """
+    _fresh_client(monkeypatch)
+    monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
+    assert llm._get_client().max_retries >= 1
+
+
+def _raising_client(exc):
+    from types import SimpleNamespace
+
+    def _create(**kwargs):
+        raise exc
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+
+
+def _openai_error(cls):
+    """OpenAI 예외는 생성자 시그니처가 제각각이라 __new__로 우회 생성한다."""
+    return cls.__new__(cls)
+
+
+def test_rate_limit_message_does_not_blame_credits(monkeypatch):
+    """429는 크레딧 소진일 수도, 순간 폭주일 수도 있다 — 원인을 단정하면 운영자가 엉뚱한 곳을 본다."""
+    from openai import RateLimitError
+
+    monkeypatch.setattr(llm, "_get_client", lambda: _raising_client(_openai_error(RateLimitError)))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: None)
+    with pytest.raises(RuntimeError) as ei:
+        llm.chat([{"role": "user", "content": "x"}], purpose="chat")
+    msg = str(ei.value)
+    assert "잠시 후 다시 시도" in msg  # 일시적 가능성을 먼저 안내
+    assert not msg.startswith("OpenAI 사용량 한도 초과")  # 단정하지 않는다
+
+
+def test_timeout_becomes_friendly_error_and_is_observed(monkeypatch):
+    """타임아웃이 raw 예외로 새지 않고, 관측에 흔적을 남긴다."""
+    from openai import APITimeoutError
+
+    events = []
+    monkeypatch.setattr(llm, "_get_client", lambda: _raising_client(_openai_error(APITimeoutError)))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: None)
+    monkeypatch.setattr("app.rag.observability.log_event",
+                        lambda event, **f: events.append((event, f)))
+
+    with pytest.raises(RuntimeError, match="제한 시간"):
+        llm.chat([{"role": "user", "content": "x"}], purpose="analyze")
+
+    assert events, "실패가 관측에 안 남으면 '왜 느렸나'에 답할 수 없다"
+    name, fields = events[0]
+    assert name == "external_api_attempt"  # 임베딩 경로와 같은 축
+    assert fields["failure_kind"] == "timeout" and fields["purpose"] == "analyze"
+    # 예외 문자열은 남기지 않는다 — 요청 페이로드가 실릴 수 있다
+    assert "error_message" not in fields
+
+
+def test_observation_failure_does_not_mask_llm_error(monkeypatch):
+    """관측이 깨져도 원래 오류가 그대로 올라와야 한다 (fail-open)."""
+    from openai import APIConnectionError
+
+    monkeypatch.setattr(llm, "_get_client", lambda: _raising_client(_openai_error(APIConnectionError)))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: None)
+
+    def _boom(*a, **k):
+        raise RuntimeError("관측 DB 다운")
+
+    monkeypatch.setattr("app.rag.observability.log_event", _boom)
+    with pytest.raises(RuntimeError, match="연결하지 못했습니다"):
+        llm.chat([{"role": "user", "content": "x"}], purpose="chat")
+
+
+def test_auth_failure_is_observed(monkeypatch):
+    """인증 실패도 관측에 남는다 (#279 리뷰).
+
+    키 만료·교체 사고는 "어느 시점부터 전부 실패했나"를 봐야 원인을 좁힐 수 있는데,
+    여기가 비어 있으면 그 흔적이 없다.
+    """
+    from openai import AuthenticationError
+
+    events = []
+    monkeypatch.setattr(llm, "_get_client", lambda: _raising_client(_openai_error(AuthenticationError)))
+    monkeypatch.setattr(llm, "record_usage", lambda **k: None)
+    monkeypatch.setattr("app.rag.observability.log_event",
+                        lambda event, **f: events.append((event, f)))
+
+    with pytest.raises(RuntimeError, match="인증 실패"):
+        llm.chat([{"role": "user", "content": "x"}], purpose="vision_parse")
+
+    assert events, "인증 실패가 관측에 안 남으면 키 사고의 시작 시점을 못 찾는다"
+    name, fields = events[0]
+    assert name == "external_api_attempt" and fields["failure_kind"] == "auth"
+    assert "error_message" not in fields  # 예외 문자열은 남기지 않는다

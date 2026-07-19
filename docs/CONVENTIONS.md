@@ -216,9 +216,9 @@ Jira 상태는 손대지 않아도 된다 — 브랜치 생성 시 "진행 중",
 - [ ] **폐기 API 부활 금지** — 문서·README·주석·예시에 **실재하지 않는 심볼/엔드포인트**가 없는가. AI는 낡은 문서를 근거로 없는 API를 재생성한다. (실사례: `app/agent/README.md`의 `run_agent`·`/api/agent/chat` — 실제 진입점은 `/api/sessions/{id}/turn`)
 - [ ] **live로 증명됨** — "코드가 그렇게 보인다"가 아니라 **실제로 그렇다**를 확인했는가: 서버 띄워 호출했는가? DB에 쌓였는가? 응답이 문서와 같은가? *스텁/Fake로만 통과한 경로는 별도 live smoke가 필요하다.*
 - [ ] 🔴 **가드는 동작이 읽는 걸 읽는가 (대리 지표 금지)** — 검사·격리·가드를 추가/수정했다면: **동작을 결정하는 값**(env가 아니라 `engine`, git이 아니라 디스크, 문서가 아니라 실행 경로)을 가드가 **직접** 읽는가? 대리 지표면 반드시 갈린다. 직접 못 읽으면 **둘이 갈리는 시나리오를 하나 만들어 보고**, 만들어지면 버그다.
-  - 🔴 **이빨 증명은 `scripts/prove_teeth.py`로 한다** (손으로 하지 말 것):
+  - 🔴 **변이 테스트(mutation testing)는 `scripts/mutation_test.py`로 한다** (손으로 하지 말 것):
     ```bash
-    python scripts/prove_teeth.py --file app/x.py --old '가드 코드' --new '무력화' --test tests/test_x.py::test_y
+    python scripts/mutation_test.py --file app/x.py --old '가드 코드' --new '무력화' --test tests/test_x.py::test_y
     ```
     **결함을 심었는데 테스트가 통과하면 "좋다"가 아니라 "증명 실패"다.** 그 판정을 사람에게
     맡기면 반대로 읽는다 — 2026-07-16 하루에 3번 그랬다(early-return에 걸려 검사에 **도달조차**
