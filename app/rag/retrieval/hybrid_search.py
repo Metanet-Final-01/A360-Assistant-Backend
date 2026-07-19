@@ -84,6 +84,16 @@ def _fuse_candidates(
     ]
 
 
+def _bm25_health(results: list[dict]) -> bool | None:
+    """BM25 가용성 집계 — 필드가 없는 결과(vector 모드)는 None으로 구분한다 (RPA-211).
+
+    True=정상 / False=저하(OpenSearch 실패) / None=해당 없음(BM25를 부르지 않음).
+    셋을 뭉개면 "저하율"이 거짓말을 한다.
+    """
+    flags = [r["bm25_available"] for r in results if "bm25_available" in r]
+    return all(flags) if flags else None
+
+
 def _candidate_summary(item: dict) -> dict:
     """관측 로그용 후보 요약(RPA-129) — 어떤 문서가 몇 점으로 뽑혔나. 카탈로그 콘텐츠라
     PII 아님(검색어와 달리 마스킹 불필요). 점수는 rerank 우선, 없으면 RRF."""
@@ -108,7 +118,10 @@ def _candidate_summary(item: dict) -> dict:
         # 🔴 BM25 저하 여부 (RPA-211). 이게 없어 "지난 주에 몇 번 저하됐나"를
         # 사후에 답할 수 없었다 — retrieval_sources는 문서별 출처라 저하 표시가 아니다.
         # /health는 도달성을 보고 검색은 질의 성공을 본다 — 둘은 다르다(CONVENTIONS §9).
-        "bm25_available": all(item.get("bm25_available", True) for item in r) if r else None,
+        # ⚠️ mode="vector"는 BM25를 **아예 부르지 않아** 이 필드가 없다. 기본값 True로 집계하면
+        #    "호출도 안 했는데 정상"으로 기록돼 저하 지표가 왜곡된다(#290 리뷰).
+        #    필드가 하나도 없으면 None = "해당 없음"으로 남긴다.
+        "bm25_available": _bm25_health(r),
         "reranked": any("rerank_score" in item for item in r),
         # 실제로 뭐가 뽑혔나(상위 5) — "왜 이 스텝만 uncovered인지" 재구성·추천 근거(FR-11)
         "candidates": [_candidate_summary(item) for item in r[:5]],
@@ -168,7 +181,10 @@ def search(
     capture_result=lambda r: {
         "count": len(r),
         "retrieval_sources": [item.get("retrieval_source") for item in r],
-        "bm25_available": all(item.get("bm25_available", True) for item in r) if r else None,
+        # ⚠️ mode="vector"는 BM25를 **아예 부르지 않아** 이 필드가 없다. 기본값 True로 집계하면
+        #    "호출도 안 했는데 정상"으로 기록돼 저하 지표가 왜곡된다(#290 리뷰).
+        #    필드가 하나도 없으면 None = "해당 없음"으로 남긴다.
+        "bm25_available": _bm25_health(r),
         "reranked": any("rerank_score" in item for item in r),
     },
 )

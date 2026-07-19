@@ -86,13 +86,18 @@ def _get(which: str) -> TTLCache:
 
 
 def _norm(query: str) -> str:
-    """질의 정규화 — 앞뒤 공백·연속 공백만 정리한다.
+    """질의를 **그대로** 키에 쓴다 — 정규화하지 않는다.
 
-    ⚠️ 소문자화·형태 변환은 하지 않는다. BM25 분석기가 대소문자를 다루는 방식과 어긋나면
-    "캐시 키로는 같은데 실제 검색 결과는 다른" 질의가 생겨 캐시가 결과를 바꿔버린다.
-    정규화는 **결과가 확실히 같은 범위**로만 제한한다.
+    🔴 처음엔 공백만 합쳤다(`" ".join(query.split())`). 그런데 **캐시 키만 정규화하고 실제
+    임베딩·BM25 호출에는 원본 질의가 그대로 간다**(#290 리뷰). 그러면 `"send  email"`과
+    `"send email"`이 같은 키를 공유하는데 실제 결과는 다를 수 있어, **캐시가 결과를 바꾼다** —
+    내가 지키겠다고 한 불변식("같은 입력이면 같은 출력")을 캐시 자신이 깬 셈이다.
+
+    정규화하려면 하위 호출에도 같은 질의를 넘겨야 하는데, 그건 검색 동작 자체를 바꾸는
+    변경이라 캐싱 PR의 범위가 아니다. **키는 원본을 쓰고 적중률을 조금 잃는 쪽**을 택한다 —
+    공백 변형은 드물고, 안전이 적중률보다 우선이다.
     """
-    return " ".join(query.split())
+    return query
 
 
 def _digest(*parts: Any) -> str:
@@ -109,19 +114,20 @@ def embedding_key(query: str, model: str, dim: int | None) -> str:
 
 
 def get_embedding(key: str) -> list[float] | None:
+    """복사본을 돌려준다 — 호출부가 벡터를 변형해도 캐시 원본이 오염되면 안 된다(#290 리뷰)."""
     if not enabled():
         return None
     with _lock:
         v = _get("embed").get(key)
         _stats["embed_hit" if v is not None else "embed_miss"] += 1
-        return v
+        return list(v) if v is not None else None
 
 
 def put_embedding(key: str, vector: list[float]) -> None:
     if not enabled() or not vector:
         return
     with _lock:
-        _get("embed")[key] = vector
+        _get("embed")[key] = list(vector)   # 저장도 복사본으로 — 호출부가 나중에 바꿔도 무관하게
 
 
 # ── 검색 결과 층 ─────────────────────────────────────────────────────────────

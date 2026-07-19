@@ -281,7 +281,19 @@ def embed_query(text: str) -> list[float]:
 )
 async def embed_query_async(text: str, client: httpx.AsyncClient | None = None) -> list[float]:
     """embed_query의 비동기 버전 — /api/rag/search 전용 경로. client는 app/rag/store/
-    pool.py의 앱 전역 재사용 클라이언트(연결 재사용, 매 호출 새 클라이언트 방지)."""
+    pool.py의 앱 전역 재사용 클라이언트(연결 재사용, 매 호출 새 클라이언트 방지).
+
+    동기판과 **같은 캐시를 공유한다** (#290 리뷰). 처음엔 sync만 캐싱했는데, 그러면
+    /api/rag/search가 캐시를 켜도 매 요청 임베딩 API를 불러 두 경로의 동작이 갈린다.
+    키가 같으므로 한쪽이 채운 벡터를 다른 쪽이 그대로 쓴다.
+    """
+    from app.services import rag_cache
+
+    key = rag_cache.embedding_key(text, config.EMBEDDING_MODEL, config.EMBEDDING_DIM)
+    cached = rag_cache.get_embedding(key)
+    if cached is not None:
+        return cached
+
     if config.EMBEDDING_PROVIDER == "voyage":
         if not config.VOYAGE_API_KEY:
             raise RuntimeError("VOYAGE_API_KEY 환경변수가 필요합니다")
@@ -292,7 +304,9 @@ async def embed_query_async(text: str, client: httpx.AsyncClient | None = None) 
             client=client,
         )
         _record_embed_usage(data)
-        return data["data"][0]["embedding"]
+        vector = data["data"][0]["embedding"]
+        rag_cache.put_embedding(key, vector)
+        return vector
     if not config.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
     data = await post_with_retry_async(
@@ -302,4 +316,6 @@ async def embed_query_async(text: str, client: httpx.AsyncClient | None = None) 
         client=client,
     )
     _record_embed_usage(data)
-    return data["data"][0]["embedding"]
+    vector = data["data"][0]["embedding"]
+    rag_cache.put_embedding(key, vector)
+    return vector

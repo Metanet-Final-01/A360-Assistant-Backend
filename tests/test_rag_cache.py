@@ -92,10 +92,29 @@ def test_request_shape_changes_the_key():
     assert _key(source_types=None) != _key(source_types=("action_schema",))
 
 
-def test_normalization_only_collapses_whitespace():
-    """공백만 정리한다 — 소문자화하면 BM25 분석기와 어긋나 '키는 같은데 결과는 다른' 질의가 생긴다."""
-    assert _key(query="send  email") == _key(query="send email")
+def test_key_uses_raw_query_without_normalization():
+    """🔴 질의를 **정규화하지 않고 그대로** 키에 쓴다 (#290 리뷰).
+
+    키만 공백을 합치면, 실제 임베딩·BM25 호출에는 **원본 질의가 그대로 가므로**
+    `"send  email"`과 `"send email"`이 같은 키를 공유하면서 실제 결과는 다를 수 있다 —
+    캐시가 결과를 바꾸는 것이고, 이 캐시가 지키겠다고 한 불변식을 스스로 깨는 것이다.
+    적중률을 조금 잃더라도 원본을 쓴다.
+    """
+    assert _key(query="send  email") != _key(query="send email")   # 공백 변형도 다른 키
     assert _key(query="Send Email") != _key(query="send email")
+    assert rag_cache.embedding_key("send  email", "m", 1) != rag_cache.embedding_key("send email", "m", 1)
+
+
+def test_embedding_cached_copy_is_isolated():
+    """임베딩도 복사본을 저장·반환한다 — 호출부가 벡터를 변형해도 캐시 원본이 오염되면 안 된다."""
+    ek = rag_cache.embedding_key("q", "voyage-3", 1024)
+    original = [0.1, 0.2, 0.3]
+    rag_cache.put_embedding(ek, original)
+    original[0] = 999                       # 저장 뒤 호출부가 원본 리스트를 변형
+    got = rag_cache.get_embedding(ek)
+    assert got == [0.1, 0.2, 0.3]
+    got[0] = -1                             # 받은 쪽이 변형해도
+    assert rag_cache.get_embedding(ek) == [0.1, 0.2, 0.3]
 
 
 # --- 🔴 저하된 결과는 캐싱하지 않는다 ---
@@ -158,3 +177,19 @@ def test_stats_report_hit_rate_and_skips():
     assert s["search_hit"] == 1 and s["search_miss"] == 1
     assert s["search_hit_rate"] == 0.5
     assert s["enabled"] is True
+
+
+# --- BM25 저하 지표: 3상태 구분 (#290 리뷰) ---
+
+def test_bm25_health_distinguishes_three_states():
+    """🔴 True=정상 / False=저하 / None=해당 없음(BM25를 부르지 않음)을 구분한다.
+
+    `mode="vector"`는 BM25를 **아예 호출하지 않아** 결과에 이 필드가 없다. 기본값 True로
+    집계하면 "호출도 안 했는데 정상"으로 기록돼 저하율이 거짓말을 한다.
+    """
+    from app.rag.retrieval.hybrid_search import _bm25_health
+
+    assert _bm25_health([{"bm25_available": True}, {"bm25_available": True}]) is True
+    assert _bm25_health([{"bm25_available": True}, {"bm25_available": False}]) is False
+    assert _bm25_health([{"id": "a"}, {"id": "b"}]) is None      # vector 모드 — 필드 없음
+    assert _bm25_health([]) is None                              # 결과 없음
