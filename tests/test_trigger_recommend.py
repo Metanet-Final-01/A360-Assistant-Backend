@@ -37,10 +37,12 @@ def test_no_intent_skips_llm(monkeypatch):
 
 def test_event_intent_picks_from_menu(monkeypatch):
     monkeypatch.setattr(trig_mod, "get_catalog", lambda: _Cat(_ROWS))
-    monkeypatch.setattr(trig_mod, "chat_json", lambda *a, **k: _pick())
+    # LLM이 title을 제멋대로 바꿔 써도(표기 1:1 계약 위반 소지) 카탈로그 canonical로 강제된다
+    monkeypatch.setattr(trig_mod, "chat_json", lambda *a, **k: _pick(title="이메일 자동 실행 트리거"))
     out = trig_mod.recommend_trigger({"goal": "메일이 오면 첨부를 저장한다", "requirements": []}, None)
     assert out["kind"] == "trigger"
     assert out["package"] == "Email trigger"
+    assert out["title"] == "Creating an email trigger"  # 카탈로그 표기 그대로
     assert out["sources"][0]["source_type"] == "trigger_schema"
 
 

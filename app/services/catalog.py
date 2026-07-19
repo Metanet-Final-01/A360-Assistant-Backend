@@ -115,10 +115,15 @@ class BackendCatalog:
         if self._triggers is None:
             with self._lock:
                 if self._triggers is None:
-                    self._triggers = self._load_triggers()
+                    loaded = self._load_triggers()
+                    if loaded is None:
+                        # 일시 실패는 캐싱하지 않는다 — 빈 목록으로 굳히면 DB가 복구돼도
+                        # 재시작 전까지 트리거 제안이 계속 죽는다(_ensure_index와 대칭).
+                        return []
+                    self._triggers = loaded
         return self._triggers
 
-    def _load_triggers(self) -> list[dict]:
+    def _load_triggers(self) -> list[dict] | None:
         from app.rag.store import db
 
         try:
@@ -138,7 +143,7 @@ class BackendCatalog:
                 conn.close()
         except Exception:  # noqa: BLE001 — 트리거 메뉴 실패가 추천 전체를 막으면 안 된다
             logger.warning("trigger_schema 조회 실패 — 트리거 제안 없이 진행", exc_info=True)
-            return []
+            return None  # 실패 신호 — 호출부가 캐싱하지 않고 다음 호출에서 재시도한다
 
         out: list[dict] = []
         seen: set[tuple] = set()

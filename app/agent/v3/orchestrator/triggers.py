@@ -102,7 +102,8 @@ def recommend_trigger(spec: dict, document: str | None) -> dict | None:
     return TriggerRecommendation(
         kind=kind,
         package=pick.package if kind == "trigger" else None,
-        title=pick.title,
+        # 트리거면 title도 카탈로그 canonical 값 — LLM 문구를 그대로 쓰면 표기 1:1 계약이 깨진다.
+        title=row["title"] if kind == "trigger" else pick.title,
         reason=pick.reason or None,
         setup_hint=pick.setup_hint or None,
         sources=sources,
