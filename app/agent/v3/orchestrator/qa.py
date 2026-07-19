@@ -40,7 +40,10 @@ _EVIDENCE_NOUN = re.compile(
     r"bot\s*agent|컨트롤\s*룸|control\s*room|레코더|recorder|버전|설치|ocr",
     re.IGNORECASE,
 )
-_EVIDENCE_ASK = re.compile(r"있|없|돼|되나|되니|되어|가능|지원|할 수|필요|어떻|뭐|무엇|알려|설명|차이|맞아")
+_EVIDENCE_ASK = re.compile(
+    r"있|없|돼|되나|되니|되어|가능|지원|할 수|필요|어떻|뭐|무엇|알려|설명|차이|맞아|맞나"
+    r"|방법|얼마|인가|어떤|무슨"  # "설치 방법은?"·"무료인가요?"류 (CodeRabbit #286 리뷰 반영)
+)
 
 
 def _needs_evidence(message: str) -> bool:
@@ -120,7 +123,10 @@ async def qa_node(state: TurnState) -> dict:
         if round_no == _MAX_TOOL_ROUNDS:
             target = llm
         elif round_no == 0 and force_search:
-            target = llm.bind_tools(tools, tool_choice="required")
+            # 근거 수집 턴은 search_kb로 고정한다 — "required"만으로는 get_action_schema가
+            # 먼저 불릴 수 있는데, 정확한 (package, action)을 모르는 사실 질문에서는 인자를
+            # 지어내 '카탈로그에 없음' 오류만 받고 그 오류가 답변 근거로 오독될 수 있다.
+            target = llm.bind_tools(tools, tool_choice="search_kb")
         else:
             target = runnable
         gathered = None
