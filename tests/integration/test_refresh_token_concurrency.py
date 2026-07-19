@@ -298,10 +298,11 @@ def test_logout_with_stale_token_still_kills_session(client, integration_engine)
 
         tl = threading.Thread(target=do_logout)
         tl.start()
-        # ⚠️ 여기서 **기다려야** 경합이 재현된다. 곧바로 release하면 갱신이 먼저 끝나버려
-        #    잠금 단위와 무관하게 통과한다(실제로 이 대기를 빠뜨려 행 잠금 구현도 통과시켰다).
-        #    로그아웃이 계열 UPDATE를 실행할 시간을 준 뒤에 갱신을 풀어준다.
-        logout_done.wait(timeout=3)
+        # ⚠️ **실제 잠금 대기를 확인한 뒤에** 갱신을 풀어준다 (CodeRabbit #278).
+        #    처음엔 `logout_done.wait(3)`으로 뒀는데, 그건 로그아웃이 계열 UPDATE에
+        #    **도달했다는 보장이 없다** — 스레드 스케줄링이 늦으면 잘못된 행 단위 잠금
+        #    구현도 통과한다. pg_stat_activity로 진짜 대기를 확인해야 경합이 재현된다.
+        _wait_for_refresh_token_lock_wait(integration_engine)
         release.set()
         tr.join(timeout=30)
         tl.join(timeout=30)
