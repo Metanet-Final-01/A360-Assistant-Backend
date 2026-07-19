@@ -19,7 +19,7 @@ from app.services.assurance_evidence import (
     persist_change_receipt,
     receipt_integrity,
 )
-from assurance.change.foundation import AssuranceError
+from assurance.change.foundation import AssuranceError, canonical_digest
 from assurance.change.transport import load_change_envelope, validate_change_envelope
 from scripts.publish_change_assurance import publish, source_from_event, writer_url
 from tests.test_change_assurance import _load_scenarios, _run_scenario
@@ -63,6 +63,38 @@ def test_valid_change_artifacts_build_content_addressed_receipt(tmp_path):
     serialized = str(row.receipt_payload)
     assert "installed_distributions" not in serialized
     assert "changes" not in serialized
+
+
+def test_missing_expected_artifact_cannot_be_promoted_to_observed(tmp_path):
+    envelope = _envelope(tmp_path)
+    envelope["artifacts"].pop("runtime-environment.json")
+    integrity = envelope["artifacts"]["evidence-integrity.json"]
+    integrity["evidence"] = [
+        ref for ref in integrity["evidence"] if ref["uri"] != "runtime-environment.json"
+    ]
+    integrity_digest = canonical_digest(integrity)
+    report = envelope["artifacts"]["assurance-report.json"]
+    for control in report["controls"]:
+        if control["evidence"]["uri"] == "evidence-integrity.json":
+            control["evidence"]["sha256"] = integrity_digest
+    report_digest = canonical_digest(report)
+    index = envelope["artifacts"]["evidence-index.json"]
+    index["artifacts"] = [
+        ref for ref in index["artifacts"] if ref["uri"] != "runtime-environment.json"
+    ]
+    for ref in index["artifacts"]:
+        if ref["uri"] == "evidence-integrity.json":
+            ref["sha256"] = integrity_digest
+        elif ref["uri"] == "assurance-report.json":
+            ref["sha256"] = report_digest
+
+    row, summary = build_change_receipt(envelope)
+
+    assert row.decision == "allow_candidate"
+    assert summary["assurance_verdict"] == "refused"
+    assert row.assurance_status == "refused_unassured"
+    assert summary["completeness_status"] == "incomplete"
+    assert summary["missing_evidence"] == ["runtime-environment.json"]
 
 
 def test_valid_unassured_report_is_refused_not_promoted(tmp_path):
@@ -119,6 +151,37 @@ def test_checksum_manifest_tampering_is_rejected(tmp_path):
 
     with pytest.raises(AssuranceError):
         load_change_envelope(output, source={
+            "repository": report["subject"]["repository"],
+            "workflow_name": "Change Assurance (Observe)",
+            "workflow_run_id": 12345,
+            "run_attempt": 1,
+            "event": "pull_request",
+            "conclusion": "success",
+            "head_sha": report["subject"]["head_sha"],
+            "pull_request_number": 281,
+        })
+
+
+def test_top_level_symbolic_artifact_directory_is_rejected(tmp_path, monkeypatch):
+    scenario = _load_scenarios()["good_import"]
+    report, output = _run_scenario(tmp_path, scenario)
+    alias = tmp_path / "artifact-link"
+    original_is_symlink = Path.is_symlink
+    original_resolve = Path.resolve
+
+    def fake_is_symlink(path):
+        return path == alias or original_is_symlink(path)
+
+    def fake_resolve(path, *args, **kwargs):
+        if path == alias:
+            return output
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(AssuranceError, match="unavailable or symbolic"):
+        load_change_envelope(alias, source={
             "repository": report["subject"]["repository"],
             "workflow_name": "Change Assurance (Observe)",
             "workflow_run_id": 12345,
@@ -318,6 +381,55 @@ def test_publisher_derives_identity_only_from_matching_workflow_run():
         source_from_event(event, expected_repository="Metanet-Final-01/A360-Assistant-Backend")
 
 
+def test_publisher_accepts_one_sha_resolved_pull_request_when_event_list_is_empty():
+    event = {
+        "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
+        "workflow_run": {
+            "id": 12345,
+            "run_attempt": 2,
+            "name": "Change Assurance (Observe)",
+            "event": "pull_request",
+            "conclusion": "success",
+            "head_sha": "a" * 40,
+            "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
+            "pull_requests": [],
+        },
+    }
+
+    source = source_from_event(
+        event,
+        expected_repository="Metanet-Final-01/A360-Assistant-Backend",
+        resolved_pull_request_number=281,
+    )
+
+    assert source["pull_request_number"] == 281
+    with pytest.raises(AssuranceError, match="identity is unavailable"):
+        source_from_event(event, expected_repository="Metanet-Final-01/A360-Assistant-Backend")
+
+
+def test_publisher_rejects_resolved_pull_request_that_disagrees_with_event():
+    event = {
+        "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
+        "workflow_run": {
+            "id": 12345,
+            "run_attempt": 2,
+            "name": "Change Assurance (Observe)",
+            "event": "pull_request",
+            "conclusion": "success",
+            "head_sha": "a" * 40,
+            "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
+            "pull_requests": [{"number": 281}],
+        },
+    }
+
+    with pytest.raises(AssuranceError, match="does not match"):
+        source_from_event(
+            event,
+            expected_repository="Metanet-Final-01/A360-Assistant-Backend",
+            resolved_pull_request_number=282,
+        )
+
+
 def test_publisher_requires_https_outside_loopback():
     assert writer_url("https://backend.example.com") == (
         "https://backend.example.com/api/internal/assurance/change-receipts"
@@ -389,6 +501,9 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "contents: read" in publisher
     assert "environment: change-assurance-writer" in publisher
     assert "ASSURANCE_WRITER_ENABLED == 'true'" in publisher
+    assert "pull-requests: read" in publisher
+    assert "/commits/${HEAD_SHA}/pulls" in publisher
+    assert "needs.resolve_pr.outputs.pull_request_number" in publisher
     assert "github.event.repository.default_branch" in publisher
     assert "secrets.ASSURANCE_WRITER_TOKEN" in publisher
     assert "ASSURANCE_WRITER_TOKEN" not in observe

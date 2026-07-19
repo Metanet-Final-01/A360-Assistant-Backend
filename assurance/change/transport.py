@@ -63,8 +63,10 @@ def _load_json(raw: bytes, *, name: str) -> dict[str, Any]:
 
 def load_change_envelope(directory: Path, *, source: dict[str, Any]) -> dict[str, Any]:
     """Load only the known artifact set and preserve canonical artifact bytes."""
+    if directory.is_symlink():
+        raise AssuranceError("change assurance artifact directory is unavailable or symbolic")
     root = directory.resolve()
-    if not root.is_dir() or root.is_symlink():
+    if not root.is_dir():
         raise AssuranceError("change assurance artifact directory is unavailable or symbolic")
     artifacts: dict[str, dict[str, Any]] = {}
     raw_artifacts: dict[str, bytes] = {}

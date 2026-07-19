@@ -35,7 +35,12 @@ def _positive_int(value: Any, *, field: str) -> int:
     return value
 
 
-def source_from_event(event: Any, *, expected_repository: str) -> dict[str, Any]:
+def source_from_event(
+    event: Any,
+    *,
+    expected_repository: str,
+    resolved_pull_request_number: Any = None,
+) -> dict[str, Any]:
     """Derive source identity only from GitHub's trusted workflow_run event."""
     if not isinstance(event, dict):
         raise AssuranceError("workflow_run event root must be an object")
@@ -54,11 +59,29 @@ def source_from_event(event: Any, *, expected_repository: str) -> dict[str, Any]
     if run.get("event") != "pull_request" or run.get("conclusion") != "success":
         raise AssuranceError("workflow_run is not a successful pull_request run")
     pull_requests = run.get("pull_requests")
-    if not isinstance(pull_requests, list) or len(pull_requests) != 1:
-        raise AssuranceError("workflow_run must identify exactly one pull request")
-    pull_request = pull_requests[0]
-    if not isinstance(pull_request, dict):
-        raise AssuranceError("workflow_run pull request identity is invalid")
+    if not isinstance(pull_requests, list) or len(pull_requests) > 1:
+        raise AssuranceError("workflow_run must identify at most one pull request")
+    event_pull_request_number = None
+    if pull_requests:
+        pull_request = pull_requests[0]
+        if not isinstance(pull_request, dict):
+            raise AssuranceError("workflow_run pull request identity is invalid")
+        event_pull_request_number = _positive_int(
+            pull_request.get("number"), field="pull_request.number"
+        )
+    resolved_number = None
+    if resolved_pull_request_number is not None:
+        resolved_number = _positive_int(
+            resolved_pull_request_number, field="resolved_pull_request_number"
+        )
+    if event_pull_request_number is None and resolved_number is None:
+        raise AssuranceError("workflow_run pull request identity is unavailable")
+    if (
+        event_pull_request_number is not None
+        and resolved_number is not None
+        and event_pull_request_number != resolved_number
+    ):
+        raise AssuranceError("resolved pull request does not match the workflow_run event")
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str):
         raise AssuranceError("workflow_run head SHA is missing")
@@ -70,9 +93,7 @@ def source_from_event(event: Any, *, expected_repository: str) -> dict[str, Any]
         "event": "pull_request",
         "conclusion": "success",
         "head_sha": head_sha,
-        "pull_request_number": _positive_int(
-            pull_request.get("number"), field="pull_request.number"
-        ),
+        "pull_request_number": event_pull_request_number or resolved_number,
     }
 
 
@@ -144,6 +165,7 @@ def _parser() -> argparse.ArgumentParser:
     value.add_argument("--event", required=True, type=Path)
     value.add_argument("--artifacts", required=True, type=Path)
     value.add_argument("--repository", required=True)
+    value.add_argument("--pull-request-number", required=True, type=int)
     value.add_argument("--url", required=True)
     return value
 
@@ -152,7 +174,11 @@ def main() -> int:
     args = _parser().parse_args()
     try:
         event = json.loads(args.event.read_text(encoding="utf-8"))
-        source = source_from_event(event, expected_repository=args.repository)
+        source = source_from_event(
+            event,
+            expected_repository=args.repository,
+            resolved_pull_request_number=args.pull_request_number,
+        )
         envelope = load_change_envelope(args.artifacts, source=source)
         result = publish(
             envelope,

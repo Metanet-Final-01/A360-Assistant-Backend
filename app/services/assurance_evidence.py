@@ -304,17 +304,17 @@ def build_change_receipt(
     report = facts["report"]
     decision = report["assurance_decision"]
     evidence_complete = bool(report["evidence_complete"])
+    artifact_names = set(facts["artifact_names"])
+    missing = sorted(set(CHANGE_EXPECTED_ARTIFACTS) - artifact_names)
     if decision == "deny":
         verdict = "deny"
         assurance_status = "observed_deny"
-    elif decision == "allow_candidate" and evidence_complete:
+    elif decision == "allow_candidate" and evidence_complete and not missing:
         verdict = "observed"
         assurance_status = "observed_complete"
     else:
         verdict = "refused"
         assurance_status = "refused_unassured"
-    artifact_names = set(facts["artifact_names"])
-    missing = sorted(set(CHANGE_EXPECTED_ARTIFACTS) - artifact_names)
     completeness_status = "complete" if evidence_complete and not missing else "incomplete"
     subject = report["subject"]
     enforcement = report["enforcement"]
