@@ -39,6 +39,8 @@ _RULE_SEVERITY = {
     "R7": "major", "R8": "major", "R9": "major", "R11": "major",
     "R13": "major", "R14": "major",
     "R10": "warning", "R12": "warning",
+    # R15(attended 함정)·R16(플랫폼)은 환경 가정에 의존하는 경고 — 수리를 강제하지 않는다.
+    "R15": "warning", "R16": "warning",
 }
 
 

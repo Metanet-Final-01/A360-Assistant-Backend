@@ -24,11 +24,14 @@ from .. import config
 from ..analysis import _format_document, _has_text, analyze, analyze_text
 from ..recommend.graph import generate_flow
 from ..recommend.stream import emit, emit_analysis_frame
+from ..verify.catalog import get_catalog
+from ..verify.checker import run_environment_checks
 from .harness import verify_and_repair
 from .jsonio import chat_json
 from .render import analysis_brief, chat_task_brief, render_compact, render_history
 from .spec import build_flow_spec
 from .state import TYPE_ANALYSIS, TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
+from .triggers import recommend_trigger
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,12 @@ def _collect_sources(flow: dict) -> list[dict]:
 
     for step in flow.get("steps", []):
         walk(step.get("actions") or [])
+    # 실행 시점 제안(trigger)의 근거 문서도 답변 근거에 포함한다 (A-2).
+    for s in (flow.get("trigger") or {}).get("sources") or []:
+        title = s.get("title") or ""
+        if title and title not in seen:
+            seen.add(title)
+            out.append(s)
     return out
 
 
@@ -131,6 +140,20 @@ async def _generate_a360(state: TurnState) -> dict:
 
     flow = result.get("recommendation") or Recommendation(steps=[]).model_dump()
     violations = result.get("violations") or []
+
+    # 실행 시점 제안 (A-2): "매일 아침"·"메일이 오면" 같은 시점 의도를 트리거/스케줄로 잇는다.
+    # 의도 없음·트리거 카탈로그 부재·LLM 실패면 None — 추천은 그대로 진행.
+    trigger = await asyncio.to_thread(recommend_trigger, spec, document)
+    if trigger and flow.get("steps"):
+        flow["trigger"] = trigger
+        # 트리거가 붙으면 무인 실행 전제가 생긴다 — attended 함정(R15)만 추가 점검한다
+        # (트리거는 흐름 구조를 바꾸지 않으므로 전체 재검수는 과잉).
+        violations = violations + [
+            v.as_dict() for v in run_environment_checks(flow, get_catalog()) if v.rule == "R15"
+        ]
+        note = f"실행 제안: {trigger['title']}" + (f" — {trigger['reason']}" if trigger.get("reason") else "")
+        flow["notes"] = f"{flow['notes']} / {note}" if flow.get("notes") else note
+
     answer = _flow_answer(flow, violations)
     cards = flow.get("needs_input") or []
     if cards:
