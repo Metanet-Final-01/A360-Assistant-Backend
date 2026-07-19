@@ -65,8 +65,13 @@ class BackendCatalog:
                 # 청킹으로 (pkg, act)당 여러 행이 있을 수 있으나 metadata.schema는 동일 — 첫 행이면 충분.
                 continue
             if isinstance(metadata, str):  # jsonb는 dict로 오지만 드라이버 차이에 방어적으로
-                metadata = json.loads(metadata)
-            schema = (metadata or {}).get("schema")
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = None
+            # 최상위가 dict가 아니면(배열·문자열·깨진 JSON) schema 없음으로 처리 — 한 행의
+            # 비정상 metadata가 전체 적재를 AttributeError로 무너뜨리지 않게 한다.
+            schema = metadata.get("schema") if isinstance(metadata, dict) else None
             if not isinstance(schema, dict):
                 # schema 없는 행도 어휘로는 실존한다(v2 문서 카탈로그의 보강 미도달 행 —
                 # --enrich 생략 빌드면 액션의 ~92%). parameters 키를 아예 두지 않아

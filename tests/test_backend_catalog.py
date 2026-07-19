@@ -85,6 +85,23 @@ def test_schema_row_upgrades_earlier_placeholder(monkeypatch):
     assert spec["parameters"] == []
 
 
+def test_malformed_metadata_rows_do_not_break_load(monkeypatch):
+    # 비정상 metadata(배열 JSON 문자열·깨진 JSON·비딕셔너리)가 한 행이라도 있으면 전체
+    # 적재가 AttributeError로 무너지던 것 방지 (PR #283 CodeRabbit 리뷰 반영) — 해당
+    # 행은 params_unknown 최소 스펙으로 살리고, 같은 배치의 정상 행은 그대로 적재된다.
+    rows = [
+        ("Excel advanced", "Open", {"schema": {"name": "Open", "parameters": []}}),
+        ("Broken", "ArrayMeta", "[1, 2]"),
+        ("Broken", "BadJson", "{not json"),
+        ("Broken", "ListMeta", [1, 2]),
+    ]
+    cat = _catalog_with(rows, monkeypatch)
+    assert cat.get_action_schema("Excel advanced", "Open")["parameters"] == []
+    for act in ("ArrayMeta", "BadJson", "ListMeta"):
+        spec = cat.get_action_schema("Broken", act)
+        assert spec is not None and spec["params_unknown"] is True
+
+
 def test_placeholder_never_overwrites_schema_row(monkeypatch):
     rows = [
         ("Email", "Send", {"schema": {"name": "Send", "parameters": []}}),
