@@ -247,7 +247,19 @@ def embed_texts(texts: list[str], on_progress=None) -> list[list[float]]:
     capture_result=lambda r: {"provider": config.EMBEDDING_PROVIDER, "dim": len(r)},
 )
 def embed_query(text: str) -> list[float]:
-    """검색 시 질의 임베딩 (Voyage는 query/document input_type을 구분)."""
+    """검색 시 질의 임베딩 (Voyage는 query/document input_type을 구분).
+
+    캐시 적용 (RPA-211) — 이 호출이 RAG 5.5초 중 **1,991ms(36%)** 를 차지한다.
+    질의→벡터는 **문서가 바뀌어도 안 변하므로**(모델에만 의존) 무효화가 필요 없다.
+    모델·차원이 키에 들어가 모델 교체 시 자동으로 옛 벡터를 버린다.
+    """
+    from app.services import rag_cache
+
+    key = rag_cache.embedding_key(text, config.EMBEDDING_MODEL, config.EMBEDDING_DIM)
+    cached = rag_cache.get_embedding(key)
+    if cached is not None:
+        return cached
+
     if config.EMBEDDING_PROVIDER == "voyage":
         data = post_with_retry(
             "https://api.voyageai.com/v1/embeddings",
@@ -255,8 +267,11 @@ def embed_query(text: str) -> list[float]:
             {"model": config.EMBEDDING_MODEL, "input": [text], "input_type": "query"},
         )
         _record_embed_usage(data)
-        return data["data"][0]["embedding"]
-    return _embed_openai([text])[0]
+        vector = data["data"][0]["embedding"]
+    else:
+        vector = _embed_openai([text])[0]
+    rag_cache.put_embedding(key, vector)
+    return vector
 
 
 @log_call(

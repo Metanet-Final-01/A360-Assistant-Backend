@@ -105,6 +105,10 @@ def _candidate_summary(item: dict) -> dict:
     capture_result=lambda r: {
         "count": len(r),
         "retrieval_sources": [item.get("retrieval_source") for item in r],
+        # 🔴 BM25 저하 여부 (RPA-211). 이게 없어 "지난 주에 몇 번 저하됐나"를
+        # 사후에 답할 수 없었다 — retrieval_sources는 문서별 출처라 저하 표시가 아니다.
+        # /health는 도달성을 보고 검색은 질의 성공을 본다 — 둘은 다르다(CONVENTIONS §9).
+        "bm25_available": all(item.get("bm25_available", True) for item in r) if r else None,
         "reranked": any("rerank_score" in item for item in r),
         # 실제로 뭐가 뽑혔나(상위 5) — "왜 이 스텝만 uncovered인지" 재구성·추천 근거(FR-11)
         "candidates": [_candidate_summary(item) for item in r[:5]],
@@ -164,6 +168,7 @@ def search(
     capture_result=lambda r: {
         "count": len(r),
         "retrieval_sources": [item.get("retrieval_source") for item in r],
+        "bm25_available": all(item.get("bm25_available", True) for item in r) if r else None,
         "reranked": any("rerank_score" in item for item in r),
     },
 )
