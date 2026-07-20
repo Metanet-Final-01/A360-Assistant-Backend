@@ -102,7 +102,13 @@ def test_persist_is_best_effort(monkeypatch):
 
 
 def test_write_log_masks_jsonl_and_calls_persist(tmp_path, monkeypatch):
-    """_write_log는 JSONL을 마스킹해 기록하고(원문 유출 방지) 관측 적재도 호출한다."""
+    """_write_log는 JSONL을 마스킹해 기록하고(원문 유출 방지) 관측 적재도 호출한다.
+
+    RAG_EVENT_QUEUE=0으로 **동기 경로**를 명시한다 (RPA-221) — 기본값은 큐 적재라
+    _persist_rag_event가 워커 스레드에서 불린다. 큐 경로의 마스킹 보장은
+    tests/test_rag_event_queue.py가 따로 검증한다.
+    """
+    monkeypatch.setenv("RAG_EVENT_QUEUE", "0")
     monkeypatch.setattr(obs.config, "LOG_DIR", tmp_path)
     called = {}
     monkeypatch.setattr(obs, "_persist_rag_event", lambda rec: called.setdefault("rec", rec))

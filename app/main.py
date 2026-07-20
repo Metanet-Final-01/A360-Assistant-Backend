@@ -73,6 +73,11 @@ async def lifespan(app: FastAPI):
     yield
     stop_scheduler()
     await close_pools()
+    # 관측 이벤트 큐(RPA-221) — 남은 이벤트를 내보내고 워커를 정리한다. 지연 생성이라
+    # 기동 시 할 일은 없고, 여기서 flush해야 정상 종료에서 유실이 0이 된다.
+    from app.rag.event_queue import stop as stop_event_queue
+
+    stop_event_queue()
 
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
