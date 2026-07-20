@@ -36,6 +36,7 @@ class BackendCatalog:
 
     def __init__(self) -> None:
         self._index: dict[tuple[str, str], dict] | None = None
+        self._triggers: list[dict] | None = None
         self._lock = threading.Lock()
 
     def _load(self) -> dict[tuple[str, str], dict]:
@@ -103,6 +104,57 @@ class BackendCatalog:
     def get_action_schema(self, package: str, action: str) -> dict | None:
         """(package, action)의 구조 스펙을 반환한다. 없으면 None."""
         return self._ensure_index().get((package, action))
+
+    def list_trigger_schemas(self) -> list[dict]:
+        """trigger_schema 행 전량 — [{package, title, url, content}] (RPA-206 A-2 소비부).
+
+        트리거 카탈로그는 7패키지·9문서 규모라 검색이 아니라 전량 메뉴로 소비한다 —
+        희귀 소스타입은 하이브리드 검색 상위 k에서 굶는다(후단 필터 실측 0-hit).
+        행이 없으면(구 카탈로그) 빈 목록을 반환해 소비처가 조용히 기능을 쉰다.
+        """
+        if self._triggers is None:
+            with self._lock:
+                if self._triggers is None:
+                    loaded = self._load_triggers()
+                    if loaded is None:
+                        # 일시 실패는 캐싱하지 않는다 — 빈 목록으로 굳히면 DB가 복구돼도
+                        # 재시작 전까지 트리거 제안이 계속 죽는다(_ensure_index와 대칭).
+                        return []
+                    self._triggers = loaded
+        return self._triggers
+
+    def _load_triggers(self) -> list[dict] | None:
+        from app.rag.store import db
+
+        try:
+            conn = db.connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT package_name, title, url, content, chunk_index
+                        FROM rag_documents
+                        WHERE source_type = 'trigger_schema'
+                        ORDER BY package_name, title, chunk_index
+                        """
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — 트리거 메뉴 실패가 추천 전체를 막으면 안 된다
+            logger.warning("trigger_schema 조회 실패 — 트리거 제안 없이 진행", exc_info=True)
+            return None  # 실패 신호 — 호출부가 캐싱하지 않고 다음 호출에서 재시도한다
+
+        out: list[dict] = []
+        seen: set[tuple] = set()
+        for package_name, title, url, content, _chunk in rows:
+            key = (package_name, title)
+            if key in seen:  # 청킹 복수 행 — 메뉴에는 첫 청크(개요부)면 충분
+                continue
+            seen.add(key)
+            out.append({"package": package_name, "title": title, "url": url, "content": content or ""})
+        logger.info("트리거 메뉴 적재: %d건", len(out))
+        return out
 
     def iter_action_schemas(self):
         """전체 액션 스펙을 순회한다 — agent v3의 세션 레지스트리·라벨 인덱스 유도용.

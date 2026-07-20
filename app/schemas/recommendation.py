@@ -159,6 +159,22 @@ class FlowSpec(BaseModel):
     assumptions: list[str] = Field(default_factory=list, description="생성이 임의로 정한 전제(명시 강제)")
 
 
+class TriggerRecommendation(BaseModel):
+    """이 자동화를 '언제 실행할지' 제안 (A-2) — 실봇 JSON triggers[]·Control Room 스케줄에 대응.
+
+    업무정의서의 시점 표현("매일 아침", "메일이 오면", "폴더에 파일이 생기면")을 실행 방식
+    제안으로 잇는다. kind="trigger"는 트리거 패키지(무인 실행·Public 체크인 전제),
+    kind="schedule"은 Control Room > Activity 예약 실행이다.
+    """
+
+    kind: Literal["trigger", "schedule"] = "trigger"
+    package: str | None = Field(None, description="트리거 패키지명 (예: 'Email trigger') — schedule이면 None")
+    title: str = Field(description="트리거/스케줄 이름 (사람이 읽는)")
+    reason: str | None = Field(None, description="업무정의서의 어떤 표현이 근거인지")
+    setup_hint: str | None = Field(None, description="설정 방법 한 줄 요약")
+    sources: list[RagSource] = Field(default_factory=list)
+
+
 class Recommendation(BaseModel):
     """추천안 전체 — 이 JSON이 최종 내보내기 형식이자 골드셋 채점 대상이다."""
 
@@ -166,6 +182,9 @@ class Recommendation(BaseModel):
     steps: list[StepRecommendation]
     variables: list[BotVariable] = Field(default_factory=list)
     notes: str | None = Field(None, description="전제·주의사항, 예: 'Knox 메일은 Email 패키지 기준'")
+    trigger: TriggerRecommendation | None = Field(
+        None, description="실행 시점 제안 (A-2) — 시점 의도가 없으면 None"
+    )
     needs_input: list[QuestionCard] = Field(
         default_factory=list, description="사용자 입력 대기 질문 카드 (v3)"
     )

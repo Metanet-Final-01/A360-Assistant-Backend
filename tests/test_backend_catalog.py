@@ -102,6 +102,27 @@ def test_malformed_metadata_rows_do_not_break_load(monkeypatch):
         assert spec is not None and spec["params_unknown"] is True
 
 
+def test_trigger_menu_failure_not_cached(monkeypatch):
+    # 일시 DB 실패가 빈 목록으로 캐싱되면 복구 후에도 재시작 전까지 트리거 제안이 죽는다
+    # (PR #288 CodeRabbit 리뷰 반영) — 실패는 캐싱하지 않고 다음 호출에서 재시도한다.
+    from app.rag.store import db
+
+    calls = {"n": 0}
+    rows = [("Email trigger", "Creating an email trigger", "/x", "메일 수신 시 실행", 0)]
+
+    def _connect():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("db down")
+        return _FakeConn(rows)
+
+    monkeypatch.setattr(db, "connect", _connect)
+    cat = BackendCatalog()
+    assert cat.list_trigger_schemas() == []  # 실패 — 빈 목록 반환, 캐싱 안 함
+    out = cat.list_trigger_schemas()  # DB 복구 후 재시도 성공
+    assert [r["package"] for r in out] == ["Email trigger"]
+
+
 def test_placeholder_never_overwrites_schema_row(monkeypatch):
     rows = [
         ("Email", "Send", {"schema": {"name": "Send", "parameters": []}}),

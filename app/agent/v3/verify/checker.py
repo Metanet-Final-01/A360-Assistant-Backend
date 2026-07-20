@@ -27,6 +27,8 @@ v3 신설 (run_flow_checks가 통합 실행):
   R10 dead output — produces 됐으나 아무도 consumes 안 함            (warning)
   R11 변수 타입 정합 — $var$ 참조 파라미터의 기대 타입과 변수 타입 불일치
   R12 표준 골격 적합성 — 예외 처리 부재·Finally 밖 세션 닫기          (warning)
+  R15 attended 함정 — 트리거 자동 실행 흐름의 대화형 액션             (warning)
+  R16 플랫폼 — Windows 미지원(macOS 전용) 패키지 사용                (warning)
 
 R9~R11의 원료는 스키마 확장 필드 produces/consumes(app/schemas/recommendation.py의
 VarRef)다. composer 명시가 1차이고 `$var$` 파싱이 교차 보정한다 — 흐름도에 produces
@@ -284,13 +286,14 @@ def run_checks(actions: list[dict], catalog: CatalogLookup) -> list[Violation]:
 def derive_session_registry(catalog=None) -> tuple[frozenset, frozenset]:
     """세션 opener/closer 집합을 수기 상수 + 카탈로그 메타에서 유도한다.
 
-    - opener: 스펙 return_type이 SESSION인 액션(세션을 '리턴'하는 open 계열 — cloudExcelOpen형).
-    - closer: opener를 보유한 패키지에서 액션명이 close / end+session 패턴인 액션.
-      (닫기는 스펙에 구조 신호가 없어 이름 휴리스틱이다 — opener 보유 패키지로 좁혀 오탐 방지.)
+    - opener/closer 1순위: 스펙의 session_role — v2 문서 카탈로그 빌드가 패키지 단위로
+      유도해 싣는 명시 신호(48패키지 실측). 표기 세대와 무관하게 동작한다.
+    - opener 2순위: 스펙 return_type이 SESSION인 액션(구 JAR 카탈로그의 cloudExcelOpen형).
+    - closer 보강: opener를 보유한 패키지에서 액션명이 close / end+session 패턴인 액션.
+      (구 카탈로그엔 닫기 구조 신호가 없어 이름 휴리스틱 — opener 보유 패키지로 좁혀 오탐 방지.)
 
-    카탈로그가 순회를 지원하지 않으면(iter_action_schemas 부재 — 테스트 스텁, v2 카탈로그)
-    상수만 반환한다. 실제 세션 패키지는 DLL·DataRobot·XML 등 상수 3개보다 훨씬 많아
-    (RAG_CATALOG 실측) 유도가 커버리지를 넓힌다.
+    카탈로그가 순회를 지원하지 않으면(iter_action_schemas 부재 — 테스트 스텁) 상수만
+    반환한다. 실제 세션 패키지는 상수 4개보다 훨씬 많아 유도가 커버리지를 넓힌다.
     """
     openers = set(SESSION_OPENERS)
     closers = set(SESSION_CLOSERS)
@@ -302,8 +305,15 @@ def derive_session_registry(catalog=None) -> tuple[frozenset, frozenset]:
             specs = []
         for s in specs:
             pkg, act = s.get("package"), s.get("action")
-            rt = s.get("return_type")
-            if pkg and act and isinstance(rt, str) and rt.strip().upper() == "SESSION":
+            if not pkg or not act:
+                continue
+            role = s.get("session_role")  # v2 문서 카탈로그의 명시 신호 (1순위)
+            if role == "opener":
+                openers.add((pkg, act))
+            elif role == "closer":
+                closers.add((pkg, act))
+            rt = s.get("return_type")  # 구 JAR 카탈로그 신호 (2순위)
+            if isinstance(rt, str) and rt.strip().upper() == "SESSION":
                 openers.add((pkg, act))
         opener_pkgs = {p for p, _ in openers}
         for s in specs:
@@ -316,13 +326,22 @@ def derive_session_registry(catalog=None) -> tuple[frozenset, frozenset]:
     return frozenset(openers), frozenset(closers)
 
 
+def _is_session_param(name: object) -> bool:
+    """세션 이름을 담는 파라미터인지 — 표기 세대에 무관하게 판정한다.
+
+    구 JAR "session"/"sessionName"(SESSION_PARAM_NAMES)과 v2 문서 라벨 "Session name"을
+    모두 잡도록 정규화 부분 일치("session" 포함)로 본다.
+    """
+    return isinstance(name, str) and "session" in name.replace(" ", "").lower()
+
+
 def _session_name(action: dict) -> str | None:
-    """액션의 세션 파라미터(session/sessionName) 값을 세션 이름으로 반환. 없으면 None.
+    """액션의 세션 파라미터 값을 세션 이름으로 반환. 없으면 None.
 
     'Default'도 유효한 세션 이름이다 — A360에서 Default 세션도 명시적으로 열어야 한다.
     """
     for p in action.get("parameters", []):
-        if p.get("name") in SESSION_PARAM_NAMES:
+        if _is_session_param(p.get("name")):
             value = p.get("value")
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -954,7 +973,56 @@ def run_structure_checks(steps: list[dict]) -> list[Violation]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 통합 실행기 (v3) — L0(R1~R6) + L1(R7~R14) 한 번에
+# R15~R16 — 실행 환경 정합 (v3, 무LLM, warning 전용)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 사람 개입이 필수인 대화형 패키지 — 무인 실행에서 봇을 무기한 멈춘다 (표기 정규화 비교).
+_ATTENDED_PACKAGES = frozenset({"messagebox", "prompt"})
+
+
+def run_environment_checks(flow: dict, catalog: CatalogLookup) -> list[Violation]:
+    """실행 환경 정합 검사 (R15~R16) — 둘 다 warning: 경고하되 수리를 강제하지 않는다.
+
+    R15 (attended 함정): 흐름도에 실행 트리거(flow.trigger)가 붙어 있으면 사실상 무인
+        실행인데, Message box/Prompt 같은 대화형 액션은 사람이 없을 때 봇을 무기한
+        멈춘다 (A360 attended 전용 성격 — 조사 §5.2).
+    R16 (플랫폼): 카탈로그 platform 메타(등기부 로스터 실측)가 windows=False인 패키지
+        (Apple 계열 등)는 Windows 러너에서 실행 불가 — 초보자 기본 환경을 Windows로
+        가정하고 경고만 한다(차단 아님, 사용자 환경을 모르므로).
+    """
+    violations: list[Violation] = []
+    has_trigger = bool(flow.get("trigger"))
+
+    def walk(actions: list[dict], path: str, step_id: str | None) -> None:
+        for idx, a in enumerate(actions):
+            pkg, act = a.get("package"), a.get("action")
+            loc = f"{path}[{idx}]"
+            if has_trigger and pkg and pkg.replace(" ", "").lower() in _ATTENDED_PACKAGES:
+                violations.append(Violation(
+                    "R15", loc,
+                    f"트리거로 자동 실행되는 흐름에 대화형 액션({pkg})이 있습니다 — 사람이 "
+                    "없는 무인 실행에서는 이 액션에서 봇이 멈춥니다. 기록(Log)·메일 알림으로 "
+                    "대체를 권장합니다.",
+                    package=pkg, action=act, step_id=step_id, severity="warning",
+                ))
+            spec = catalog.get_action_schema(pkg, act) if pkg and act else None
+            platform = (spec or {}).get("platform")
+            if isinstance(platform, dict) and platform.get("windows") is False:
+                violations.append(Violation(
+                    "R16", loc,
+                    f"'{pkg}' 패키지는 Windows를 지원하지 않습니다(macOS 전용) — Windows "
+                    "러너에서는 이 액션이 실행되지 않습니다. 대상 환경을 확인해 주세요.",
+                    package=pkg, action=act, step_id=step_id, severity="warning",
+                ))
+            walk(a.get("children") or [], f"{loc}.children", step_id)
+
+    for step in flow.get("steps") or []:
+        walk(step.get("actions") or [], "actions", step.get("step_id"))
+    return violations
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 통합 실행기 (v3) — L0(R1~R6) + L1(R7~R16) 한 번에
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_flow_checks(
@@ -980,6 +1048,7 @@ def run_flow_checks(
     violations.extend(run_session_checks(steps, reg, emit_r12=True))
     violations.extend(run_dataflow_checks(flow, catalog))
     violations.extend(run_structure_checks(steps))
+    violations.extend(run_environment_checks(flow, catalog))
 
     # R12a: 규모 있는 흐름도에 예외 처리 구조가 아예 없음 (A360 표준 골격 위배 — warning)
     total, has_eh = _flow_stats(steps)
