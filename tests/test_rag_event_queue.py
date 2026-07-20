@@ -289,11 +289,11 @@ def test_stop_counts_inflight_batch_when_queue_empty(caplog):
         # 워커가 전부 배치로 가져가 큐가 빌 때까지 기다린다 — 그래야 '큐는 비었는데
         # 처리 중 배치만 있는' 상황이 성립한다.
         deadline = time.time() + 3.0
-        while not eq._queue.empty() and time.time() < deadline:
+        while not eq._writer.q.empty() and time.time() < deadline:
             time.sleep(0.01)
         eq.flush(timeout=0.5)  # 배치 창을 끊어 적재를 시작시킨다
         assert blocked.wait(timeout=3.0), "워커가 적재에 진입하지 않았다"
-        assert eq._queue.empty(), "이 테스트는 큐가 빈 상태를 전제한다"
+        assert eq._writer.q.empty(), "이 테스트는 큐가 빈 상태를 전제한다"
         assert seen[0] >= 1
 
         before = eq.dropped_count()
@@ -305,6 +305,69 @@ def test_stop_counts_inflight_batch_when_queue_empty(caplog):
         )
     finally:
         release.set()
+        eq.reset_for_tests()
+        eq.configure(obs._persist_rag_events)
+
+
+def test_overlapping_workers_do_not_clobber_inflight(caplog):
+    """🔴 종료 타임아웃으로 워커가 겹쳐도 유실 집계가 서로 덮어써지지 않는다 (CodeRabbit #302).
+
+    처리중 건수가 모듈 전역이면, 살아남은 이전 워커의 finally가 새 워커의 값을 0으로
+    덮어써 새 워커도 타임아웃될 때 그 배치가 집계에서 빠진다. 상태를 _Writer
+    인스턴스에 두는 이유가 이것이다.
+    """
+    releases: list[threading.Event] = []
+    entered: list[int] = []
+
+    def _stuck(records):
+        ev = threading.Event()
+        releases.append(ev)
+        entered.append(len(records))
+        ev.wait(timeout=10.0)
+
+    def _wait(pred, why, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pred():
+                return
+            time.sleep(0.01)
+        raise AssertionError(why)
+
+    eq.reset_for_tests()
+    eq.configure(_stuck)
+    try:
+        # 워커 A — 1건을 들고 적재에서 멈춘다
+        eq.enqueue({"event": "a"})
+        eq.flush(timeout=0.5)
+        _wait(lambda: len(entered) >= 1, "워커 A가 적재에 진입하지 않았다")
+        eq.stop(timeout=0.3)  # 타임아웃 → A는 살아 있고 전역에서만 분리된다
+        assert eq.dropped_count() >= 1
+
+        # 워커 B — 새로 만들어져 3건을 들고 멈춘다
+        for i in range(3):
+            eq.enqueue({"event": f"b{i}"})
+        _wait(lambda: eq._writer is not None and eq._writer.q.empty(),
+              "워커 B가 큐를 비우지 않았다")
+        eq.flush(timeout=0.5)
+        _wait(lambda: len(entered) >= 2, "워커 B가 적재에 진입하지 않았다")
+        b_size = entered[1]
+        assert b_size >= 1
+
+        # 여기서 A를 풀어준다 — A의 finally가 돈다. 전역 상태였다면 B의 값이 0이 된다.
+        releases[0].set()
+        time.sleep(0.3)
+
+        before = eq.dropped_count()
+        with caplog.at_level("WARNING"):
+            eq.stop(timeout=0.3)
+
+        assert eq.dropped_count() == before + b_size, (
+            f"이전 워커가 새 워커의 처리중 집계({b_size}건)를 덮어썼다 "
+            f"({before} → {eq.dropped_count()})"
+        )
+    finally:
+        for ev in releases:
+            ev.set()
         eq.reset_for_tests()
         eq.configure(obs._persist_rag_events)
 
