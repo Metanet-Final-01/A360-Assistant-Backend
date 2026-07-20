@@ -515,3 +515,25 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "secrets.ASSURANCE_WRITER_TOKEN" in publish_job
     assert "ASSURANCE_WRITER_TOKEN" not in observe
     assert "secrets." not in observe
+
+
+def test_backend_deploy_injects_writer_credentials_from_protected_environment():
+    workflow = (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    template = (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8")
+    build_job, deploy_job = workflow.split("\n  deploy:", 1)
+    token_parameter = template.split("  AssuranceWriterToken:", 1)[1].split(
+        "\n  AssuranceWriterRepository:", 1
+    )[0]
+
+    assert "ASSURANCE_WRITER_TOKEN" not in build_job
+    assert "environment: change-assurance-writer" in deploy_job
+    assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_job
+    assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_job
+
+    assert "NoEcho: true" in token_parameter
+    assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in template
+    assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in template
+    assert 'get("ASSURANCE_WRITER_TOKEN", "")' in template
+    assert 'get("ASSURANCE_WRITER_REPOSITORY", "")' in template
+    assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in template
+    assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in template
