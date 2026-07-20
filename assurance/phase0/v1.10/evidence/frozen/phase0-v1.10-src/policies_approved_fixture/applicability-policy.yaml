@@ -1,0 +1,27 @@
+kind: applicability-policy
+policy_id: app.applicability
+version: 0.1.0-fixture
+state: approved
+approval:
+  approver_role: phase0-fixture-only
+  approval_ref: FIXTURE-NOT-A-REAL-APPROVAL
+  approved_at: '2026-07-10T00:00:00Z'
+applicability:
+- trigger: dependency_changed
+  controls:
+  - CH-04
+- trigger: agent_owned_paths_touched
+  controls:
+  - CH-06
+- trigger: path_glob
+  paths:
+  - app/schemas/recommendation.py
+  - app/api/sessions.py
+  controls:
+  - OH-02
+- trigger: risk_profile
+  risk_profile: db_migration
+  controls:
+  - CH-07
+fixture_warning: TEST FIXTURE ONLY. Not a human approval. The shipped policies/ directory remains state=unapproved pending
+  D-9/D-11/D-20.

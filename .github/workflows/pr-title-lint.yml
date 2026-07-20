@@ -1,0 +1,31 @@
+# PR 제목이 커밋 컨벤션(type(scope): 제목)을 따르는지 검사
+# PR 제목은 이력 조회·머지 커밋의 단위이므로 컨벤션을 강제한다
+name: PR Title Lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            refactor
+            docs
+            test
+            chore
+            ci
+            perf
+            style
+          # 한글 제목 허용 (기본 subject 패턴은 그대로 통과)
+          requireScope: false

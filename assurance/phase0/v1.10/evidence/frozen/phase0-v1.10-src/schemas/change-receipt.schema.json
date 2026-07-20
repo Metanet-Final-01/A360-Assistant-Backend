@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:change-receipt:1.8",
+  "title": "Change Attestation Receipt",
+  "description": "v1.6 review item 1. A bare assurance_report_digest only proves a report EXISTS; it does not prove the Change was attested and allowed. This receipt is the hand-off document between the existing Change harness and the Evidence harness. It is NOT a new harness and adds no new control: it records what the Change attestor already decided, so Output can bind to it. Codex reproduced the gap: an unrelated, internally contradictory Change report authorised Output with decision=allow.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "receipt_id",
+    "generated_at",
+    "evidence_valid",
+    "decision",
+    "repository_id",
+    "commit",
+    "assurance_report_digest",
+    "change_manifest_digest",
+    "control_registry_digest",
+    "schema_digest",
+    "policy_digests",
+    "attestor"
+  ],
+  "$defs": {
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    }
+  },
+  "properties": {
+    "kind": {
+      "const": "change-receipt"
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^CR-[0-9a-zA-Z._-]+$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "evidence_valid": {
+      "type": "boolean"
+    },
+    "decision": {
+      "enum": [
+        "allow",
+        "deny",
+        "observe"
+      ],
+      "description": "Copied from the Change AttestationResult. Only `allow` may support an assured Output."
+    },
+    "decision_reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonempty"
+      }
+    },
+    "repository_id": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "commit": {
+      "$ref": "#/$defs/git_sha"
+    },
+    "assurance_report_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "change_manifest_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "control_registry_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "schema_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "policy_digests": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/sha256"
+      },
+      "minProperties": 1,
+      "description": "Every policy digest the Change attestation resolved."
+    },
+    "attestor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "version": {
+          "$ref": "#/$defs/nonempty"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "A receipt that did not allow cannot claim valid allow evidence.",
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "allow"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidence_valid": {
+            "const": true
+          }
+        }
+      }
+    }
+  ]
+}

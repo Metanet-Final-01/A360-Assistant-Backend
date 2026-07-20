@@ -1,0 +1,454 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a360.local/schemas/rpa179-verification-result.schema.json",
+  "title": "RPA-179 deterministic reference verification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verified_at",
+    "result",
+    "baseline_commit",
+    "reference",
+    "environment",
+    "runs",
+    "regression",
+    "determinism",
+    "summary",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "rpa179.verification.1"},
+    "verified_at": {"type": "string", "format": "date-time"},
+    "result": {"const": "pass"},
+    "baseline_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "source_manifest_sha256",
+        "corrections_sha256",
+        "corrected_tree_digest",
+        "corrected_file_count",
+        "verified_source_files",
+        "finding_matrix_sha256",
+        "verification_tools"
+      ],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "source_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "corrections_sha256": {"$ref": "#/$defs/digest"},
+        "corrected_tree_digest": {"$ref": "#/$defs/digest"},
+        "corrected_file_count": {"const": 52},
+        "verified_source_files": {"const": 45},
+        "finding_matrix_sha256": {"$ref": "#/$defs/digest"},
+        "verification_tools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "materialize.py",
+            "regression.py",
+            "verify.py",
+            "verification-result.schema.json"
+          ],
+          "properties": {
+            "materialize.py": {"$ref": "#/$defs/digest"},
+            "regression.py": {"$ref": "#/$defs/digest"},
+            "verify.py": {"$ref": "#/$defs/digest"},
+            "verification-result.schema.json": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python_version",
+        "python_implementation",
+        "system",
+        "release",
+        "machine",
+        "platform",
+        "git_version",
+        "dependencies",
+        "dependency_digest"
+      ],
+      "properties": {
+        "python_version": {"type": "string", "minLength": 1},
+        "python_implementation": {"type": "string", "minLength": 1},
+        "system": {"type": "string", "minLength": 1},
+        "release": {"type": "string", "minLength": 1},
+        "machine": {"type": "string"},
+        "platform": {"type": "string", "minLength": 1},
+        "git_version": {"type": "string", "pattern": "^git version "},
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jsonschema", "PyYAML"],
+          "properties": {
+            "jsonschema": {"type": "string", "minLength": 1},
+            "PyYAML": {"type": "string", "minLength": 1}
+          }
+        },
+        "dependency_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "runs": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/run"},
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": ["run_id"],
+            "properties": {"run_id": {"const": "run-1"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["run_id"],
+            "properties": {"run_id": {"const": "run-2"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "regression": {"$ref": "#/$defs/regression"},
+    "determinism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tree_digest_equal",
+        "regression_equal",
+        "transcripts_equal",
+        "validated_common_digests"
+      ],
+      "properties": {
+        "tree_digest_equal": {"const": true},
+        "regression_equal": {"const": true},
+        "transcripts_equal": {"const": true},
+        "validated_common_digests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tree_digest", "regression_digest", "transcript_digest"],
+          "properties": {
+            "tree_digest": {"$ref": "#/$defs/digest"},
+            "regression_digest": {"$ref": "#/$defs/digest"},
+            "transcript_digest": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_cases",
+        "executable_rules",
+        "regression_cases",
+        "actionable_findings",
+        "historical_findings",
+        "selfattack_expected_residuals"
+      ],
+      "properties": {
+        "contract_cases": {"const": 68},
+        "executable_rules": {"const": 15},
+        "regression_cases": {"const": 23},
+        "actionable_findings": {"const": 25},
+        "historical_findings": {"const": 3},
+        "selfattack_expected_residuals": {"const": 4}
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "findingSet": {
+      "type": "array",
+      "minItems": 25,
+      "maxItems": 25,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "CR-01", "CR-02", "CR-03", "CR-04", "CR-05", "CR-06", "CR-07",
+          "CR-08", "CR-09", "CR-10", "CR-11", "CR-12", "CR-13", "CR-14",
+          "CR-15", "CR-16", "CR-18", "CR-19", "CR-20", "CR-21", "CR-24",
+          "CR-25", "CR-26", "CR-27", "CR-28"
+        ]
+      }
+    },
+    "namedContains": {
+      "typed_deny": {"contains": {"required": ["name"], "properties": {"name": {"const": "typed_deny"}}}, "minContains": 1, "maxContains": 1},
+      "synthetic_git_paths": {"contains": {"required": ["name"], "properties": {"name": {"const": "synthetic_git_paths"}}}, "minContains": 1, "maxContains": 1},
+      "coverage_matrix": {"contains": {"required": ["name"], "properties": {"name": {"const": "coverage_matrix"}}}, "minContains": 1, "maxContains": 1},
+      "portable_paths": {"contains": {"required": ["name"], "properties": {"name": {"const": "portable_paths"}}}, "minContains": 1, "maxContains": 1},
+      "registry_evidence_scope": {"contains": {"required": ["name"], "properties": {"name": {"const": "registry_evidence_scope"}}}, "minContains": 1, "maxContains": 1},
+      "artifact_errors": {"contains": {"required": ["name"], "properties": {"name": {"const": "artifact_errors"}}}, "minContains": 1, "maxContains": 1},
+      "root_script_scan": {"contains": {"required": ["name"], "properties": {"name": {"const": "root_script_scan"}}}, "minContains": 1, "maxContains": 1},
+      "waiver_duration": {"contains": {"required": ["name"], "properties": {"name": {"const": "waiver_duration"}}}, "minContains": 1, "maxContains": 1},
+      "agent_policy_approval": {"contains": {"required": ["name"], "properties": {"name": {"const": "agent_policy_approval"}}}, "minContains": 1, "maxContains": 1},
+      "control_state": {"contains": {"required": ["name"], "properties": {"name": {"const": "control_state"}}}, "minContains": 1, "maxContains": 1},
+      "dynamic_import_alias": {"contains": {"required": ["name"], "properties": {"name": {"const": "dynamic_import_alias"}}}, "minContains": 1, "maxContains": 1},
+      "confirmed_evidence": {"contains": {"required": ["name"], "properties": {"name": {"const": "confirmed_evidence"}}}, "minContains": 1, "maxContains": 1},
+      "rule_versions": {"contains": {"required": ["name"], "properties": {"name": {"const": "rule_versions"}}}, "minContains": 1, "maxContains": 1},
+      "runtime_provenance": {"contains": {"required": ["name"], "properties": {"name": {"const": "runtime_provenance"}}}, "minContains": 1, "maxContains": 1},
+      "waiver_approval": {"contains": {"required": ["name"], "properties": {"name": {"const": "waiver_approval"}}}, "minContains": 1, "maxContains": 1},
+      "selfcheck_exit": {"contains": {"required": ["name"], "properties": {"name": {"const": "selfcheck_exit"}}}, "minContains": 1, "maxContains": 1},
+      "git_failure": {"contains": {"required": ["name"], "properties": {"name": {"const": "git_failure"}}}, "minContains": 1, "maxContains": 1},
+      "reason_assertion": {"contains": {"required": ["name"], "properties": {"name": {"const": "reason_assertion"}}}, "minContains": 1, "maxContains": 1},
+      "full_projection": {"contains": {"required": ["name"], "properties": {"name": {"const": "full_projection"}}}, "minContains": 1, "maxContains": 1},
+      "policy_closed": {"contains": {"required": ["name"], "properties": {"name": {"const": "policy_closed"}}}, "minContains": 1, "maxContains": 1},
+      "receipt_positive": {"contains": {"required": ["name"], "properties": {"name": {"const": "receipt_positive"}}}, "minContains": 1, "maxContains": 1},
+      "applicability_companions": {"contains": {"required": ["name"], "properties": {"name": {"const": "applicability_companions"}}}, "minContains": 1, "maxContains": 1},
+      "receipt_poison": {"contains": {"required": ["name"], "properties": {"name": {"const": "receipt_poison"}}}, "minContains": 1, "maxContains": 1}
+    },
+    "commandContract": {"contains": {"required": ["name"], "properties": {"name": {"const": "contract"}}}, "minContains": 1, "maxContains": 1},
+    "commandVertical": {"contains": {"required": ["name"], "properties": {"name": {"const": "vertical"}}}, "minContains": 1, "maxContains": 1},
+    "commandSelfattack": {"contains": {"required": ["name"], "properties": {"name": {"const": "selfattack"}}}, "minContains": 1, "maxContains": 1},
+    "commandRegression": {"contains": {"required": ["name"], "properties": {"name": {"const": "regression"}}}, "minContains": 1, "maxContains": 1},
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "argv",
+        "exit_code",
+        "stdout_sha256",
+        "stderr_sha256",
+        "normalized_stdout_sha256",
+        "normalized_stderr_sha256",
+        "markers",
+        "passed"
+      ],
+      "properties": {
+        "name": {"enum": ["contract", "vertical", "selfattack", "regression"]},
+        "argv": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "exit_code": {"const": 0},
+        "stdout_sha256": {"$ref": "#/$defs/digest"},
+        "stderr_sha256": {"$ref": "#/$defs/digest"},
+        "normalized_stdout_sha256": {"$ref": "#/$defs/digest"},
+        "normalized_stderr_sha256": {"$ref": "#/$defs/digest"},
+        "markers": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"const": true}
+        },
+        "passed": {"const": true}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "name": {"const": "contract"},
+            "argv": {"const": ["python", "-B", "contract_self_test.py"]},
+            "markers": {
+              "const": {
+                "cases=68  mismatches=0": true,
+                "executable rules      : 15": true,
+                "COVERAGE GATE: PASS": true
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {"const": "vertical"},
+            "argv": {"const": ["python", "-B", "vertical_paths.py"]},
+            "markers": {
+              "const": {
+                "HL-21  ok=True": true,
+                "VERTICAL PATHS: BOTH POSITIVE PATHS REACHED A SUCCESS STATE": true
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {"const": "selfattack"},
+            "argv": {"const": ["python", "-B", "selfattack.py"]},
+            "markers": {
+              "const": {
+                "attacks that bypassed a v1.10 claim: 4/14": true,
+                "SELF-ATTACK ALLOWLIST: exact D-16 residual set matched": true
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "name": {"const": "regression"},
+            "argv": {
+              "const": [
+                "python",
+                "-B",
+                "assurance/reference/rpa179/regression.py",
+                "--source",
+                "<MATERIALIZED_SOURCE>",
+                "--matrix",
+                "assurance/reference/rpa179/finding-matrix.yaml",
+                "--json",
+                "<RUN_ROOT>/regression.json"
+              ]
+            },
+            "markers": {"const": {"\"coverage_complete\": true": true}}
+          }
+        }
+      ]
+    },
+    "regressionCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "findings", "passed"],
+      "properties": {
+        "name": {
+          "enum": [
+            "typed_deny",
+            "synthetic_git_paths",
+            "coverage_matrix",
+            "portable_paths",
+            "registry_evidence_scope",
+            "artifact_errors",
+            "root_script_scan",
+            "waiver_duration",
+            "agent_policy_approval",
+            "control_state",
+            "dynamic_import_alias",
+            "confirmed_evidence",
+            "rule_versions",
+            "runtime_provenance",
+            "waiver_approval",
+            "selfcheck_exit",
+            "git_failure",
+            "reason_assertion",
+            "full_projection",
+            "policy_closed",
+            "receipt_positive",
+            "applicability_companions",
+            "receipt_poison"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "pattern": "^CR-[0-9]{2}$"}
+        },
+        "passed": {"const": true}
+      },
+      "oneOf": [
+        {"properties": {"name": {"const": "typed_deny"}, "findings": {"const": ["CR-01"]}}},
+        {"properties": {"name": {"const": "synthetic_git_paths"}, "findings": {"const": ["CR-02", "CR-26"]}}},
+        {"properties": {"name": {"const": "coverage_matrix"}, "findings": {"const": ["CR-03"]}}},
+        {"properties": {"name": {"const": "portable_paths"}, "findings": {"const": ["CR-04", "CR-18"]}}},
+        {"properties": {"name": {"const": "registry_evidence_scope"}, "findings": {"const": ["CR-05"]}}},
+        {"properties": {"name": {"const": "artifact_errors"}, "findings": {"const": ["CR-06"]}}},
+        {"properties": {"name": {"const": "root_script_scan"}, "findings": {"const": ["CR-07"]}}},
+        {"properties": {"name": {"const": "waiver_duration"}, "findings": {"const": ["CR-08"]}}},
+        {"properties": {"name": {"const": "agent_policy_approval"}, "findings": {"const": ["CR-09"]}}},
+        {"properties": {"name": {"const": "control_state"}, "findings": {"const": ["CR-10"]}}},
+        {"properties": {"name": {"const": "dynamic_import_alias"}, "findings": {"const": ["CR-11"]}}},
+        {"properties": {"name": {"const": "confirmed_evidence"}, "findings": {"const": ["CR-12"]}}},
+        {"properties": {"name": {"const": "rule_versions"}, "findings": {"const": ["CR-13"]}}},
+        {"properties": {"name": {"const": "runtime_provenance"}, "findings": {"const": ["CR-14"]}}},
+        {"properties": {"name": {"const": "waiver_approval"}, "findings": {"const": ["CR-15"]}}},
+        {"properties": {"name": {"const": "selfcheck_exit"}, "findings": {"const": ["CR-16"]}}},
+        {"properties": {"name": {"const": "git_failure"}, "findings": {"const": ["CR-19"]}}},
+        {"properties": {"name": {"const": "reason_assertion"}, "findings": {"const": ["CR-20"]}}},
+        {"properties": {"name": {"const": "full_projection"}, "findings": {"const": ["CR-21"]}}},
+        {"properties": {"name": {"const": "policy_closed"}, "findings": {"const": ["CR-24"]}}},
+        {"properties": {"name": {"const": "receipt_positive"}, "findings": {"const": ["CR-25"]}}},
+        {"properties": {"name": {"const": "applicability_companions"}, "findings": {"const": ["CR-27"]}}},
+        {"properties": {"name": {"const": "receipt_poison"}, "findings": {"const": ["CR-28"]}}}
+      ]
+    },
+    "regression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "cases",
+        "actionable_findings",
+        "covered_findings",
+        "coverage_complete"
+      ],
+      "properties": {
+        "schema_version": {"const": "rpa179.1"},
+        "cases": {
+          "type": "array",
+          "minItems": 23,
+          "maxItems": 23,
+          "items": {"$ref": "#/$defs/regressionCase"},
+          "allOf": [
+            {"$ref": "#/$defs/namedContains/typed_deny"},
+            {"$ref": "#/$defs/namedContains/synthetic_git_paths"},
+            {"$ref": "#/$defs/namedContains/coverage_matrix"},
+            {"$ref": "#/$defs/namedContains/portable_paths"},
+            {"$ref": "#/$defs/namedContains/registry_evidence_scope"},
+            {"$ref": "#/$defs/namedContains/artifact_errors"},
+            {"$ref": "#/$defs/namedContains/root_script_scan"},
+            {"$ref": "#/$defs/namedContains/waiver_duration"},
+            {"$ref": "#/$defs/namedContains/agent_policy_approval"},
+            {"$ref": "#/$defs/namedContains/control_state"},
+            {"$ref": "#/$defs/namedContains/dynamic_import_alias"},
+            {"$ref": "#/$defs/namedContains/confirmed_evidence"},
+            {"$ref": "#/$defs/namedContains/rule_versions"},
+            {"$ref": "#/$defs/namedContains/runtime_provenance"},
+            {"$ref": "#/$defs/namedContains/waiver_approval"},
+            {"$ref": "#/$defs/namedContains/selfcheck_exit"},
+            {"$ref": "#/$defs/namedContains/git_failure"},
+            {"$ref": "#/$defs/namedContains/reason_assertion"},
+            {"$ref": "#/$defs/namedContains/full_projection"},
+            {"$ref": "#/$defs/namedContains/policy_closed"},
+            {"$ref": "#/$defs/namedContains/receipt_positive"},
+            {"$ref": "#/$defs/namedContains/applicability_companions"},
+            {"$ref": "#/$defs/namedContains/receipt_poison"}
+          ]
+        },
+        "actionable_findings": {"$ref": "#/$defs/findingSet"},
+        "covered_findings": {"$ref": "#/$defs/findingSet"},
+        "coverage_complete": {"const": true}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "tree_digest",
+        "commands",
+        "regression_digest"
+      ],
+      "properties": {
+        "run_id": {"enum": ["run-1", "run-2"]},
+        "tree_digest": {"$ref": "#/$defs/digest"},
+        "commands": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/command"},
+          "allOf": [
+            {"$ref": "#/$defs/commandContract"},
+            {"$ref": "#/$defs/commandVertical"},
+            {"$ref": "#/$defs/commandSelfattack"},
+            {"$ref": "#/$defs/commandRegression"}
+          ]
+        },
+        "regression_digest": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

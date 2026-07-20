@@ -1,0 +1,2284 @@
+diff --git a/attest.py b/attest.py
+index afbc720b1abfd4fa3699a7f5ba62cb1c6dec8a9e..81ee5c8db06140b8fbb0a5944e9dee71eb774d52 100644
+--- a/attest.py
++++ b/attest.py
+@@ -23,9 +23,9 @@ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+ import rules
+-from core import (ATTESTOR_ID, ATTESTOR_VERSION, Artifact, ArtifactError, ArtifactStore,
+-                  PolicyResolver, TrustedContext, change_receipt_id, load_validators,
+-                  schema_set_digest)
++from core import (ATTESTOR_ID, ATTESTOR_VERSION, Artifact, ArtifactError, ArtifactStore,
++                  ContextError, PolicyResolver, TrustedContext, change_receipt_id, load_validators,
++                  schema_set_digest)
+ from store import AuthorityContext, StoreReadError
+ 
+ # v1.8 defect (Codex, independently reproduced): `_test_path` was an ordinary dataclass field and the
+@@ -136,13 +136,13 @@ class Attestor:
+                    _construction=_TEST_CONSTRUCTION)
+ 
+     # ---------------------------------------------------------------- resolved authority
+-    def resolved_digests(self, registry: Artifact, report: Artifact = None) -> dict:
+-        d = {"registry": registry.digest, "schemas": schema_set_digest(self.src_dir / "schemas")}
++    def resolved_digests(self, registry: Artifact, report: Artifact = None) -> dict:
++        d = {"registry": registry.digest, "schemas": schema_set_digest(self.src_dir / "schemas"),
++             "policy-registry": self.resolver.registry().digest}
+         # v1.8 defect (Codex): agent-version-policy existed as a FILE but no resolved authority and
+         # no rule read it, so an unapproved v404 plus a fake policy digest reached Output allow.
+-        for k in ("operation-policy", "severity-policy", "dependency-path-policy",
+-                  "applicability-policy", "interface-policy", "agent-version-policy"):
+-            d[k] = self.resolver.resolve(k).digest
++        for k in self.resolver.authority_kinds():
++            d[k] = self.resolver.resolve(k).digest
+         if report is not None:
+             d["assurance_report"] = report.digest
+         return d
+@@ -153,8 +153,15 @@ class Attestor:
+         items += [f"{k}={v}" for k, v in sorted((extra or {}).items())]
+         return tuple(items)
+ 
+-    # ---------------------------------------------------------------- Change
+-    def attest_change(self, runner_env, manifest_path, report_path, registry_path) -> AttestationResult:
++    # ---------------------------------------------------------------- Change
++    def attest_change(self, runner_env, manifest_path, report_path, registry_path) -> AttestationResult:
++        try:
++            return self._attest_change(runner_env, manifest_path, report_path, registry_path)
++        except (ArtifactError, ContextError, StoreReadError) as e:
++            reason = f"input_unresolvable[{type(e).__name__}]: {e}"
++            return AttestationResult(False, "deny", (reason,), (reason,), (), "n/a")
++
++    def _attest_change(self, runner_env, manifest_path, report_path, registry_path) -> AttestationResult:
+         results: list = []
+         ev_reasons: list = []
+ 
+@@ -204,7 +211,10 @@ class Attestor:
+             decision, dec_reasons = rules.policy_decision(report.obj, derived, self.artifacts,
+                                                           registry, self.now, enforcement_mode)
+         # v1.6 review item 1: emit the hand-off document Output must bind to.
+-        authority_digests = {k: v for k, v in digests.items() if k.endswith("-policy")}
++        authority_digests = {
++            k: v for k, v in digests.items()
++            if k.endswith("-policy") or k == "policy-registry"
++        }
+         authority_digests.update({"registry": digests["registry"], "schemas": digests["schemas"]})
+         receipt = {
+             "kind": "change-receipt",
+@@ -222,25 +232,34 @@ class Attestor:
+             "assurance_report_digest": report.digest,
+             "change_manifest_digest": manifest.digest,
+             "control_registry_digest": digests["registry"],
+-            "schema_digest": digests["schemas"],
+-            "policy_digests": {k: v for k, v in digests.items()
+-                               if k.endswith("-policy")},
++            "schema_digest": digests["schemas"],
++            "policy_digests": {k: v for k, v in digests.items()
++                               if k.endswith("-policy") or k == "policy-registry"},
+             "attestor": {"id": ATTESTOR_ID, "version": ATTESTOR_VERSION},
+         }
+         return AttestationResult(evidence_valid, decision, tuple(ev_reasons), dec_reasons,
+                                  tuple(results), ctx.mode, ctx.checkout_model, tuple(changed),
+                                  self._authority_list(digests), receipt)
+ 
+-    # ---------------------------------------------------------------- Output
+-    def attest_output(self, bundle_path, runtime_path, report_path, manifest_path,
+-                      boundary_record_id, registry_path) -> AttestationResult:
++    # ---------------------------------------------------------------- Output
++    def attest_output(self, bundle_path, runtime_path, report_path, manifest_path,
++                      boundary_record_id, registry_path) -> AttestationResult:
+         """v1.6 review item 2: only IDs and artifact paths; adapters come from the AuthorityContext.
+ 
+         v1.7 review item 2: the separate `receipt_id` argument is REMOVED. Codex reproduced that a
+         method argument could override the bundle's own `change_receipt_id` and still reach allow.
+         The bundle's `change_receipt_id` is now the single canonical identity for the lookup.
+         """
+-        results: list = []
++        try:
++            return self._attest_output(bundle_path, runtime_path, report_path, manifest_path,
++                                       boundary_record_id, registry_path)
++        except (ArtifactError, ContextError, StoreReadError) as e:
++            reason = f"input_unresolvable[{type(e).__name__}]: {e}"
++            return AttestationResult(False, "deny", (reason,), (reason,), (), "n/a")
++
++    def _attest_output(self, bundle_path, runtime_path, report_path, manifest_path,
++                       boundary_record_id, registry_path) -> AttestationResult:
++        results: list = []
+         ev_reasons: list = []
+         try:
+             bundle = Artifact.load(bundle_path, self.validators["evidence-bundle"])
+@@ -291,10 +310,13 @@ class Attestor:
+             # v1.9 P0-2: an assured Output must bind an OBSERVED, APPROVED producer Agent version.
+             # At d66fce1 the real product cannot satisfy this (no version field in _done_data), so
+             # the honest outcome today is fail-closed. See D-21/D-22.
+-            checks.append(("HL-20", rules.hl20(self.resolver, runtime, digests,
+-                                               self.authority.observer())))
+-        if runtime:
+-            checks.append(("HL-16", rules.hl16(self.resolver, runtime)))
++            checks.append(("HL-20", rules.hl20(self.resolver, runtime, digests,
++                                               self.artifacts, self.now,
++                                               self.authority.observer())))
++        if runtime:
++            checks.append(("HL-16", rules.hl16(self.resolver, runtime)))
++        executed_rule_ids = [rid for rid, _ in checks] + ["HL-21"]
++        checks.append(("HL-21", rules.hl21(bundle, executed_rule_ids)))
+ 
+         for rid, res in checks:
+             results.append((rid, res))
+diff --git a/contract_self_test.py b/contract_self_test.py
+index 90ceaecde0953d9f56b76274ee5a93220a98beff..76ada53c60a6260d37a8e0b923057faeb952070f 100644
+--- a/contract_self_test.py
++++ b/contract_self_test.py
+@@ -12,8 +12,9 @@ from __future__ import annotations
+ 
+ import copy
+ import datetime as dt
+-import json
+-import platform
++import json
++import os
++import platform
+ import sys
+ from importlib.metadata import version as pkgver
+ from pathlib import Path
+@@ -24,7 +25,7 @@ from core import Artifact, ArtifactStore, PolicyResolver, TrustedContext, load_v
+ from store import BoundaryRecordStore, FixtureEventStore, StoreRow
+ 
+ HERE = Path(__file__).parent
+-REPO = Path(r"D:\메타넷 최종\A360-Assistant-Backend")
++REPO = Path(os.environ.get("A360_TEST_SUBJECT_REPO", str(HERE)))
+ NOW = dt.datetime(2026, 7, 15, 0, 0, 10, tzinfo=dt.timezone.utc)
+ 
+ V = load_validators(HERE / "schemas")
+@@ -72,13 +73,10 @@ def reader_boom(rel):
+     raise OSError("permission denied")
+ 
+ 
+-# v1.10: this list must stay identical to Attestor.resolved_digests(). It had drifted - it omitted
+-# agent-version-policy, so the self-test's idea of "the resolved authority" was staler than the
+-# attestor's, and the receipt-omission negative silently passed against a set that never had the key.
+-DIGESTS = {"registry": REG.digest, "schemas": schema_set_digest(HERE / "schemas"),
+-           **{k: R.resolve(k).digest for k in ("operation-policy", "severity-policy",
+-                                               "dependency-path-policy", "applicability-policy",
+-                                               "interface-policy", "agent-version-policy")}}
++# RPA-179: the executable resolver registry is the one source of policy authority membership.
++DIGESTS = {"registry": REG.digest, "schemas": schema_set_digest(HERE / "schemas"),
++           "policy-registry": R.registry().digest,
++           **{k: R.resolve(k).digest for k in R.authority_kinds()}}
+ 
+ 
+ def proj(changed, reader=reader_ok, ctx=CTX):
+@@ -304,7 +302,9 @@ def eb(**over):
+                           "observed": [{"stage_id": "boundary_validation", "count": 1},
+                                        {"stage_id": "audit", "count": 1}],
+                           "missing": [], "complete": True},
+-         "required_controls": ["OH-01", "OH-02", "OH-06", "EH-03", "EH-07"], "missing_controls": [],
++         "required_controls": ["OH-01", "OH-02", "OH-06", "EH-03", "EH-07"], "missing_controls": [],
++         "rule_versions": [{"rule_id": rid, "version": core.ATTESTOR_VERSION, "executable": True}
++                           for rid in ["HL-13", "HL-14", "HL-15", "HL-16", "HL-21"]],
+          "controls": [{"control_id": c, "status": "pass",
+                        "evidence_ref": {"uri": f"db://{c}", "type": "db_row", "digest": D_A}}
+                       for c in ["OH-01", "OH-02", "OH-06", "EH-03", "EH-07"]],
+@@ -335,8 +335,15 @@ case("HL-13", "observations reconcile with the trusted store", True, None,
+      lambda: rules.hl13(R, art(eb(), "eb3", "evidence-bundle"), STORE, NOW))
+ case("HL-13", "P0-6: store has no rows but the bundle claims complete", False, "observation_mismatch",
+      lambda: rules.hl13(R, art(eb(), "eb4", "evidence-bundle"), STORE_EMPTY, NOW))
+-case("HL-13", "P0-6: store read failure fails closed", False, "store_read_failed",
+-     lambda: rules.hl13(R, art(eb(), "eb5", "evidence-bundle"), STORE_BROKEN, NOW))
++case("HL-13", "P0-6: store read failure fails closed", False, "store_read_failed",
++     lambda: rules.hl13(R, art(eb(), "eb5", "evidence-bundle"), STORE_BROKEN, NOW))
++
++case("HL-21", "executed rule versions are exactly bound", True, None,
++     lambda: rules.hl21(art(eb(), "eb-rule-ok", "evidence-bundle"),
++                        ["HL-13", "HL-14", "HL-15", "HL-16", "HL-21"]))
++case("HL-21", "RPA-179: omitted executed rule is refused", False, "rule_version_mismatch",
++     lambda: rules.hl21(art(eb(), "eb-rule-missing", "evidence-bundle"),
++                        ["HL-13", "HL-14", "HL-15", "HL-16", "HL-19", "HL-21"]))
+ 
+ 
+ def _eb_dup():
+@@ -433,60 +440,69 @@ def _prov(**over):
+ 
+ _DG_AVP = dict(DIGESTS, **{"agent-version-policy": _AVP.digest})
+ 
+-case("HL-20", "observed producer version is listed in the approved policy", True, None,
+-     lambda: rules.hl20(R_FIX, _prov(), _DG_AVP, _OBS))
++case("HL-20", "observed producer version is listed in the approved policy", True, None,
++     lambda: rules.hl20(R_FIX, _prov(), _DG_AVP, ArtifactStore(HERE / "policies_approved_fixture", V),
++                        NOW, _OBS))
+ case("HL-20", "P0(v1.8 Codex): fabricated agent_version_policy_digest", False,
+      "agent_version_policy_digest_mismatch",
+-     lambda: rules.hl20(R_FIX, _prov(agent_version_policy_digest="sha256:" + "9" * 64), _DG_AVP,
+-                        _OBS))
++     lambda: rules.hl20(R_FIX, _prov(agent_version_policy_digest="sha256:" + "9" * 64), _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW, _OBS))
+ case("HL-20", "P0(v1.8 Codex): unapproved version v404 with a truthful digest", False,
+      "agent_version_unapproved",
+-     lambda: rules.hl20(R_FIX, _prov(requested_agent_version="v404",
+-                                     producer_resolved_version="v404"), _DG_AVP,
+-                        _FPCA(resolved_version="v404",
+-                              registry_snapshot_digest=_SEEN.registry_snapshot_digest)))
++     lambda: rules.hl20(R_FIX, _prov(requested_agent_version="v404",
++                                     producer_resolved_version="v404"), _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW,
++                        _FPCA(resolved_version="v404",
++                              registry_snapshot_digest=_SEEN.registry_snapshot_digest)))
+ # The SHIPPED policy is state=unapproved with approved_versions: [] - so at d66fce1 nothing can be
+ # assured through the real policy tree. That is D-22, and it is the correct answer today.
+ case("HL-20", "P0: shipped agent-version-policy is unapproved -> no version may be assured", False,
+-     "agent_version_policy_unapproved",
+-     lambda: rules.hl20(R, _prov(agent_version_policy_digest=_AVP_SHIPPED.digest),
+-                        dict(DIGESTS, **{"agent-version-policy": _AVP_SHIPPED.digest}), _OBS))
++     "agent_version_policy_unapproved",
++     lambda: rules.hl20(R, _prov(agent_version_policy_digest=_AVP_SHIPPED.digest),
++                        dict(DIGESTS, **{"agent-version-policy": _AVP_SHIPPED.digest}), AS, NOW, _OBS))
+ # The CURRENT product state: _done_data carries no version, so a truthful report says so. It must
+ # fail closed rather than guess (D-21).
+ case("HL-20", "P0: current product state (null producer version) cannot be assured", False,
+      "agent_version_not_observable",
+-     lambda: rules.hl20(R_FIX, _prov(producer_resolved_version=None,
+-                                     resolved_version_observability="not_observable_pending_D21"),
+-                        _DG_AVP, _FPCA(resolved_version=None,
+-                                       registry_snapshot_digest=_SEEN.registry_snapshot_digest)))
++     lambda: rules.hl20(R_FIX, _prov(producer_resolved_version=None,
++                                     resolved_version_observability="not_observable_pending_D21"),
++                        _DG_AVP, ArtifactStore(HERE / "policies_approved_fixture", V), NOW,
++                        _FPCA(resolved_version=None,
++                                       registry_snapshot_digest=_SEEN.registry_snapshot_digest)))
+ case("HL-20", "P1: requested version != the version the producer actually resolved", False,
+-     "agent_version_requested_mismatch",
+-     lambda: rules.hl20(R_FIX, _prov(requested_agent_version="v1"), _DG_AVP, _OBS))
++     "agent_version_requested_mismatch",
++     lambda: rules.hl20(R_FIX, _prov(requested_agent_version="v1"), _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW, _OBS))
+ case("HL-20", "P1: assured output with no runtime evidence at all", False,
+-     "agent_provenance_missing",
+-     lambda: rules.hl20(R_FIX, None, _DG_AVP, _OBS))
++     "agent_provenance_missing",
++     lambda: rules.hl20(R_FIX, None, _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW, _OBS))
+ 
+ 
+ case("HL-20", "P0(v1.9 Codex): fabricated agent_registry_snapshot_digest", False,
+-     "agent_registry_snapshot_unbound",
+-     lambda: rules.hl20(R_FIX, _prov(agent_registry_snapshot_digest="sha256:" + "b" * 64), _DG_AVP,
+-                        _OBS))
++     "agent_registry_snapshot_unbound",
++     lambda: rules.hl20(R_FIX, _prov(agent_registry_snapshot_digest="sha256:" + "b" * 64), _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW, _OBS))
+ case("HL-20", "P0(v1.9 Codex): fabricated public_contract_version", False,
+-     "public_contract_version_unbound",
+-     lambda: rules.hl20(R_FIX, _prov(public_contract_version="9.9.9-invented"), _DG_AVP, _OBS))
++     "public_contract_version_unbound",
++     lambda: rules.hl20(R_FIX, _prov(public_contract_version="9.9.9-invented"), _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW, _OBS))
+ # The SHIPPED runner has no observer: it fails closed rather than trust a self-report.
+ case("HL-20", "P0: shipped runner has no public-boundary observer -> fail closed", False,
+-     "public_boundary_unobserved",
+-     lambda: rules.hl20(R_FIX, _prov(), _DG_AVP, _NoObs()))
++     "public_boundary_unobserved",
++     lambda: rules.hl20(R_FIX, _prov(), _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW, _NoObs()))
+ case("HL-20", "P0: no observer supplied at all -> fail closed", False, "public_boundary_unobserved",
+-     lambda: rules.hl20(R_FIX, _prov(), _DG_AVP, None))
++     lambda: rules.hl20(R_FIX, _prov(), _DG_AVP,
++                        ArtifactStore(HERE / "policies_approved_fixture", V), NOW, None))
+ # The self-report lie from v1.9's own self-attack: claiming an observation the observer did not make.
+ case("HL-20", "P0(v1.9 self-attack): claims observed_from_public_contract, observer saw nothing",
+      False, "agent_version_not_observable",
+-     lambda: rules.hl20(R_FIX, _prov(producer_resolved_version="v2",
+-                                     resolved_version_observability="observed_from_public_contract"),
+-                        _DG_AVP, _FPCA(resolved_version=None,
+-                                       registry_snapshot_digest=_SEEN.registry_snapshot_digest)))
++     lambda: rules.hl20(R_FIX, _prov(producer_resolved_version="v2",
++                                     resolved_version_observability="observed_from_public_contract"),
++                        _DG_AVP, ArtifactStore(HERE / "policies_approved_fixture", V), NOW,
++                        _FPCA(resolved_version=None,
++                                       registry_snapshot_digest=_SEEN.registry_snapshot_digest)))
+ 
+ 
+ # ---------------------------------------------------------------- HL-19 (v1.6 review item 1)
+@@ -496,7 +512,8 @@ from core import ATTESTOR_ID, ATTESTOR_VERSION, change_receipt_id  # noqa: E402
+ 
+ # v1.9 defect (Codex): a receipt could omit an authority and be re-addressed around it. The set must
+ # be exactly the policies the attestor resolved.
+-_RECEIPT_POLICIES = {k: v for k, v in DIGESTS.items() if k.endswith("-policy")}
++_RECEIPT_POLICIES = {k: v for k, v in DIGESTS.items()
++                     if k.endswith("-policy") or k == "policy-registry"}
+ _RECEIPT_AUTHORITY = dict(_RECEIPT_POLICIES,
+                           registry=DIGESTS["registry"], schemas=DIGESTS["schemas"])
+ _GOOD_RECEIPT = {"kind": "change-receipt",
+@@ -515,13 +532,14 @@ _RSTORE = _CRS(records={_GOOD_RID: json.dumps(_GOOD_RECEIPT, sort_keys=True).enc
+ _RECEIPT = _RSTORE.resolve(_GOOD_RID)
+ 
+ 
+-def _receipt_variant(**over):
+-    """A receipt whose payload is mutated AFTER its id was computed - i.e. a forgery."""
+-    r = dict(_GOOD_RECEIPT)
+-    r.update(over)
+-    raw = json.dumps(r, sort_keys=True).encode()
+-    return _CRS(records={r["receipt_id"]: raw}, validator=V["change-receipt"]).resolve(
+-        r["receipt_id"])
++def _receipt_variant(**over):
++    """Rule-level defense-in-depth fixture; the corrected store rejects these before HL-19."""
++    r = dict(_GOOD_RECEIPT)
++    r.update(over)
++    raw = json.dumps(r, sort_keys=True).encode()
++    return type("ReceiptFixture", (), {"receipt_id": r["receipt_id"], "obj": r,
++                                        "digest": core.sha256_bytes(raw),
++                                        "revision": "rule-fixture"})()
+ 
+ 
+ class _RepArt:
+@@ -636,8 +654,7 @@ def main() -> int:
+     print("Phase 0 v1.10 CONTRACT SELF-TEST  (fixture-driven; NOT an attestation)")
+     print(f"python={sys.version.split()[0]}  platform={platform.platform()}")
+     print(f"jsonschema={pkgver('jsonschema')}  pyyaml={pkgver('PyYAML')}")
+-    for k in ("operation-policy", "severity-policy", "dependency-path-policy",
+-              "applicability-policy", "interface-policy"):
++    for k in R.authority_kinds():
+         a = R.resolve(k)
+         print(f"policy {k:<26} state={a.obj['state']:<11} {a.digest}")
+     print(f"registry {REG.digest}")
+diff --git a/control-registry.yaml b/control-registry.yaml
+index bd89ea0b8d01ec735eef0a674c8b8cedd913843b..2286005867a7604e3c941408bd1fa2651aa5052d 100644
+--- a/control-registry.yaml
++++ b/control-registry.yaml
+@@ -294,7 +294,8 @@ controls:
+       scoped_paths:
+       - app/agent/verify/checker.py
+       - app/agent/verify/catalog.py
+-      repro: Read app/agent/verify/*; git diff ed1a1b0..HEAD -- app/agent -> empty.
++      repro: 'At 50687eb, read checker.py and catalog.py directly. Scope is existence and wiring only;
++        git diff ed1a1b0..50687eb -- app/agent returns 8 changed files and is not claimed empty.'
+       runtime_env:
+         python: 3.13.2
+         os: Windows-11-10.0.26200-SP0
+@@ -559,7 +560,8 @@ controls:
+       scoped_paths:
+       - app/agent/verify
+       - app/agent/recommend
+-      repro: app/agent unchanged baseline..HEAD; verify package present.
++      repro: 'At 50687eb, read app/agent/verify and app/agent/recommend directly. The claim is limited
++        to repair-loop existence and wiring; app/agent as a whole changed in 8 files since ed1a1b0.'
+       runtime_env:
+         python: 3.13.2
+         os: Windows-11-10.0.26200-SP0
+diff --git a/core.py b/core.py
+index c0d6b479d5fd64edcf3b4a31b658095e86670591..28b017d23bd29c9c1e826a767e765ca072585b80 100644
+--- a/core.py
++++ b/core.py
+@@ -18,9 +18,10 @@ Read-only. Never writes to the product tree.
+ """
+ from __future__ import annotations
+ 
+-import hashlib
+-import json
+-import subprocess
++import hashlib
++import json
++import re
++import subprocess
+ from collections.abc import Mapping
+ from types import MappingProxyType
+ from dataclasses import dataclass, field
+@@ -98,43 +99,69 @@ class Artifact:
+     obj: Any  # always deep-frozen
+ 
+     @classmethod
+-    def load(cls, path, validator: Draft202012Validator | None = None) -> "Artifact":
+-        p = Path(path)
+-        if not p.is_file():
+-            raise ArtifactError(f"artifact not found: {p}")
+-        return cls.from_bytes(str(p), p.read_bytes(), validator)
++    def load(cls, path, validator: Draft202012Validator | None = None) -> "Artifact":
++        p = Path(path)
++        if not p.is_file():
++            raise ArtifactError(f"artifact not found: {p}")
++        try:
++            raw = p.read_bytes()
++        except OSError as e:
++            raise ArtifactError(f"artifact unreadable: {p}: {type(e).__name__}: {e}") from None
++        return cls.from_bytes(str(p), raw, validator)
+ 
+     @classmethod
+-    def from_bytes(cls, uri: str, raw: bytes, validator: Draft202012Validator | None = None) -> "Artifact":
+-        text = raw.decode("utf-8")
+-        parsed = json.loads(text) if uri.endswith(".json") else yaml.safe_load(text)
+-        if parsed is None:
+-            raise ArtifactError(f"empty artifact: {uri}")
+-        if validator is not None:
+-            errs = sorted(validator.iter_errors(parsed), key=lambda e: list(e.path))
++    def from_bytes(cls, uri: str, raw: bytes, validator: Draft202012Validator | None = None) -> "Artifact":
++        try:
++            text = raw.decode("utf-8")
++            parsed = json.loads(text) if uri.endswith(".json") else yaml.safe_load(text)
++        except (UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError, TypeError, ValueError) as e:
++            raise ArtifactError(
++                f"artifact parse failed: {uri}: {type(e).__name__}: {str(e)[:160]}"
++            ) from None
++        if parsed is None:
++            raise ArtifactError(f"empty artifact: {uri}")
++        if validator is not None:
++            errs = sorted(
++                validator.iter_errors(parsed),
++                key=lambda e: tuple(str(part) for part in e.path),
++            )
+             if errs:
+                 raise ArtifactError(f"{uri} failed schema: {errs[0].message[:160]}")
+         return cls(uri=uri, raw=raw, digest=sha256_bytes(raw), obj=deep_freeze(parsed))
+ 
+ 
+-def load_validators(schema_dir) -> dict[str, Draft202012Validator]:
++def load_validators(schema_dir) -> dict[str, Draft202012Validator]:
+     from referencing import Registry, Resource
+ 
+     schemas = {}
+-    for p in sorted(Path(schema_dir).glob("*.schema.json")):
+-        s = json.loads(p.read_text(encoding="utf-8"))
+-        Draft202012Validator.check_schema(s)
+-        schemas[p.name.replace(".schema.json", "")] = s
+-    registry = Registry().with_resources([(s["$id"], Resource.from_contents(s)) for s in schemas.values()])
+-    return {n: Draft202012Validator(s, registry=registry, format_checker=FormatChecker())
+-            for n, s in schemas.items()}
+-
+-
+-def schema_set_digest(schema_dir) -> str:
+-    h = hashlib.sha256()
+-    for p in sorted(Path(schema_dir).glob("*.schema.json")):
+-        h.update(p.read_bytes())
+-    return "sha256:" + h.hexdigest()
++    try:
++        for p in sorted(Path(schema_dir).glob("*.schema.json")):
++            s = json.loads(p.read_text(encoding="utf-8"))
++            Draft202012Validator.check_schema(s)
++            schemas[p.name.replace(".schema.json", "")] = s
++        registry = Registry().with_resources(
++            [(s["$id"], Resource.from_contents(s)) for s in schemas.values()]
++        )
++        return {
++            n: Draft202012Validator(s, registry=registry, format_checker=FormatChecker())
++            for n, s in schemas.items()
++        }
++    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
++        raise ArtifactError(
++            f"schema set invalid at {schema_dir}: {type(e).__name__}: {str(e)[:160]}"
++        ) from None
++
++
++def schema_set_digest(schema_dir) -> str:
++    h = hashlib.sha256()
++    try:
++        for p in sorted(Path(schema_dir).glob("*.schema.json")):
++            h.update(p.read_bytes())
++    except OSError as e:
++        raise ArtifactError(
++            f"schema set unreadable at {schema_dir}: {type(e).__name__}: {e}"
++        ) from None
++    return "sha256:" + h.hexdigest()
+ 
+ 
+ # --------------------------------------------------------------------- TrustedContext (P0-1)
+@@ -142,7 +169,7 @@ class ContextError(Exception):
+     pass
+ 
+ 
+-def _git(repo: Path, *args: str, strip: bool = True) -> str:
++def _git(repo: Path, *args: str, strip: bool = True) -> str:
+     """v1.9 self-found bug: this stripped EVERY git output, including `status --porcelain`, whose
+     format is a two-column status field then a space (`" M path"`). Stripping removed the leading
+     space of the FIRST line only, so the `l[3:]` path slice ate that path's first character:
+@@ -151,10 +178,53 @@ def _git(repo: Path, *args: str, strip: bool = True) -> str:
+     exactly the shape of latent bug this harness exists to catch, in the harness itself.
+     Callers that parse column-oriented output MUST pass strip=False.
+     """
+-    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
++    r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+     if r.returncode != 0:
+         raise ContextError(f"git {' '.join(args)} failed: {r.stderr.strip()[:120]}")
+-    return r.stdout.strip() if strip else r.stdout
++    return r.stdout.strip() if strip else r.stdout
++
++
++def _git_bytes(repo: Path, *args: str) -> bytes:
++    r = subprocess.run(["git", *args], cwd=repo, capture_output=True)
++    if r.returncode != 0:
++        err = r.stderr.decode("utf-8", "replace")
++        raise ContextError(f"git {' '.join(args)} failed: {err.strip()[:120]}")
++    return r.stdout
++
++
++def _decode_git_path(raw: bytes, source: str) -> str:
++    try:
++        return raw.decode("utf-8")
++    except UnicodeDecodeError as e:
++        raise ContextError(f"{source} emitted a non-UTF-8 path: {e}") from None
++
++
++def _nul_paths(raw: bytes, source: str) -> tuple[str, ...]:
++    if not raw:
++        return ()
++    if not raw.endswith(b"\0"):
++        raise ContextError(f"{source} did not terminate its path stream with NUL")
++    return tuple(_decode_git_path(part, source) for part in raw[:-1].split(b"\0"))
++
++
++def _porcelain_paths(raw: bytes) -> tuple[str, ...]:
++    records = list(_nul_paths(raw, "git status --porcelain=v1 -z"))
++    paths: list[str] = []
++    index = 0
++    while index < len(records):
++        record = records[index]
++        encoded = record.encode("utf-8")
++        if len(encoded) < 4 or encoded[2:3] != b" ":
++            raise ContextError(f"malformed porcelain record at index {index}")
++        status = encoded[:2].decode("ascii", "strict")
++        paths.append(_decode_git_path(encoded[3:], "git status --porcelain=v1 -z"))
++        if status[0] in "RC" or status[1] in "RC":
++            index += 1
++            if index >= len(records):
++                raise ContextError("rename/copy porcelain record has no source path")
++            paths.append(records[index])
++        index += 1
++    return tuple(sorted(paths))
+ 
+ 
+ @dataclass(frozen=True)
+@@ -168,9 +238,9 @@ class GitObjectReader:
+     repo: Path
+     sha: str
+ 
+-    def list_files(self) -> tuple:
+-        out = _git(self.repo, "ls-tree", "-r", "--name-only", self.sha)
+-        return tuple(sorted(l for l in out.splitlines() if l.strip()))
++    def list_files(self) -> tuple:
++        out = _git_bytes(self.repo, "ls-tree", "-r", "-z", "--name-only", self.sha)
++        return tuple(sorted(_nul_paths(out, "git ls-tree -z")))
+ 
+     def read_text(self, rel: str):
+         """Text at the verified commit, or None if absent. Raises ContextError on read failure."""
+@@ -239,7 +309,7 @@ class TrustedContext:
+             return cls.local("no repository provided: git state and checkout cannot be verified")
+         try:
+             head = _git(repo, "rev-parse", "HEAD")
+-            status = _git(repo, "status", "--porcelain", strip=False)
++            status = _git_bytes(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+             mb = _git(repo, "merge-base", env["A360_BASE_SHA"], env["A360_HEAD_SHA"])
+         except ContextError as e:
+             return cls.local(f"git verification failed: {e}")
+@@ -250,8 +320,7 @@ class TrustedContext:
+                              "(head_checkout requires HEAD == event_head == checkout)")
+         if mb != env["A360_MERGE_BASE"]:
+             return cls.local(f"declared merge base {env['A360_MERGE_BASE'][:8]} != real {mb[:8]}")
+-        dirty = tuple(sorted(l[3:] for l in status.splitlines() if l.strip()))
+-        # NOTE: l[3:] is only correct because status is NOT stripped (see _git).
++        dirty = _porcelain_paths(status)
+         return cls(mode="authoritative", checkout_model=model, repository_id=env["A360_REPO_ID"],
+                    repository_name=env.get("A360_REPO_NAME", ""), event_type=env["A360_EVENT"],
+                    pr_base_sha=env["A360_BASE_SHA"], event_head_sha=env["A360_HEAD_SHA"],
+@@ -259,12 +328,14 @@ class TrustedContext:
+                    workflow_ref=env["A360_WORKFLOW_REF"],
+                    git_state="clean" if not dirty else "dirty", dirty_paths=dirty)
+ 
+-    def changed_paths(self, repo: Path) -> tuple:
++    def changed_paths(self, repo: Path) -> tuple:
+         """Derived INTERNALLY from the trusted event. Never accepted from a caller."""
+         if not self.authoritative:
+             raise ContextError("cannot derive changed paths from a non-authoritative context")
+-        out = _git(repo, "diff", "--name-only", f"{self.merge_base}..{self.event_head_sha}")
+-        return tuple(sorted(l for l in out.splitlines() if l.strip()))
++        out = _git_bytes(
++            repo, "diff", "--name-only", "-z", f"{self.merge_base}..{self.event_head_sha}", "--"
++        )
++        return tuple(sorted(_nul_paths(out, "git diff --name-only -z")))
+ 
+     def object_reader(self, repo: Path) -> GitObjectReader:
+         if not self.authoritative:
+@@ -274,22 +345,55 @@ class TrustedContext:
+ 
+ # --------------------------------------------------------------------- PolicyResolver (P0-2)
+ @dataclass
+-class PolicyResolver:
++class PolicyResolver:
+     """Policy bytes from a PINNED protected directory. Parsed data is deep-frozen, so the
+     v1.4 attack (mutate cached obj -> state=approved) now raises instead of succeeding."""
+ 
+     policy_dir: Path
+-    validators: dict
+-    _cache: dict = field(default_factory=dict)
+-
+-    def resolve(self, kind: str) -> Artifact:
+-        if kind not in self._cache:
+-            self._cache[kind] = Artifact.load(Path(self.policy_dir) / f"{kind}.yaml",
+-                                              self.validators.get("policy"))
+-        return self._cache[kind]
++    validators: dict
++    _cache: dict = field(default_factory=dict)
++    _registry_cache: Artifact | None = None
++
++    def registry(self) -> Artifact:
++        if self._registry_cache is None:
++            self._registry_cache = Artifact.load(
++                Path(self.policy_dir) / "policy-registry.yaml",
++                self.validators.get("policy-registry"),
++            )
++        return self._registry_cache
++
++    def authority_entries(self) -> tuple:
++        entries = tuple(self.registry().obj["authorities"])
++        kinds = [entry["kind"] for entry in entries]
++        if len(kinds) != len(set(kinds)):
++            raise ArtifactError("policy registry contains duplicate authority kinds")
++        return entries
++
++    def authority_kinds(self) -> tuple[str, ...]:
++        return tuple(entry["kind"] for entry in self.authority_entries())
++
++    def authority_entry(self, kind: str):
++        return next((entry for entry in self.authority_entries() if entry["kind"] == kind), None)
++
++    def resolve(self, kind: str) -> Artifact:
++        if kind not in self._cache:
++            entry = self.authority_entry(kind)
++            if entry is None:
++                raise ArtifactError(f"policy kind {kind!r} is not registered")
++            rel = Path(entry["file"])
++            if rel.is_absolute() or ".." in rel.parts or len(rel.parts) != 1:
++                raise ArtifactError(f"policy registry file is not a local filename: {entry['file']!r}")
++            art = Artifact.load(Path(self.policy_dir) / rel, self.validators.get("policy"))
++            if art.obj.get("kind") != kind or art.obj.get("policy_id") != entry["policy_id"]:
++                raise ArtifactError(
++                    f"registered authority {kind!r}/{entry['policy_id']!r} does not match "
++                    f"artifact {art.obj.get('kind')!r}/{art.obj.get('policy_id')!r}"
++                )
++            self._cache[kind] = art
++        return self._cache[kind]
+ 
+     @staticmethod
+-    def _decide_from_raw(art: "Artifact") -> dict:
++    def _decide_from_raw(art: "Artifact") -> dict:
+         """Re-parse the policy from its immutable `raw` bytes at DECISION time.
+ 
+         v1.6 review item 4: reading `art.obj` let a same-process aliasing attack (gc.get_referents
+@@ -298,15 +402,21 @@ class PolicyResolver:
+         outcome. This is NOT a security boundary (ctypes can still rewrite a buffer); it removes one
+         concrete aliasing hazard. Same-process integrity remains D-16.
+         """
+-        text = art.raw.decode("utf-8")
+-        return json.loads(text) if art.uri.endswith(".json") else yaml.safe_load(text)
+-
+-    def require_approved(self, kind: str, claim: Mapping) -> tuple:
+-        try:
+-            art = self.resolve(kind)
+-        except ArtifactError as e:
+-            return False, f"policy {kind} unresolvable: {e}", "policy_unresolvable"
+-        p = self._decide_from_raw(art)          # v1.6 review item 4: decide from bytes, not from obj
++        try:
++            text = art.raw.decode("utf-8")
++            return json.loads(text) if art.uri.endswith(".json") else yaml.safe_load(text)
++        except (UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError, TypeError, ValueError) as e:
++            raise ArtifactError(
++                f"policy decision parse failed: {art.uri}: {type(e).__name__}: {str(e)[:160]}"
++            ) from None
++
++    def require_approved(self, kind: str, claim: Mapping) -> tuple:
++        try:
++            art = self.resolve(kind)
++            p = self._decide_from_raw(art)
++        except ArtifactError as e:
++            return False, f"policy {kind} unresolvable: {e}", "policy_unresolvable"
++        # v1.6 review item 4: decide from bytes, not from obj.
+         problems = []
+         if claim.get("policy_id") != p["policy_id"]:
+             problems.append(f"policy_id claimed={claim.get('policy_id')} actual={p['policy_id']}")
+@@ -338,17 +448,26 @@ class ArtifactStore:
+     root: Path
+     validators: dict
+ 
+-    def _load(self, sub: str, ident: str, schema: str) -> Artifact | None:
+-        p = Path(self.root) / sub / f"{ident}.yaml"
++    def _load(self, sub: str, ident: str, schema: str, id_field: str) -> Artifact | None:
++        if not isinstance(ident, str) or not re.fullmatch(r"[A-Z]{2,4}-[0-9]+", ident):
++            return None
++        p = Path(self.root) / sub / f"{ident}.yaml"
+         if not p.is_file():
+             return None
+-        return Artifact.load(p, self.validators.get(schema))
++        artifact = Artifact.load(p, self.validators.get(schema))
++        return artifact if artifact.obj.get(id_field) == ident else None
+ 
+     def approval(self, ident: str) -> Artifact | None:
+-        return self._load("approvals", ident, "approval")
++        return self._load("approvals", ident, "approval", "approval_id")
+ 
+-    def waiver(self, ident: str) -> Artifact | None:
+-        return self._load("waivers", ident, "waiver")
++    def waiver(self, ident: str) -> Artifact | None:
++        return self._load("waivers", ident, "waiver", "waiver_id")
++
++    def policy_approval(self, ident: str) -> Artifact | None:
++        return self._load("policy-approvals", ident, "policy-approval", "approval_id")
++
++    def waiver_approval(self, ident: str) -> Artifact | None:
++        return self._load("waiver-approvals", ident, "waiver-approval", "approval_id")
+ 
+ 
+ # ----------------------------------------------------------------- rule registry (P0-7)
+@@ -402,7 +521,7 @@ def specified_only(rid: str, category: str, statement: str, governance: str):
+ 
+ # ------------------------------------------------- receipt identity (v1.7 review item 3)
+ ATTESTOR_ID = "a360-phase0-attestor"
+-ATTESTOR_VERSION = "1.10.0"
++ATTESTOR_VERSION = "1.10.1-rpa179"
+ 
+ 
+ def change_receipt_id(repository_id: str, commit: str, report_digest: str, manifest_digest: str,
+diff --git a/policies/dependency-path-policy.yaml b/policies/dependency-path-policy.yaml
+index 489bf38e091b13341840180d67d3ec08ec0c27c0..45633c0dc16c0d7926e7c4281edecade0fe9aa25 100644
+--- a/policies/dependency-path-policy.yaml
++++ b/policies/dependency-path-policy.yaml
+@@ -16,12 +16,20 @@ dependency_paths:
+ - docker-compose*.yml
+ - .github/workflows/*.yml
+ - .github/workflows/*.yaml
+-content_scan_paths:
+-- '**/*.sh'
+-- '**/*.ps1'
+-- '**/*.bat'
+-- '**/*.mk'
+-- Makefile
++content_scan_paths:
++- '*.sh'
++- '*.ps1'
++- '*.bat'
++- '*.cmd'
++- '*.mk'
++- '**/*.sh'
++- '**/*.ps1'
++- '**/*.bat'
++- '**/*.cmd'
++- '**/*.mk'
++- Makefile
++- makefile
++- GNUmakefile
+ - Dockerfile
+ - Dockerfile.*
+ - docker-compose*.yml
+diff --git a/policies/policy-registry.yaml b/policies/policy-registry.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..420ac79e855f950d52aaef6e2514f7491fc0757a
+--- /dev/null
++++ b/policies/policy-registry.yaml
+@@ -0,0 +1,26 @@
++schema_version: rpa179.1
++authorities:
++  - kind: operation-policy
++    file: operation-policy.yaml
++    policy_id: op.policy
++    approval_role: release-approver
++  - kind: severity-policy
++    file: severity-policy.yaml
++    policy_id: sev.blocking
++    approval_role: release-approver
++  - kind: dependency-path-policy
++    file: dependency-path-policy.yaml
++    policy_id: dep.paths
++    approval_role: release-approver
++  - kind: applicability-policy
++    file: applicability-policy.yaml
++    policy_id: app.applicability
++    approval_role: release-approver
++  - kind: interface-policy
++    file: interface-policy.yaml
++    policy_id: agent.public_interface
++    approval_role: agent-maintainer
++  - kind: agent-version-policy
++    file: agent-version-policy.yaml
++    policy_id: agent.versions
++    approval_role: release-approver
+diff --git a/policies/waiver-approvals/WA-1.yaml b/policies/waiver-approvals/WA-1.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..80782a258c6216e2885eda596734f08bd40e701b
+--- /dev/null
++++ b/policies/waiver-approvals/WA-1.yaml
+@@ -0,0 +1,11 @@
++kind: waiver-approval
++approval_id: WA-1
++status: approved
++approver_role: release-approver
++subject:
++  waiver_id: WV-1
++  control_id: CH-04
++  waiver_digest: sha256:a09029c73b157286da8ece332ca340f8bad12a9da964a81f84a3a825ee3e8866
++approved_at: '2026-07-09T00:00:00Z'
++expires_at: '2026-08-02T00:00:00Z'
++reason: Deterministic contract fixture; not an operational approval.
+diff --git a/policies/waiver-approvals/WA-2.yaml b/policies/waiver-approvals/WA-2.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..61bee0b4a13e480279d8e11bedc03ba22eed6b04
+--- /dev/null
++++ b/policies/waiver-approvals/WA-2.yaml
+@@ -0,0 +1,11 @@
++kind: waiver-approval
++approval_id: WA-2
++status: approved
++approver_role: release-approver
++subject:
++  waiver_id: WV-2
++  control_id: CH-04
++  waiver_digest: sha256:8ef60e39fa02e0d8d2051de826c5e1068a5636cad95bf27fa71c6f27ce20cc17
++approved_at: '2026-05-31T00:00:00Z'
++expires_at: '2026-07-02T00:00:00Z'
++reason: Deterministic expired-waiver fixture.
+diff --git a/policies/waiver-approvals/WA-3.yaml b/policies/waiver-approvals/WA-3.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..2974612a2b00fbda4166354a11f3dd29d928afae
+--- /dev/null
++++ b/policies/waiver-approvals/WA-3.yaml
+@@ -0,0 +1,11 @@
++kind: waiver-approval
++approval_id: WA-3
++status: approved
++approver_role: release-approver
++subject:
++  waiver_id: WV-3
++  control_id: CH-04
++  waiver_digest: sha256:d23c4dca36f370843a13857cd5b0d9013593afe75e01b67795e7fd83d42b01c5
++approved_at: '2026-07-09T00:00:00Z'
++expires_at: '2026-08-02T00:00:00Z'
++reason: Deterministic missing-compensation fixture.
+diff --git a/policies/waivers/WV-1.yaml b/policies/waivers/WV-1.yaml
+index 2bc679e8eae16d7c6392e8cacb003cc54a7f38ed..6d40c5946895ac6760734b9e68207263dbcc0e3b 100644
+--- a/policies/waivers/WV-1.yaml
++++ b/policies/waivers/WV-1.yaml
+@@ -3,7 +3,7 @@ waiver_id: WV-1
+ control_id: CH-04
+ scope: PR-201
+ approver_role: release-approver
+-approval_ref: RPA-999
++approval_ref: WA-1
+ jira: RPA-999
+ reason: "vendored library pending security review"
+ compensating_control: CH-08
+diff --git a/policies/waivers/WV-2.yaml b/policies/waivers/WV-2.yaml
+index 7a1bfd6c57b7a03580b5bcee423d9158117aa6c7..5091565cc236f40e639c81e481042a215c9cc3a5 100644
+--- a/policies/waivers/WV-2.yaml
++++ b/policies/waivers/WV-2.yaml
+@@ -3,7 +3,7 @@ waiver_id: WV-2
+ control_id: CH-04
+ scope: PR-201
+ approver_role: release-approver
+-approval_ref: RPA-998
++approval_ref: WA-2
+ jira: RPA-998
+ reason: "expired waiver kept active"
+ compensating_control: CH-08
+diff --git a/policies/waivers/WV-3.yaml b/policies/waivers/WV-3.yaml
+index de3024f2934b471042af35ba78b5dd7bf7c3d672..4b2fadc6aca40e2e7e2180ded03f0fb54aa2078b 100644
+--- a/policies/waivers/WV-3.yaml
++++ b/policies/waivers/WV-3.yaml
+@@ -3,7 +3,7 @@ waiver_id: WV-3
+ control_id: CH-04
+ scope: PR-201
+ approver_role: release-approver
+-approval_ref: RPA-997
++approval_ref: WA-3
+ jira: RPA-997
+ reason: "compensating control never passes"
+ compensating_control: CH-99
+diff --git a/policies_approved_fixture/agent-version-policy.yaml b/policies_approved_fixture/agent-version-policy.yaml
+index 7ab6e9cd1119980a99a0d72dca601d0401a0f7e8..0f1e6fb86d84c7a1e37abac261bbe1f5ed4b13d0 100644
+--- a/policies_approved_fixture/agent-version-policy.yaml
++++ b/policies_approved_fixture/agent-version-policy.yaml
+@@ -1,10 +1,10 @@
+ kind: agent-version-policy
+ policy_id: agent.versions
+-version: 0.1.0-fixture
++version: 0.1.1-fixture-rpa179
+ state: approved
+ approval:
+   approver_role: phase0-fixture-only
+-  approval_ref: FIXTURE-NOT-A-REAL-APPROVAL
++  approval_ref: PA-1
+   approved_at: '2026-07-10T00:00:00Z'
+ discovered_at_sha: d66fce1840c1dcf907c9d303bbc64654c7c41857
+ discovered_versions:
+diff --git a/policies_approved_fixture/dependency-path-policy.yaml b/policies_approved_fixture/dependency-path-policy.yaml
+index 02dd965404438fed271a6f40bc14533ec0d3ddd5..438e755feba66afb632f227be0c2f359d038cd06 100644
+--- a/policies_approved_fixture/dependency-path-policy.yaml
++++ b/policies_approved_fixture/dependency-path-policy.yaml
+@@ -19,12 +19,20 @@ dependency_paths:
+ - docker-compose*.yml
+ - .github/workflows/*.yml
+ - .github/workflows/*.yaml
+-content_scan_paths:
+-- '**/*.sh'
+-- '**/*.ps1'
+-- '**/*.bat'
+-- '**/*.mk'
+-- Makefile
++content_scan_paths:
++- '*.sh'
++- '*.ps1'
++- '*.bat'
++- '*.cmd'
++- '*.mk'
++- '**/*.sh'
++- '**/*.ps1'
++- '**/*.bat'
++- '**/*.cmd'
++- '**/*.mk'
++- Makefile
++- makefile
++- GNUmakefile
+ - Dockerfile
+ - Dockerfile.*
+ - docker-compose*.yml
+diff --git a/policies_approved_fixture/policy-approvals/PA-1.yaml b/policies_approved_fixture/policy-approvals/PA-1.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a7af905e013eef6b9e8d0fd9e046eb75d8664b6
+--- /dev/null
++++ b/policies_approved_fixture/policy-approvals/PA-1.yaml
+@@ -0,0 +1,12 @@
++kind: policy-approval
++approval_id: PA-1
++status: approved
++approver_role: phase0-fixture-only
++subject:
++  policy_kind: agent-version-policy
++  policy_id: agent.versions
++  policy_version: 0.1.1-fixture-rpa179
++  policy_digest: sha256:5ee404be7d9b9b3f919236d408f478767d9a049fd42324e3d73ce5819890073c
++approved_at: '2026-07-10T00:00:00Z'
++expires_at: '2026-12-31T00:00:00Z'
++reason: Deterministic fixture approval only; not an operational approval.
+diff --git a/policies_approved_fixture/policy-registry.yaml b/policies_approved_fixture/policy-registry.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..59843866d1a8071acee86a2b2d9a6b371c6544e5
+--- /dev/null
++++ b/policies_approved_fixture/policy-registry.yaml
+@@ -0,0 +1,26 @@
++schema_version: rpa179.1
++authorities:
++  - kind: operation-policy
++    file: operation-policy.yaml
++    policy_id: op.policy
++    approval_role: phase0-fixture-only
++  - kind: severity-policy
++    file: severity-policy.yaml
++    policy_id: sev.blocking
++    approval_role: phase0-fixture-only
++  - kind: dependency-path-policy
++    file: dependency-path-policy.yaml
++    policy_id: dep.paths
++    approval_role: phase0-fixture-only
++  - kind: applicability-policy
++    file: applicability-policy.yaml
++    policy_id: app.applicability
++    approval_role: phase0-fixture-only
++  - kind: interface-policy
++    file: interface-policy.yaml
++    policy_id: agent.public_interface
++    approval_role: phase0-fixture-only
++  - kind: agent-version-policy
++    file: agent-version-policy.yaml
++    policy_id: agent.versions
++    approval_role: phase0-fixture-only
+diff --git a/policies_approved_fixture/waiver-approvals/WA-1.yaml b/policies_approved_fixture/waiver-approvals/WA-1.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..80782a258c6216e2885eda596734f08bd40e701b
+--- /dev/null
++++ b/policies_approved_fixture/waiver-approvals/WA-1.yaml
+@@ -0,0 +1,11 @@
++kind: waiver-approval
++approval_id: WA-1
++status: approved
++approver_role: release-approver
++subject:
++  waiver_id: WV-1
++  control_id: CH-04
++  waiver_digest: sha256:a09029c73b157286da8ece332ca340f8bad12a9da964a81f84a3a825ee3e8866
++approved_at: '2026-07-09T00:00:00Z'
++expires_at: '2026-08-02T00:00:00Z'
++reason: Deterministic contract fixture; not an operational approval.
+diff --git a/policies_approved_fixture/waiver-approvals/WA-2.yaml b/policies_approved_fixture/waiver-approvals/WA-2.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..61bee0b4a13e480279d8e11bedc03ba22eed6b04
+--- /dev/null
++++ b/policies_approved_fixture/waiver-approvals/WA-2.yaml
+@@ -0,0 +1,11 @@
++kind: waiver-approval
++approval_id: WA-2
++status: approved
++approver_role: release-approver
++subject:
++  waiver_id: WV-2
++  control_id: CH-04
++  waiver_digest: sha256:8ef60e39fa02e0d8d2051de826c5e1068a5636cad95bf27fa71c6f27ce20cc17
++approved_at: '2026-05-31T00:00:00Z'
++expires_at: '2026-07-02T00:00:00Z'
++reason: Deterministic expired-waiver fixture.
+diff --git a/policies_approved_fixture/waiver-approvals/WA-3.yaml b/policies_approved_fixture/waiver-approvals/WA-3.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..2974612a2b00fbda4166354a11f3dd29d928afae
+--- /dev/null
++++ b/policies_approved_fixture/waiver-approvals/WA-3.yaml
+@@ -0,0 +1,11 @@
++kind: waiver-approval
++approval_id: WA-3
++status: approved
++approver_role: release-approver
++subject:
++  waiver_id: WV-3
++  control_id: CH-04
++  waiver_digest: sha256:d23c4dca36f370843a13857cd5b0d9013593afe75e01b67795e7fd83d42b01c5
++approved_at: '2026-07-09T00:00:00Z'
++expires_at: '2026-08-02T00:00:00Z'
++reason: Deterministic missing-compensation fixture.
+diff --git a/policies_approved_fixture/waivers/WV-1.yaml b/policies_approved_fixture/waivers/WV-1.yaml
+index 2bc679e8eae16d7c6392e8cacb003cc54a7f38ed..6d40c5946895ac6760734b9e68207263dbcc0e3b 100644
+--- a/policies_approved_fixture/waivers/WV-1.yaml
++++ b/policies_approved_fixture/waivers/WV-1.yaml
+@@ -3,7 +3,7 @@ waiver_id: WV-1
+ control_id: CH-04
+ scope: PR-201
+ approver_role: release-approver
+-approval_ref: RPA-999
++approval_ref: WA-1
+ jira: RPA-999
+ reason: "vendored library pending security review"
+ compensating_control: CH-08
+diff --git a/policies_approved_fixture/waivers/WV-2.yaml b/policies_approved_fixture/waivers/WV-2.yaml
+index 7a1bfd6c57b7a03580b5bcee423d9158117aa6c7..5091565cc236f40e639c81e481042a215c9cc3a5 100644
+--- a/policies_approved_fixture/waivers/WV-2.yaml
++++ b/policies_approved_fixture/waivers/WV-2.yaml
+@@ -3,7 +3,7 @@ waiver_id: WV-2
+ control_id: CH-04
+ scope: PR-201
+ approver_role: release-approver
+-approval_ref: RPA-998
++approval_ref: WA-2
+ jira: RPA-998
+ reason: "expired waiver kept active"
+ compensating_control: CH-08
+diff --git a/policies_approved_fixture/waivers/WV-3.yaml b/policies_approved_fixture/waivers/WV-3.yaml
+index de3024f2934b471042af35ba78b5dd7bf7c3d672..4b2fadc6aca40e2e7e2180ded03f0fb54aa2078b 100644
+--- a/policies_approved_fixture/waivers/WV-3.yaml
++++ b/policies_approved_fixture/waivers/WV-3.yaml
+@@ -3,7 +3,7 @@ waiver_id: WV-3
+ control_id: CH-04
+ scope: PR-201
+ approver_role: release-approver
+-approval_ref: RPA-997
++approval_ref: WA-3
+ jira: RPA-997
+ reason: "compensating control never passes"
+ compensating_control: CH-99
+diff --git a/rules.py b/rules.py
+index a2af0e2618d939794a66d585a954bcc603d151c1..16779fea0a147aeaad8ce556e1df7ce41b095a7e 100644
+--- a/rules.py
++++ b/rules.py
+@@ -223,9 +223,9 @@ def hl12(ctx: TrustedContext, manifest_art: Artifact, report_art: Artifact, deri
+         p.append(f"report git_state={r['run']['git_state']} != runner-derived {ctx.git_state}")
+     # P0-5: the COMPLETE projection, including the two fields v1.4 silently omitted.
+     rf = r["derived_facts"]
+-    for k in ("repository_id", "diff_baseline_sha", "diff_head_sha", "changed_paths", "dependency_changed",
+-              "silent_install_hits", "touches_agent_owned_paths", "risk_profiles", "applicable_controls",
+-              "git_state"):
++    for k in ("repository_id", "diff_baseline_sha", "diff_head_sha", "changed_paths", "dependency_changed",
++              "silent_install_hits", "unreadable_scanned_paths", "touches_agent_owned_paths",
++              "risk_profiles", "applicable_controls", "git_state"):
+         if list(rf.get(k)) != list(derived[k]) if isinstance(derived[k], list) else rf.get(k) != derived[k]:
+             p.append(f"derived_facts.{k} reported={rf.get(k)!r} independent={derived[k]!r}")
+     return (RuleResult(True, "report bound to read-once manifest, resolved digests and full projection")
+@@ -251,8 +251,8 @@ def hl02(registry_art: Artifact, referenced) -> RuleResult:
+ 
+ 
+ # ------------------------------------------------------------------- waiver resolution (P0-4)
+-def _resolve_waiver(store: ArtifactStore, registry_art: Artifact, waiver_id, control_id, subject, now,
+-                    passing_controls) -> str | None:
++def _resolve_waiver(store: ArtifactStore, registry_art: Artifact, waiver_id, control_id, subject, now,
++                    passing_controls) -> str | None:
+     art = store.waiver(waiver_id)
+     if art is None:
+         return f"{control_id}: waiver {waiver_id} does not resolve to a waiver artifact"
+@@ -265,20 +265,43 @@ def _resolve_waiver(store: ArtifactStore, registry_art: Artifact, waiver_id, con
+         return f"{control_id}: waiver {waiver_id} expired {w['expires_at']}"
+     if dt.datetime.fromisoformat(w["approved_at"].replace("Z", "+00:00")) > now:
+         return f"{control_id}: waiver {waiver_id} approved in the future"
+-    max_days = 90
+-    life = (dt.datetime.fromisoformat(w["expires_at"].replace("Z", "+00:00"))
+-            - dt.datetime.fromisoformat(w["approved_at"].replace("Z", "+00:00"))).days
+-    if life > max_days:
+-        return f"{control_id}: waiver {waiver_id} lifetime {life}d exceeds {max_days}d"
++    max_lifetime = dt.timedelta(days=90)
++    life = (dt.datetime.fromisoformat(w["expires_at"].replace("Z", "+00:00"))
++            - dt.datetime.fromisoformat(w["approved_at"].replace("Z", "+00:00")))
++    if life > max_lifetime:
++        return (f"{control_id}: waiver {waiver_id} lifetime {life.total_seconds()}s exceeds "
++                f"{max_lifetime.total_seconds()}s")
+     if w["subject"]["repository_id"] != subject["repository_id"] or w["subject"]["commit"] != subject["commit"]:
+         return f"{control_id}: waiver {waiver_id} subject does not match this change"
+     comp = w.get("compensating_control")
+     members = {c["id"] for c in registry_art.obj["controls"]}
+     if comp not in members:
+         return f"{control_id}: compensating control {comp} is not a registry member"
+-    if comp not in passing_controls:
+-        return f"{control_id}: compensating control {comp} has no passing evidence"
+-    return None
++    if comp not in passing_controls:
++        return f"{control_id}: compensating control {comp} has no passing evidence"
++    approval_ref = w.get("approval_ref")
++    approval_art = store.waiver_approval(approval_ref)
++    if approval_art is None:
++        return (f"{control_id}: waiver {waiver_id} approval_ref {approval_ref!r} does not resolve "
++                "to a protected waiver approval artifact")
++    approval = approval_art.obj
++    approval_subject = approval["subject"]
++    if approval["status"] != "approved":
++        return f"{control_id}: waiver approval {approval_ref} status={approval['status']}"
++    if approval["approver_role"] != w["approver_role"]:
++        return (f"{control_id}: waiver approval {approval_ref} role="
++                f"{approval['approver_role']} != waiver role={w['approver_role']}")
++    if (approval_subject["waiver_id"] != waiver_id
++            or approval_subject["control_id"] != control_id
++            or approval_subject["waiver_digest"] != art.digest):
++        return f"{control_id}: waiver approval {approval_ref} subject does not bind this waiver"
++    approval_start = dt.datetime.fromisoformat(approval["approved_at"].replace("Z", "+00:00"))
++    approval_end = dt.datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00"))
++    waiver_start = dt.datetime.fromisoformat(w["approved_at"].replace("Z", "+00:00"))
++    waiver_end = dt.datetime.fromisoformat(w["expires_at"].replace("Z", "+00:00"))
++    if approval_start > waiver_start or approval_start > now or approval_end < waiver_end or approval_end < now:
++        return f"{control_id}: waiver approval {approval_ref} does not cover the waiver period"
++    return None
+ 
+ 
+ # ------------------------------------------------------------------------------- HL-03
+@@ -523,8 +546,9 @@ def hl13(resolver: PolicyResolver, bundle_art: Artifact, store, now,
+                "agent_version_policy_unapproved", "agent_version_not_observable",
+                "agent_version_unapproved", "agent_version_requested_mismatch",
+                "public_boundary_unobserved", "agent_registry_snapshot_unbound",
+-               "public_contract_version_unbound"))
+-def hl20(resolver, runtime_art, resolved_digests: dict, observer=None) -> RuleResult:
++               "public_contract_version_unbound", "agent_version_policy_approval_unresolved"))
++def hl20(resolver, runtime_art, resolved_digests: dict, approval_store: ArtifactStore, now,
++         observer=None) -> RuleResult:
+     """v1.8 defect (Codex): `agent-version-policy.yaml` shipped, and `runtime.agent_provenance`
+     carried version fields, but NO rule read either. Codex independently drove an unapproved `v404`
+     with a fabricated policy digest to Output `allow`. A policy nothing resolves is a document, not
+@@ -553,10 +577,45 @@ def hl20(resolver, runtime_art, resolved_digests: dict, observer=None) -> RuleRe
+     if resolved_digests.get("agent-version-policy") != policy.digest:
+         return RuleResult(False, "agent-version-policy is not in the resolved authority chain",
+                           "agent_version_policy_digest_mismatch")
+-    if policy.obj.get("state") != "approved":
++    if policy.obj.get("state") != "approved":
+         return RuleResult(False, f"agent-version-policy state={policy.obj.get('state')!r}: an "
+                                  f"unapproved policy cannot authorise an assured version (D-22)",
+-                          "agent_version_policy_unapproved")
++                          "agent_version_policy_unapproved")
++
++    approval_claim = policy.obj.get("approval") or {}
++    approval_ref = approval_claim.get("approval_ref")
++    approval_art = approval_store.policy_approval(approval_ref)
++    registry_entry = resolver.authority_entry("agent-version-policy")
++    if approval_art is None or registry_entry is None:
++        return RuleResult(False, f"agent-version-policy approval_ref={approval_ref!r} does not "
++                          "resolve through the protected policy authority registry",
++                          "agent_version_policy_approval_unresolved")
++    approval = approval_art.obj
++    subject = approval["subject"]
++    approval_start = dt.datetime.fromisoformat(approval["approved_at"].replace("Z", "+00:00"))
++    approval_end = dt.datetime.fromisoformat(approval["expires_at"].replace("Z", "+00:00"))
++    approval_problems = []
++    if approval["status"] != "approved":
++        approval_problems.append(f"status={approval['status']}")
++    if approval["approver_role"] != registry_entry["approval_role"]:
++        approval_problems.append(
++            f"role={approval['approver_role']} expected={registry_entry['approval_role']}"
++        )
++    if approval_claim.get("approver_role") != approval["approver_role"]:
++        approval_problems.append("inline approver_role does not match approval artifact")
++    for field, expected in (
++        ("policy_kind", "agent-version-policy"),
++        ("policy_id", policy.obj["policy_id"]),
++        ("policy_version", policy.obj["version"]),
++        ("policy_digest", policy.digest),
++    ):
++        if subject.get(field) != expected:
++            approval_problems.append(f"subject.{field}={subject.get(field)!r} expected={expected!r}")
++    if approval_start > now or approval_end < now:
++        approval_problems.append("approval artifact is outside its validity period")
++    if approval_problems:
++        return RuleResult(False, "; ".join(approval_problems),
++                          "agent_version_policy_approval_unresolved")
+ 
+     # v1.9 defect (Codex): `agent_registry_snapshot_digest` and `public_contract_version` were in the
+     # runtime document and in the schema, and NOTHING read them. Codex forged the registry digest,
+@@ -640,7 +699,10 @@ def hl19(bundle_art: Artifact, receipt, report_art, manifest_digest, resolved_di
+     # recomputed the (now smaller) content address correctly, and reached allow - a receipt could
+     # simply omit the authority it did not want to be bound by. The key SET must match exactly, and
+     # be checked BEFORE the values.
+-    expected_keys = {k for k in resolved_digests if k.endswith("-policy")}
++    expected_keys = {
++        k for k in resolved_digests
++        if k.endswith("-policy") or k == "policy-registry"
++    }
+     got_keys = set(r["policy_digests"])
+     if got_keys != expected_keys:
+         missing = sorted(expected_keys - got_keys)
+@@ -704,11 +766,11 @@ def hl19(bundle_art: Artifact, receipt, report_art, manifest_digest, resolved_di
+ 
+ 
+ # ------------------------------------------------------------------------------- HL-15
+-@rule("HL-15", "cross-artifact",
++@rule("HL-15", "cross-artifact",
+       "candidate assurance resolves the runtime report, boundary row and every linked digest, and matches "
+       "the full subject key",
+-      reasons=("runtime_unresolved", "digest_mismatch", "subject_mismatch", "runtime_not_validated",
+-               "boundary_unresolved", "waiver_unresolved"))
++      reasons=("runtime_unresolved", "digest_mismatch", "subject_mismatch", "runtime_not_validated",
++               "boundary_unresolved", "waiver_unresolved", "control_not_passing"))
+ def hl15(registry_art: Artifact, bundle_art: Artifact, runtime_art, boundary_record,
+          resolved_digests: dict, waiver_store: ArtifactStore, now) -> RuleResult:
+     b = bundle_art.obj
+@@ -769,14 +831,19 @@ def hl15(registry_art: Artifact, bundle_art: Artifact, runtime_art, boundary_rec
+             if p:
+                 return RuleResult(False, "; ".join(p), "subject_mismatch")
+     subject = {"repository_id": b["subject"].get("repository_id", ""), "commit": b["subject"].get("commit", "")}
+-    passing = {c["control_id"] for c in b["controls"] if c["status"] == "pass"}
+-    for c in b["controls"]:
+-        if c["status"] == "waived":
+-            err = _resolve_waiver(waiver_store, registry_art, c.get("waiver_id"), c["control_id"],
+-                                  subject, now, passing)
+-            if err:
+-                return RuleResult(False, err, "waiver_unresolved")
+-    return RuleResult(True, "full evidence chain resolved and subject-bound")
++    passing = {c["control_id"] for c in b["controls"] if c["status"] == "pass"}
++    for c in b["controls"]:
++        if c["status"] == "pass":
++            continue
++        if c["status"] == "waived":
++            err = _resolve_waiver(waiver_store, registry_art, c.get("waiver_id"), c["control_id"],
++                                  subject, now, passing)
++            if err:
++                return RuleResult(False, err, "waiver_unresolved")
++            continue
++        return RuleResult(False, f"{c['control_id']}: status={c['status']} is not passing",
++                          "control_not_passing")
++    return RuleResult(True, "full evidence chain resolved and subject-bound")
+ 
+ 
+ # ------------------------------------------------------------------------------- HL-16
+@@ -807,7 +874,7 @@ def hl16(resolver: PolicyResolver, runtime_art: Artifact) -> RuleResult:
+       "outside app/agent/** only owner-approved public names may be imported from app.agent; package "
+       "aliases, private submodules, dynamic imports and indeterminate sources are rejected",
+       reasons=("private_agent_import", "source_indeterminate"))
+-def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleResult:
++def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleResult:
+     """v1.5 P1-1: `from app import agent as x` + `getattr(x, "verify")` was accepted, and parse
+     failures were treated as clean. v1.6 uses a closed rule: any binding of the `app.agent` package
+     itself is rejected, so no alias can exist to call getattr on. Sources are read from the VERIFIED
+@@ -816,13 +883,123 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+     bad: list = []
+     indeterminate: list = []
+ 
+-    def scan(rel: str, src: str):
++    def scan(rel: str, src: str):
+         try:
+             tree = ast.parse(src)
+         except SyntaxError as e:
+             indeterminate.append(f"{rel} (unparsable: {e.msg})")
+             return
+-        for node in ast.walk(tree):
++        importlib_modules = {"importlib"}
++        builtins_modules = {"builtins"}
++        dynamic_names = {"import_module", "__import__"}
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Import):
++                for alias in node.names:
++                    if alias.name == "importlib":
++                        importlib_modules.add(alias.asname or alias.name)
++                    elif alias.name == "builtins":
++                        builtins_modules.add(alias.asname or alias.name)
++            elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
++                for alias in node.names:
++                    if alias.name == "import_module":
++                        dynamic_names.add(alias.asname or alias.name)
++            elif isinstance(node, ast.ImportFrom) and node.module == "builtins":
++                for alias in node.names:
++                    if alias.name == "__import__":
++                        dynamic_names.add(alias.asname or alias.name)
++
++        def dynamic_getattr_status(node):
++            if not (
++                isinstance(node, ast.Call)
++                and isinstance(node.func, ast.Name)
++                and node.func.id == "getattr"
++            ):
++                return None
++            if not node.args:
++                return None
++            target = node.args[0]
++            importlib_known = isinstance(target, ast.Name) and target.id in importlib_modules
++            builtins_known = isinstance(target, ast.Name) and target.id in builtins_modules
++            target_known = importlib_known or builtins_known
++            if len(node.args) < 2:
++                return "indeterminate" if target_known else None
++            attribute = node.args[1]
++            attribute_name = (
++                attribute.value
++                if isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)
++                else None
++            )
++            if target_known:
++                if attribute_name is None:
++                    return "indeterminate"
++                expected = "import_module" if importlib_known else "__import__"
++                return "dynamic" if attribute_name == expected else None
++            if attribute_name in {"import_module", "__import__"}:
++                return "indeterminate"
++            return None
++
++        alias_indeterminate = set()
++        changed = True
++        while changed:
++            changed = False
++            for node in ast.walk(tree):
++                if isinstance(node, ast.Assign):
++                    targets = node.targets
++                    value = node.value
++                elif isinstance(node, ast.AnnAssign):
++                    targets = [node.target]
++                    value = node.value
++                elif isinstance(node, ast.NamedExpr):
++                    targets = [node.target]
++                    value = node.value
++                else:
++                    continue
++                target_names = [
++                    target.id for target in targets if isinstance(target, ast.Name)
++                ]
++                if isinstance(value, ast.Name):
++                    if value.id in importlib_modules:
++                        for name in target_names:
++                            if name not in importlib_modules:
++                                importlib_modules.add(name)
++                                changed = True
++                    if value.id in builtins_modules:
++                        for name in target_names:
++                            if name not in builtins_modules:
++                                builtins_modules.add(name)
++                                changed = True
++                    if value.id in dynamic_names:
++                        for name in target_names:
++                            if name not in dynamic_names:
++                                dynamic_names.add(name)
++                                changed = True
++                elif (
++                    isinstance(value, ast.Attribute)
++                    and isinstance(value.value, ast.Name)
++                    and (
++                        (value.attr == "import_module"
++                         and value.value.id in importlib_modules)
++                        or (value.attr == "__import__"
++                            and value.value.id in builtins_modules)
++                    )
++                ):
++                    for name in target_names:
++                        if name not in dynamic_names:
++                            dynamic_names.add(name)
++                            changed = True
++                else:
++                    getattr_status = dynamic_getattr_status(value)
++                    if getattr_status == "dynamic":
++                        for name in target_names:
++                            if name not in dynamic_names:
++                                dynamic_names.add(name)
++                                changed = True
++                    elif getattr_status == "indeterminate":
++                        alias_indeterminate.add(
++                            f"{rel} (computed dynamic import getattr alias)"
++                        )
++        indeterminate.extend(sorted(alias_indeterminate))
++        for node in ast.walk(tree):
+             if isinstance(node, ast.ImportFrom) and node.module:
+                 if node.module == "app.agent":
+                     for a in node.names:
+@@ -844,17 +1021,62 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+                     elif a.name == "app.agent":
+                         bad.append(f"{rel}: import app.agent"
+                                    f"{' as ' + a.asname if a.asname else ''} (package binding)")
+-            elif isinstance(node, ast.Call):
+-                fn = node.func
+-                name = (fn.attr if isinstance(fn, ast.Attribute) else
+-                        fn.id if isinstance(fn, ast.Name) else "")
+-                if name in ("import_module", "__import__"):
+-                    for arg in node.args:
+-                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
+-                           and arg.value.startswith("app.agent"):
+-                            bad.append(f"{rel}: dynamic import of {arg.value}")
+-                        elif not isinstance(arg, ast.Constant):
+-                            indeterminate.append(f"{rel} (computed import target)")
++            elif isinstance(node, ast.Call):
++                fn = node.func
++                getattr_status = dynamic_getattr_status(fn)
++                if getattr_status == "indeterminate":
++                    indeterminate.append(f"{rel} (computed dynamic import getattr call)")
++                    continue
++                dynamic_call = (
++                    isinstance(fn, ast.Name) and fn.id in dynamic_names
++                ) or (
++                    isinstance(fn, ast.Attribute)
++                    and fn.attr == "import_module"
++                    and isinstance(fn.value, ast.Name)
++                    and fn.value.id in importlib_modules
++                ) or (
++                    isinstance(fn, ast.Attribute)
++                    and fn.attr == "__import__"
++                    and isinstance(fn.value, ast.Name)
++                    and fn.value.id in builtins_modules
++                ) or getattr_status == "dynamic"
++                if dynamic_call:
++                    if not node.args:
++                        indeterminate.append(f"{rel} (dynamic import without a target)")
++                        continue
++                    arg = node.args[0]
++                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
++                        target = arg.value
++                        if target.startswith("."):
++                            if len(node.args) < 2:
++                                indeterminate.append(
++                                    f"{rel} (relative dynamic import without a package)"
++                                )
++                                continue
++                            package_arg = node.args[1]
++                            if not (
++                                isinstance(package_arg, ast.Constant)
++                                and isinstance(package_arg.value, str)
++                                and package_arg.value
++                            ):
++                                indeterminate.append(
++                                    f"{rel} (relative dynamic import with a computed package)"
++                                )
++                                continue
++                            level = len(target) - len(target.lstrip("."))
++                            package_parts = package_arg.value.split(".")
++                            if level > len(package_parts) or any(not part for part in package_parts):
++                                indeterminate.append(f"{rel} (invalid relative dynamic import)")
++                                continue
++                            suffix = target[level:]
++                            resolved_parts = package_parts[:len(package_parts) - level + 1]
++                            if suffix:
++                                resolved_parts.append(suffix)
++                            target = ".".join(resolved_parts)
++                        if target == "app.agent" or target.startswith("app.agent."):
++                            bad.append(f"{rel}: dynamic import of {target}")
++                    else:
++                        indeterminate.append(f"{rel} (computed import target)")
+ 
+     for rel in reader.list_files():
+         if not rel.endswith(".py") or rel.startswith("app/agent/") or rel.startswith("tests/"):
+@@ -874,7 +1096,29 @@ def hl06(reader, public_names: frozenset, extra_sources: dict = None) -> RuleRes
+         return RuleResult(False, f"indeterminate sources: {indeterminate[:5]}", "source_indeterminate")
+     return (RuleResult(True, f"no private app.agent import outside app/agent/** "
+                              f"(closed rule over verified objects)") if not bad
+-            else RuleResult(False, f"violations={bad}", "private_agent_import"))
++            else RuleResult(False, f"violations={bad}", "private_agent_import"))
++
++
++@rule("HL-21", "cross-artifact",
++      "rule_versions must be a complete, exact binding to the executable rules used for this "
++      "attestation path",
++      reasons=("rule_version_mismatch",))
++def hl21(bundle_art: Artifact, executed_rule_ids) -> RuleResult:
++    declared = list(bundle_art.obj.get("rule_versions") or ())
++    declared_ids = [item["rule_id"] for item in declared]
++    expected_ids = sorted(set(executed_rule_ids))
++    problems = []
++    if len(declared_ids) != len(set(declared_ids)):
++        problems.append("duplicate rule_id entries")
++    if sorted(declared_ids) != expected_ids:
++        problems.append(f"declared={sorted(declared_ids)} executed={expected_ids}")
++    for item in declared:
++        if item["version"] != ATTESTOR_VERSION or item["executable"] is not True:
++            problems.append(
++                f"{item['rule_id']} version/executable={item['version']!r}/{item['executable']!r}"
++            )
++    return (RuleResult(True, f"{len(expected_ids)} executed rule versions are exactly bound")
++            if not problems else RuleResult(False, "; ".join(problems), "rule_version_mismatch"))
+ 
+ 
+ # ------------------------------------------------------------------------------- HL-17
+diff --git a/schemas/control-registry.schema.json b/schemas/control-registry.schema.json
+index 0f4773ceffdf9e35d3e8a152c8b045b30c640a47..327267ad9ed47dadefc6a10a2e028ae0dc24cd9d 100644
+--- a/schemas/control-registry.schema.json
++++ b/schemas/control-registry.schema.json
+@@ -242,11 +242,11 @@
+             ]
+           }
+         },
+-        {
+-          "if": {
+-            "properties": {
+-              "status": {
+-                "const": "Baseline-Confirmed"
++        {
++          "if": {
++            "properties": {
++              "status": {
++                "const": "Baseline-Confirmed"
+               }
+             },
+             "required": [
+@@ -257,10 +257,37 @@
+             "required": [
+               "baseline_sha",
+               "scoped_paths",
+-              "limitations"
+-            ]
+-          }
+-        },
++              "limitations"
++            ]
++          }
++        },
++        {
++          "$comment": "RPA-179 CR-12: a confirmed fact must identify actual evidence, never evidence_kind=none.",
++          "if": {
++            "properties": {
++              "status": {
++                "enum": [
++                  "Baseline-Confirmed",
++                  "Current-Confirmed"
++                ]
++              }
++            },
++            "required": [
++              "status"
++            ]
++          },
++          "then": {
++            "properties": {
++              "evidence_kind": {
++                "enum": [
++                  "static_code",
++                  "local_execution",
++                  "live_operational"
++                ]
++              }
++            }
++          }
++        },
+         {
+           "if": {
+             "properties": {
+diff --git a/schemas/evidence-bundle.schema.json b/schemas/evidence-bundle.schema.json
+index 7086ec153a6e906201d42ba7230617f2e5b1d5e9..31c60c68ba686f4de47f0d5947f3e915fb2028f4 100644
+--- a/schemas/evidence-bundle.schema.json
++++ b/schemas/evidence-bundle.schema.json
+@@ -18,9 +18,10 @@
+     "schema_digest",
+     "completeness",
+     "required_controls",
+-    "controls",
+-    "missing_controls",
+-    "assurance_verdict"
++    "controls",
++    "missing_controls",
++    "assurance_verdict",
++    "rule_versions"
+   ],
+   "$defs": {
+     "control_id": {
+@@ -616,9 +617,10 @@
+         "$ref": "#/$defs/nonempty"
+       }
+     },
+-    "rule_versions": {
+-      "type": "array",
+-      "description": "P0-6/acceptance 15: every executed rule id + version, so prose-only rules cannot be claimed.",
++    "rule_versions": {
++      "type": "array",
++      "minItems": 1,
++      "description": "P0-6/acceptance 15: every executed rule id + version, so prose-only rules cannot be claimed.",
+       "items": {
+         "type": "object",
+         "additionalProperties": false,
+diff --git a/schemas/policy-approval.schema.json b/schemas/policy-approval.schema.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..b880bc8bf858519401e3ac4a63cd233b3bf06e79
+--- /dev/null
++++ b/schemas/policy-approval.schema.json
+@@ -0,0 +1,80 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "urn:a360:harness:schema:policy-approval:rpa179.1",
++  "title": "Protected policy approval artifact",
++  "type": "object",
++  "additionalProperties": false,
++  "required": [
++    "kind",
++    "approval_id",
++    "status",
++    "approver_role",
++    "subject",
++    "approved_at",
++    "expires_at"
++  ],
++  "$defs": {
++    "nonempty": {
++      "type": "string",
++      "minLength": 1
++    },
++    "sha256": {
++      "type": "string",
++      "pattern": "^sha256:[0-9a-f]{64}$"
++    }
++  },
++  "properties": {
++    "kind": {
++      "const": "policy-approval"
++    },
++    "approval_id": {
++      "type": "string",
++      "pattern": "^PA-[0-9]+$"
++    },
++    "status": {
++      "enum": [
++        "approved",
++        "revoked",
++        "expired"
++      ]
++    },
++    "approver_role": {
++      "$ref": "#/$defs/nonempty"
++    },
++    "subject": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "policy_kind",
++        "policy_id",
++        "policy_version",
++        "policy_digest"
++      ],
++      "properties": {
++        "policy_kind": {
++          "$ref": "#/$defs/nonempty"
++        },
++        "policy_id": {
++          "$ref": "#/$defs/nonempty"
++        },
++        "policy_version": {
++          "$ref": "#/$defs/nonempty"
++        },
++        "policy_digest": {
++          "$ref": "#/$defs/sha256"
++        }
++      }
++    },
++    "approved_at": {
++      "type": "string",
++      "format": "date-time"
++    },
++    "expires_at": {
++      "type": "string",
++      "format": "date-time"
++    },
++    "reason": {
++      "type": "string"
++    }
++  }
++}
+diff --git a/schemas/policy-registry.schema.json b/schemas/policy-registry.schema.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae17cba4ab98ccc3a75d98be64ec9b8666df7c55
+--- /dev/null
++++ b/schemas/policy-registry.schema.json
+@@ -0,0 +1,54 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "urn:a360:harness:schema:policy-registry:rpa179.1",
++  "title": "Assurance policy authority registry",
++  "type": "object",
++  "additionalProperties": false,
++  "required": [
++    "schema_version",
++    "authorities"
++  ],
++  "properties": {
++    "schema_version": {
++      "const": "rpa179.1"
++    },
++    "authorities": {
++      "type": "array",
++      "minItems": 1,
++      "items": {
++        "type": "object",
++        "additionalProperties": false,
++        "required": [
++          "kind",
++          "file",
++          "policy_id",
++          "approval_role"
++        ],
++        "properties": {
++          "kind": {
++            "enum": [
++              "severity-policy",
++              "operation-policy",
++              "dependency-path-policy",
++              "applicability-policy",
++              "interface-policy",
++              "agent-version-policy"
++            ]
++          },
++          "file": {
++            "type": "string",
++            "pattern": "^[a-z][a-z0-9-]*-policy\\.yaml$"
++          },
++          "policy_id": {
++            "type": "string",
++            "minLength": 1
++          },
++          "approval_role": {
++            "type": "string",
++            "minLength": 1
++          }
++        }
++      }
++    }
++  }
++}
+diff --git a/schemas/policy.schema.json b/schemas/policy.schema.json
+index 9fa9465d09fae6ad4c039cd3cc3e1f55e37cf50b..ee479d26d59cbad4dbc9f1ed72c7c882a2d9fd9e 100644
+--- a/schemas/policy.schema.json
++++ b/schemas/policy.schema.json
+@@ -2,8 +2,9 @@
+   "$schema": "https://json-schema.org/draft/2020-12/schema",
+   "$id": "urn:a360:harness:schema:policy:1.8",
+   "title": "Harness policy artifact (severity / operation / dependency-path)",
+-  "description": "P0-3: policies are artifacts with their own schema, loaded by the trusted runner from a pinned protected path, hashed, and required to carry human approval evidence before they may authorize assurance or blocking.",
+-  "type": "object",
++  "description": "P0-3: policies are artifacts with their own schema, loaded by the trusted runner from a pinned protected path, hashed, and required to carry human approval evidence before they may authorize assurance or blocking.",
++  "type": "object",
++  "unevaluatedProperties": false,
+   "required": [
+     "kind",
+     "policy_id",
+@@ -245,7 +246,7 @@
+                 "subject_requirements",
+                 "stages"
+               ],
+-              "properties": {
++              "properties": {
+                 "required_controls": {
+                   "type": "array",
+                   "minItems": 1,
+@@ -374,18 +375,101 @@
+                     "minLength": 1
+                   }
+                 },
+-                "controls": {
++                "controls": {
+                   "type": "array",
+                   "minItems": 1,
+                   "uniqueItems": true,
+                   "items": {
+                     "type": "string",
+                     "pattern": "^(CH|OH|EH)-[0-9]{2}$"
+-                  }
+-                }
+-              }
+-            }
+-          }
++                  }
++                }
++              },
++              "allOf": [
++                {
++                  "if": {
++                    "properties": {
++                      "trigger": {
++                        "const": "risk_profile"
++                      }
++                    },
++                    "required": [
++                      "trigger"
++                    ]
++                  },
++                  "then": {
++                    "required": [
++                      "risk_profile"
++                    ],
++                    "not": {
++                      "required": [
++                        "paths"
++                      ]
++                    }
++                  }
++                },
++                {
++                  "if": {
++                    "properties": {
++                      "trigger": {
++                        "const": "path_glob"
++                      }
++                    },
++                    "required": [
++                      "trigger"
++                    ]
++                  },
++                  "then": {
++                    "required": [
++                      "paths"
++                    ],
++                    "properties": {
++                      "paths": {
++                        "minItems": 1
++                      }
++                    },
++                    "not": {
++                      "required": [
++                        "risk_profile"
++                      ]
++                    }
++                  }
++                },
++                {
++                  "if": {
++                    "properties": {
++                      "trigger": {
++                        "enum": [
++                          "dependency_changed",
++                          "agent_owned_paths_touched",
++                          "any_change"
++                        ]
++                      }
++                    },
++                    "required": [
++                      "trigger"
++                    ]
++                  },
++                  "then": {
++                    "not": {
++                      "anyOf": [
++                        {
++                          "required": [
++                            "risk_profile"
++                          ]
++                        },
++                        {
++                          "required": [
++                            "paths"
++                          ]
++                        }
++                      ]
++                    }
++                  }
++                }
++              ]
++            }
++          }
+         }
+       }
+     },
+diff --git a/schemas/runtime-validation.schema.json b/schemas/runtime-validation.schema.json
+index 03ae075feffeee9b4141c283aa7266573a257138..79b133a4c29ee49a70c936dd9e559404b1fcaabe 100644
+--- a/schemas/runtime-validation.schema.json
++++ b/schemas/runtime-validation.schema.json
+@@ -1133,8 +1133,8 @@
+         }
+       }
+     },
+-    {
+-      "$comment": "An observed resolved version must actually carry the value it claims to have observed.",
++    {
++      "$comment": "An observed resolved version must actually carry the value it claims to have observed.",
+       "if": {
+         "properties": {
+           "agent_provenance": {
+@@ -1162,8 +1162,39 @@
+               }
+             }
+           }
+-        }
+-      }
+-    }
+-  ]
+-}
++        }
++      }
++    },
++    {
++      "$comment": "RPA-179 CR-14: an explicitly unobservable producer version cannot simultaneously carry a resolved value.",
++      "if": {
++        "properties": {
++          "agent_provenance": {
++            "properties": {
++              "resolved_version_observability": {
++                "const": "not_observable_pending_D21"
++              }
++            },
++            "required": [
++              "resolved_version_observability"
++            ]
++          }
++        },
++        "required": [
++          "agent_provenance"
++        ]
++      },
++      "then": {
++        "properties": {
++          "agent_provenance": {
++            "properties": {
++              "producer_resolved_version": {
++                "type": "null"
++              }
++            }
++          }
++        }
++      }
++    }
++  ]
++}
+diff --git a/schemas/waiver-approval.schema.json b/schemas/waiver-approval.schema.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..37790332d781c9e3ba879e74c415c258cf3d3743
+--- /dev/null
++++ b/schemas/waiver-approval.schema.json
+@@ -0,0 +1,78 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "$id": "urn:a360:harness:schema:waiver-approval:rpa179.1",
++  "title": "Protected waiver approval artifact",
++  "type": "object",
++  "additionalProperties": false,
++  "required": [
++    "kind",
++    "approval_id",
++    "status",
++    "approver_role",
++    "subject",
++    "approved_at",
++    "expires_at"
++  ],
++  "$defs": {
++    "nonempty": {
++      "type": "string",
++      "minLength": 1
++    },
++    "sha256": {
++      "type": "string",
++      "pattern": "^sha256:[0-9a-f]{64}$"
++    }
++  },
++  "properties": {
++    "kind": {
++      "const": "waiver-approval"
++    },
++    "approval_id": {
++      "type": "string",
++      "pattern": "^WA-[0-9]+$"
++    },
++    "status": {
++      "enum": [
++        "approved",
++        "revoked",
++        "expired"
++      ]
++    },
++    "approver_role": {
++      "$ref": "#/$defs/nonempty"
++    },
++    "subject": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "waiver_id",
++        "control_id",
++        "waiver_digest"
++      ],
++      "properties": {
++        "waiver_id": {
++          "type": "string",
++          "pattern": "^WV-[0-9]+$"
++        },
++        "control_id": {
++          "type": "string",
++          "pattern": "^(CH|OH|EH)-[0-9]{2}$"
++        },
++        "waiver_digest": {
++          "$ref": "#/$defs/sha256"
++        }
++      }
++    },
++    "approved_at": {
++      "type": "string",
++      "format": "date-time"
++    },
++    "expires_at": {
++      "type": "string",
++      "format": "date-time"
++    },
++    "reason": {
++      "type": "string"
++    }
++  }
++}
+diff --git a/selfattack.py b/selfattack.py
+index d35c503518299248d0b1329a1cb8aaffdf5b9269..171620add50622376251cc797b7fede84dcd60be 100644
+--- a/selfattack.py
++++ b/selfattack.py
+@@ -10,8 +10,9 @@ an authority? Everything it finds is published, including what does not survive.
+ """
+ from __future__ import annotations
+ 
+-import json
+-import sys
++import json
++import os
++import sys
+ from pathlib import Path
+ 
+ HERE = Path(__file__).parent
+@@ -23,8 +24,9 @@ from core import ATTESTOR_VERSION, Artifact, TrustedContext, change_receipt_id
+ from vertical_paths import (NOW, authority, build_change_docs, build_output_docs,  # noqa: E402
+                             make_subject_repo)
+ 
+-FIX = HERE / "policies_approved_fixture"
+-reg = HERE / "control-registry.yaml"
++FIX = HERE / "policies_approved_fixture"
++reg = HERE / "control-registry.yaml"
++OUT = Path(os.environ.get("A360_HARNESS_OUT", str(HERE / ".out")))
+ repo, base, head = make_subject_repo()
+ env = {"A360_REPO_ID": "R_synthetic_subject", "A360_EVENT": "pull_request", "A360_BASE_SHA": base,
+        "A360_HEAD_SHA": head, "A360_CHECKOUT_SHA": head, "A360_MERGE_BASE": base,
+@@ -66,7 +68,7 @@ attack("pass an installation root to for_runner (Codex's v1.9 attack)",
+ 
+ # 1b3. THE QUESTION I KEPT NOT ASKING: what ELSE does the runner take from its caller? `repo`, `now`
+ #      and `authority` all are. Can any of them select an authority the way src_dir did?
+-_crafted = HERE / ".out" / "sa110-crafted-root"
++_crafted = OUT / "sa110-crafted-root"
+ (_crafted / "policies").mkdir(parents=True, exist_ok=True)
+ for _f in FIX.iterdir():
+     if _f.is_file():
+@@ -114,12 +116,12 @@ bp, rp = build_output_docs(oat, ctx, rep_art, rid)
+ def output_with(prov_update, tag):
+     rt = json.loads(Path(rp).read_text(encoding="utf-8"))
+     rt["agent_provenance"].update(prov_update)
+-    p = HERE / ".out" / f"sa19-runtime-{tag}.json"
++    p = OUT / f"sa19-runtime-{tag}.json"
+     p.write_text(json.dumps(rt), encoding="utf-8")
+     art = Artifact.load(p, oat.validators["runtime-validation"])
+     bo = json.loads(Path(bp).read_text(encoding="utf-8"))
+     bo["linked_reports"]["runtime_validation_digest"] = art.digest
+-    bpp = HERE / ".out" / f"sa19-bundle-{tag}.json"
++    bpp = OUT / f"sa19-bundle-{tag}.json"
+     bpp.write_text(json.dumps(bo), encoding="utf-8")
+     return oat.attest_output(bpp, p, rep_p, man_p, "BR-1", reg)
+ 
+@@ -237,8 +239,22 @@ print("""
+   origin authentication") and it is confirmed. Criterion 4 therefore holds only UNDER the D-16
+   assumption of a protected store writer. Signing is the fix, and it is not in v1.9.
+ """)
+-bypassed = [n for n, b in findings if b]
+-print(f"attacks that bypassed a v1.10 claim: {len(bypassed)}/{len(findings)}")
++bypassed = [n for n, b in findings if b]
++print(f"attacks that bypassed a v1.10 claim: {len(bypassed)}/{len(findings)}")
+ for n in bypassed:
+     print(f"  - {n}")
+-print("\nAll of the above are DISCLOSED in the contract, not fixed by it.")
++print("\nAll of the above are DISCLOSED in the contract, not fixed by it.")
++
++expected_d16_residuals = {
++    "call Attestor.for_testing_only directly (it is a public classmethod)",
++    "import the private _TEST_CONSTRUCTION sentinel and pass it",
++    "wire the runner to an adapter that fabricates the entire observation",
++    "hand-mint an ALLOW receipt for a change the attestor DENIED, address recomputed correctly",
++}
++actual = set(bypassed)
++if actual != expected_d16_residuals:
++    print("UNEXPECTED SELF-ATTACK RESULT")
++    print(f"  unexpected={sorted(actual - expected_d16_residuals)}")
++    print(f"  missing_expected={sorted(expected_d16_residuals - actual)}")
++    raise SystemExit(1)
++print("SELF-ATTACK ALLOWLIST: exact D-16 residual set matched")
+diff --git a/store.py b/store.py
+index 94fedaa7695a265cba4900f7f2d5e9ad1ca574a5..9a34dd7d6414ff6af9983730e113c678d2bfbc07 100644
+--- a/store.py
++++ b/store.py
+@@ -211,7 +211,7 @@ class BoundaryRecordStore:
+ 
+ 
+ # ------------------------------------------------ change receipts (v1.6 review item 1)
+-class ChangeReceiptStore:
++class ChangeReceiptStore:
+     """Runner-owned adapter resolving a ChangeAttestationReceipt by ID.
+ 
+     Codex reproduced: an unrelated, internally contradictory Change report authorised Output with
+@@ -223,19 +223,49 @@ class ChangeReceiptStore:
+                  revision: str = "receipt-rev-3"):
+         self._records = records or {}
+         self._validator = validator
+-        self._unreadable = unreadable
+-        self._revision = revision
+-
+-    def put(self, raw: bytes) -> str:
++        self._unreadable = unreadable
++        self._revision = revision
++
++    def _validated(self, raw: bytes, expected_id: str | None = None):
++        if self._validator is None:
++            raise StoreReadError("change receipt schema validator is not configured")
++        from core import Artifact, ArtifactError, change_receipt_id
++        try:
++            art = Artifact.from_bytes("receipt://candidate.json", raw, self._validator)
++            obj = art.obj
++            authority = dict(obj["policy_digests"])
++            authority["registry"] = obj["control_registry_digest"]
++            authority["schemas"] = obj["schema_digest"]
++            recomputed = change_receipt_id(
++                obj["repository_id"], obj["commit"], obj["assurance_report_digest"],
++                obj["change_manifest_digest"], authority, obj["attestor"]["version"],
++                obj["decision"], obj["evidence_valid"],
++            )
++        except (ArtifactError, KeyError, TypeError, ValueError) as e:
++            raise StoreReadError(
++                f"change receipt is invalid: {type(e).__name__}: {str(e)[:160]}"
++            ) from None
++        rid = obj["receipt_id"]
++        if recomputed != rid:
++            raise StoreReadError(
++                f"receipt id {rid!r} is not the content address of the validated payload"
++            )
++        if expected_id is not None and expected_id != rid:
++            raise StoreReadError(
++                f"receipt store key {expected_id!r} != validated payload receipt_id {rid!r}"
++            )
++        return art
++
++    def put(self, raw: bytes) -> str:
+         """Immutable, idempotent store contract (v1.7 review item 3).
+ 
+         The key IS the payload's receipt_id, so a lookup key can never disagree with the record it
+         returns. Re-storing identical bytes is a no-op; storing DIFFERENT bytes under an existing id
+         raises instead of silently overwriting an attestation.
+         """
+-        import json as _json
+-        rid = _json.loads(raw.decode("utf-8"))["receipt_id"]
+-        existing = self._records.get(rid)
++        art = self._validated(raw)
++        rid = art.obj["receipt_id"]
++        existing = self._records.get(rid)
+         if existing is not None and existing != raw:
+             raise StoreReadError(
+                 f"receipt {rid} already exists with different content: receipts are immutable")
+@@ -245,19 +275,13 @@ class ChangeReceiptStore:
+     def resolve(self, receipt_id: str) -> "ChangeReceipt":
+         if receipt_id in self._unreadable:
+             raise StoreReadError(f"change receipt unreadable: {receipt_id}")
+-        raw = self._records.get(receipt_id)
+-        if raw is None:
+-            raise StoreReadError(f"change receipt {receipt_id} does not resolve")
+-        from core import Artifact
+-        art = Artifact.from_bytes(f"receipt://{receipt_id}.json", raw, self._validator)
+-        # v1.7 defect (Codex): the store key could differ from the validated payload's receipt_id,
+-        # and an allow decision still followed. The key and the payload are now one identity.
+-        payload_id = art.obj["receipt_id"]
+-        if payload_id != receipt_id:
+-            raise StoreReadError(
+-                f"receipt store key {receipt_id!r} != validated payload receipt_id {payload_id!r}")
+-        return ChangeReceipt(receipt_id=payload_id, obj=art.obj, digest=art.digest,
+-                             revision=self._revision)
++        raw = self._records.get(receipt_id)
++        if raw is None:
++            raise StoreReadError(f"change receipt {receipt_id} does not resolve")
++        art = self._validated(raw, receipt_id)
++        payload_id = art.obj["receipt_id"]
++        return ChangeReceipt(receipt_id=payload_id, obj=art.obj, digest=art.digest,
++                             revision=self._revision)
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/vertical_paths.py b/vertical_paths.py
+index ff5401619c994c9d7405b29cc01f6df0d39c6487..13ee518213f3996f62dafd4fceab5fb66bf5fa05 100644
+--- a/vertical_paths.py
++++ b/vertical_paths.py
+@@ -24,9 +24,10 @@ Generated documents go to `.out/`, OUTSIDE the hashed source manifest.
+ """
+ from __future__ import annotations
+ 
+-import datetime as dt
+-import json
+-import subprocess
++import datetime as dt
++import json
++import os
++import subprocess
+ import sys
+ from dataclasses import replace
+ from pathlib import Path
+@@ -44,8 +45,7 @@ from store import (AuthorityContext, BoundaryRecordStore, ChangeReceiptStore, Fi
+ PUBLIC_CONTRACT = FixturePublicContractAdapter(resolved_version="v2")
+ 
+ HERE = Path(__file__).parent
+-OUT = HERE / ".out"
+-LIVE_REPO = Path(r"D:\메타넷 최종\A360-Assistant-Backend")
++OUT = Path(os.environ.get("A360_HARNESS_OUT", str(HERE / ".out")))
+ NOW = dt.datetime(2026, 7, 15, 0, 0, 10, tzinfo=dt.timezone.utc)
+ FIX = HERE / "policies_approved_fixture"
+ D_A = core.sha256_bytes(b"a")
+@@ -61,12 +61,15 @@ BOUNDARY = {"candidate_id": "cand-77", "candidate_payload_digest": D_PAY,
+             "boundary_validator_version": "boundary@0.1.0"}
+ 
+ 
+-def git(repo, *a):
+-    return subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True).stdout.strip()
++def git(repo, *a):
++    result = subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True)
++    if result.returncode != 0:
++        raise RuntimeError(f"git {' '.join(a)} failed: {result.stderr.strip()[:160]}")
++    return result.stdout.strip()
+ 
+ 
+-def w(name, obj):
+-    OUT.mkdir(exist_ok=True)
++def w(name, obj):
++    OUT.mkdir(parents=True, exist_ok=True)
+     p = OUT / name
+     p.write_text(json.dumps(obj, indent=1), encoding="utf-8")
+     return p
+@@ -247,7 +250,9 @@ def build_output_docs(at, ctx, report_art, receipt_id, provenance_override=None)
+                            "observed": [{"stage_id": "boundary_validation", "count": 1},
+                                         {"stage_id": "audit", "count": 1}],
+                            "missing": [], "complete": True},
+-          "required_controls": ["OH-01", "OH-02", "OH-06", "EH-03", "EH-07"], "missing_controls": [],
++          "required_controls": ["OH-01", "OH-02", "OH-06", "EH-03", "EH-07"], "missing_controls": [],
++          "rule_versions": [{"rule_id": rid, "version": core.ATTESTOR_VERSION, "executable": True}
++                            for rid in ["HL-13", "HL-14", "HL-15", "HL-16", "HL-19", "HL-20", "HL-21"]],
+           "controls": [{"control_id": c, "status": "pass",
+                         "evidence_ref": {"uri": f"db://{c}", "type": "db_row", "digest": D_A}}
+                        for c in ["OH-01", "OH-02", "OH-06", "EH-03", "EH-07"]],
+@@ -349,21 +354,6 @@ def main() -> int:
+     print(f"  DECISION={r3.decision}  receipt.decision={r3.receipt['decision']}")
+     ok &= (r3.decision == "observe")
+ 
+-    print("\n--- CHANGE: LIVE product repo -> expect refusal --------------------------------")
+-    lhead = git(LIVE_REPO, "rev-parse", "HEAD")
+-    lbase = git(LIVE_REPO, "merge-base", "ed1a1b0d62452f75212da4f78f3e8b9f990da42e", lhead)
+-    lenv = {**env, "A360_REPO_ID": "R_kgDO-a360-backend", "A360_BASE_SHA": lbase,
+-            "A360_HEAD_SHA": lhead, "A360_CHECKOUT_SHA": lhead, "A360_MERGE_BASE": lbase}
+-    at_live = Attestor.for_testing_only(HERE, LIVE_REPO, NOW, authority())
+-    lctx = TrustedContext.from_runner_env(lenv, LIVE_REPO)
+-    if lctx.authoritative:
+-        lc, lp, _ = build_change_docs(at_live, lctx, LIVE_REPO, tag="_live")
+-        rl = at_live.attest_change(lenv, lc, lp, reg)
+-        print(f"  git_state={lctx.git_state} evidence_valid={rl.evidence_valid} "
+-              f"DECISION={rl.decision}")
+-        print(f"    reason: {(rl.evidence_reasons or ('',))[0][:88]}")
+-        ok &= (rl.decision != "allow")
+-
+     print("\n--- OUTPUT: receipt + report + runtime + boundary + observations -> assured ----")
+     report_art = Artifact.load(repp, at.validators["assurance-report"])
+     rid = good_receipt["receipt_id"]

@@ -2,14 +2,25 @@ services:
   backend:
     build: .
     container_name: a360-backend
+    # .env 전체를 컨테이너로 주입한다 — JWT_SECRET·OPENAI_MODEL·VISION_* 등 모든 설정이
+    # 자동으로 들어가 "환경변수를 개별로 나열해야 하는" 누락 실수를 없앤다. .env가 없어도
+    # 기동은 되도록 required:false (그 경우 시크릿은 셸/시스템 환경변수에서 온다).
+    env_file:
+      - path: .env
+        required: false
     environment:
-      APP_ENV: ${APP_ENV:-development}
-      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
-      DATABASE_HOST: ${DATABASE_HOST:-db}
-      DATABASE_PORT: ${DATABASE_PORT:-5432}
-      DATABASE_NAME: ${DATABASE_NAME:-a360}
-      DATABASE_USERNAME: ${DATABASE_USERNAME:-a360_admin}
-      DATABASE_PASSWORD: ${DATABASE_PASSWORD:-a360_local_password}
+      # 앱 DB(users/sessions)만 로컬 컨테이너로 오버라이드 — .env는 호스트 CLI용(localhost/외부
+      # 포트)이라 컨테이너 안에선 서비스명·내부 포트로 고정한다. RAG 코퍼스(RAG_DATABASE_URL)·
+      # 관측 DB(OBSERVABILITY_DATABASE_URL)는 .env의 공유 Neon 값을 그대로 쓴다(여기서 안 덮음).
+      DATABASE_HOST: db
+      DATABASE_PORT: "5432"           # 컨테이너↔db는 내부 5432 (호스트 매핑 포트 5433과 무관)
+      # OPENSEARCH는 로컬로 안 덮는다 — RAG BM25 색인은 공유 Bonsai에 있으므로 컨테이너도 .env의
+      # Bonsai(OPENSEARCH_HOST/USERNAME/PASSWORD)를 써야 한다 (RPA-160). 로컬 검색은 아래 opensearch
+      # 서비스를 프로파일로 띄우고 .env OPENSEARCH_HOST를 로컬로 두면 된다.
+      # ⚠️ 필수 강제: env_file(.env)이 required:false라 .env가 없거나 OPENSEARCH_HOST가 비면
+      #    config가 localhost:9200으로 폴백해 BM25가 또 조용히 죽는다(CodeRabbit #226). 그래서
+      #    여기서 .env 값을 required 치환으로 명시 — 없으면 `docker compose up`이 즉시 실패한다.
+      OPENSEARCH_HOST: ${OPENSEARCH_HOST:?.env에 OPENSEARCH_HOST(공유 Bonsai URL)를 설정하세요}
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
@@ -36,5 +47,29 @@ services:
       timeout: 5s
       retries: 10
 
+  # 완전 로컬 검색 모드용(opt-in) — 기본 `docker compose up`에선 안 뜬다. 공유 데모는 Bonsai를
+  # 쓰므로 이 서비스가 필요 없고, 예전엔 이게 안 떠 있는데 backend가 여길 가리켜 BM25가 죽었다(RPA-160).
+  # 로컬 검색을 쓰려면: `docker compose --profile local-opensearch up` + .env OPENSEARCH_HOST를 로컬로.
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: a360-opensearch
+    profiles: ["local-opensearch"]
+    environment:
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # 2.12+ 보안 플러그인 데모 설치 스크립트가 security.disabled 여부와 무관하게 요구함 (로컬 전용, 실제 인증엔 안 쓰임)
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "A360-local-Dev1!"
+    ports:
+      - "${OPENSEARCH_PORT:-9200}:9200"
+    volumes:
+      - a360-opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   a360-postgres-data:
+  a360-opensearch-data:

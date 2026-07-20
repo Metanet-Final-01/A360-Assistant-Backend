@@ -1,0 +1,472 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:policy:1.8",
+  "title": "Harness policy artifact (severity / operation / dependency-path)",
+  "description": "P0-3: policies are artifacts with their own schema, loaded by the trusted runner from a pinned protected path, hashed, and required to carry human approval evidence before they may authorize assurance or blocking.",
+  "type": "object",
+  "required": [
+    "kind",
+    "policy_id",
+    "version",
+    "state",
+    "approval"
+  ],
+  "$defs": {
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approval": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "approver_role",
+            "approval_ref",
+            "approved_at"
+          ],
+          "properties": {
+            "approver_role": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "approval_ref": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "approved_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        }
+      ]
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_id",
+        "event_kind",
+        "min_count",
+        "max_count",
+        "source_table",
+        "correlation_key",
+        "window_seconds",
+        "condition"
+      ],
+      "properties": {
+        "stage_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "event_kind": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "min_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "source_table": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "correlation_key": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "window_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "condition": {
+          "const": "always",
+          "description": "v1.5 P0-5: closed to the single value with a typed evaluator. Any other condition has no evaluator and must not be silently accepted."
+        }
+      }
+    }
+  },
+  "properties": {
+    "kind": {
+      "enum": [
+        "severity-policy",
+        "operation-policy",
+        "dependency-path-policy",
+        "applicability-policy",
+        "interface-policy",
+        "agent-version-policy"
+      ]
+    },
+    "policy_id": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "version": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "state": {
+      "enum": [
+        "unapproved",
+        "approved"
+      ]
+    },
+    "approval": {
+      "$ref": "#/$defs/approval"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "fixture_warning": {
+      "type": "string"
+    },
+    "version_dispatch_note": {
+      "type": "string"
+    },
+    "source_of_truth": {
+      "type": "string"
+    },
+    "observed_at_sha": {
+      "type": "string"
+    },
+    "discovered_at_sha": {
+      "type": "string"
+    },
+    "unresolved_decisions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "P0-3: an approved policy MUST carry human approval evidence.",
+      "if": {
+        "properties": {
+          "state": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "approval": {
+            "type": "object",
+            "required": [
+              "approver_role",
+              "approval_ref",
+              "approved_at"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "severity-policy"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "blocking_severities",
+          "severity_scale",
+          "rule_severity_mapping_state"
+        ],
+        "properties": {
+          "blocking_severities": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "severity_scale": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "rule_severity_mapping_state": {
+            "enum": [
+              "unapproved",
+              "approved"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "operation-policy"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "operations",
+          "unsupported_operations"
+        ],
+        "properties": {
+          "unsupported_operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "operations": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required_controls",
+                "subject_requirements",
+                "stages"
+              ],
+              "properties": {
+                "required_controls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(CH|OH|EH)-[0-9]{2}$"
+                  }
+                },
+                "subject_requirements": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/nonempty"
+                  }
+                },
+                "stages": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/$defs/stage"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "dependency-path-policy"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "dependency_paths",
+          "content_scan_paths",
+          "agent_owned_paths",
+          "risk_profile_paths"
+        ],
+        "properties": {
+          "dependency_paths": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "content_scan_paths": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "agent_owned_paths": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "risk_profile_paths": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/nonempty"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "P0-3: applicability is derived from this protected artifact, not special-cased in code.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "applicability-policy"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "applicability"
+        ],
+        "properties": {
+          "applicability": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "trigger",
+                "controls"
+              ],
+              "properties": {
+                "trigger": {
+                  "enum": [
+                    "dependency_changed",
+                    "agent_owned_paths_touched",
+                    "any_change",
+                    "risk_profile",
+                    "path_glob"
+                  ]
+                },
+                "risk_profile": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "controls": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(CH|OH|EH)-[0-9]{2}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "P1-1: the public Agent API is an owner-approved artifact, not a hard-coded set.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "interface-policy"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "owner_role",
+          "public_names",
+          "bounded_coverage_note"
+        ],
+        "properties": {
+          "owner_role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "public_names": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "bounded_coverage_note": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "post-merge item 3: discoverable versions are not approved versions.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "agent-version-policy"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "required": [
+          "discovered_versions",
+          "approved_versions",
+          "observed_fallback_default"
+        ],
+        "properties": {
+          "discovered_versions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "approved_versions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "observed_fallback_default": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
+}

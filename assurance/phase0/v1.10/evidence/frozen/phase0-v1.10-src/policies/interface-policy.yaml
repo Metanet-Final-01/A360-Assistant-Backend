@@ -1,0 +1,26 @@
+kind: interface-policy
+policy_id: agent.public_interface
+version: "0.2.0-proposed"
+state: unapproved            # human decision D-6: the Agent owner must ratify this list
+approval: null
+# Re-verified at the new Current-Confirmed baseline d66fce1 (read-only).
+# app/agent/__init__.py __all__ grew by two symbols when PR #237 (RPA-169) landed the version
+# dispatcher. v1.7 listed only three names; that list is now stale.
+owner_role: agent-maintainer
+source_of_truth: "app/agent/__init__.py __all__"
+observed_at_sha: "d66fce1840c1dcf907c9d303bbc64654c7c41857"
+public_names:
+  - analyze
+  - available_versions        # new at d66fce1 (PR #237)
+  - default_version           # new at d66fce1 (PR #237)
+  - recommend
+  - stream_agent_turn
+bounded_coverage_note: >
+  This lint detects direct imports, parent-package imports, package aliases and literal dynamic
+  imports. It does NOT detect fully computed module names, sys.modules manipulation, or imports
+  performed by native/compiled code. It is a bounded boundary lint, not a complete import authority.
+version_dispatch_note: >
+  app/agent now vendors independent per-version stacks under app/agent/v1 and app/agent/v2, each with
+  its own orchestrator/recommend/verify/prompts. Backend control MUST NOT be rewritten to point at
+  app/agent/vN/** paths: those are Agent-owned internals (D-002). Backend uses only the public
+  boundary - the dispatcher symbols above and the done-data envelope.

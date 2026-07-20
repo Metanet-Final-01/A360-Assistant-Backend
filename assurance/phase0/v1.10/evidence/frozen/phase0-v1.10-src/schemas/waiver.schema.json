@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:waiver:1.8",
+  "title": "Waiver artifact",
+  "description": "P0-4: v1.4 accepted raw waiver lists; a schema-shaped waiver with no approval evidence, an unrelated scope and an unresolved compensating control was accepted. A waiver is now an immutable artifact bound to an exact subject, with an approver role, bounded lifetime and a compensating control that must itself resolve in the registry AND show passing evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "waiver_id",
+    "control_id",
+    "scope",
+    "approver_role",
+    "approval_ref",
+    "jira",
+    "reason",
+    "compensating_control",
+    "subject",
+    "approved_at",
+    "expires_at",
+    "status"
+  ],
+  "$defs": {
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "control_id": {
+      "type": "string",
+      "pattern": "^(CH|OH|EH)-[0-9]{2}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    }
+  },
+  "properties": {
+    "kind": {
+      "const": "waiver"
+    },
+    "waiver_id": {
+      "type": "string",
+      "pattern": "^WV-[0-9]+$"
+    },
+    "control_id": {
+      "$ref": "#/$defs/control_id"
+    },
+    "scope": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "approver_role": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "approval_ref": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "jira": {
+      "type": "string",
+      "pattern": "^RPA-[0-9]+$"
+    },
+    "reason": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "compensating_control": {
+      "$ref": "#/$defs/control_id",
+      "description": "Must resolve in the control registry and have passing evidence in the same report/bundle."
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "commit"
+      ],
+      "properties": {
+        "repository_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "commit": {
+          "$ref": "#/$defs/git_sha"
+        }
+      }
+    },
+    "approved_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": [
+        "active",
+        "expired",
+        "revoked"
+      ]
+    }
+  }
+}

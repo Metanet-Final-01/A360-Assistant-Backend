@@ -1,0 +1,100 @@
+kind: operation-policy
+policy_id: op.policy
+version: 0.1.0-fixture
+state: approved
+approval:
+  approver_role: phase0-fixture-only
+  approval_ref: FIXTURE-NOT-A-REAL-APPROVAL
+  approved_at: '2026-07-10T00:00:00Z'
+unsupported_operations:
+- analyze
+- admin_op
+- rag_ingest
+operations:
+  candidate_validation:
+    required_controls:
+    - OH-01
+    - OH-02
+    - OH-06
+    - EH-03
+    - EH-07
+    subject_requirements:
+    - candidate_id
+    - request_id
+    - session_id
+    - candidate_payload_digest
+    - provenance_status
+    stages:
+    - stage_id: boundary_validation
+      event_kind: runtime_validation
+      min_count: 1
+      max_count: 1
+      source_table: boundary_validation
+      correlation_key: candidate_id
+      window_seconds: 60
+      condition: always
+    - stage_id: audit
+      event_kind: audit_log
+      min_count: 1
+      max_count: null
+      source_table: audit_logs
+      correlation_key: request_id
+      window_seconds: 60
+      condition: always
+  export:
+    required_controls:
+    - EH-07
+    subject_requirements:
+    - request_id
+    - session_id
+    - recommendation_version
+    - provenance_status
+    stages:
+    - stage_id: audit
+      event_kind: audit_log
+      min_count: 1
+      max_count: null
+      source_table: audit_logs
+      correlation_key: request_id
+      window_seconds: 60
+      condition: always
+  compact:
+    required_controls:
+    - EH-07
+    subject_requirements:
+    - request_id
+    - session_id
+    stages:
+    - stage_id: audit
+      event_kind: audit_log
+      min_count: 1
+      max_count: null
+      source_table: audit_logs
+      correlation_key: request_id
+      window_seconds: 60
+      condition: always
+    - stage_id: llm
+      event_kind: llm_usage
+      min_count: 1
+      max_count: null
+      source_table: llm_usage
+      correlation_key: request_id
+      window_seconds: 60
+      condition: always
+  chat_plain:
+    required_controls:
+    - EH-07
+    subject_requirements:
+    - request_id
+    - session_id
+    stages:
+    - stage_id: audit
+      event_kind: audit_log
+      min_count: 1
+      max_count: null
+      source_table: audit_logs
+      correlation_key: request_id
+      window_seconds: 60
+      condition: always
+fixture_warning: TEST FIXTURE ONLY. Not a human approval. The shipped policies/ directory remains state=unapproved pending
+  D-9/D-11/D-20.

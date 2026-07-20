@@ -7,6 +7,11 @@ __pycache__/
 .env.*
 !.env.example
 
+# Test coverage
+.coverage
+coverage.xml
+htmlcov/
+
 # Virtual environments
 venv/
 .venv/
@@ -29,3 +34,37 @@ docs/aws-backend-deployment.md
 
 # MacOS
 .DS_Store
+
+# RAG ingest artifacts (crawled docs, parsed schemas, embeddings input)
+data/
+tmp/
+
+# RAG 검색/리랭커 파이프라인 로그 (JSON Lines, 날짜별)
+app/rag/logs/
+
+# RAG seed dump (용량 큼 — LFS/S3로 공유)
+infra/seed/*.dump
+
+# 규칙/LLM 기반 리프 액션 판별 시도 아카이브 (2026-07-10 팀 결정으로 폐기,
+# 로그로만 보존 — _archive_pre_agent_handoff/README.md 참고)
+_archive_pre_agent_handoff/
+
+# 조사 과정 원본 로그/샘플 (시간순 기록, raw HTML 샘플 등) — 핵심 결론은 이미
+# app/rag/README.md에 요약돼 있어 팀원에게 공유할 필요 없음, 로컬 참고용으로만 보존
+app/rag/_investigation_notes/
+
+# Phase 0 assurance verification outputs (generated, not contract source)
+/assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src/.out/
+
+# RPA-179 corrected reference materialization and verification outputs
+/assurance/reference/rpa179/.work/
+/.rpa179-test/
+/.rpa179-debug*/
+/.rpa179-materialized-*/
+/.rpa179-rebuild-*/
+/.rpa179-run-*/
+/.rpa179-work/
+
+# Change Assurance deterministic fixture outputs
+/.rpa180-test/
+/.artifacts/change-assurance/

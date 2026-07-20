@@ -1,0 +1,62 @@
+kind: dependency-path-policy
+policy_id: dep.paths
+version: 0.1.0-proposed
+state: unapproved
+approval: null
+dependency_paths:
+- requirements.txt
+- requirements-dev.txt
+- requirements/*.txt
+- constraints*.txt
+- pyproject.toml
+- poetry.lock
+- uv.lock
+- Dockerfile
+- Dockerfile.*
+- docker-compose*.yml
+- .github/workflows/*.yml
+- .github/workflows/*.yaml
+content_scan_paths:
+- '**/*.sh'
+- '**/*.ps1'
+- '**/*.bat'
+- '**/*.mk'
+- Makefile
+- Dockerfile
+- Dockerfile.*
+- docker-compose*.yml
+- .github/workflows/*.yml
+- .github/workflows/*.yaml
+- scripts/**
+- tools/**
+agent_owned_paths:
+- app/agent/**
+risk_profile_paths:
+  auth:
+  - app/core/auth*.py
+  - app/api/auth*.py
+  db_migration:
+  - migrations/**
+  - app/models.py
+  agent_output:
+  - app/schemas/recommendation.py
+  - app/api/sessions.py
+  api_contract:
+  - app/api/**
+  - app/schemas/**
+  rag:
+  - app/rag/**
+  - app/services/retrieval_params.py
+  infra:
+  - docker-compose*.yml
+  - Dockerfile
+  - Dockerfile.*
+  workflow:
+  - .github/workflows/**
+  dependency:
+  - requirements*.txt
+  - pyproject.toml
+  - poetry.lock
+  - uv.lock
+  agent_boundary:
+  - app/agent/**

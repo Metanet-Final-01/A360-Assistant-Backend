@@ -1,0 +1,20 @@
+kind: applicability-policy
+policy_id: app.applicability
+version: "0.1.0-proposed"
+state: unapproved            # human decision D-11/D-20
+approval: null
+# P0-3: v1.4 derived ONLY CH-04 (from dependency change), and HL-11 merely checked that derived
+# controls were a SUBSET of the manifest's declaration. A manifest could therefore declare OH-02
+# while the report claimed no applicable controls, and everything passed. Applicability is now
+# derived in full from this protected artifact and must match manifest AND report EXACTLY.
+applicability:
+  - trigger: dependency_changed
+    controls: [CH-04]
+  - trigger: agent_owned_paths_touched
+    controls: [CH-06]
+  - trigger: path_glob
+    paths: ["app/schemas/recommendation.py", "app/api/sessions.py"]
+    controls: [OH-02]
+  - trigger: risk_profile
+    risk_profile: db_migration
+    controls: [CH-07]
