@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:assurance:dependency-policy:1.0",
+  "title": "A360 Change Assurance dependency policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "rollout_mode",
+    "policy_decision_state",
+    "requirement_files",
+    "dependency_paths",
+    "local_roots",
+    "protected_paths",
+    "import_distribution_map",
+    "approved_additions",
+    "license_policy",
+    "vulnerability_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "rollout_mode": {
+      "const": "observe"
+    },
+    "policy_decision_state": {
+      "enum": [
+        "decision_needed",
+        "approved",
+        "approved_fixture"
+      ]
+    },
+    "requirement_files": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    },
+    "dependency_paths": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    },
+    "local_roots": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    },
+    "protected_paths": {
+      "$ref": "#/$defs/nonEmptyStringArray"
+    },
+    "import_distribution_map": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "approved_additions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "approval_ref",
+          "import_roots"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "approval_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "import_roots": {
+            "$ref": "#/$defs/nonEmptyStringArray"
+          }
+        }
+      }
+    },
+    "license_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_spdx"
+      ],
+      "properties": {
+        "allowed_spdx": {
+          "$ref": "#/$defs/nonEmptyStringArray"
+        }
+      }
+    },
+    "vulnerability_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "snapshot_generated_at",
+        "max_age_days",
+        "deny_at_or_above",
+        "packages"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "max_age_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deny_at_or_above": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "packages": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/vulnerabilityRecord"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyStringArray": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "vulnerabilityRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "reviewed",
+        "advisories"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewed": {
+          "const": true
+        },
+        "advisories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "severity"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "critical",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

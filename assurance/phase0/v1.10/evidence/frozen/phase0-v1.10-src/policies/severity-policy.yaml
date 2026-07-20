@@ -1,0 +1,13 @@
+kind: severity-policy
+policy_id: sev.blocking
+version: "0.1.0-proposed"
+state: unapproved            # human decision D-9. Nothing may BLOCK while unapproved.
+approval: null               # must carry approver_role + approval_ref when state=approved
+blocking_severities: [critical, high]   # PROPOSAL only; inert while state=unapproved
+severity_scale: [critical, high, medium, low, info]
+rule_severity_mapping_state: unapproved
+notes: >
+  Validators must not hard-code severities. A validator marks each violation with a blocking flag
+  derived from THIS policy; HL-16 re-derives it from these protected bytes and compares.
+  P0-7: an unapproved policy still permits Observe mode (no blocking effect, business persistence
+  untouched, assurance_status=unassured_observe). It only forbids a blocking effect.

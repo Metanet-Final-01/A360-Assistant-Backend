@@ -1,0 +1,74 @@
+# CodeRabbit AI 리뷰 설정 — https://docs.coderabbit.ai/reference/configuration
+# 방침: 빠르게, 필수만. 실제 버그·보안·계약 위반 위주. 정적 린터는 CI가 담당하므로 끔.
+language: "ko-KR"
+
+tone_instructions: "항상 한국어로만. 실제 버그·보안·데이터 계약 위반만 지적하고, 스타일·사소한 개선은 생략한다. 간결하게."
+
+reviews:
+  profile: "chill"          # 노이즈 최소
+  request_changes_workflow: false
+  high_level_summary: false # 요약 생성 생략 (속도)
+  poem: false
+  sequence_diagrams: false
+  changed_files_summary: false
+  review_status: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "dev"
+      - "main"
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+  # 수정된 파일은 전부 리뷰한다 — 차단목록 방식. 코드·설정·마이그레이션·스크립트·테스트·문서(md)
+  # 모두 리뷰 대상. 데이터 덤프(data/)만 제외. md는 아래 path_instructions로 "코드가 소스일 수
+  # 있음"을 전제로 리뷰하게 한다(우리 구현이 진실이면 문서를 코드에 맞춰야 하므로).
+  path_filters:
+    - "!data/**"
+  path_instructions:
+    - path: "app/schemas/**"
+      instructions: >-
+        백엔드·Agent·프론트 공유 데이터 계약. 필드 변경이 기존 소비자(app/agent,
+        프론트 SSE)를 깨는지, docs/INTERFACES.md와 어긋나는지만 지적.
+    - path: "app/api/**|app/services/rag.py"
+      instructions: >-
+        라우터는 얇게(로직은 services). 에러는 {code, message}. 오래 걸리는 작업은 SSE.
+        SSE 스트림 안에서 요청 스코프 DB 세션 금지(FastAPI가 스트리밍 전에 닫음).
+        search_actions 반환 계약(id/source_type/title/content/score) 유지 확인.
+    - path: "**/*.py"
+      instructions: >-
+        시크릿 하드코딩 금지. 외부 입력(업로드·URL·쿼리) 신뢰 금지(SSRF/인젝션).
+        백엔드 직접 LLM 호출은 app/core/llm 경유(사용량 기록).
+    - path: "**/*.md"
+      instructions: >-
+        문서(md) 리뷰: **코드/구현이 소스 오브 트루스일 수 있다.** 문서가 코드와
+        어긋나면 "문서가 틀렸다"고 단정하지 말고, 실제 코드(엔드포인트·필드명·계약·
+        기본값)와의 **불일치를 짚어 어느 쪽이 최신인지 사람이 판단하게** 한다.
+        API 명세·done.data 계약·env 키가 실제와 다르면 그 불일치를 우선 지적.
+        오탈자·문장 스타일·표현 개선은 생략(노이즈).
+  # 정적 분석 도구는 CI(lint·gitleaks)가 이미 담당 → CodeRabbit에서는 꺼서 속도 확보
+  # (CodeRabbit v2 스키마: tools는 reviews 하위. 최상위에 두면 통째로 무시됨 — RPA-85)
+  tools:
+    ruff:
+      enabled: false
+    hadolint:
+      enabled: false
+    gitleaks:
+      enabled: false
+    markdownlint:
+      enabled: false
+    yamllint:
+      enabled: false
+    languagetool:
+      enabled: false
+    actionlint:
+      enabled: false
+    shellcheck:
+      enabled: false
+
+chat:
+  auto_reply: true

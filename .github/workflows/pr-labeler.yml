@@ -1,0 +1,17 @@
+# 변경 파일 경로 기준으로 PR에 area:* 라벨을 자동 부여한다 (매핑: .github/labeler.yml)
+# pull_request_target이므로 base 브랜치(dev)에 있는 설정 파일이 사용된다
+name: PR Labeler
+
+on: pull_request_target
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          sync-labels: true

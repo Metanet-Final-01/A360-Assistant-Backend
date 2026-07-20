@@ -1,0 +1,198 @@
+{
+  "good_import": {
+    "base_files": {
+      "requirements.txt": "samplepkg==1.0.0\n",
+      "worker.py": "def run():\n    return 'ready'\n"
+    },
+    "head_files": {
+      "requirements.txt": "samplepkg==1.0.0\n",
+      "worker.py": "from samplepkg import Widget\n\ndef run():\n    return Widget()\n"
+    },
+    "environment": {
+      "inventory": {
+        "samplepkg": "1.0.0"
+      },
+      "import_map": {
+        "samplepkg": [
+          "samplepkg"
+        ]
+      },
+      "imports": {
+        "samplepkg:Widget": true
+      },
+      "distributions": {
+        "samplepkg": {
+          "installed": true,
+          "version": "1.0.0",
+          "license": "MIT"
+        }
+      }
+    },
+    "snapshot": {
+      "samplepkg": {
+        "version": "1.0.0",
+        "reviewed": true,
+        "advisories": []
+      }
+    },
+    "expected_decision": "allow_candidate"
+  },
+  "fake_dependency": {
+    "base_files": {
+      "requirements.txt": "samplepkg==1.0.0\n",
+      "worker.py": "def run():\n    return 'ready'\n"
+    },
+    "head_files": {
+      "requirements.txt": "samplepkg==1.0.0\ninvented-sdk==9.9.9\n",
+      "worker.py": "from invented_sdk import Client\n\ndef run():\n    return Client()\n"
+    },
+    "environment": {
+      "inventory": {
+        "invented-sdk": "9.9.9",
+        "samplepkg": "1.0.0"
+      },
+      "import_map": {
+        "invented_sdk": [
+          "invented-sdk"
+        ]
+      },
+      "imports": {
+        "invented_sdk:Client": true
+      },
+      "distributions": {
+        "invented-sdk": {
+          "installed": true,
+          "version": "9.9.9",
+          "license": "MIT"
+        }
+      }
+    },
+    "snapshot": {
+      "invented-sdk": {
+        "version": "9.9.9",
+        "reviewed": true,
+        "advisories": []
+      }
+    },
+    "expected_decision": "deny"
+  },
+  "fake_import": {
+    "base_files": {
+      "requirements.txt": "samplepkg==1.0.0\n",
+      "worker.py": "def run():\n    return 'ready'\n"
+    },
+    "head_files": {
+      "requirements.txt": "samplepkg==1.0.0\n",
+      "worker.py": "from samplepkg import ImaginaryWidget\n\ndef run():\n    return ImaginaryWidget()\n"
+    },
+    "environment": {
+      "inventory": {
+        "samplepkg": "1.0.0"
+      },
+      "import_map": {
+        "samplepkg": [
+          "samplepkg"
+        ]
+      },
+      "imports": {
+        "samplepkg:ImaginaryWidget": false
+      },
+      "distributions": {
+        "samplepkg": {
+          "installed": true,
+          "version": "1.0.0",
+          "license": "MIT"
+        }
+      }
+    },
+    "snapshot": {
+      "samplepkg": {
+        "version": "1.0.0",
+        "reviewed": true,
+        "advisories": []
+      }
+    },
+    "expected_decision": "deny"
+  },
+  "high_vulnerability": {
+    "base_files": {
+      "requirements.txt": "riskypkg==2.0.0\n",
+      "worker.py": "def run():\n    return 'ready'\n"
+    },
+    "head_files": {
+      "requirements.txt": "riskypkg==2.0.0\n",
+      "worker.py": "from riskypkg import Client\n\ndef run():\n    return Client()\n"
+    },
+    "environment": {
+      "inventory": {
+        "riskypkg": "2.0.0"
+      },
+      "import_map": {
+        "riskypkg": [
+          "riskypkg"
+        ]
+      },
+      "imports": {
+        "riskypkg:Client": true
+      },
+      "distributions": {
+        "riskypkg": {
+          "installed": true,
+          "version": "2.0.0",
+          "license": "MIT"
+        }
+      }
+    },
+    "snapshot": {
+      "riskypkg": {
+        "version": "2.0.0",
+        "reviewed": true,
+        "advisories": [
+          {
+            "id": "OSV-TEST-1",
+            "severity": "high"
+          }
+        ]
+      }
+    },
+    "expected_decision": "deny"
+  },
+  "disallowed_license": {
+    "base_files": {
+      "requirements.txt": "copyleftpkg==3.0.0\n",
+      "worker.py": "def run():\n    return 'ready'\n"
+    },
+    "head_files": {
+      "requirements.txt": "copyleftpkg==3.0.0\n",
+      "worker.py": "from copyleftpkg import Client\n\ndef run():\n    return Client()\n"
+    },
+    "environment": {
+      "inventory": {
+        "copyleftpkg": "3.0.0"
+      },
+      "import_map": {
+        "copyleftpkg": [
+          "copyleftpkg"
+        ]
+      },
+      "imports": {
+        "copyleftpkg:Client": true
+      },
+      "distributions": {
+        "copyleftpkg": {
+          "installed": true,
+          "version": "3.0.0",
+          "license": "GPL-3.0-only"
+        }
+      }
+    },
+    "snapshot": {
+      "copyleftpkg": {
+        "version": "3.0.0",
+        "reviewed": true,
+        "advisories": []
+      }
+    },
+    "expected_decision": "deny"
+  }
+}

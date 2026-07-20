@@ -1,0 +1,15 @@
+kind: waiver
+waiver_id: WV-3
+control_id: CH-04
+scope: PR-201
+approver_role: release-approver
+approval_ref: RPA-997
+jira: RPA-997
+reason: "compensating control never passes"
+compensating_control: CH-99
+subject:
+  repository_id: R_kgDO-a360-backend
+  commit: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+approved_at: "2026-07-10T00:00:00Z"
+expires_at: "2026-08-01T00:00:00Z"
+status: active

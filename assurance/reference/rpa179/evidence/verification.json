@@ -1,0 +1,453 @@
+{
+  "baseline_commit": "79c3428ed05a13f4a4f9be8155ee56b41546a2e4",
+  "determinism": {
+    "regression_equal": true,
+    "transcripts_equal": true,
+    "tree_digest_equal": true,
+    "validated_common_digests": {
+      "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
+      "transcript_digest": "sha256:17b223bd8723eb220ca79467a9fb58fed9aca4c04b22dec18b648a708f0b4367",
+      "tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a"
+    }
+  },
+  "environment": {
+    "dependencies": {
+      "PyYAML": "6.0.3",
+      "jsonschema": "4.26.0"
+    },
+    "dependency_digest": "sha256:8355586d6187cada9ad0e0035c3bbd5dcb2cf6f822a6d0583f1bc99070ce4ef4",
+    "git_version": "git version 2.53.0.windows.2",
+    "machine": "AMD64",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python_implementation": "CPython",
+    "python_version": "3.13.2",
+    "release": "11",
+    "system": "Windows"
+  },
+  "limitations": [
+    "fixture-only reference; no product path, database, network, or paid LLM was used",
+    "the four disclosed D-16 residuals require a protected CI writer and are not closed in Python",
+    "this result is not an operational security certification or Warn/Enforce approval"
+  ],
+  "reference": {
+    "corrected_file_count": 52,
+    "corrected_tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a",
+    "corrections_sha256": "sha256:b8fdea25f17cb04bf31400bd941bfd9b02872c443112fe603cb2f0edcd0d8764",
+    "finding_matrix_sha256": "sha256:0dfaaa6dd43fd4b709574963cf2fbfd2907757494cee0ca838867d999fe8c661",
+    "source": "assurance/phase0/v1.10/evidence/frozen/phase0-v1.10-src",
+    "source_manifest_sha256": "sha256:d0ad43c2a705d0522cba8e287b31fe040c953bb2ba89a5d3d9788cc0b07a666f",
+    "verification_tools": {
+      "materialize.py": "sha256:f1f28324112531237d9919eace19b80677cd9bac898ec282779e3faf57e69447",
+      "regression.py": "sha256:ad3b0ce3aa4ea0513881806d9b1ad863976fcb622d31089fc2bfbfa974c90511",
+      "verification-result.schema.json": "sha256:9fe54d13c2a86d82660cb0b56f8633ddd1950e0c9189cdb8413ab7615d15b828",
+      "verify.py": "sha256:32cbd7f2b08557288e6be045d49ab836a69bdc5020d1c330b79b1a53a14517f3"
+    },
+    "verified_source_files": 45
+  },
+  "regression": {
+    "actionable_findings": [
+      "CR-01",
+      "CR-02",
+      "CR-03",
+      "CR-04",
+      "CR-05",
+      "CR-06",
+      "CR-07",
+      "CR-08",
+      "CR-09",
+      "CR-10",
+      "CR-11",
+      "CR-12",
+      "CR-13",
+      "CR-14",
+      "CR-15",
+      "CR-16",
+      "CR-18",
+      "CR-19",
+      "CR-20",
+      "CR-21",
+      "CR-24",
+      "CR-25",
+      "CR-26",
+      "CR-27",
+      "CR-28"
+    ],
+    "cases": [
+      {
+        "findings": [
+          "CR-01"
+        ],
+        "name": "typed_deny",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-02",
+          "CR-26"
+        ],
+        "name": "synthetic_git_paths",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-03"
+        ],
+        "name": "coverage_matrix",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-04",
+          "CR-18"
+        ],
+        "name": "portable_paths",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-05"
+        ],
+        "name": "registry_evidence_scope",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-06"
+        ],
+        "name": "artifact_errors",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-07"
+        ],
+        "name": "root_script_scan",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-08"
+        ],
+        "name": "waiver_duration",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-09"
+        ],
+        "name": "agent_policy_approval",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-10"
+        ],
+        "name": "control_state",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-11"
+        ],
+        "name": "dynamic_import_alias",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-12"
+        ],
+        "name": "confirmed_evidence",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-13"
+        ],
+        "name": "rule_versions",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-14"
+        ],
+        "name": "runtime_provenance",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-15"
+        ],
+        "name": "waiver_approval",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-16"
+        ],
+        "name": "selfcheck_exit",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-19"
+        ],
+        "name": "git_failure",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-20"
+        ],
+        "name": "reason_assertion",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-21"
+        ],
+        "name": "full_projection",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-24"
+        ],
+        "name": "policy_closed",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-25"
+        ],
+        "name": "receipt_positive",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-27"
+        ],
+        "name": "applicability_companions",
+        "passed": true
+      },
+      {
+        "findings": [
+          "CR-28"
+        ],
+        "name": "receipt_poison",
+        "passed": true
+      }
+    ],
+    "coverage_complete": true,
+    "covered_findings": [
+      "CR-01",
+      "CR-02",
+      "CR-03",
+      "CR-04",
+      "CR-05",
+      "CR-06",
+      "CR-07",
+      "CR-08",
+      "CR-09",
+      "CR-10",
+      "CR-11",
+      "CR-12",
+      "CR-13",
+      "CR-14",
+      "CR-15",
+      "CR-16",
+      "CR-18",
+      "CR-19",
+      "CR-20",
+      "CR-21",
+      "CR-24",
+      "CR-25",
+      "CR-26",
+      "CR-27",
+      "CR-28"
+    ],
+    "schema_version": "rpa179.1"
+  },
+  "result": "pass",
+  "runs": [
+    {
+      "commands": [
+        {
+          "argv": [
+            "python",
+            "-B",
+            "contract_self_test.py"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "COVERAGE GATE: PASS": true,
+            "cases=68  mismatches=0": true,
+            "executable rules      : 15": true
+          },
+          "name": "contract",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:e18ced7aa6f94e8af8d7a263da2bd647d2f39bbce08ebcc765db49906a1eb67c",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:e18ced7aa6f94e8af8d7a263da2bd647d2f39bbce08ebcc765db49906a1eb67c"
+        },
+        {
+          "argv": [
+            "python",
+            "-B",
+            "vertical_paths.py"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "HL-21  ok=True": true,
+            "VERTICAL PATHS: BOTH POSITIVE PATHS REACHED A SUCCESS STATE": true
+          },
+          "name": "vertical",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:144f43adac516e5213291dcb24b4a583429046b029e4c84652ae8e05172180c1",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:144f43adac516e5213291dcb24b4a583429046b029e4c84652ae8e05172180c1"
+        },
+        {
+          "argv": [
+            "python",
+            "-B",
+            "selfattack.py"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "SELF-ATTACK ALLOWLIST: exact D-16 residual set matched": true,
+            "attacks that bypassed a v1.10 claim: 4/14": true
+          },
+          "name": "selfattack",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:dfdd4759c8576b980ecebd828efcad0e0596b333510decf605c6c22a73458d05"
+        },
+        {
+          "argv": [
+            "python",
+            "-B",
+            "assurance/reference/rpa179/regression.py",
+            "--source",
+            "<MATERIALIZED_SOURCE>",
+            "--matrix",
+            "assurance/reference/rpa179/finding-matrix.yaml",
+            "--json",
+            "<RUN_ROOT>/regression.json"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "\"coverage_complete\": true": true
+          },
+          "name": "regression",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:46fb827d9f48190f6b344215d77773449115697bfdff78b5afd76b4ec7b0f1a1",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:46fb827d9f48190f6b344215d77773449115697bfdff78b5afd76b4ec7b0f1a1"
+        }
+      ],
+      "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
+      "run_id": "run-1",
+      "tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a"
+    },
+    {
+      "commands": [
+        {
+          "argv": [
+            "python",
+            "-B",
+            "contract_self_test.py"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "COVERAGE GATE: PASS": true,
+            "cases=68  mismatches=0": true,
+            "executable rules      : 15": true
+          },
+          "name": "contract",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:e18ced7aa6f94e8af8d7a263da2bd647d2f39bbce08ebcc765db49906a1eb67c",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:e18ced7aa6f94e8af8d7a263da2bd647d2f39bbce08ebcc765db49906a1eb67c"
+        },
+        {
+          "argv": [
+            "python",
+            "-B",
+            "vertical_paths.py"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "HL-21  ok=True": true,
+            "VERTICAL PATHS: BOTH POSITIVE PATHS REACHED A SUCCESS STATE": true
+          },
+          "name": "vertical",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:144f43adac516e5213291dcb24b4a583429046b029e4c84652ae8e05172180c1",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:144f43adac516e5213291dcb24b4a583429046b029e4c84652ae8e05172180c1"
+        },
+        {
+          "argv": [
+            "python",
+            "-B",
+            "selfattack.py"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "SELF-ATTACK ALLOWLIST: exact D-16 residual set matched": true,
+            "attacks that bypassed a v1.10 claim: 4/14": true
+          },
+          "name": "selfattack",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:4dfdee532db229be2fb97c6cfa9c472950ec88c8e7a74b81e368ca4cf4100b49",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:8b4e62d288327e62de312d74d1c79bbd5b07faa85a00830b04b874f099aa3d09"
+        },
+        {
+          "argv": [
+            "python",
+            "-B",
+            "assurance/reference/rpa179/regression.py",
+            "--source",
+            "<MATERIALIZED_SOURCE>",
+            "--matrix",
+            "assurance/reference/rpa179/finding-matrix.yaml",
+            "--json",
+            "<RUN_ROOT>/regression.json"
+          ],
+          "exit_code": 0,
+          "markers": {
+            "\"coverage_complete\": true": true
+          },
+          "name": "regression",
+          "normalized_stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "normalized_stdout_sha256": "sha256:46fb827d9f48190f6b344215d77773449115697bfdff78b5afd76b4ec7b0f1a1",
+          "passed": true,
+          "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "stdout_sha256": "sha256:46fb827d9f48190f6b344215d77773449115697bfdff78b5afd76b4ec7b0f1a1"
+        }
+      ],
+      "regression_digest": "sha256:4a5bf01052413068b0f4b4fb78486e34f6a5c5fffc59592a8a5c693dd1725a97",
+      "run_id": "run-2",
+      "tree_digest": "sha256:a8a36337d11f172e1a623dbe773ca9b95db7d0d9dc0d72ecba97d268a71ad91a"
+    }
+  ],
+  "schema_version": "rpa179.verification.1",
+  "summary": {
+    "actionable_findings": 25,
+    "contract_cases": 68,
+    "executable_rules": 15,
+    "historical_findings": 3,
+    "regression_cases": 23,
+    "selfattack_expected_residuals": 4
+  },
+  "verified_at": "2026-07-16T07:11:46.469501Z"
+}

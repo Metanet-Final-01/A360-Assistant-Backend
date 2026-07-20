@@ -1,0 +1,13 @@
+# Phase 0 frozen evidence is content-addressed. Preserve reviewed bytes across checkouts.
+/assurance/phase0/v1.10/evidence/frozen/** -text whitespace=cr-at-eol
+/assurance/phase0/v1.10/decisions/*.json -text
+/assurance/phase0/v1.10/evidence/post-freeze-review.md -text
+
+# This executable patch preserves mixed line endings from the frozen source.
+/assurance/reference/rpa179/corrections.patch -text whitespace=cr-at-eol,-blank-at-eol
+/assurance/reference/rpa179/evidence/verification.json -text whitespace=cr-at-eol
+/assurance/reference/rpa179/evidence/verification.sha256 -text whitespace=cr-at-eol
+
+# These original review transcripts contain reviewed trailing spaces and Markdown line breaks.
+/assurance/phase0/v1.10/evidence/frozen/claude-contract-v1.10.md whitespace=cr-at-eol,-blank-at-eol
+/assurance/phase0/v1.10/evidence/frozen/codex-independent-review-v1.10.md whitespace=cr-at-eol,-blank-at-eol

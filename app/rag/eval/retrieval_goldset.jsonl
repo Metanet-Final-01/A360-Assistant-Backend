@@ -1,0 +1,12 @@
+{"query": "엑셀 스프레드시트 파일을 열어 데이터 작업을 시작한다", "relevant": [{"package": "Excel", "action": "OpenSpreadsheet"}, {"package": "Excel_MS", "action": "OpenSpreadsheet"}], "note": "봇 HugeExcel_ExcelBasic/Advanced, Sales Data Analysis, LetterGenerator"}
+{"query": "작업을 마친 엑셀 스프레드시트를 닫는다", "relevant": [{"package": "Excel", "action": "CloseSpreadsheet"}, {"package": "Excel_MS", "action": "CloseSpreadsheet"}], "note": "봇 Sales Data Analysis, LetterGenerator"}
+{"query": "엑셀의 특정 셀에 값을 입력한다", "relevant": [{"package": "Excel_MS", "action": "SetCell"}, {"package": "Excel", "action": "SetCell"}], "note": "봇 Profit Calculation Bot Episode 1"}
+{"query": "엑셀 시트의 전체 행 개수를 구한다", "relevant": [{"package": "Excel_MS", "action": "getNumberOfRows"}], "note": "봇 Profit Calculation Bot Episode 1"}
+{"query": "엑셀에서 행이나 열을 삽입하거나 삭제한다", "relevant": [{"package": "Excel_MS", "action": "InsertDeleteRowColumn"}], "note": "봇 Profit Calculation Bot Episode 1"}
+{"query": "엑셀에서 선택한 영역의 행과 열을 숨긴다", "relevant": [{"package": "Excel_MS", "action": "HideRowsColumnsInSelection"}], "note": "봇 Profit Calculation Bot Episode 1"}
+{"query": "엑셀 통합 문서에 암호를 걸어 보호한다", "relevant": [{"package": "Excel_MS", "action": "ProtectWorkbook"}], "note": "봇 Profit Calculation Bot Episode 1"}
+{"query": "인터넷 주소에서 파일을 내려받아 저장한다", "relevant": [{"package": "File", "action": "downloadTo"}], "note": "봇 LetterGenerator"}
+{"query": "외부 프로그램이나 실행 파일을 실행한다", "relevant": [{"package": "Application", "action": "runApp"}], "note": "봇 GoogleVision_IQBot_Qualifier"}
+{"query": "DLL 라이브러리를 불러와 사용할 준비를 한다", "relevant": [{"package": "DLL", "action": "Open"}], "note": "봇 AA_Latest_Log_Finder, SOAPWebservice_Access_Using_DLL"}
+{"query": "불러온 DLL의 C# 함수를 호출해 실행한다", "relevant": [{"package": "DLL", "action": "RunCSharpDLL_V1"}], "note": "봇 AA_Latest_Log_Finder, SOAPWebservice_Access_Using_DLL"}
+{"query": "사용을 마친 DLL 라이브러리를 닫는다", "relevant": [{"package": "DLL", "action": "Close"}], "note": "봇 AA_Latest_Log_Finder, SOAPWebservice_Access_Using_DLL"}

@@ -1,0 +1,928 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:a360:harness:schema:evidence-bundle:1.8",
+  "title": "Evidence Bundle (assurance verdict)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace_id",
+    "operation",
+    "operation_policy",
+    "subject",
+    "runtime_env",
+    "assurer",
+    "generated_at",
+    "hashing",
+    "control_registry_digest",
+    "schema_digest",
+    "completeness",
+    "required_controls",
+    "controls",
+    "missing_controls",
+    "assurance_verdict"
+  ],
+  "$defs": {
+    "control_id": {
+      "type": "string",
+      "pattern": "^(CH|OH|EH)-[0-9]{2}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nonempty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "type",
+        "digest"
+      ],
+      "properties": {
+        "uri": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "type": {
+          "enum": [
+            "junit",
+            "sarif",
+            "jsonl",
+            "db_row",
+            "http_response",
+            "log",
+            "report",
+            "sbom",
+            "diff"
+          ]
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": "1.8"
+    },
+    "trace_id": {
+      "$ref": "#/$defs/nonempty"
+    },
+    "operation": {
+      "enum": [
+        "candidate_validation",
+        "export",
+        "compact",
+        "chat_plain",
+        "analyze",
+        "admin_op",
+        "rag_ingest"
+      ]
+    },
+    "operation_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id",
+        "version",
+        "digest",
+        "state"
+      ],
+      "description": "P0-3: the versioned policy that is the AUTHORITY for required_controls and expected stages. HL-14 re-derives both from this policy and rejects a self-trimmed or empty projection.",
+      "properties": {
+        "policy_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "state": {
+          "enum": [
+            "unapproved",
+            "approved"
+          ]
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "session_id"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "session_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "candidate_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "candidate_payload_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "recommendation_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        },
+        "provenance_status": {
+          "enum": [
+            "assured",
+            "legacy"
+          ]
+        },
+        "repository_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "runtime_env": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python_version",
+        "os",
+        "dependency_digest"
+      ],
+      "properties": {
+        "python_version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "os": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "dependency_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "validator_library": {
+          "type": "string"
+        }
+      }
+    },
+    "assurer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "build"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "build": {
+          "$ref": "#/$defs/nonempty"
+        }
+      }
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hashing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "canonicalization",
+        "registry_digest_method"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "canonicalization": {
+          "const": "jcs-rfc8785"
+        },
+        "registry_digest_method": {
+          "const": "raw_bytes"
+        }
+      }
+    },
+    "control_registry_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "schema_digest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "linked_reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "assurance_report_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_validation_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "dual_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boundary_enforcement_digest",
+        "bound_candidate_id",
+        "bound_candidate_payload_digest"
+      ],
+      "description": "EH-03 + P0-5: boundary_enforcement is authoritative and required. The bound_* keys let HL-15 prove the linked runtime report, the boundary row and this subject describe the SAME candidate and payload.",
+      "properties": {
+        "boundary_enforcement_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "producer_advisory_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bound_candidate_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "bound_candidate_payload_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bound_request_id": {
+          "$ref": "#/$defs/nonempty"
+        }
+      }
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id",
+        "policy_version",
+        "policy_digest",
+        "operation_binding",
+        "derivation",
+        "expected",
+        "observed",
+        "missing",
+        "complete"
+      ],
+      "properties": {
+        "policy_id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "policy_version": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "operation_binding": {
+          "enum": [
+            "candidate_validation",
+            "export",
+            "compact",
+            "chat_plain",
+            "analyze",
+            "admin_op",
+            "rag_ingest"
+          ]
+        },
+        "derivation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "attestor_id",
+            "attestor_version",
+            "source_revision",
+            "queried_at"
+          ],
+          "description": "P0-4: replaces the self-reported attestor_derived boolean with actual derivation provenance. HL-13 recomputes missing/complete from expected+observed.",
+          "properties": {
+            "attestor_id": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "attestor_version": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "source_revision": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "queried_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "expected": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stage_id",
+              "event_kind",
+              "min_count",
+              "max_count",
+              "source_table",
+              "correlation_key"
+            ],
+            "properties": {
+              "stage_id": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "event_kind": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "min_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_count": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "condition": {
+                "type": "string"
+              },
+              "source_table": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "correlation_key": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "window_seconds": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "observed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stage_id",
+              "count"
+            ],
+            "properties": {
+              "stage_id": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stage_id",
+              "reason"
+            ],
+            "properties": {
+              "stage_id": {
+                "$ref": "#/$defs/nonempty"
+              },
+              "reason": {
+                "$ref": "#/$defs/nonempty"
+              }
+            }
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            },
+            "required": [
+              "complete"
+            ]
+          },
+          "then": {
+            "required": [
+              "missing"
+            ],
+            "properties": {
+              "missing": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "required_controls": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/control_id"
+      },
+      "description": "P0-3: minItems 1 kills the empty-set vacuous pass. HL-14 additionally requires this to equal the policy projection exactly."
+    },
+    "missing_controls": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/control_id"
+      }
+    },
+    "controls": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "control_id",
+          "status"
+        ],
+        "properties": {
+          "control_id": {
+            "$ref": "#/$defs/control_id"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "warn",
+              "blocked",
+              "waived"
+            ]
+          },
+          "waiver_id": {
+            "type": "string",
+            "pattern": "^WV-[0-9]+$"
+          },
+          "evidence_ref": {
+            "$ref": "#/$defs/evidence_ref"
+          }
+        },
+        "allOf": [
+          {
+            "$comment": "P0-3: pass and waived must each carry digest-verified evidence.",
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "pass",
+                    "waived"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "evidence_ref"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "waived"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "waiver_id"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence_ref"
+      }
+    },
+    "waivers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "waiver_id",
+          "control_id",
+          "scope",
+          "approver_role",
+          "approval_ref",
+          "jira",
+          "reason",
+          "approved_at",
+          "expires_at",
+          "status",
+          "compensating_control"
+        ],
+        "properties": {
+          "waiver_id": {
+            "type": "string",
+            "pattern": "^WV-[0-9]+$"
+          },
+          "control_id": {
+            "$ref": "#/$defs/control_id"
+          },
+          "scope": {
+            "$ref": "#/$defs/nonempty"
+          },
+          "approver_role": {
+            "$ref": "#/$defs/nonempty"
+          },
+          "approval_ref": {
+            "$ref": "#/$defs/nonempty"
+          },
+          "jira": {
+            "type": "string",
+            "pattern": "^RPA-[0-9]+$"
+          },
+          "reason": {
+            "$ref": "#/$defs/nonempty"
+          },
+          "compensating_control": {
+            "$ref": "#/$defs/control_id"
+          },
+          "approved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "expired",
+              "revoked"
+            ]
+          }
+        }
+      }
+    },
+    "assurance_verdict": {
+      "enum": [
+        "assured",
+        "refused",
+        "blocked"
+      ]
+    },
+    "refused_reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonempty"
+      }
+    },
+    "rule_versions": {
+      "type": "array",
+      "description": "P0-6/acceptance 15: every executed rule id + version, so prose-only rules cannot be claimed.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule_id",
+          "version",
+          "executable"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "executable": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "trusted_context_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "change_receipt_id": {
+      "type": "string",
+      "pattern": "^CR-[0-9a-zA-Z._-]+$",
+      "description": "v1.6 review item 1: the Change attestation receipt this output relies on. Resolved by the runner-bound receipt store; a report digest alone is not proof the change was attested and allowed."
+    },
+    "agent_provenance_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "post-merge item 3: binds the runtime agent_provenance block into the evidence chain."
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "INV-EB-1 (P0-5): candidate operations must carry candidate identity, payload digest, provenance status, the runtime report and bound boundary evidence.",
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "candidate_validation"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "required": [
+          "linked_reports",
+          "dual_evidence"
+        ],
+        "properties": {
+          "subject": {
+            "required": [
+              "candidate_id",
+              "candidate_payload_digest",
+              "provenance_status"
+            ]
+          },
+          "linked_reports": {
+            "required": [
+              "runtime_validation_digest"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-EB-2 (P0-5): export must carry a version AND a provenance status. Omitting the status can no longer dodge the legacy prohibition.",
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "export"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "required": [
+              "recommendation_version",
+              "provenance_status"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-EB-3 (P0-2): non-candidate operations must not carry a runtime-validation report or boundary evidence.",
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "export",
+              "compact",
+              "chat_plain",
+              "analyze",
+              "admin_op",
+              "rag_ingest"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "allOf": [
+          {
+            "not": {
+              "required": [
+                "dual_evidence"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "linked_reports": {
+                "not": {
+                  "required": [
+                    "runtime_validation_digest"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "$comment": "INV-EB-4 (P0-3): assured is fail-closed. No fail, blocked OR warn control. warn is not assured.",
+      "if": {
+        "properties": {
+          "assurance_verdict": {
+            "const": "assured"
+          }
+        },
+        "required": [
+          "assurance_verdict"
+        ]
+      },
+      "then": {
+        "required": [
+          "linked_reports",
+          "missing_controls",
+          "completeness"
+        ],
+        "properties": {
+          "completeness": {
+            "required": [
+              "complete",
+              "missing"
+            ],
+            "properties": {
+              "complete": {
+                "const": true
+              },
+              "missing": {
+                "maxItems": 0
+              }
+            }
+          },
+          "missing_controls": {
+            "maxItems": 0
+          },
+          "controls": {
+            "not": {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "fail",
+                      "blocked",
+                      "warn"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "linked_reports": {
+            "required": [
+              "assurance_report_digest"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-EB-5 (P0-3 + D-11): an unapproved operation policy cannot yield assured.",
+      "if": {
+        "properties": {
+          "assurance_verdict": {
+            "const": "assured"
+          }
+        },
+        "required": [
+          "assurance_verdict"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation_policy": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "approved"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "INV-EB-6: refused requires >=1 reason.",
+      "if": {
+        "properties": {
+          "assurance_verdict": {
+            "const": "refused"
+          }
+        },
+        "required": [
+          "assurance_verdict"
+        ]
+      },
+      "then": {
+        "required": [
+          "refused_reasons"
+        ],
+        "properties": {
+          "refused_reasons": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "P2-1: legacy subjects can never be assured.",
+      "if": {
+        "required": [
+          "subject"
+        ],
+        "properties": {
+          "subject": {
+            "required": [
+              "provenance_status"
+            ],
+            "properties": {
+              "provenance_status": {
+                "const": "legacy"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "assurance_verdict": {
+            "not": {
+              "const": "assured"
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "review item 1: assured requires a receipt id and the subject it was issued for.",
+      "if": {
+        "properties": {
+          "assurance_verdict": {
+            "const": "assured"
+          }
+        },
+        "required": [
+          "assurance_verdict"
+        ]
+      },
+      "then": {
+        "required": [
+          "change_receipt_id"
+        ],
+        "properties": {
+          "subject": {
+            "required": [
+              "repository_id",
+              "commit"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

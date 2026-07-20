@@ -1,0 +1,1073 @@
+registry_version: '1.8'
+registry_kind: full
+schema_ref: urn:a360:harness:schema:control-registry:1.8
+digest_method: raw_bytes
+baseline:
+  backend_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+  backoffice_sha: 6c8eda9016ab04c505c4ac881d9c78e8532d2d5e
+  as_of: '2026-07-14'
+ownership_note: 'app/agent/** is owned by the Agent maintainer. Backend reads and audits it, never modifies it, and never
+  imports private modules (harness-lint HL-06). The R1-R8 checker and repair are Agent-owned producer quality control. CORRECTED
+  IN v1.3: the public stream_agent_turn done data DOES include violations (app/agent/orchestrator/graph.py:113); ProgressEvent.data
+  is dict[str, Any] so it is untyped, no interface doc specifies it, and app/api/sessions.py rebuilds the external response
+  without it. Producer advisory is therefore de facto available to Backend at the public function boundary but has no formal
+  contract. Backend consumes it through a Backend-owned adapter over that PUBLIC boundary; it is optional, non-authoritative,
+  and never required to agree with boundary_enforcement. Re-verified at HEAD 50687eb26144ebc3dfd6c6aa22262b09199986a2 (branch
+  test/RPA-168-recommendation-integration-db): app/agent/** HAS changed since the baseline via PR #229 (RPA-162, 8 files)
+  — that is the Agent owner''s own work, not Backend''s. The Backend boundary facts still hold at that SHA: graph.py:113 still
+  emits violations, sessions.py still drops them, and no private app.agent import exists outside app/agent/**.'
+integrity_note: Control id uniqueness, registry membership, diff-derived applicability, manifest/report binding, policy-derived
+  required controls, completeness reconciliation, cross-report subject binding, waiver resolution, blocking-policy binding
+  and the private-import prohibition are NOT expressible in JSON Schema. They are enforced by harness-lint (HL-01..HL-16).
+  harness-lint does not run in CI yet, so referential integrity remains Probable-by-construction, never Confirmed. Static
+  wiring evidence (evidence_kind=static_code) does not prove runtime execution, and no live_operational evidence (branch protection,
+  deployed network) exists in this review.
+controls:
+- id: CH-01
+  name: change-manifest presence and scope
+  harness: change
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    detector_spec: manifest exists, validates, and risk_profiles agree with changed_paths
+    evidence_field: assurance-report.gates[CH-01]
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No machine-readable change manifest gate exists in CI.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github/workflows
+      - .github/pull_request_template.md
+      limitations: Static read of workflow files; CI run not re-executed at this SHA.
+      evidence_kind: static_code
+- id: CH-02
+  name: diff risk router
+  harness: change
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    detector_spec: map changed_paths to risk profiles and select verification profile
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No path-to-risk-profile router exists.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github/workflows
+      limitations: Static read.
+      evidence_kind: static_code
+- id: CH-03
+  name: least-privilege CI and sandbox
+  harness: change
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    detector_spec: PR token contents:read, no production secret injection, outbound deny
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: persist-credentials:false is set; full least-privilege policy is not enforced.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github/workflows
+      limitations: Static read; runtime token scope not observed.
+      evidence_kind: static_code
+- id: CH-04
+  name: dependency and API closure
+  harness: change
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    rules:
+    - rule_id: dep.allowlist
+      detector: package is on the approved allowlist
+    - rule_id: dep.lock_match
+      detector: lock/requirements versions agree
+    - rule_id: dep.import_symbol
+      detector: imported symbol actually resolves
+    - rule_id: dep.vuln
+      detector: no advisory at or above severity threshold in pinned snapshot
+    - rule_id: dep.license
+      detector: license policy satisfied
+    dependency_policy:
+      allowlist_ref: Decision-needed
+      lock_match: required
+      import_symbol_resolves: required
+      vuln_scanner: Decision-needed
+      vuln_advisory_snapshot: Decision-needed
+      vuln_severity_threshold: Decision-needed
+      license_policy: Decision-needed
+      waiver_allowed: true
+    block_point: CI required check blocks merge; no silent install fallback
+    evidence_field: assurance-report.gates[CH-04].evidence_ref
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: block
+    in_phase0_mvp: true
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No dependency/import closure gate exists in CI.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github/workflows
+      - requirements.txt
+      limitations: Static read of workflow files; CI not re-executed.
+      evidence_kind: static_code
+    - claim: Vulnerability scanner, advisory snapshot, severity threshold and license policy are unset.
+      status: Decision-needed
+      unresolved_decision: Choose scanner+pinned advisory snapshot, severity threshold, license policy, allowlist source.
+      evidence_kind: none
+- id: CH-05
+  name: functional and security dual oracle
+  harness: change
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    detector_spec: functional oracle and security/abuse oracle judged as separate gates
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: Functional regression suite exists; a separate security oracle gate does not.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - tests
+      - .github/workflows
+      limitations: Test suite not executed in this review (protocol forbids running it). Static read only; runtime execution
+        not observed.
+      evidence_kind: static_code
+- id: CH-06
+  name: protected oracle and test-tamper detection
+  harness: change
+  invariant_ref: INV-01
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    detector_spec: protected oracle changes need separate owner approval; detect test delete/skip/xfail growth
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No CODEOWNERS or test-diff policy gate exists.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github
+      limitations: Static read.
+      evidence_kind: static_code
+- id: CH-07
+  name: contract and DB drift gate
+  harness: change
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    detector_spec: OpenAPI/SSE fixture diff, Alembic head vs ORM vs live schema, env contract
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No contract/schema drift gate exists in CI.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github/workflows
+      - migrations
+      limitations: Static read.
+      evidence_kind: static_code
+- id: CH-08
+  name: supply-chain gate
+  harness: change
+  layers:
+  - control_layer: change_gate
+    owner_domain: ci_change
+    enforcement_point: ci_required_check
+    mutable_by_backend: true
+    detector_spec: gitleaks retained, plus SAST/SCA with pinned advisory snapshot, SBOM, Action SHA pin
+    detector_state: present
+    execution_state: active
+    effect_mode: warn
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: Secret scanning exists; SAST/SCA/SBOM/Action-SHA-pin do not.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github/workflows
+      limitations: Static read.
+      evidence_kind: static_code
+    - claim: Whether any CI check is actually enforced as a required check via branch protection.
+      status: Not-tested
+      evidence_kind: none
+      reason: Branch protection and required-check settings are external GitHub state; this review has no live_operational
+        evidence for them.
+- id: OH-01
+  name: strict schema
+  harness: output
+  invariant_ref: INV-03
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    detector_spec: Agent-internal structural validation. Backend neither imports nor modifies it.
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: Agent-side verify package exists and is wired into the agent path.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/agent/verify/checker.py
+      - app/agent/verify/catalog.py
+      repro: Read app/agent/verify/*; git diff ed1a1b0..HEAD -- app/agent -> empty.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+        validator_library: jsonschema 4.26.0
+      verified_at: '2026-07-15'
+      limitations: Static read only; no agent turn executed, so actual execution is Not-tested.
+      evidence_kind: static_code
+  - control_layer: boundary_enforcement
+    owner_domain: backend_consumer
+    enforcement_point: persistence_boundary
+    mutable_by_backend: true
+    detector_spec: 'Separate persistence-boundary strict schema (extra=forbid, step_id/order uniqueness, bounds). The shared
+      app/schemas/recommendation.py Recommendation model is NOT globally strict-ified.
+
+      '
+    evidence_field: runtime-validation.detectors.strict_schema
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: block
+    in_phase0_mvp: true
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: Shared Recommendation model is not strict; no boundary strict schema exists.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/schemas/recommendation.py
+      - app/api/sessions.py
+      repro: app/schemas/recommendation.py:85 class Recommendation(BaseModel) has no model_config/extra=forbid; POST handler
+        calls Recommendation.model_validate only.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Read-only; adversarial payload not executed against a live save path.
+      evidence_kind: static_code
+- id: OH-02
+  name: closed-world A360 catalog closure
+  harness: output
+  invariant_ref: INV-02
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    rules:
+    - rule_id: catalog.action_exists
+      detector: R1 (package,action) existence
+    - rule_id: param.name
+      detector: R2 parameter key
+    - rule_id: param.required
+      detector: R3 required parameter
+    - rule_id: param.enum
+      detector: R4 enum/value
+    - rule_id: param.type
+      detector: R5 type
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: R1-R8 checker source exists and is wired into the agent generate/edit path.
+      status: Current-Confirmed
+      evidence_kind: static_code
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/agent/verify/checker.py
+      - app/agent/orchestrator/harness.py
+      repro: 'checker.py:98 Violation dataclass with rule R1..R8; harness.py:37-51 collect_violations returns v.as_dict().
+        graph.py itself is unchanged from baseline (git diff ed1a1b0..50687eb -- app/agent/orchestrator/graph.py is empty),
+        though other app/agent files changed via PR #229.'
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: 'Static read only; no agent turn executed, so actual execution is Not-tested. NOTE: app/agent/** as a whole
+        IS no longer unchanged from baseline: PR #229 (RPA-162) changed 8 files there. Re-verified at 50687eb that graph.py:113
+        still emits violations and sessions.py still drops them.'
+    - claim: 'CORRECTION of v1.2: the public agent done data DOES include violations; Backend receives and then drops them.'
+      status: Current-Confirmed
+      evidence_kind: static_code
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/agent/orchestrator/graph.py
+      - app/api/sessions.py
+      - app/schemas/events.py
+      repro: 'graph.py:113 _done_data returns ''violations'': state.get(''violations'') or []; sessions.py:569-643 _persist_turn_result
+        receives that dict but builds `out` without violations. v1.2 claimed done.data had no violations field; that claim
+        was FALSE and is retracted.'
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Static read only; stream not executed.
+    - claim: 'The violations field has no formal contract: ProgressEvent.data is dict[str, Any] and no interface doc specifies
+        violations.'
+      status: Current-Confirmed
+      evidence_kind: static_code
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/schemas/events.py
+      - docs/INTERFACES.md
+      repro: 'events.py:23 data: dict[str, Any] | None; grep ''violations'' docs/INTERFACES.md returns nothing.'
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Static read only. Typed contract requires Agent-owner agreement (D-6).
+  - control_layer: boundary_enforcement
+    owner_domain: backend_consumer
+    enforcement_point: persistence_boundary
+    mutable_by_backend: true
+    scope: solution=a360
+    detector_spec: 'Backend-owned deterministic catalog snapshot adapter compares (package,action,parameter,enum). Uses the
+      same underlying catalog data as the Agent (rag_documents.metadata.schema via app.services.catalog.BackendCatalog). Independence
+      is of ENFORCEMENT PATH, not of source data.
+
+      '
+    block_point: active persist / latest / export
+    evidence_field: runtime-validation.detectors.catalog_closure
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: block
+    in_phase0_mvp: true
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: The manual-edit save path performs schema validation only; catalog validation is an acknowledged TODO.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/api/sessions.py
+      repro: 'sessions.py:299-334 save_edited_recommendation: docstring states catalog action-name validation is deferred;
+        only Recommendation.model_validate is called before _save_recommendation.'
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Static read; adversarial payload not executed.
+      evidence_kind: static_code
+    - claim: Catalog snapshot identity, ordering, digest and refresh/failure policy are undefined.
+      status: Decision-needed
+      unresolved_decision: 'Define Backend-owned snapshot adapter: source revision, row count, canonical ordering, digest,
+        refresh, unavailable/empty behavior.'
+      evidence_kind: none
+- id: OH-03
+  name: semantic graph and session lifecycle
+  harness: output
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    detector_spec: R6-R8 graph/session checks (Agent-owned)
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: R7/R8 flatten branches and are path-insensitive.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/agent/verify/checker.py
+      limitations: Audit finding F-9; not re-executed as a runtime path here. Static read only; runtime execution not observed.
+      evidence_kind: static_code
+  - control_layer: boundary_enforcement
+    owner_domain: backend_consumer
+    enforcement_point: persistence_boundary
+    mutable_by_backend: true
+    detector_spec: Backend boundary re-check of graph/session (post-MVP)
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No backend boundary graph/session validation exists.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/api/sessions.py
+      limitations: Static read.
+      evidence_kind: static_code
+- id: OH-04
+  name: untrusted data separation
+  harness: output
+  invariant_ref: INV-08
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    detector_spec: separate document/RAG/tool output from control instructions (Agent-owned)
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: Prompt-injection resistance of the live model was not measured.
+      status: Not-tested
+      reason: Requires paid LLM calls in an isolated environment; not approved under current handoff constraints.
+      evidence_kind: none
+- id: OH-05
+  name: repair and recheck
+  harness: output
+  invariant_ref: INV-04
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    detector_spec: 'Agent-owned local repair then re-check. EXPLICITLY OUT OF SCOPE for the first Runtime MVP: not modified,
+      not an acceptance criterion.
+
+      '
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: Repair loop exists and is wired into agent generation; it compares violation counts.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/agent/verify
+      - app/agent/recommend
+      repro: app/agent unchanged baseline..HEAD; verify package present.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Static read only; no agent turn executed, so actual execution is Not-tested.
+      evidence_kind: static_code
+- id: OH-06
+  name: unresolved blocking violation policy
+  harness: output
+  invariant_ref: INV-05
+  layers:
+  - control_layer: boundary_enforcement
+    owner_domain: backend_consumer
+    enforcement_point: persistence_boundary
+    mutable_by_backend: true
+    detector_spec: 'Detector failure or unresolved blocking violation forces validation_decision=invalid|error and a non-active
+      persistence_disposition. No recommendation version is assigned, so the candidate never enters the version-addressed
+      latest/export API.
+
+      '
+    block_point: active persist / latest / export
+    evidence_field: runtime-validation.validation_decision + persistence_disposition + reasons
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: block
+    in_phase0_mvp: true
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: The recommendations table has no status/violations column and every save assigns a version.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/models.py
+      - app/api/sessions.py
+      repro: models.py:119-145 RecommendationVersion columns; sessions.py:218-254 _save_recommendation computes version=max+1
+        and INSERTs unconditionally.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Read-only; no migration or write attempted.
+      evidence_kind: static_code
+    - claim: Export of an unknown version returns HTTP 404 NO_RECOMMENDATION, not 409.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/api/sessions.py
+      repro: sessions.py:337-359 export_recommendation raises HTTPException(404, code=NO_RECOMMENDATION) when the version
+        row is absent.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Static read; endpoint not invoked.
+      evidence_kind: static_code
+- id: OH-07
+  name: source provenance
+  harness: output
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    detector_spec: source type/url handling (Agent-owned)
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: 'javascript: scheme source URLs were accepted at baseline.'
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/schemas/recommendation.py
+      limitations: Audit finding F-12/PROBE6; not re-executed here. Static read only; runtime execution not observed.
+      evidence_kind: static_code
+  - control_layer: boundary_enforcement
+    owner_domain: backend_consumer
+    enforcement_point: persistence_boundary
+    mutable_by_backend: true
+    detector_spec: boundary URL scheme allowlist and minimum evidence coverage
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No boundary URL scheme allowlist exists.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/api/sessions.py
+      limitations: Static read.
+      evidence_kind: static_code
+- id: OH-08
+  name: capability policy
+  harness: output
+  invariant_ref: INV-08
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    detector_spec: tool allowlist and parameter bounds (Agent-owned)
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: Tool capability limits were not exercised against a live model.
+      status: Not-tested
+      reason: Requires paid LLM execution; not approved under current handoff constraints.
+      evidence_kind: none
+- id: OH-09
+  name: resource bounds
+  harness: output
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: producer_internal
+    mutable_by_backend: false
+    detector_spec: tool/repair round caps exist; token/cost/time caps pending (Agent-owned)
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: Round caps exist; token/USD/wallclock caps do not.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/agent/config.py
+      - app/agent/orchestrator
+      limitations: Static read; not executed.
+      evidence_kind: static_code
+- id: OH-10
+  name: adversarial evaluation
+  harness: output
+  layers:
+  - control_layer: producer_advisory
+    owner_domain: agent_producer
+    enforcement_point: offline_eval
+    mutable_by_backend: false
+    detector_spec: synthetic injection / fake action / spoofed source evaluation in isolation
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: agent-maintainer
+      ref: null
+    evidence:
+    - claim: No adversarial evaluation suite has been run.
+      status: Not-tested
+      reason: Requires isolated environment and approved LLM budget.
+      evidence_kind: none
+- id: EH-01
+  name: common trace correlation
+  harness: evidence
+  invariant_ref: INV-07
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backend_evidence
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: correlate HTTP -> audit -> turn -> rag -> llm -> recommendation by request_id/session_id
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: advisory
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: backend-maintainer
+      ref: null
+    evidence:
+    - claim: llm_usage.request_id exists and is snapshotted for worker threads.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/core/llm.py
+      - app/models.py
+      repro: UsageCallbackHandler.__init__ snapshots get_request_id(); llm_usage.request_id column present.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Recommendation-to-request_id linkage is still absent. Static read only; runtime execution not observed.
+      evidence_kind: static_code
+- id: EH-02
+  name: version provenance
+  harness: evidence
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backend_evidence
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: 'commit/image/model/prompt/catalog/retrieval/validator provenance. model/prompt are REQUIRED only when
+      an LLM was directly invoked; manual/derived/read records may retain them optionally.
+
+      '
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: Recommendation versions carry no model/prompt/catalog/validator provenance.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/models.py
+      repro: models.py:119-145 RecommendationVersion has no provenance columns.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Read-only.
+      evidence_kind: static_code
+- id: EH-03
+  name: dual evidence persistence
+  harness: evidence
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backend_evidence
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: 'Persist the authoritative boundary_enforcement verdict with the candidate/version in the PRIMARY DB, in
+      the SAME transaction as an active recommendation insert, or fail closed. producer_advisory is stored separately as an
+      optional non-authoritative adapter envelope. The two are never required to agree. Observability DB is a mirror only.
+
+      '
+    block_point: persistence boundary transaction
+    evidence_field: evidence-bundle.dual_evidence
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: true
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: _save_recommendation opens its own session and commits alone; no validation record is written with it.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/api/sessions.py
+      repro: sessions.py:218-254 uses a fresh SessionLocal() and commits the version row by itself.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Read-only; no transaction experiment performed.
+      evidence_kind: static_code
+- id: EH-04
+  name: access RBAC and destructive-op approval
+  harness: evidence
+  invariant_ref: INV-08
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backoffice_evidence
+    enforcement_point: backoffice_console
+    mutable_by_backend: false
+    detector_spec: inbound authentication, RBAC, destructive-op approval trace (Backoffice-owned)
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: Ops/RAG FastAPI apps have no inbound authentication dependency.
+      status: Baseline-Confirmed
+      baseline_sha: 6c8eda9016ab04c505c4ac881d9c78e8532d2d5e
+      scoped_paths:
+      - ops
+      - rag
+      limitations: Backoffice audit finding P0-1; static read in the backoffice repo.
+      evidence_kind: static_code
+    - claim: Whether these services are actually reachable from an external network.
+      status: Not-tested
+      reason: No network reachability test was performed; exposure depends on OS firewall and deployment settings.
+      evidence_kind: none
+- id: EH-05
+  name: PII and secret minimization
+  harness: evidence
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backend_evidence
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: pre-write masking, minimal collection, secrets never recorded
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: backend-maintainer
+      ref: null
+    evidence:
+    - claim: Masking and retention exist but are key-whitelist based.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/core
+      limitations: Static read.
+      evidence_kind: static_code
+- id: EH-06
+  name: evidence integrity
+  harness: evidence
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backend_evidence
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: append-only or hash-chain digests; detect update/delete
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: Observability rows permit free UPDATE/DELETE with no digest chain.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/models.py
+      - app/services/rollup.py
+      limitations: Audit F-7; not re-executed. Static read only; runtime execution not observed.
+      evidence_kind: static_code
+- id: EH-07
+  name: completeness and reconciliation
+  harness: evidence
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backend_evidence
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: 'Attestor derives expected stages from an operation-bound completeness policy (stage, event kind, min/max
+      count, condition, source table, correlation key, window) and reconciles against trusted stores. Caller-supplied expected/observed
+      arrays are never authoritative.
+
+      '
+    block_point: evidence bundle assembly -> EH-10
+    evidence_field: evidence-bundle.completeness
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: block
+    in_phase0_mvp: true
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: Observability writes are best-effort and their loss is not measured.
+      status: Current-Confirmed
+      current_sha: 50687eb26144ebc3dfd6c6aa22262b09199986a2
+      scoped_paths:
+      - app/api/sessions.py
+      repro: sessions.py _save_turn_events docstring states failures only warn and do not affect the turn response.
+      runtime_env:
+        python: 3.13.2
+        os: Windows-11-10.0.26200-SP0
+        dependency_digest: sha256:c5321f7b9af1bb273ecb453609939893508fd6c45fdffc59166138977681aa8a
+      verified_at: '2026-07-15'
+      limitations: Read-only; no fault injection performed.
+      evidence_kind: static_code
+    - claim: Per-operation stage cardinality values.
+      status: Decision-needed
+      unresolved_decision: Fix stage list, min/max counts, source tables, correlation keys and windows per operation.
+      evidence_kind: none
+- id: EH-08
+  name: cost governance
+  harness: evidence
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: backend_evidence
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: attribute cost to user/session/purpose; per-run and daily token/USD caps
+    detector_state: present
+    execution_state: active
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: proposed
+      role: backend-maintainer
+      ref: null
+    evidence:
+    - claim: Usage is recorded but no spend cap blocks paid calls.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app/core/llm.py
+      limitations: Static read.
+      evidence_kind: static_code
+- id: EH-09
+  name: waiver governance
+  harness: evidence
+  invariant_ref: INV-06
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: cross_cutting
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: waiver requires scope, approver role, jira, reason, compensating control, expiry; expired => invalid
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: warn
+    in_phase0_mvp: false
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No waiver mechanism exists.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - .github
+      limitations: Static read.
+      evidence_kind: static_code
+- id: EH-10
+  name: assurance verdict
+  harness: evidence
+  invariant_ref: INV-07
+  layers:
+  - control_layer: evidence_gate
+    owner_domain: cross_cutting
+    enforcement_point: evidence_pipeline
+    mutable_by_backend: true
+    detector_spec: 'Refuse the verdict when a required control is missing/failed or completeness is incomplete. This is a
+      machine judgment, not a signature; no signing in MVP.
+
+      '
+    block_point: assurance verdict issuance
+    evidence_field: evidence-bundle.assurance_verdict + refused_reasons
+    detector_state: absent
+    execution_state: inactive
+    effect_mode: advisory
+    target_effect_mode: block
+    in_phase0_mvp: true
+    owner:
+      assignment: unassigned
+      role: null
+      ref: null
+    evidence:
+    - claim: No assurance verdict is produced today.
+      status: Baseline-Confirmed
+      baseline_sha: ed1a1b0d62452f75212da4f78f3e8b9f990da42e
+      scoped_paths:
+      - app
+      limitations: Static read.
+      evidence_kind: static_code
+    - claim: Signing subject and canonicalization authority for the verdict.
+      status: Decision-needed
+      unresolved_decision: Decide whether the verdict is signed, by whom, and under which trust root; MVP ships unsigned.
+      evidence_kind: none
+blocking_policy_ref:
+  policy_id: sev.blocking
+  version: 0.1.0-proposed
+  state: unapproved

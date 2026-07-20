@@ -1,0 +1,87 @@
+schema_version: rpa179.1
+source: assurance/phase0/v1.10/evidence/post-freeze-review.md
+findings:
+  - id: CR-01
+    disposition: corrective
+    test: typed_deny
+  - id: CR-02
+    disposition: corrective
+    test: synthetic_git_paths
+  - id: CR-03
+    disposition: corrective
+    test: coverage_matrix
+  - id: CR-04
+    disposition: corrective
+    test: portable_paths
+  - id: CR-05
+    disposition: corrective
+    test: registry_evidence_scope
+  - id: CR-06
+    disposition: corrective
+    test: artifact_errors
+  - id: CR-07
+    disposition: corrective
+    test: root_script_scan
+  - id: CR-08
+    disposition: corrective
+    test: waiver_duration
+  - id: CR-09
+    disposition: qualified
+    test: agent_policy_approval
+  - id: CR-10
+    disposition: qualified
+    test: control_state
+  - id: CR-11
+    disposition: corrective
+    test: dynamic_import_alias
+  - id: CR-12
+    disposition: corrective
+    test: confirmed_evidence
+  - id: CR-13
+    disposition: corrective
+    test: rule_versions
+  - id: CR-14
+    disposition: qualified
+    test: runtime_provenance
+  - id: CR-15
+    disposition: corrective
+    test: waiver_approval
+  - id: CR-16
+    disposition: corrective
+    test: selfcheck_exit
+  - id: CR-17
+    disposition: historical
+    test: null
+  - id: CR-18
+    disposition: corrective
+    test: portable_paths
+  - id: CR-19
+    disposition: corrective
+    test: git_failure
+  - id: CR-20
+    disposition: corrective
+    test: reason_assertion
+  - id: CR-21
+    disposition: corrective
+    test: full_projection
+  - id: CR-22
+    disposition: historical
+    test: null
+  - id: CR-23
+    disposition: historical
+    test: null
+  - id: CR-24
+    disposition: corrective
+    test: policy_closed
+  - id: CR-25
+    disposition: corrective
+    test: receipt_positive
+  - id: CR-26
+    disposition: corrective
+    test: synthetic_git_paths
+  - id: CR-27
+    disposition: corrective
+    test: applicability_companions
+  - id: CR-28
+    disposition: corrective
+    test: receipt_poison

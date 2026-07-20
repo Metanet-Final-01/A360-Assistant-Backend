@@ -1,0 +1,23 @@
+[tool.pytest.ini_options]
+# 실행 방식(pytest vs python -m pytest)과 무관하게 리포 루트를 import 경로에 포함
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    # 실 Postgres에 실제로 쓰는 테스트 (RPA-168). DB가 없으면 스스로 skip하므로 기본 실행에
+    # 그냥 둬도 안전하다. DB 없이 유닛만 돌리려면: pytest -m "not integration"
+    "integration: 실 Postgres 필요 (docker compose up -d db). 앱 DB만 사용 — 공유 DB 미접촉",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+# 커버리지에서 제외할 관례적 라인 (런타임 로직이 아님)
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "\\.\\.\\.",
+]
