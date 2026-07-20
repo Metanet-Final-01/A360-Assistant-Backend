@@ -650,7 +650,10 @@ Resources:
       Port: 8000
       TargetType: instance
       HealthCheckEnabled: true
-      HealthCheckPath: /api/health
+      # /health/live — 인스턴스-로컬 얕은 체크 (RPA-222). 이전 /api/health는 상태코드
+      # 매핑이 없어 unhealthy에도 200이었고, 깊은 /health는 4.6초(타임아웃 5초)인 데다
+      # 공유 의존성 장애 시 ASG(HealthCheckType: ELB)가 전 플릿을 교체해 버린다.
+      HealthCheckPath: /health/live
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
@@ -841,7 +844,7 @@ Resources:
                   ports:
                     - "8000:8000"
                   healthcheck:
-                    test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/api/health', timeout=3)\nPY"]
+                    test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/health/live', timeout=3)\nPY"]
                     interval: 30s
                     timeout: 5s
                     retries: 3

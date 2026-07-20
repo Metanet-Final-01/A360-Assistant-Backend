@@ -27,4 +27,8 @@ COPY migrations ./migrations
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers: ALB 뒤에선 이게 없으면 request.client.host가 전부 ALB 사설 IP가 되어
+# audit_logs의 클라이언트 추적이 무의미해진다 (RPA-222). forwarded-allow-ips="*"는
+# X-Forwarded-For 위조를 아무에게나 허용한다는 뜻이지만, 인스턴스는 private subnet에서
+# ALB SG의 8000 포트만 받으므로 헤더를 조작해 도달할 수 있는 주체가 없다.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
