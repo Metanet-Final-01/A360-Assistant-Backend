@@ -1,5 +1,7 @@
 """OpenSearch BM25 키워드 검색. pgvector와 별도로 rag_documents를 동일 id로 색인한다."""
 
+import threading
+
 import httpx
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
@@ -49,6 +51,37 @@ def connect() -> OpenSearch:
     if config.OPENSEARCH_USERNAME:
         kwargs["http_auth"] = (config.OPENSEARCH_USERNAME, config.OPENSEARCH_PASSWORD)
     return OpenSearch(**kwargs)
+
+
+_client_lock = threading.Lock()
+_shared_client: OpenSearch | None = None
+
+
+def get_shared_client() -> OpenSearch:
+    """검색 경로용 프로세스 공용 OpenSearch 클라이언트 (RPA-219).
+
+    검색마다 connect()를 부르면 urllib3 커넥션 풀을 매번 새로 만들어 연결 재사용이
+    안 된다. OpenSearch 클라이언트는 내부적으로 스레드 세이프한 풀을 쓰므로
+    to_thread 워커들이 공유해도 된다. 적재(ingest)·debug는 계속 connect()를 쓴다.
+    """
+    global _shared_client
+    if _shared_client is None:
+        with _client_lock:
+            if _shared_client is None:
+                _shared_client = connect()
+    return _shared_client
+
+
+def close_shared_client() -> None:
+    """앱 종료 시 공용 클라이언트를 닫는다 (main.py lifespan)."""
+    global _shared_client
+    with _client_lock:
+        if _shared_client is not None:
+            try:
+                _shared_client.close()
+            except Exception:  # noqa: BLE001 — 종료 경로에서 실패는 무시
+                pass
+            _shared_client = None
 
 
 def connect_async() -> httpx.AsyncClient:

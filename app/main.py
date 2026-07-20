@@ -73,8 +73,18 @@ async def lifespan(app: FastAPI):
     yield
     stop_scheduler()
     await close_pools()
+    # 에이전트가 타는 동기 검색 경로의 재사용 자원 (RPA-219) — 지연 생성이라 여기선 정리만 한다.
+    from app.rag.retrieval.embed import close_shared_client as close_external_client
+    from app.rag.store.db import close_sync_pool
+    from app.rag.store.opensearch_client import close_shared_client as close_opensearch_client
+
+    close_sync_pool()
+    close_external_client()
+    close_opensearch_client()
     # 관측 이벤트 큐(RPA-221) — 남은 이벤트를 내보내고 워커를 정리한다. 지연 생성이라
     # 기동 시 할 일은 없고, 여기서 flush해야 정상 종료에서 유실이 0이 된다.
+    # **맨 마지막**에 둔다: 위 정리 단계가 이벤트를 남기더라도 그것까지 내보내고 끝낸다.
+    # 큐 워커는 관측 DB(별도 엔진)를 쓰므로 위에서 닫은 검색 경로 자원과 무관하다.
     from app.rag.event_queue import stop as stop_event_queue
 
     stop_event_queue()
