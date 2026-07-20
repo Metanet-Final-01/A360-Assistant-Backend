@@ -58,8 +58,18 @@ def client():
     스레드마다 TestClient를 만들면 각자 이벤트 루프를 띄워 앱의 커넥션 풀과 충돌한다
     ("attached to a different loop"). 하나만 두고 공유해도 동시성은 확보된다 —
     인증 라우트가 동기 함수(`def`)라 FastAPI가 워커 스레드풀에서 **병렬로** 실행한다.
+
+    🔴 **쿠키는 끈다** (RPA-216). 이 파일의 시나리오는 "회전된 **옛** 토큰으로 로그아웃" 처럼
+    특정 토큰을 바디로 지정해 경합을 만든다. 갱신 토큰 쿠키가 함께 실리면 서버가 쿠키를
+    우선하므로 **옛 토큰 시나리오가 성립하지 않고**, 테스트는 통과하면서 실제로는 다른 것을
+    재게 된다. 지금은 SECURE_COOKIES 기본값(true)+http라 쿠키가 우연히 전송되지 않을 뿐이라,
+    그 우연에 기대지 않고 명시적으로 비운다.
+
+    ⚠️ 한 번만 비우면 안 된다 — register 응답이 곧바로 쿠키를 다시 심는다. 응답 훅으로
+    **매번** 비워야 한다(훅이 실제로 jar를 비우는지는 별도 확인했다).
     """
     with TestClient(app) as c:
+        c.event_hooks["response"].append(lambda _resp: c.cookies.clear())
         yield c
 
 
