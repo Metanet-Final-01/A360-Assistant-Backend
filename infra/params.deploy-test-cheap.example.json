@@ -1,0 +1,58 @@
+[
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "a360-assistant"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "ContainerImage",
+    "ParameterValue": "ghcr.io/OWNER/REPO/backend:latest"
+  },
+  {
+    "ParameterKey": "FrontendOrigins",
+    "ParameterValue": "http://localhost:5173,http://127.0.0.1:5173,https://your-vue-domain.example.com"
+  },
+  {
+    "ParameterKey": "NetworkMode",
+    "ParameterValue": "public-lite"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.small"
+  },
+  {
+    "ParameterKey": "DesiredCapacity",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "MaxCapacity",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "DatabaseInstanceClass",
+    "ParameterValue": "db.t4g.micro"
+  },
+  {
+    "ParameterKey": "DatabaseAllocatedStorage",
+    "ParameterValue": "20"
+  },
+  {
+    "ParameterKey": "EnableOpenSearch",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "EnableRagIngestScheduler",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "RagIngestSchedulerTemplateUrl",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "RagIngestScheduleExpression",
+    "ParameterValue": "rate(1 minute)"
+  }
+]

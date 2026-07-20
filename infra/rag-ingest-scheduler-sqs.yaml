@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EventBridge Scheduler to SQS trigger for A360 RAG ingest consumer.
+
+Parameters:
+  ScheduleName:
+    Type: String
+    Default: a360-rag-ingest-test
+  ScheduleExpression:
+    Type: String
+    Default: rate(1 minute)
+  ScheduleTimezone:
+    Type: String
+    Default: Asia/Seoul
+  IngestOption:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 3
+  Clean:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  AppInstanceRoleName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 instance role name. When set, grants the role SQS consume permissions.
+
+Conditions:
+  HasAppInstanceRoleName: !Not [!Equals [!Ref AppInstanceRoleName, ""]]
+
+Resources:
+  RagIngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${ScheduleName}-queue"
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 1209600
+
+  RagIngestSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ScheduleName}-scheduler-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: send-rag-ingest-sqs-message
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt RagIngestQueue.Arn
+
+  RagIngestConsumerPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasAppInstanceRoleName
+    Properties:
+      PolicyName: !Sub "${ScheduleName}-consumer-sqs-access"
+      Roles:
+        - !Ref AppInstanceRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+            Resource: !GetAtt RagIngestQueue.Arn
+
+  RagIngestSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Ref ScheduleName
+      ScheduleExpression: !Ref ScheduleExpression
+      ScheduleExpressionTimezone: !Ref ScheduleTimezone
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt RagIngestQueue.Arn
+        RoleArn: !GetAtt RagIngestSchedulerRole.Arn
+        Input: !Sub |
+          {
+            "type": "rag_ingest",
+            "schedule_id": "${ScheduleName}",
+            "option": ${IngestOption},
+            "clean": ${Clean}
+          }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 2
+
+Outputs:
+  QueueUrl:
+    Value: !Ref RagIngestQueue
+  QueueArn:
+    Value: !GetAtt RagIngestQueue.Arn
+  SchedulerRoleArn:
+    Value: !GetAtt RagIngestSchedulerRole.Arn
+  ScheduleName:
+    Value: !Ref RagIngestSchedule
