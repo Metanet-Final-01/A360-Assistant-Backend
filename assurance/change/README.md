@@ -122,7 +122,7 @@ python -m assurance.change.cli `
 | `foundation.py` | 공통 계약, Git object 읽기, 격리된 설치환경 검사 |
 | `dependency_checks.py` | 요구사항·import·취약점·license·보호 경로 판정 |
 | `evidence.py` | manifest/report 계약 검증과 증거 파일 무결성 작성 |
-| `checker.py` | control 결과 조합, 최종 판정, Observe 오류 영수증 |
+| `checker.py` | control 결과 조합, 최종 판정, Observe 오류 기록 |
 | `cli.py` | GitHub Actions와 로컬 실행 진입점 |
 
 ## 검증
@@ -138,14 +138,15 @@ python -m pytest -q tests/test_change_assurance.py
 
 - 이 workflow는 아직 required check가 아니며 branch protection을 설정하지 않는다.
 - base에 검사기가 없는 최초 도입 PR은 `bootstrap-unassured`이며 완전한 assurance report를 만들지 않는다.
-- `deny`와 정상적으로 기록된 `unassured`는 CLI 성공으로 끝나지만, 오류 영수증조차 만들지 못한 실행기 고장은 CI 실패로
+- `deny`와 정상적으로 기록된 `unassured`는 CLI 성공으로 끝나지만, 오류 기록조차 만들지 못한 실행기 고장은 CI 실패로
   드러난다. required check가 아니므로 현재 단계에서 자동 병합 차단으로 승격되지는 않는다.
 - `CODEOWNERS`와 정책 2인 승인은 아직 연결되지 않았다.
-- artifact writer가 조직 차원의 보호 단일 writer임을 운영에서 증명하지 않았다.
+- `RPA-207`은 기본 브랜치 `workflow_run` publisher와 전용 writer API를 연결하지만, GitHub Environment의
+  승인자·secret·배포 URL이 실제로 보호됐는지는 운영 설정에서 별도 검증해야 한다.
 - 취약점 snapshot의 운영 갱신 주기와 승인자는 아직 확정되지 않았다.
 - 외부 패키지를 실행하는 완전 격리·네트워크 차단 runner는 아직 없다.
 
-위 항목은 `RPA-183`의 보호 writer·정책 보호·Observe 승격 근거에서 다룬다. 이 MVP 결과만으로 보안 인증이나
+정책 보호와 Observe 승격 근거는 후속 운영 검증에서 다룬다. 이 MVP와 `RPA-207` 전송 코드만으로 보안 인증이나
 `Warn`·`Enforce` 승격을 주장하면 안 된다.
 
 ## English Summary
@@ -153,5 +154,6 @@ python -m pytest -q tests/test_change_assurance.py
 RPA-180 derives a manifest and assurance evidence from trusted Git objects, checks dependency and import closure,
 flags protected-oracle changes, binds evidence to the exact PR head, and emits digest-addressed artifacts. It runs
 in Observe mode only: `deny` and `unassured` are real assurance decisions, but neither changes the merge outcome.
-The checker never installs PR dependencies or uses a network fallback. Protected writers, policy ownership, branch
-protection, and promotion to Warn or Enforce remain RPA-183 work.
+The checker never installs PR dependencies or uses a network fallback. RPA-207 adds a disabled-by-default,
+default-branch publisher and dedicated Backend writer API. Protected environment configuration, policy ownership,
+branch protection, and promotion to Warn or Enforce still require operational verification.

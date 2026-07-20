@@ -11,9 +11,11 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app import models
 from app.core.masking import mask_pii
+from assurance.change.transport import validate_change_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,15 @@ OUTPUT_EXPECTED_AGENT = (
     "resolved_agent_version",
     "agent_registry_digest",
     "public_contract_version",
+)
+CHANGE_EXPECTED_ARTIFACTS = (
+    "change-manifest.json",
+    "dependency-evidence.json",
+    "protected-change-evidence.json",
+    "runtime-environment.json",
+    "subject-evidence.json",
+    "evidence-integrity.json",
+    "assurance-report.json",
 )
 
 
@@ -265,6 +276,153 @@ def persist_output_receipt(
     return {**summary, "status": "persisted", "idempotent": False}
 
 
+def _sanitize_change_controls(controls: Any) -> list[dict[str, Any]]:
+    if not isinstance(controls, list):
+        return []
+    sanitized = []
+    for control in controls:
+        if not isinstance(control, dict):
+            continue
+        evidence = control.get("evidence")
+        evidence = evidence if isinstance(evidence, dict) else {}
+        sanitized.append({
+            "control_id": _safe_text(control.get("control_id"), limit=20),
+            "status": _safe_text(control.get("status"), limit=30),
+            "reason_code": _safe_text(control.get("reason_code"), limit=80),
+            "evidence_uri": _safe_text(evidence.get("uri"), limit=120),
+            "evidence_digest": _safe_text(evidence.get("sha256"), limit=71),
+        })
+    return sanitized
+
+
+def build_change_receipt(
+    envelope: dict[str, Any],
+) -> tuple[models.AssuranceReceipt, dict[str, Any]]:
+    """Validate a trusted workflow envelope and build a compact Change receipt."""
+    facts = validate_change_envelope(envelope)
+    source = facts["source"]
+    report = facts["report"]
+    decision = report["assurance_decision"]
+    evidence_complete = bool(report["evidence_complete"])
+    artifact_names = set(facts["artifact_names"])
+    missing = sorted(set(CHANGE_EXPECTED_ARTIFACTS) - artifact_names)
+    if decision == "deny":
+        verdict = "deny"
+        assurance_status = "observed_deny"
+    elif decision == "allow_candidate" and evidence_complete and not missing:
+        verdict = "observed"
+        assurance_status = "observed_complete"
+    else:
+        verdict = "refused"
+        assurance_status = "refused_unassured"
+    completeness_status = "complete" if evidence_complete and not missing else "incomplete"
+    subject = report["subject"]
+    enforcement = report["enforcement"]
+    receipt_payload = {
+        "schema_version": RECEIPT_SCHEMA_VERSION,
+        "harness": "change",
+        "record_kind": "change_observation",
+        "writer_authority": "github_actions_workflow_run",
+        "source": "workflow_run",
+        "source_observation_id": facts["evidence_index_digest"],
+        "subject": {
+            "repository": source["repository"],
+            "pull_request_number": source["pull_request_number"],
+            "workflow_run_id": source["workflow_run_id"],
+            "run_attempt": source["run_attempt"],
+            "base_sha": subject["base_sha"],
+            "head_sha": subject["head_sha"],
+            "run_id": report["run_id"],
+            "report_digest": facts["report_digest"],
+            "manifest_digest": facts["manifest_digest"],
+            "runtime_digest": facts["runtime_digest"],
+            "diff_digest": facts["diff_digest"],
+        },
+        "decision": decision,
+        "assurance_verdict": verdict,
+        "assurance_status": assurance_status,
+        "evidence_valid": True,
+        "completeness": {
+            "status": completeness_status,
+            "expected": list(CHANGE_EXPECTED_ARTIFACTS),
+            "observed": sorted(artifact_names),
+            "missing": missing,
+        },
+        "controls": _sanitize_change_controls(report["controls"]),
+        "provenance": {
+            "validator_version": f"change-assurance/{report['schema_version']}",
+            "policy_digest": facts["policy_digest"],
+            "workflow_name": source["workflow_name"],
+            "report_generated_at": report["generated_at"],
+        },
+        "enforcement": {
+            "mode": enforcement["mode"],
+            "effect": "blocked" if enforcement["blocks_merge"] else "none",
+        },
+        "business_outcome": {
+            "persisted": None,
+            "merge_decision": report["business_outcome"],
+        },
+    }
+    receipt_digest = digest(receipt_payload)
+    row = models.AssuranceReceipt(
+        receipt_digest=receipt_digest,
+        schema_version=RECEIPT_SCHEMA_VERSION,
+        harness="change",
+        record_kind="change_observation",
+        writer_authority="github_actions_workflow_run",
+        source="workflow_run",
+        request_id=None,
+        session_id=None,
+        recommendation_id=None,
+        recommendation_version=None,
+        candidate_id=report["run_id"],
+        payload_digest=facts["report_digest"],
+        source_observation_id=facts["evidence_index_digest"],
+        evidence_valid=True,
+        completeness_status=completeness_status,
+        decision=decision,
+        assurance_verdict=verdict,
+        assurance_status=assurance_status,
+        rollout_mode=enforcement["mode"],
+        enforcement_effect="blocked" if enforcement["blocks_merge"] else "none",
+        business_persisted=None,
+        validator_version=f"change-assurance/{report['schema_version']}",
+        policy_digest=facts["policy_digest"],
+        catalog_digest=None,
+        requested_agent_version=None,
+        resolved_agent_version=None,
+        receipt_payload=receipt_payload,
+    )
+    return row, {
+        "status": "pending",
+        "receipt_digest": receipt_digest,
+        "evidence_valid": True,
+        "completeness_status": completeness_status,
+        "assurance_verdict": verdict,
+        "missing_evidence": missing,
+    }
+
+
+def persist_change_receipt(envelope: dict[str, Any], db: Session) -> dict[str, Any]:
+    """Insert one Change receipt; exact content retries are idempotent."""
+    row, summary = build_change_receipt(envelope)
+    try:
+        db.add(row)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.execute(
+            select(models.AssuranceReceipt).where(
+                models.AssuranceReceipt.receipt_digest == row.receipt_digest
+            )
+        ).scalar_one_or_none()
+        if existing is not None and receipt_integrity(existing):
+            return {**summary, "status": "persisted", "idempotent": True}
+        raise
+    return {**summary, "status": "persisted", "idempotent": False}
+
+
 def receipt_integrity(row: models.AssuranceReceipt) -> bool:
     """Recompute content integrity and verify indexed columns still match the stored payload."""
     payload = row.receipt_payload
@@ -278,12 +436,14 @@ def receipt_integrity(row: models.AssuranceReceipt) -> bool:
         return False
     subject = payload.get("subject") if isinstance(payload.get("subject"), dict) else {}
     provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
-    completeness = payload.get("completeness") if isinstance(payload.get("completeness"), dict) else {}
+    completeness = (
+        payload.get("completeness") if isinstance(payload.get("completeness"), dict) else {}
+    )
     enforcement = payload.get("enforcement") if isinstance(payload.get("enforcement"), dict) else {}
     business_outcome = (
         payload.get("business_outcome") if isinstance(payload.get("business_outcome"), dict) else {}
     )
-    return all((
+    common = all((
         payload.get("schema_version") == row.schema_version,
         payload.get("harness") == row.harness,
         payload.get("record_kind") == row.record_kind,
@@ -294,6 +454,27 @@ def receipt_integrity(row: models.AssuranceReceipt) -> bool:
         payload.get("assurance_verdict") == row.assurance_verdict,
         payload.get("assurance_status") == row.assurance_status,
         payload.get("evidence_valid") == row.evidence_valid,
+        completeness.get("status") == row.completeness_status,
+        provenance.get("validator_version") == row.validator_version,
+        provenance.get("policy_digest") == row.policy_digest,
+        enforcement.get("mode") == row.rollout_mode,
+        enforcement.get("effect") == row.enforcement_effect,
+        business_outcome.get("persisted") == row.business_persisted,
+    ))
+    if row.harness == "change":
+        return common and all((
+            subject.get("run_id") == row.candidate_id,
+            subject.get("report_digest") == row.payload_digest,
+            row.request_id is None,
+            row.session_id is None,
+            row.recommendation_id is None,
+            row.recommendation_version is None,
+            row.catalog_digest is None,
+            row.requested_agent_version is None,
+            row.resolved_agent_version is None,
+        ))
+    return all((
+        common,
         subject.get("recommendation_id")
         == (str(row.recommendation_id) if row.recommendation_id else None),
         subject.get("recommendation_version") == row.recommendation_version,
@@ -301,13 +482,7 @@ def receipt_integrity(row: models.AssuranceReceipt) -> bool:
         subject.get("request_id") == row.request_id,
         subject.get("candidate_id") == row.candidate_id,
         subject.get("payload_digest") == row.payload_digest,
-        completeness.get("status") == row.completeness_status,
-        provenance.get("validator_version") == row.validator_version,
-        provenance.get("policy_digest") == row.policy_digest,
         provenance.get("catalog_digest") == row.catalog_digest,
         provenance.get("requested_agent_version") == row.requested_agent_version,
         provenance.get("resolved_agent_version") == row.resolved_agent_version,
-        enforcement.get("mode") == row.rollout_mode,
-        enforcement.get("effect") == row.enforcement_effect,
-        business_outcome.get("persisted") == row.business_persisted,
     ))

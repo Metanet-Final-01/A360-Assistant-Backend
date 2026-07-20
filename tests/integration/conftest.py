@@ -55,6 +55,7 @@ _DOMAIN_TABLES = (
     "recommendations", "analyses", "documents", "chat_messages",
     "session_compacts", "feedback", "analysis_sessions", "users",
     "audit_logs", "request_metrics", "llm_usage",
+    "assurance_receipts",
     "refresh_tokens",  # RPA-200 — users CASCADE로도 지워지지만 명시해 의존을 없앤다
 )
 
