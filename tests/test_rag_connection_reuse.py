@@ -141,6 +141,58 @@ def test_connection_falls_back_when_pool_unavailable(monkeypatch):
     assert made == ["connected", "closed"], "폴백 경로는 연결을 열고 반드시 닫아야 한다"
 
 
+def test_failed_pool_startup_is_closed(monkeypatch):
+    """🔴 기동에 실패한 풀도 닫아야 한다 (CodeRabbit #298).
+
+    open(wait=True)는 실패해도 이미 워커 스레드를 띄운 뒤다. 그 객체는 _sync_pool에
+    담기지 않으므로 close_sync_pool()이 회수할 수 없다 — 여기서 안 닫으면 DB가
+    불안정할 때마다 유령 워커가 프로세스 종료까지 남는다.
+    """
+    import psycopg_pool
+
+    closed = []
+
+    class _BadPool:
+        def __init__(self, *a, **kw):
+            pass
+
+        def open(self, *a, **kw):
+            raise RuntimeError("DB 없음")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(psycopg_pool, "ConnectionPool", _BadPool)
+    monkeypatch.setattr(db, "_sync_pool", None)
+    monkeypatch.setattr(db, "_sync_pool_failed", False)
+
+    assert db._get_sync_pool() is None, "기동 실패 시 None을 줘 폴백시켜야 한다"
+    assert closed == [True], "기동 실패한 풀을 닫지 않았다 — 워커가 남는다"
+    assert db._sync_pool_failed is True
+
+
+def test_failed_pool_close_error_does_not_break_fallback(monkeypatch):
+    """정리 중 예외가 나도 폴백은 계속돼야 한다 — 정리 실패가 검색을 죽이면 안 된다."""
+    import psycopg_pool
+
+    class _WorsePool:
+        def __init__(self, *a, **kw):
+            pass
+
+        def open(self, *a, **kw):
+            raise RuntimeError("DB 없음")
+
+        def close(self):
+            raise RuntimeError("정리도 실패")
+
+    monkeypatch.setattr(psycopg_pool, "ConnectionPool", _WorsePool)
+    monkeypatch.setattr(db, "_sync_pool", None)
+    monkeypatch.setattr(db, "_sync_pool_failed", False)
+
+    assert db._get_sync_pool() is None
+    assert db._sync_pool_failed is True
+
+
 def test_connection_borrows_from_pool_when_available(monkeypatch):
     """풀이 있으면 connect()를 부르지 않는다 — 검색마다 새 연결을 맺던 게 원인이었다."""
     from contextlib import contextmanager

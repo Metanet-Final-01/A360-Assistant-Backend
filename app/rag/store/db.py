@@ -63,6 +63,7 @@ def _get_sync_pool() -> "ConnectionPool | None":
         return _sync_pool
     with _pool_lock:
         if _sync_pool is None and not _sync_pool_failed:
+            pool = None
             try:
                 from psycopg_pool import ConnectionPool
 
@@ -72,6 +73,14 @@ def _get_sync_pool() -> "ConnectionPool | None":
                 pool.open(wait=True, timeout=5.0)
                 _sync_pool = pool
             except Exception:  # noqa: BLE001 — 풀 기동 실패가 검색을 막으면 안 된다
+                # open()은 실패해도 이미 워커 스레드를 띄운 뒤다. _sync_pool에 담기 전이라
+                # close_sync_pool()이 회수할 수 없으므로 여기서 닫는다 — 안 닫으면 DB가
+                # 불안정할 때마다 유령 워커가 프로세스 종료까지 남는다.
+                if pool is not None:
+                    try:
+                        pool.close()
+                    except Exception:  # noqa: BLE001 — 정리 실패가 폴백을 막으면 안 된다
+                        logger.debug("실패한 풀 정리 중 예외 (무시)", exc_info=True)
                 logger.warning("RAG 동기 커넥션 풀 기동 실패 — 요청별 연결로 폴백", exc_info=True)
                 _sync_pool_failed = True
     return _sync_pool
