@@ -50,6 +50,8 @@ _queue: queue.Queue | None = None
 _worker: threading.Thread | None = None
 _flush_fn: Callable[[list[dict]], None] | None = None
 _dropped = 0
+# 워커가 큐에서 꺼내 flush_fn에 넘긴 건수 — 큐에는 이미 없어 qsize()에 안 잡힌다.
+_inflight = 0
 _STOP = object()  # 워커 종료 sentinel
 
 # 워커가 배치를 **로컬에 들고 있는 동안**은 큐가 비어도 적재가 안 끝난 것이다.
@@ -155,13 +157,21 @@ def _collect(q: "queue.Queue") -> "tuple[list[dict], bool]":
 
 
 def _run(q: "queue.Queue", flush_fn: Callable[[list[dict]], None]) -> None:
+    global _inflight
     while True:
         batch, stopping = _collect(q)
         if batch:
+            # 이 배치는 이미 큐에서 빠졌다 — qsize()에 안 잡히므로 따로 세어둬야
+            # 종료 타임아웃 시 유실 집계에서 누락되지 않는다 (CodeRabbit #302).
+            with _lock:
+                _inflight = len(batch)
             try:
                 flush_fn(batch)
             except Exception:  # noqa: BLE001 — 적재 실패가 워커를 죽이면 이후 전부 유실된다
                 logger.warning("관측 이벤트 배치 적재 실패 (%d건 유실)", len(batch), exc_info=True)
+            finally:
+                with _lock:
+                    _inflight = 0
         if q.empty():
             _idle.set()
         if stopping:
@@ -208,15 +218,24 @@ def stop(timeout: float = 5.0) -> None:
     if w.is_alive():
         # 예산(flush+join) 안에 못 끝냈다. 아래에서 전역을 비우면 이 큐는 아무도 안 보므로,
         # 남은 건 조용히 사라진다 — 그게 "무음 유실 금지"에 걸린다(CodeRabbit #302).
-        # 유실로 집계하고 경고해서 드롭 카운터가 실제 유실을 반영하게 한다.
-        # 워커는 daemon이라 프로세스 종료를 막지 않고, 곧 현재 배치를 끝내고 빠진다.
-        leftover = max(0, q.qsize() - (1 if sentinel_queued else 0))
+        # 워커는 daemon이라 프로세스 종료를 막지 않고 그대로 죽을 수 있다.
+        #
+        # 두 갈래를 **함께** 세야 한다:
+        #   - 큐 잔여: 아직 워커가 안 가져간 것 (직접 넣은 _STOP sentinel은 제외)
+        #   - 처리 중 배치: 이미 큐에서 빠져 flush_fn에 넘어간 것 — qsize()에 안 잡힌다.
+        #     적재 완료 여부를 알 수 없으므로 '유실 가능'으로 보고 집계한다. 과소 보고는
+        #     "유실 없음"을 거짓으로 주장하게 되니, 과대 쪽으로 안전하게 기운다.
+        with _lock:
+            inflight = _inflight
+        queued = max(0, q.qsize() - (1 if sentinel_queued else 0))
+        leftover = queued + inflight
         if leftover:
             with _lock:
                 _dropped += leftover
         logger.warning(
-            "관측 이벤트 워커가 %.1fs 안에 종료되지 않았다 — 큐 잔여 %d건을 유실로 집계",
-            timeout, leftover,
+            "관측 이벤트 워커가 %.1fs 안에 종료되지 않았다 — 큐 잔여 %d건 + 처리 중 %d건을 "
+            "유실로 집계(처리 중 배치는 적재 완료 여부 불명)",
+            timeout, queued, inflight,
         )
     with _lock:
         _queue, _worker = None, None
@@ -224,9 +243,10 @@ def stop(timeout: float = 5.0) -> None:
 
 def reset_for_tests() -> None:
     """테스트 격리용 — 워커를 멈추고 카운터·플래그를 초기화한다."""
-    global _dropped
+    global _dropped, _inflight
     stop(timeout=2.0)
     with _lock:
         _dropped = 0
+        _inflight = 0
     _flush_now.clear()
     _idle.set()

@@ -232,8 +232,10 @@ def test_stop_counts_leftover_when_worker_times_out(caplog):
     주장이 조용히 거짓이 된다 — 무음 유실 금지가 이 프로젝트의 원칙이다.
     """
     release, blocked = threading.Event(), threading.Event()
+    seen = []
 
     def _stuck(records):
+        seen.append(len(records))   # 처리 중 배치 크기
         blocked.set()               # 워커가 적재에 진입했다
         release.wait(timeout=10.0)  # 여기서 붙잡아 join이 타임아웃 나게 한다
 
@@ -253,10 +255,54 @@ def test_stop_counts_leftover_when_worker_times_out(caplog):
         with caplog.at_level("WARNING"):
             eq.stop(timeout=0.3)
 
-        assert eq.dropped_count() == before + 5, (
-            f"큐 잔여 5건이 유실로 집계되지 않았다 ({before} → {eq.dropped_count()})"
+        # 큐 잔여 5건 + 처리 중 배치(seen[0]건) 둘 다 세야 한다
+        assert eq.dropped_count() == before + 5 + seen[0], (
+            f"잔여 5 + 처리중 {seen[0]}이 집계되지 않았다 ({before} → {eq.dropped_count()})"
         )
         assert "종료되지 않았다" in caplog.text, "종료 타임아웃 경고가 없다"
+    finally:
+        release.set()
+        eq.reset_for_tests()
+        eq.configure(obs._persist_rag_events)
+
+
+def test_stop_counts_inflight_batch_when_queue_empty(caplog):
+    """🔴 큐가 비어 있고 적재만 멈춘 경우에도 처리 중 배치가 집계돼야 한다 (CodeRabbit #302).
+
+    _collect가 꺼낸 배치는 이미 큐에서 빠져 qsize()에 안 잡힌다. 큐 잔여만 세면
+    이 상황에서 leftover == 0이 되어 "유실 없음"을 거짓으로 보고하게 된다.
+    """
+    release, blocked = threading.Event(), threading.Event()
+    seen = []
+
+    def _stuck(records):
+        seen.append(len(records))
+        blocked.set()
+        release.wait(timeout=10.0)
+
+    eq.reset_for_tests()
+    eq.configure(_stuck)
+    try:
+        for i in range(3):
+            eq.enqueue({"event": f"e{i}"})
+
+        # 워커가 전부 배치로 가져가 큐가 빌 때까지 기다린다 — 그래야 '큐는 비었는데
+        # 처리 중 배치만 있는' 상황이 성립한다.
+        deadline = time.time() + 3.0
+        while not eq._queue.empty() and time.time() < deadline:
+            time.sleep(0.01)
+        eq.flush(timeout=0.5)  # 배치 창을 끊어 적재를 시작시킨다
+        assert blocked.wait(timeout=3.0), "워커가 적재에 진입하지 않았다"
+        assert eq._queue.empty(), "이 테스트는 큐가 빈 상태를 전제한다"
+        assert seen[0] >= 1
+
+        before = eq.dropped_count()
+        with caplog.at_level("WARNING"):
+            eq.stop(timeout=0.3)
+
+        assert eq.dropped_count() == before + seen[0], (
+            f"처리 중 배치 {seen[0]}건이 집계되지 않았다 ({before} → {eq.dropped_count()})"
+        )
     finally:
         release.set()
         eq.reset_for_tests()
