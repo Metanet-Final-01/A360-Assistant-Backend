@@ -126,6 +126,27 @@ def test_events_are_persisted_in_one_batch(monkeypatch):
     assert sum(s.commits for s in opened) < 7
 
 
+def test_burst_is_drained_in_few_batches(monkeypatch):
+    """트래픽 급증 시 배치가 커져야 한다 — 배치 비용이 크기에 대해 평평하기 때문.
+
+    이게 회귀하면(배치 크기가 작아지면) 처리량 상한이 내려가 큐가 쌓이고 결국 드롭한다.
+    """
+    rows, opened = _install_fake_db(monkeypatch)
+    eq.reset_for_tests()
+    eq.configure(obs._persist_rag_events)
+
+    burst = 200
+    for i in range(burst):
+        obs._write_log({"request_id": "r1", "event": f"e{i}", "status": "ok"})
+
+    assert eq.flush(timeout=10.0), "큐가 시간 안에 비지 않았다"
+    time.sleep(0.3)
+
+    assert len(rows) == burst, f"적재 누락: {len(rows)}/{burst}"
+    # 200건이 건당 세션이면 200개. 배치가 살아 있으면 한 자릿수여야 한다.
+    assert len(opened) <= 10, f"세션이 {len(opened)}개 — 배치가 잘게 쪼개졌다"
+
+
 # --- 내용이 그대로인가 ---
 
 def test_queued_record_is_masked_before_enqueue(monkeypatch):
