@@ -73,6 +73,14 @@ async def lifespan(app: FastAPI):
     yield
     stop_scheduler()
     await close_pools()
+    # 에이전트가 타는 동기 검색 경로의 재사용 자원 (RPA-219) — 지연 생성이라 여기선 정리만 한다.
+    from app.rag.retrieval.embed import close_shared_client as close_external_client
+    from app.rag.store.db import close_sync_pool
+    from app.rag.store.opensearch_client import close_shared_client as close_opensearch_client
+
+    close_sync_pool()
+    close_external_client()
+    close_opensearch_client()
 
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)

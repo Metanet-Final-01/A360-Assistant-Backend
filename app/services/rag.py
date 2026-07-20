@@ -39,13 +39,12 @@ def search_actions(
     if cached is not None:
         return cached
 
-    conn = db.connect()
-    try:
-        os_client = opensearch_client.connect()
-        fetch_limit = k * 3 if source_types else k
+    # 연결은 풀·공용 클라이언트에서 빌린다 (RPA-219) — 검색마다 새 PG 연결·새 OpenSearch
+    # 클라이언트를 만들던 것이 팬아웃 시 연결 수립 직렬화의 원인이었다.
+    os_client = opensearch_client.get_shared_client()
+    fetch_limit = k * 3 if source_types else k
+    with db.connection() as conn:
         results = _hybrid_search(conn, os_client, query, limit=fetch_limit, params=params)
-    finally:
-        conn.close()
 
     if source_types:
         results = [r for r in results if r.get("source_type") in source_types]
