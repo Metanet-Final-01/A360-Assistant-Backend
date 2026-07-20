@@ -192,17 +192,32 @@ def flush(timeout: float = 5.0) -> bool:
 
 def stop(timeout: float = 5.0) -> None:
     """남은 이벤트를 내보내고 워커를 정리한다 (main.py lifespan)."""
-    global _queue, _worker
+    global _queue, _worker, _dropped
     with _lock:
         q, w = _queue, _worker
     if q is None or w is None:
         return
     flush(timeout=timeout)
+    sentinel_queued = False
     try:
         q.put_nowait(_STOP)
+        sentinel_queued = True
     except queue.Full:
         logger.warning("관측 이벤트 큐가 가득 차 종료 신호를 넣지 못했다")
     w.join(timeout=timeout)
+    if w.is_alive():
+        # 예산(flush+join) 안에 못 끝냈다. 아래에서 전역을 비우면 이 큐는 아무도 안 보므로,
+        # 남은 건 조용히 사라진다 — 그게 "무음 유실 금지"에 걸린다(CodeRabbit #302).
+        # 유실로 집계하고 경고해서 드롭 카운터가 실제 유실을 반영하게 한다.
+        # 워커는 daemon이라 프로세스 종료를 막지 않고, 곧 현재 배치를 끝내고 빠진다.
+        leftover = max(0, q.qsize() - (1 if sentinel_queued else 0))
+        if leftover:
+            with _lock:
+                _dropped += leftover
+        logger.warning(
+            "관측 이벤트 워커가 %.1fs 안에 종료되지 않았다 — 큐 잔여 %d건을 유실로 집계",
+            timeout, leftover,
+        )
     with _lock:
         _queue, _worker = None, None
 

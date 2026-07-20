@@ -225,6 +225,44 @@ def test_disabled_falls_back_to_sync(monkeypatch):
     assert len(called) == 1, "토글을 껐는데 동기 적재가 안 됐다"
 
 
+def test_stop_counts_leftover_when_worker_times_out(caplog):
+    """🔴 종료가 타임아웃되면 큐 잔여를 유실로 집계한다 (CodeRabbit #302).
+
+    전역을 비우면 그 큐는 아무도 안 본다. 카운터에 안 잡히면 "종료 시 유실 0"이라는
+    주장이 조용히 거짓이 된다 — 무음 유실 금지가 이 프로젝트의 원칙이다.
+    """
+    release, blocked = threading.Event(), threading.Event()
+
+    def _stuck(records):
+        blocked.set()               # 워커가 적재에 진입했다
+        release.wait(timeout=10.0)  # 여기서 붙잡아 join이 타임아웃 나게 한다
+
+    eq.reset_for_tests()
+    eq.configure(_stuck)
+    try:
+        # 워커를 확실히 묶어둔다 — flush로 배치 창을 끊어 첫 배치를 내보내게 하고,
+        # 워커가 _stuck에 들어간 것을 확인한 뒤에야 나머지를 넣는다(레이스 제거).
+        eq.enqueue({"event": "first"})
+        eq.flush(timeout=0.5)  # idle이 될 수 없으니 False를 반환한다 — 창을 끊는 게 목적
+        assert blocked.wait(timeout=3.0), "워커가 적재에 진입하지 않았다"
+
+        for i in range(5):  # 워커가 막혀 있으므로 전부 큐에 남는다
+            eq.enqueue({"event": f"e{i}"})
+
+        before = eq.dropped_count()
+        with caplog.at_level("WARNING"):
+            eq.stop(timeout=0.3)
+
+        assert eq.dropped_count() == before + 5, (
+            f"큐 잔여 5건이 유실로 집계되지 않았다 ({before} → {eq.dropped_count()})"
+        )
+        assert "종료되지 않았다" in caplog.text, "종료 타임아웃 경고가 없다"
+    finally:
+        release.set()
+        eq.reset_for_tests()
+        eq.configure(obs._persist_rag_events)
+
+
 def test_stop_flushes_remaining(monkeypatch):
     """정상 종료(lifespan)에서는 유실이 0이어야 한다."""
     rows, _ = _install_fake_db(monkeypatch)
