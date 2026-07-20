@@ -168,6 +168,10 @@ def put_search(key: str, results: list[dict]) -> str | None:
     성능 최적화가 장애를 숨기는 장치가 되면 안 된다.
 
     빈 결과도 저장하지 않는다 — 저하로 인한 0건인지 정말 없는 건지 **구분할 수 없기 때문**이다.
+
+    ⚠️ 저하는 **명시적 `False`일 때만**이다. `mode="vector"`는 BM25를 아예 부르지 않아
+    필드가 없고(정상 캐싱 대상), `None`은 "해당 없음"이다 — 관측의 `_bm25_health`가 쓰는
+    3상태 규약과 같은 해석을 여기서도 쓴다. 한 필드를 두 곳이 다르게 읽으면 그게 다음 버그다.
     """
     if not enabled():
         return None
@@ -175,7 +179,7 @@ def put_search(key: str, results: list[dict]) -> str | None:
         with _lock:
             _stats["skip_empty"] += 1
         return "empty"
-    if not all(r.get("bm25_available", True) for r in results):
+    if any(r.get("bm25_available") is False for r in results):
         with _lock:
             _stats["skip_degraded"] += 1
         return "degraded"

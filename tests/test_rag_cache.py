@@ -135,6 +135,24 @@ def test_partially_degraded_is_not_cached():
     assert rag_cache.get_search(_key()) is None
 
 
+def test_vector_mode_result_is_cached():
+    """`mode="vector"`는 BM25를 아예 부르지 않아 결과에 `bm25_available`이 **없다**.
+    없음을 저하로 오해해 건너뛰면 vector 모드에서 캐시가 통째로 죽는다.
+
+    이 동작을 고정한 테스트가 없어서 #290 리뷰가 '이미 죽어 있다'고 오진했다 —
+    반증할 테스트가 없으면 맞는 코드도 방어할 수 없다."""
+    vector_only = [{"id": "a", "retrieval_source": "vector"}]
+    assert rag_cache.put_search(_key(), vector_only) is None
+    assert rag_cache.get_search(_key()) == vector_only
+    assert rag_cache.stats()["skip_degraded"] == 0
+
+
+def test_bm25_none_is_not_treated_as_degraded():
+    """`None`은 '해당 없음'이지 저하가 아니다 — 관측의 `_bm25_health` 3상태와 같은 규약."""
+    assert rag_cache.put_search(_key(), [{"id": "a", "bm25_available": None}]) is None
+    assert rag_cache.get_search(_key()) is not None
+
+
 def test_empty_result_is_not_cached():
     """빈 결과는 '저하로 0건'인지 '정말 없음'인지 **구분할 수 없다** — 굳히지 않는다."""
     assert rag_cache.put_search(_key(), []) == "empty"
