@@ -12,6 +12,35 @@ on:
         required: true
         type: boolean
         default: false
+      network_mode:
+        description: "private (NAT Gateway, ~$32-45/mo fixed) or public-lite (no NAT, cheaper short test deploys)"
+        required: true
+        type: choice
+        options:
+          - private
+          - public-lite
+        default: private
+      instance_type:
+        description: "EC2 instance type for the app Auto Scaling Group"
+        required: true
+        default: t3.medium
+      desired_capacity:
+        description: "Desired app instance count"
+        required: true
+        default: "1"
+      max_capacity:
+        description: "Max app instance count"
+        required: true
+        default: "2"
+      enable_rag_ingest_scheduler:
+        description: "Create EventBridge Scheduler -> SQS nested stack for rag ingest"
+        required: true
+        type: boolean
+        default: false
+      rag_ingest_schedule_expression:
+        description: "RAG ingest schedule expression. Start with rate(1 minute), then switch to cron(...)."
+        required: true
+        default: "rate(1 minute)"
   push:
     branches:
       - main
@@ -58,7 +87,7 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,16 +97,66 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Upload nested CloudFormation templates
+        id: nested
+        if: inputs.enable_rag_ingest_scheduler == true
+        run: |
+          NESTED_BUCKET="${{ secrets.CFN_ARTIFACT_BUCKET }}"
+          if [ -z "$NESTED_BUCKET" ]; then
+            echo "CFN_ARTIFACT_BUCKET secret is required when enable_rag_ingest_scheduler=true" >&2
+            exit 1
+          fi
+          KEY="cloudformation/${STACK_NAME}/${GITHUB_SHA}/rag-ingest-scheduler-sqs.yaml"
+          aws s3 cp "infra/rag-ingest-scheduler-sqs.yaml" "s3://${NESTED_BUCKET}/${KEY}"
+          echo "rag_scheduler_template_url=https://${NESTED_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${KEY}" >> "$GITHUB_OUTPUT"
+
       - name: Deploy CloudFormation
+        env:
+          P_ENVIRONMENT: ${{ inputs.environment || 'dev' }}
+          P_CONTAINER_IMAGE: ${{ needs.build.outputs.image_uri }}
+          P_FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
+          P_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          P_VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          P_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          P_GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          P_RAG_DATABASE_URL: ${{ secrets.RAG_DATABASE_URL }}
+          P_OBSERVABILITY_DATABASE_URL: ${{ secrets.OBSERVABILITY_DATABASE_URL }}
+          P_OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          P_OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          P_OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+          P_ENABLE_OPENSEARCH: ${{ vars.ENABLE_OPENSEARCH || 'false' }}
+          P_OPENSEARCH_MODE: ${{ vars.OPENSEARCH_MODE || 'managed' }}
+          P_NETWORK_MODE: ${{ inputs.network_mode || 'public-lite' }}
+          P_INSTANCE_TYPE: ${{ inputs.instance_type || 't3.medium' }}
+          P_DESIRED_CAPACITY: ${{ inputs.desired_capacity || '1' }}
+          P_MAX_CAPACITY: ${{ inputs.max_capacity || '2' }}
+          P_ENABLE_RAG_INGEST_SCHEDULER: ${{ inputs.enable_rag_ingest_scheduler && 'true' || 'false' }}
+          P_RAG_SCHEDULER_TEMPLATE_URL: ${{ steps.nested.outputs.rag_scheduler_template_url }}
+          P_RAG_INGEST_SCHEDULE_EXPRESSION: ${{ inputs.rag_ingest_schedule_expression || 'rate(1 minute)' }}
         run: |
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
             --template-file infra/a360-backend-private.yml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              Environment="${{ inputs.environment }}" \
-              ContainerImage="${{ needs.build.outputs.image_uri }}" \
-              FrontendOrigins="${{ secrets.FRONTEND_ORIGINS }}" \
-              OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
-              GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
-              EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}"
+              Environment="$P_ENVIRONMENT" \
+              ContainerImage="$P_CONTAINER_IMAGE" \
+              FrontendOrigins="$P_FRONTEND_ORIGINS" \
+              OpenAiApiKey="$P_OPENAI_API_KEY" \
+              VoyageApiKey="$P_VOYAGE_API_KEY" \
+              JwtSecret="$P_JWT_SECRET" \
+              GithubToken="$P_GHCR_READ_TOKEN" \
+              RagDatabaseUrl="$P_RAG_DATABASE_URL" \
+              ObservabilityDatabaseUrl="$P_OBSERVABILITY_DATABASE_URL" \
+              OpenSearchHost="$P_OPENSEARCH_HOST" \
+              OpenSearchUsername="$P_OPENSEARCH_USERNAME" \
+              OpenSearchPassword="$P_OPENSEARCH_PASSWORD" \
+              EnableOpenSearch="$P_ENABLE_OPENSEARCH" \
+              OpenSearchMode="$P_OPENSEARCH_MODE" \
+              NetworkMode="$P_NETWORK_MODE" \
+              InstanceType="$P_INSTANCE_TYPE" \
+              DesiredCapacity="$P_DESIRED_CAPACITY" \
+              MaxCapacity="$P_MAX_CAPACITY" \
+              EnableRagIngestScheduler="$P_ENABLE_RAG_INGEST_SCHEDULER" \
+              RagIngestSchedulerTemplateUrl="$P_RAG_SCHEDULER_TEMPLATE_URL" \
+              RagIngestScheduleExpression="$P_RAG_INGEST_SCHEDULE_EXPRESSION"
