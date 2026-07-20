@@ -266,13 +266,18 @@ def test_reuse_of_revoked_token_revokes_whole_family(client, monkeypatch):
     assert client.post("/api/auth/refresh", json={"refresh_token": rotated}).status_code == 401
 
 
-def test_immediate_resubmit_within_grace_keeps_family_alive(client):
+def test_immediate_resubmit_within_grace_keeps_family_alive(client, monkeypatch):
     """🔴 유예창 안의 재제시는 탈취가 아니라 경합이다 — 계열을 끊지 않는다.
 
     실 동시성 테스트(tests/integration/test_refresh_token_concurrency.py)에서 드러난 결함:
     동시 요청의 진 쪽들이 '폐기된 토큰 재사용'으로 분류돼 **방금 발급된 정상 토큰까지** 폐기했다.
     클라이언트 더블클릭·네트워크 재시도가 전 기기 로그아웃이 되면 안 된다.
     """
+    # 유예창을 명시한다 — 기본 10초에 기대면 **테스트가 느린 날 빨간불**이 된다(실제로 발생:
+    # bcrypt·DB 대기로 세 요청이 10초를 넘기면 계열이 폐기돼 마지막 단언이 401로 뒤집힌다).
+    # '유예창 밖' 케이스가 위에서 0으로 고정하듯, '안' 케이스도 시계가 아니라 값으로 고정해야
+    # 재는 대상이 유예창 규칙 자체가 된다.
+    monkeypatch.setenv("REFRESH_REUSE_GRACE_SECONDS", "600")
     body = _login(client, email="grace@example.com")
     old = body["refresh_token"]
     rotated = client.post("/api/auth/refresh", json={"refresh_token": old}).json()["refresh_token"]
@@ -325,8 +330,9 @@ def test_expired_refresh_token_rejected(client, monkeypatch):
     assert r.status_code == 401
 
 
-def test_recent_rotation_reuse_returns_401_and_keeps_family(client):
+def test_recent_rotation_reuse_returns_401_and_keeps_family(client, monkeypatch):
     """방금 회전한 부모의 재사용은 401이지만 정상 후손 계열은 유지한다."""
+    monkeypatch.setenv("REFRESH_REUSE_GRACE_SECONDS", "600")  # '방금'을 시계가 아니라 값으로 고정
     body = _login(client, email="race@example.com")
     first = client.post("/api/auth/refresh", json={"refresh_token": body["refresh_token"]})
     assert first.status_code == 200
