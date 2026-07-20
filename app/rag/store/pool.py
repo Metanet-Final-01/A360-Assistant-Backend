@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 # httpx.AsyncClient(verify=...)에 넘기면 이후 생성은 1ms 미만.
 _SSL_CONTEXT = ssl.create_default_context()
 
+
+def get_ssl_context() -> ssl.SSLContext:
+    """프로세스 공용 SSL 컨텍스트 — 동기 경로(app/rag/retrieval/embed.py)도 같이 쓴다 (RPA-219).
+
+    위 주석의 700ms~1s는 특정 환경(개발 PC) 수치다. 2026-07-20 재측정에서는 새
+    프로세스 최초 호출도 약 10ms였다 — 환경 편차가 크므로 이 비용을 성능 근거로
+    삼지 말 것. 공유하는 이유는 "어느 환경에서든 중복 생성할 이유가 없어서"다.
+    """
+    return _SSL_CONTEXT
+
 _pg_pool: AsyncConnectionPool | None = None
 _opensearch_client: httpx.AsyncClient | None = None
 _external_client: httpx.AsyncClient | None = None  # Voyage/OpenAI (임베딩·리랭크)
