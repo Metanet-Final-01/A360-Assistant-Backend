@@ -192,8 +192,7 @@ Parameters:
   RagIngestOption:
     Type: Number
     Default: 3
-    MinValue: 1
-    MaxValue: 3
+    AllowedValues: [1, 2, 3]
 
   RagIngestClean:
     Type: String
@@ -204,7 +203,7 @@ Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
   HasExternalOpenSearch: !Not [!Equals [!Ref OpenSearchHost, ""]]
-  CreateOpenSearch: !Equals [!Ref EnableOpenSearch, "true"]
+  CreateOpenSearch: !And [!Not [!Condition HasExternalOpenSearch], !Equals [!Ref EnableOpenSearch, "true"]]
   UseManagedOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "managed"]]
   UseContainerOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "container"]]
   IsPublicLite: !Equals [!Ref NetworkMode, "public-lite"]
@@ -964,7 +963,7 @@ Resources:
                 - ""
               OpenSearchComposeBlock: !If
                 - UseContainerOpenSearch
-                - "  opensearch:\n    image: opensearchproject/opensearch:2.13.0\n    container_name: a360-opensearch\n    restart: unless-stopped\n    environment:\n      discovery.type: single-node\n      plugins.security.disabled: \"true\"\n      OPENSEARCH_JAVA_OPTS: \"-Xms512m -Xmx512m\"\n      OPENSEARCH_INITIAL_ADMIN_PASSWORD: \"A360-container-Dev1!\"\n    volumes:\n      - opensearch-data:/usr/share/opensearch/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -sf http://localhost:9200/_cluster/health || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 10\n\nvolumes:\n  opensearch-data:"
+                - "  opensearch:\n    image: opensearchproject/opensearch:2.13.0\n    container_name: a360-opensearch\n    restart: unless-stopped\n    environment:\n      discovery.type: single-node\n      plugins.security.disabled: \"true\"\n      OPENSEARCH_JAVA_OPTS: \"-Xms512m -Xmx512m\"\n    volumes:\n      - opensearch-data:/usr/share/opensearch/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -sf http://localhost:9200/_cluster/health || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 10\n\nvolumes:\n  opensearch-data:"
                 - ""
 
   AppAutoScalingGroup:

@@ -14,8 +14,7 @@ Parameters:
   IngestOption:
     Type: Number
     Default: 3
-    MinValue: 1
-    MaxValue: 3
+    AllowedValues: [1, 2, 3]
   Clean:
     Type: String
     Default: "false"

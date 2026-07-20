@@ -111,30 +111,52 @@ jobs:
           echo "rag_scheduler_template_url=https://${NESTED_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${KEY}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy CloudFormation
+        env:
+          P_ENVIRONMENT: ${{ inputs.environment || 'dev' }}
+          P_CONTAINER_IMAGE: ${{ needs.build.outputs.image_uri }}
+          P_FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
+          P_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          P_VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          P_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          P_GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          P_RAG_DATABASE_URL: ${{ secrets.RAG_DATABASE_URL }}
+          P_OBSERVABILITY_DATABASE_URL: ${{ secrets.OBSERVABILITY_DATABASE_URL }}
+          P_OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          P_OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          P_OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+          P_ENABLE_OPENSEARCH: ${{ vars.ENABLE_OPENSEARCH || 'false' }}
+          P_OPENSEARCH_MODE: ${{ vars.OPENSEARCH_MODE || 'managed' }}
+          P_NETWORK_MODE: ${{ inputs.network_mode || 'public-lite' }}
+          P_INSTANCE_TYPE: ${{ inputs.instance_type || 't3.medium' }}
+          P_DESIRED_CAPACITY: ${{ inputs.desired_capacity || '1' }}
+          P_MAX_CAPACITY: ${{ inputs.max_capacity || '2' }}
+          P_ENABLE_RAG_INGEST_SCHEDULER: ${{ inputs.enable_rag_ingest_scheduler && 'true' || 'false' }}
+          P_RAG_SCHEDULER_TEMPLATE_URL: ${{ steps.nested.outputs.rag_scheduler_template_url }}
+          P_RAG_INGEST_SCHEDULE_EXPRESSION: ${{ inputs.rag_ingest_schedule_expression || 'rate(1 minute)' }}
         run: |
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
             --template-file infra/a360-backend-private.yml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              Environment="${{ inputs.environment || 'dev' }}" \
-              ContainerImage="${{ needs.build.outputs.image_uri }}" \
-              FrontendOrigins="${{ secrets.FRONTEND_ORIGINS }}" \
-              OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
-              VoyageApiKey="${{ secrets.VOYAGE_API_KEY }}" \
-              JwtSecret="${{ secrets.JWT_SECRET }}" \
-              GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
-              RagDatabaseUrl="${{ secrets.RAG_DATABASE_URL }}" \
-              ObservabilityDatabaseUrl="${{ secrets.OBSERVABILITY_DATABASE_URL }}" \
-              OpenSearchHost="${{ secrets.OPENSEARCH_HOST }}" \
-              OpenSearchUsername="${{ secrets.OPENSEARCH_USERNAME }}" \
-              OpenSearchPassword="${{ secrets.OPENSEARCH_PASSWORD }}" \
-              EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}" \
-              OpenSearchMode="${{ vars.OPENSEARCH_MODE || 'managed' }}" \
-              NetworkMode="${{ inputs.network_mode || 'public-lite' }}" \
-              InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
-              DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
-              MaxCapacity="${{ inputs.max_capacity || '2' }}" \
-              EnableRagIngestScheduler="${{ inputs.enable_rag_ingest_scheduler && 'true' || 'false' }}" \
-              RagIngestSchedulerTemplateUrl="${{ steps.nested.outputs.rag_scheduler_template_url }}" \
-              RagIngestScheduleExpression="${{ inputs.rag_ingest_schedule_expression || 'rate(1 minute)' }}"
+              Environment="$P_ENVIRONMENT" \
+              ContainerImage="$P_CONTAINER_IMAGE" \
+              FrontendOrigins="$P_FRONTEND_ORIGINS" \
+              OpenAiApiKey="$P_OPENAI_API_KEY" \
+              VoyageApiKey="$P_VOYAGE_API_KEY" \
+              JwtSecret="$P_JWT_SECRET" \
+              GithubToken="$P_GHCR_READ_TOKEN" \
+              RagDatabaseUrl="$P_RAG_DATABASE_URL" \
+              ObservabilityDatabaseUrl="$P_OBSERVABILITY_DATABASE_URL" \
+              OpenSearchHost="$P_OPENSEARCH_HOST" \
+              OpenSearchUsername="$P_OPENSEARCH_USERNAME" \
+              OpenSearchPassword="$P_OPENSEARCH_PASSWORD" \
+              EnableOpenSearch="$P_ENABLE_OPENSEARCH" \
+              OpenSearchMode="$P_OPENSEARCH_MODE" \
+              NetworkMode="$P_NETWORK_MODE" \
+              InstanceType="$P_INSTANCE_TYPE" \
+              DesiredCapacity="$P_DESIRED_CAPACITY" \
+              MaxCapacity="$P_MAX_CAPACITY" \
+              EnableRagIngestScheduler="$P_ENABLE_RAG_INGEST_SCHEDULER" \
+              RagIngestSchedulerTemplateUrl="$P_RAG_SCHEDULER_TEMPLATE_URL" \
+              RagIngestScheduleExpression="$P_RAG_INGEST_SCHEDULE_EXPRESSION"
