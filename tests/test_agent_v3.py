@@ -706,3 +706,21 @@ def test_empty_param_spec_still_flags_r2():
         _EmptyParamsCatalog(),
     )
     assert [x.rule for x in v] == ["R2"]
+
+
+def test_qa_needs_evidence_predicate():
+    # qa 근거 가드 판정 — A360 도메인 명사+질의 마커 결합일 때만 첫 턴 검색을 강제한다.
+    from app.agent.v3.orchestrator.qa import _needs_evidence
+
+    # 사실 조회형 — 강제 대상 (근거 없는 단정 방지)
+    assert _needs_evidence("커뮤니티 에디션에서도 트리거 쓸 수 있어?")
+    assert _needs_evidence("PDF 텍스트 추출하는 액션 있어?")
+    assert _needs_evidence("봇 에이전트 설치 어떻게 해?")
+    # 명사형 질의 표현도 잡는다 (CodeRabbit #286 리뷰 반영 — "인가요"/"방법"류)
+    assert _needs_evidence("커뮤니티 에디션은 무료인가요?")
+    assert _needs_evidence("봇 에이전트 설치 방법은?")
+    assert _needs_evidence("라이선스 비용 얼마야?")
+    # 인사·감사·흐름도 문맥 질문 — 기존대로 검색 없이 답한다 (강제 없음)
+    assert not _needs_evidence("안녕하세요")
+    assert not _needs_evidence("고마워, 잘 만들어졌네")
+    assert not _needs_evidence("이 단계는 왜 있는 거야?")
