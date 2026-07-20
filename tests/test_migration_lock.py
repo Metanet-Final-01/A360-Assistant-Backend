@@ -1,66 +1,15 @@
-"""기동 시 마이그레이션 직렬화 (RPA-223) — advisory lock 계약.
+"""마이그레이션 advisory lock (RPA-223) — 유닛에서 볼 수 있는 부분만.
 
-실제 Postgres의 pg_advisory_lock으로 검증한다 — 락 직렬화는 mock으로 증명되지 않는다
-(가드가 읽는 것과 동작이 읽는 것이 같아야 한다는 원칙의 테스트판). conftest가
-APP_DATABASE_URL을 비워 DATABASE_*(로컬 docker Postgres)로 폴백한 상태를 전제한다.
+⚠️ 실 DB가 필요한 계약(락 잡음·해제·타임아웃)은 **여기 두면 안 된다** —
+유닛 스위트는 DB 없이 돌아야 하고, CI의 postgres 서비스에는 `a360`이 없다
+(tests/test_alerts.py 상단: 같은 함정으로 CI를 깨뜨린 선례). 그 계약은
+tests/integration/test_migration_lock_pg.py 가 실 Postgres(`a360_test`)로 검증한다
+(파일명이 다른 이유: 같은 basename이 두 디렉터리에 있으면 __init__.py 없는 pytest
+레이아웃에선 import file mismatch로 수집이 깨진다).
+여기는 접속이 필요 없는 분기만 남긴다.
 """
 
-import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
-
 import app.db as app_db
-
-
-def _autocommit_conn():
-    """락 보유용 별도 세션 — NullPool이라 close 시 연결이 끊겨 락도 확실히 풀린다."""
-    engine = create_engine(app_db._database_url(), poolclass=NullPool)
-    return engine, engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-
-
-def test_lock_free_after_successful_run():
-    """run_migrations 정상 완료 후 락이 풀려 있다.
-
-    안 풀리면 다음 기동(배포·스케일아웃)마다 타임아웃(120초)을 다 기다린 뒤에야 뜬다 —
-    "락을 잡는다"만 검증하고 "놓는다"를 빼먹으면 그게 새 배포 장애가 된다.
-    """
-    app_db.run_migrations()
-    engine, conn = _autocommit_conn()
-    try:
-        got = conn.execute(
-            text("SELECT pg_try_advisory_lock(:k)"), {"k": app_db.APP_MIGRATION_LOCK_KEY}
-        ).scalar()
-        assert got is True, "run_migrations가 advisory lock을 해제하지 않았다"
-        conn.execute(
-            text("SELECT pg_advisory_unlock(:k)"), {"k": app_db.APP_MIGRATION_LOCK_KEY}
-        )
-    finally:
-        conn.close()
-        engine.dispose()
-
-
-def test_run_waits_then_fails_while_lock_held(monkeypatch):
-    """다른 세션이 락을 쥐고 있으면 lock_timeout까지 대기 후 실패한다 — 무한 대기 금지.
-
-    실패는 조용히 사라지지 않는다: lifespan이 migrations_ok=False로 남겨 /health/live가
-    503을 주고(RPA-222) ASG가 인스턴스를 교체한다. 타임아웃을 500ms로 줄여 실측한다.
-    """
-    monkeypatch.setattr(app_db, "_LOCK_TIMEOUT", "500ms")
-    engine, conn = _autocommit_conn()
-    try:
-        got = conn.execute(
-            text("SELECT pg_try_advisory_lock(:k)"), {"k": app_db.APP_MIGRATION_LOCK_KEY}
-        ).scalar()
-        assert got is True, "테스트 전제 실패: 락을 선점하지 못함"
-        with pytest.raises(Exception) as ei:
-            app_db.run_migrations()
-        assert "lock timeout" in str(ei.value).lower()
-    finally:
-        conn.execute(
-            text("SELECT pg_advisory_unlock(:k)"), {"k": app_db.APP_MIGRATION_LOCK_KEY}
-        )
-        conn.close()
-        engine.dispose()
 
 
 def test_non_postgres_url_passes_without_lock(tmp_path):
