@@ -89,6 +89,7 @@ jobs:
     needs: build
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)
     runs-on: ubuntu-latest
+    environment: change-assurance-writer
     steps:
       - uses: actions/checkout@v4
 
@@ -119,6 +120,8 @@ jobs:
           P_VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
           P_JWT_SECRET: ${{ secrets.JWT_SECRET }}
           P_GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          P_ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
+          P_ASSURANCE_WRITER_REPOSITORY: ${{ github.repository }}
           P_RAG_DATABASE_URL: ${{ secrets.RAG_DATABASE_URL }}
           P_OBSERVABILITY_DATABASE_URL: ${{ secrets.OBSERVABILITY_DATABASE_URL }}
           P_OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
@@ -146,6 +149,8 @@ jobs:
               VoyageApiKey="$P_VOYAGE_API_KEY" \
               JwtSecret="$P_JWT_SECRET" \
               GithubToken="$P_GHCR_READ_TOKEN" \
+              AssuranceWriterToken="$P_ASSURANCE_WRITER_TOKEN" \
+              AssuranceWriterRepository="$P_ASSURANCE_WRITER_REPOSITORY" \
               RagDatabaseUrl="$P_RAG_DATABASE_URL" \
               ObservabilityDatabaseUrl="$P_OBSERVABILITY_DATABASE_URL" \
               OpenSearchHost="$P_OPENSEARCH_HOST" \
