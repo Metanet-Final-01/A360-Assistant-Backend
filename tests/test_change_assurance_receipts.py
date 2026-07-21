@@ -551,6 +551,8 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "needs.resolve_pr.outputs.pull_request_number" in publish_job
     assert "github.event.repository.default_branch" in publish_job
     assert "secrets.ASSURANCE_WRITER_TOKEN" in publish_job
+    assert "python -m scripts.publish_change_assurance" in publish_job
+    assert "python scripts/publish_change_assurance.py" not in publish_job
     assert "ASSURANCE_WRITER_TOKEN" not in observe
     assert "secrets." not in observe
 
