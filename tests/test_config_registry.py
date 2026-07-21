@@ -8,6 +8,7 @@
 """
 
 import ast
+import functools
 from pathlib import Path
 
 import pytest
@@ -71,20 +72,26 @@ def _env_access(node: ast.AST):
     return None
 
 
-def _scan() -> tuple[dict[str, set[str]], set[str]]:
+@functools.cache
+def _scan() -> tuple[dict[str, set[str]], frozenset[str], tuple[tuple[str, str], ...]]:
     """app/ 전체를 AST로 훑어 env 접근을 수집한다.
 
-    반환: (리터럴키→{파일}, 변수키로 읽는 파일 집합).
+    반환: (리터럴키→{파일}, 변수키로 읽는 파일 집합, 파싱 실패 목록).
     정규식 대신 AST를 쓰는 이유(Qodo 반영): 정규식은 os.environ[]와 변수 키를 못 잡아
     래칫이 뚫려 있었다(LLM_*_COST_PER_1M·*_RETENTION_DAYS 등이 미선언인데 통과).
+    @functools.cache: 세 테스트가 각각 부르므로 파싱을 한 번만 한다(Qodo Performance).
     """
     literal: dict[str, set[str]] = {}
     dynamic: set[str] = set()
+    parse_errors: list[tuple[str, str]] = []
     for p in ROOT.rglob("*.py"):
         rel = p.relative_to(ROOT).as_posix()
         try:
             tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError:
+        except SyntaxError as e:
+            # 삼키지 않는다 (Qodo Correctness): 파싱 실패 파일은 스캔에서 빠져 그 파일의
+            # env 접근이 래칫을 우회한다 — 목록으로 모아 test_all_app_files_parse가 실패시킨다.
+            parse_errors.append((rel, str(e)))
             continue
         for node in ast.walk(tree):
             hit = _env_access(node)
@@ -95,12 +102,12 @@ def _scan() -> tuple[dict[str, set[str]], set[str]]:
                 literal.setdefault(key, set()).add(rel)
             elif is_dynamic:
                 dynamic.add(rel)
-    return literal, dynamic
+    return literal, frozenset(dynamic), tuple(parse_errors)
 
 
 def test_every_referenced_key_is_declared():
     """①: 리터럴로 참조되는 모든 키가 REGISTRY에 선언돼 있다 — 새 키는 선언부터."""
-    literal, _ = _scan()
+    literal, _, _ = _scan()
     undeclared = {k: sorted(files) for k, files in literal.items() if k not in config.REGISTRY}
     assert not undeclared, (
         f"REGISTRY에 미선언된 환경변수: {undeclared}\n"
@@ -110,8 +117,8 @@ def test_every_referenced_key_is_declared():
 
 def test_direct_getenv_files_do_not_grow():
     """②: env를 직접 읽는 파일이 늘지 않는다 — 새 코드는 config 경유."""
-    literal, dynamic = _scan()
-    current = {f for files in literal.values() for f in files} | dynamic
+    literal, dynamic, _ = _scan()
+    current = {f for files in literal.values() for f in files} | set(dynamic)
     new_files = current - _DIRECT_GETENV_ALLOWED
     assert not new_files, (
         f"새 파일이 env를 직접 읽습니다: {sorted(new_files)}\n"
@@ -125,12 +132,22 @@ def test_dynamic_key_access_files_are_known():
     스캐너가 변수 키의 실제 값을 못 보므로, 그런 파일이 새로 생기면 그 파일이 읽는 키가
     REGISTRY에 있는지 자동 검증이 불가능하다 — 목록으로 막아 코드 리뷰를 강제한다.
     """
-    _, dynamic = _scan()
-    new_files = dynamic - _DYNAMIC_KEY_FILES
+    _, dynamic, _ = _scan()
+    new_files = set(dynamic) - _DYNAMIC_KEY_FILES
     assert not new_files, (
         f"변수 키로 env를 읽는 새 파일: {sorted(new_files)}\n"
         "읽는 키를 REGISTRY에 선언하고 이 목록(_DYNAMIC_KEY_FILES)에 추가하세요."
     )
+
+
+def test_all_app_files_parse():
+    """④(Qodo 반영): app/ 파일이 전부 파싱된다 — 파싱 실패는 래칫을 조용히 우회시킨다.
+
+    _scan이 SyntaxError를 삼키고 그 파일을 제외하면, 그 파일의 env 접근이 ①②③ 어디에도
+    안 잡혀 REGISTRY 선언 강제가 뚫린다. 파싱 실패를 여기서 표면화한다.
+    """
+    _, _, parse_errors = _scan()
+    assert not parse_errors, f"파싱 실패로 래칫에서 누락된 파일: {list(parse_errors)}"
 
 
 def test_get_reads_at_access_time(monkeypatch):
