@@ -5,6 +5,7 @@ intent 없이 full context를 조립해 넘기고, 반환 type으로 저장을 �
 그 자리에 심어 백엔드 로직만 격리 검증한다.
 """
 
+import asyncio
 import json
 import uuid
 from types import SimpleNamespace
@@ -671,3 +672,79 @@ def test_blocks_non_owner(monkeypatch):
     with TestClient(app) as c:
         with c.stream("POST", f"/api/sessions/{SID}/turn", json={"message": "안녕"}) as r:
             assert r.status_code == 403
+
+
+# --- SSE heartbeat (RPA-233): 조용한 구간에도 연결을 살린다 ---
+
+def test_iter_with_heartbeat_emits_on_silence():
+    """다음 이벤트가 늦으면 heartbeat sentinel을 내고, 실제 이벤트는 순서대로 온전히 통과."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _slow():
+            await asyncio.sleep(0.03)  # interval(0.005)보다 길게 조용
+            yield ProgressEvent(event="token", message="a")
+            await asyncio.sleep(0.03)
+            yield ProgressEvent(event="done", data={"type": "answer"})
+
+        return [x async for x in sessions_api._iter_with_heartbeat(_slow(), 0.005)]
+
+    out = asyncio.run(_collect())
+    assert out.count(sessions_api._HEARTBEAT) >= 1  # 침묵 구간마다 최소 1번
+    events = [x for x in out if x is not sessions_api._HEARTBEAT]
+    assert [e.event for e in events] == ["token", "done"]  # 실제 이벤트는 유실·중복 없이 순서대로
+
+
+def test_iter_with_heartbeat_silent_beats_do_not_corrupt_stream():
+    """긴 침묵으로 heartbeat가 여러 번 나가도 하위 제너레이터가 깨지지 않는다(shield 검증)."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _slow():
+            await asyncio.sleep(0.05)  # interval(0.005)의 여러 배 — heartbeat 여러 번
+            yield ProgressEvent(event="done", data={"type": "answer"})
+
+        return [x async for x in sessions_api._iter_with_heartbeat(_slow(), 0.005)]
+
+    out = asyncio.run(_collect())
+    assert out.count(sessions_api._HEARTBEAT) >= 3  # 여러 번 뛰고도
+    events = [x for x in out if x is not sessions_api._HEARTBEAT]
+    assert [e.event for e in events] == ["done"]  # 실제 이벤트는 정확히 한 번 온다
+
+
+def test_iter_with_heartbeat_no_beat_when_fast():
+    """이벤트가 interval 안에 계속 오면 heartbeat는 안 나온다(불필요한 프레임 방지)."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _fast():
+            yield ProgressEvent(event="token", message="a")
+            yield ProgressEvent(event="done", data={"type": "answer"})
+
+        return [x async for x in sessions_api._iter_with_heartbeat(_fast(), 10.0)]
+
+    out = asyncio.run(_collect())
+    assert sessions_api._HEARTBEAT not in out
+    assert [e.event for e in out] == ["token", "done"]
+
+
+def test_turn_emits_sse_heartbeat_during_silence(monkeypatch):
+    """/turn: 에이전트가 조용한 구간에 실제 SSE 주석 heartbeat가 나가고, done도 정상 도착."""
+    from app.schemas import ProgressEvent
+
+    async def _slow_turn(message, context):
+        await asyncio.sleep(0.05)  # done 전 조용한 구간 (interval 0.01의 여러 배)
+        yield ProgressEvent(event="done", data={"type": "answer", "answer": "ok", "sources": []})
+
+    monkeypatch.setattr("app.agent.stream_agent_turn", _slow_turn, raising=False)
+    monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 0.01)  # 실제 60초를 기다리지 않는다
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        with c.stream("POST", f"/api/sessions/{SID}/turn", json={"message": "안녕"}) as r:
+            raw = list(r.iter_lines())
+
+    assert any("keepalive" in line for line in raw)  # 주석 heartbeat가 실제 프레임으로 나감
+    data_events = [json.loads(l[5:]) for l in raw if l.startswith("data:")]
+    assert data_events[-1]["event"] == "done"  # heartbeat가 정상 완료를 가리지 않는다
