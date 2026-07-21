@@ -4,6 +4,8 @@
 레거시 개별 엔드포인트(/analyze, /recommend, /api/agent/chat)는 /turn으로 흡수돼 제거됐다 (RPA-67).
 """
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -1015,6 +1017,64 @@ async def _run_internal_compact(session_id: uuid.UUID, message: str, stream_turn
         return False
 
 
+# SSE heartbeat (RPA-233) — 에이전트가 다음 이벤트를 내기까지 조용한 구간이 길면(LLM 긴 생성 등)
+# CloudFront OriginReadTimeout(60초)에 연결이 끊긴다. 침묵이 이어지면 주석 프레임을 흘려 연결을
+# 살려둔다. 60초보다 넉넉히 짧게 둬 idle마다 최소 한 번은 반드시 들어가게 한다.
+_SSE_HEARTBEAT_SEC = 15.0
+_SSE_HEARTBEAT_FRAME = ": keepalive\n\n"  # SSE 주석 — EventSource는 무시하고 연결만 유지한다
+_HEARTBEAT = object()  # 침묵 구간 신호 (실제 이벤트와 구분되는 sentinel)
+
+
+async def _iter_with_heartbeat(agen, interval: float):
+    """`agen`의 이벤트를 흘리되, `interval`초 이상 조용하면 `_HEARTBEAT` sentinel을 낸다.
+
+    다음 이벤트를 기다리는 `__anext__`를 `asyncio.shield`로 감싸 타임아웃이 하위 async
+    제너레이터를 취소·훼손하지 않게 한다 — 취소하면 진행 중이던 LLM 호출·상태가 깨진다.
+    타임아웃은 shield 래퍼만 취소하고 실제 대기는 다음 반복에서 그대로 이어진다.
+    """
+    it = agen.__aiter__()
+
+    async def _next():
+        # StopAsyncIteration을 태스크 경계로 넘기지 않는다 — __anext__를 직접 태스크화하면
+        # 종료 신호 전파가 깨져(무한 대기) heartbeat만 영원히 나간다. 코루틴 안에서 잡아
+        # (값, 종료여부) 튜플로 바꾼다.
+        try:
+            return await it.__anext__(), False
+        except StopAsyncIteration:
+            return None, True
+
+    pending: asyncio.Future | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(_next())
+            try:
+                event, done = await asyncio.wait_for(asyncio.shield(pending), interval)
+            except asyncio.TimeoutError:
+                yield _HEARTBEAT  # 아직 다음 이벤트 없음 — 연결만 살린다
+                continue
+            pending = None
+            if done:
+                return
+            yield event
+    finally:
+        # 조기 종료(클라 끊김 등)면 진행 중이던 __anext__를 정리한다 — 진행 중 호출 1건만 취소.
+        # 우리가 유발한 CancelledError만 삼킨다 — BaseException을 통째로 삼키면 바깥 취소까지
+        # 먹어 asyncio 협조적 취소가 깨진다(RPA-233 Qodo).
+        if pending is not None:
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+        # 하위 제너레이터도 명시적으로 닫는다 — __anext__를 수동 구동해서 wrapper의 GeneratorExit이
+        # it로 자동 전파되지 않는다. pending을 먼저 취소했으니 "generator already running" 없이
+        # 하위(graph.astream)의 finally 정리가 확실히 돈다. 정리 중 하위 예외는 삼키되,
+        # CancelledError(바깥 취소)는 전파한다 — 취소가 최우선이다(RPA-233 Qodo).
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(Exception):  # noqa: BLE001 — 정리 예외만, 취소는 전파
+                await aclose()
+
+
 @router.post("/{session_id}/turn")
 async def agent_turn(
     session_id: str,
@@ -1151,7 +1211,19 @@ async def agent_turn(
             with usage_context(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
             ):
-                async for event in stream_turn(message, agent_context):
+                async for event in _iter_with_heartbeat(
+                    stream_turn(message, agent_context), _SSE_HEARTBEAT_SEC
+                ):
+                    # 조용한 구간엔 heartbeat만 흘려 연결을 살린다 (RPA-233, CloudFront 60초 idle).
+                    # 끊긴 클라이언트엔 보내지 않고 즉시 턴을 중단한다 — 계속 소비하면 비용만 나간다.
+                    if event is _HEARTBEAT:
+                        if await request.is_disconnected():
+                            logger.info("클라이언트 끊김 — 턴 중단(heartbeat): session=%s", session_key)
+                            _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
+                            disconnected = True
+                            break
+                        yield _SSE_HEARTBEAT_FRAME
+                        continue
                     # done은 끊김 체크보다 먼저 잡는다 (CodeRabbit #164) — 같은 반복에서
                     # 끊김이 감지되면 이미 완료된 작업(전체 LLM 비용 지출됨)이 저장 없이
                     # 버려지는 누락이 생긴다. done을 먼저 확보하면 그 케이스가 "done 후
