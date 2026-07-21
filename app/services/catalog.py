@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 # 0 이하 = 재적재 없음(무한 캐시, RPA-225 이전 동작).
 _CATALOG_TTL_SEC = 600.0
 
+# 백그라운드 재적재의 DB 연결·쿼리 타임아웃(초) — 무한 블로킹이 재적재 스레드를 붙잡아
+# _reloading_* 플래그가 영구 True로 고착되면(=이후 재적재 영구 정지) 카탈로그가 오래된
+# 상태에 고정된다(Qodo 리뷰). 첫 동기 적재에도 적용해 기동 시 DB 지연에 무한 대기하지 않게.
+_CATALOG_DB_TIMEOUT_SEC = 10
+
 
 class BackendCatalog:
     """rag_documents(action_schema)의 metadata.schema를 (package_name, action_name)으로 조회.
@@ -89,7 +94,13 @@ class BackendCatalog:
             finally:
                 setattr(self, flag_attr, False)
 
-        threading.Thread(target=_run, daemon=True).start()
+        try:
+            threading.Thread(target=_run, daemon=True).start()
+        except Exception:  # noqa: BLE001 — 스레드 생성 실패(자원 고갈 등)
+            # start()가 실패하면 _run이 아예 안 돌아 finally가 플래그를 못 내린다 →
+            # 플래그가 영구 True로 남아 이후 재적재가 영원히 억제된다(Qodo 리뷰). 롤백한다.
+            setattr(self, flag_attr, False)
+            logger.warning("카탈로그 재적재 스레드 시작 실패 — 재적재 건너뜀", exc_info=True)
 
     def _reload_index(self) -> None:
         """백그라운드 인덱스 재적재. 실패 시 옛 인덱스 유지 + loaded_at 백오프."""
@@ -116,9 +127,12 @@ class BackendCatalog:
         from app.rag.store import db
 
         index: dict[tuple[str, str], dict] = {}
-        conn = db.connect()
+        # connect/statement 둘 다 타임아웃 — 연결이든 쿼리든 무한 블로킹이면 재적재 스레드가
+        # 안 끝나 플래그가 고착된다(RPA-225, Qodo 리뷰). ms 상수라 f-string 인젝션 없음.
+        conn = db.connect(connect_timeout=_CATALOG_DB_TIMEOUT_SEC)
         try:
             with conn.cursor() as cur:
+                cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
                 cur.execute(
                     """
                     SELECT package_name, action_name, metadata
@@ -212,9 +226,11 @@ class BackendCatalog:
         from app.rag.store import db
 
         try:
-            conn = db.connect()
+            # 재적재가 무한 블로킹으로 스레드/플래그를 붙잡지 않게 타임아웃 (RPA-225, _load와 동일).
+            conn = db.connect(connect_timeout=_CATALOG_DB_TIMEOUT_SEC)
             try:
                 with conn.cursor() as cur:
+                    cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
                     cur.execute(
                         """
                         SELECT package_name, title, url, content, chunk_index

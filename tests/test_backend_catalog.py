@@ -42,7 +42,8 @@ class _FakeConn:
 def _catalog_with(rows, monkeypatch):
     from app.rag.store import db
 
-    monkeypatch.setattr(db, "connect", lambda: _FakeConn(rows))
+    # connect는 이제 connect_timeout= 키워드를 받는다(RPA-225) — 인자를 흡수한다.
+    monkeypatch.setattr(db, "connect", lambda **kw: _FakeConn(rows))
     return BackendCatalog()
 
 
@@ -113,7 +114,7 @@ def test_trigger_menu_failure_not_cached(monkeypatch):
     calls = {"n": 0}
     rows = [("Email trigger", "Creating an email trigger", "/x", "메일 수신 시 실행", 0)]
 
-    def _connect():
+    def _connect(**kw):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("db down")
@@ -150,7 +151,7 @@ def _counting_connect(monkeypatch, rows_by_call):
 
     calls = {"n": 0}
 
-    def _connect():
+    def _connect(**kw):
         calls["n"] += 1
         rows = rows_by_call(calls["n"])
         if isinstance(rows, Exception):
@@ -217,7 +218,7 @@ def test_reload_is_nonblocking_during_slow_load(monkeypatch):
 
     calls = {"n": 0}
 
-    def _connect():
+    def _connect(**kw):
         calls["n"] += 1
         if calls["n"] >= 2:  # 재적재는 release 전까지 블록(느린 DB 시뮬레이션)
             release.wait(timeout=5)
@@ -289,3 +290,66 @@ def test_trigger_menu_reloads_after_ttl(monkeypatch):
     _wait_reload(cat, "_reloading_triggers")
     assert len(cat.list_trigger_schemas()) == 2  # 재적재 반영
     assert calls["n"] == 2
+
+
+def test_reload_thread_start_failure_rolls_back_flag(monkeypatch):
+    """스레드 시작 실패 시 재적재 플래그가 롤백된다 — 영구 stale 고착 방지 (Qodo 리뷰).
+
+    _start_reload가 플래그를 True로 세운 뒤 Thread.start()가 실패하면 worker가 안 돌아
+    finally가 플래그를 못 내린다. 롤백이 없으면 이후 재적재가 영원히 억제된다.
+    """
+    import threading as _th
+
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: [("Excel", "Open", {"schema": {"name": "Open"}})])
+    cat = BackendCatalog()
+    cat.get_action_schema("Excel", "Open")  # 첫 적재
+    clock["t"] += 601
+
+    orig_start = _th.Thread.start
+    monkeypatch.setattr(_th.Thread, "start", lambda self: (_ for _ in ()).throw(RuntimeError("no thread")))
+    cat.get_action_schema("Excel", "Open")  # stale → _start_reload → start 실패
+    assert cat._reloading_index is False, "start 실패 후 플래그가 True로 고착됨"
+
+    # start 복구 후 다음 stale 조회는 재적재를 다시 시도할 수 있어야 한다
+    monkeypatch.setattr(_th.Thread, "start", orig_start)
+    cat.get_action_schema("Excel", "Open")
+    _wait_reload(cat, "_reloading_index")
+    assert calls["n"] == 2  # 재적재가 다시 돌았다(영구 정지 아님)
+
+
+def test_load_applies_db_timeouts(monkeypatch):
+    """_load가 connect_timeout과 statement_timeout을 건다 — 무한 블로킹 방지 (Qodo 리뷰)."""
+    from app.rag.store import db
+
+    captured = {"connect_timeout": "unset", "statements": []}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql):
+            captured["statements"].append(sql)
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    def _connect(**kw):
+        captured["connect_timeout"] = kw.get("connect_timeout")
+        return _Conn()
+
+    monkeypatch.setattr(db, "connect", _connect)
+    BackendCatalog().get_action_schema("x", "y")
+    assert captured["connect_timeout"] == cat_mod._CATALOG_DB_TIMEOUT_SEC
+    assert any("statement_timeout" in s for s in captured["statements"])
