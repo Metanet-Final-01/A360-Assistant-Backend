@@ -42,3 +42,7 @@ def test_qodo_review_policy_preserves_project_boundaries() -> None:
     assert "app/agent/**" in instructions
     assert "API·SSE·스키마·DB·배포 계약" in instructions
     assert "시크릿" in instructions
+    # 배포 환경 고려 (RPA-226 후속) — Qodo가 다중 인스턴스·secret 노출·CFN 재실행을
+    # 리뷰 시 짚도록 지침이 살아 있는지 래칫으로 고정한다(누가 지우면 테스트가 잡는다).
+    assert "다중 인스턴스" in instructions
+    assert "xtrace" in instructions
