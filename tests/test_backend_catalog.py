@@ -161,6 +161,19 @@ def _counting_connect(monkeypatch, rows_by_call):
     return calls
 
 
+def _wait_reload(cat, flag_attr, timeout=5.0):
+    """백그라운드 재적재 스레드가 끝날 때까지 기다린다(플래그가 내려갈 때까지 폴링).
+
+    catalog의 monotonic만 monkeypatch되고 time.time/sleep은 실제라 폴링이 가능하다.
+    """
+    import time as real_time
+
+    deadline = real_time.time() + timeout
+    while getattr(cat, flag_attr) and real_time.time() < deadline:
+        real_time.sleep(0.005)
+    assert not getattr(cat, flag_attr), "백그라운드 재적재가 시간 내 끝나지 않음"
+
+
 def test_no_reload_within_ttl(monkeypatch):
     """TTL 이내 반복 조회는 재적재하지 않는다 — 병렬 step 노드가 매번 DB를 때리면 안 된다."""
     _clock(monkeypatch)
@@ -173,7 +186,7 @@ def test_no_reload_within_ttl(monkeypatch):
 
 
 def test_reload_after_ttl_reflects_new_ingest(monkeypatch):
-    """TTL 경과 후 조회는 재적재해 새로 적재된 액션을 본다 — 다중 인스턴스 수렴의 핵심."""
+    """TTL 경과 후 재적재(백그라운드)로 새로 적재된 액션을 본다 — 다중 인스턴스 수렴의 핵심."""
     clock = _clock(monkeypatch)
     monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
     calls = _counting_connect(monkeypatch, lambda n: (
@@ -182,11 +195,44 @@ def test_reload_after_ttl_reflects_new_ingest(monkeypatch):
               ("New", "Action", {"schema": {"name": "Action"}})]
     ))
     cat = BackendCatalog()
-    assert cat.get_action_schema("New", "Action") is None  # 적재 전 — 없음
+    assert cat.get_action_schema("New", "Action") is None  # 첫 동기 적재 — New 없음
     assert calls["n"] == 1
     clock["t"] += 601  # TTL 경과
-    assert cat.get_action_schema("New", "Action") is not None  # 재적재로 반영
+    cat.get_action_schema("New", "Action")  # stale 조회가 백그라운드 재적재를 트리거
+    #  (반환값은 옛 값/새 값 레이스라 검증하지 않는다 — non-blocking 보장은
+    #   test_reload_is_nonblocking_during_slow_load가 느린 DB로 안정적으로 검증한다)
+    _wait_reload(cat, "_reloading_index")  # 백그라운드 재적재 완료 대기
     assert calls["n"] == 2
+    assert cat.get_action_schema("New", "Action") is not None  # 재적재 반영
+
+
+def test_reload_is_nonblocking_during_slow_load(monkeypatch):
+    """재적재(느린 DB) 중에도 다른 조회는 막히지 않는다 — Qodo 지적(락 블로킹)의 직접 검증."""
+    import threading as _th
+
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    release = _th.Event()
+    from app.rag.store import db
+
+    calls = {"n": 0}
+
+    def _connect():
+        calls["n"] += 1
+        if calls["n"] >= 2:  # 재적재는 release 전까지 블록(느린 DB 시뮬레이션)
+            release.wait(timeout=5)
+        return _FakeConn([("Excel", "Open", {"schema": {"name": "Open"}})])
+
+    monkeypatch.setattr(db, "connect", _connect)
+    cat = BackendCatalog()
+    cat.get_action_schema("Excel", "Open")  # 첫 동기 적재
+    clock["t"] += 601
+    cat.get_action_schema("Excel", "Open")  # 백그라운드 재적재 트리거(release 대기 중)
+    assert cat._reloading_index is True  # 재적재 진행 중
+    # 재적재가 DB에 매여 있어도 이 조회는 옛 값을 즉시 받아야 한다(락 대기로 막히면 실패)
+    assert cat.get_action_schema("Excel", "Open") is not None
+    release.set()
+    _wait_reload(cat, "_reloading_index")
 
 
 def test_reload_failure_keeps_old_index_and_backs_off(monkeypatch):
@@ -199,9 +245,11 @@ def test_reload_failure_keeps_old_index_and_backs_off(monkeypatch):
     cat = BackendCatalog()
     assert cat.get_action_schema("Excel", "Open") is not None  # 첫 적재 성공
     clock["t"] += 601
-    assert cat.get_action_schema("Excel", "Open") is not None  # 재적재 실패해도 옛 것 유지(예외 X)
-    assert calls["n"] == 2
-    cat.get_action_schema("Excel", "Open")  # 백오프 — 같은 창에선 재시도 안 함
+    assert cat.get_action_schema("Excel", "Open") is not None  # 옛 것 즉시 반환(예외 X)
+    _wait_reload(cat, "_reloading_index")  # 백그라운드 재적재(실패) 완료
+    assert calls["n"] == 2  # 재적재 시도함
+    assert cat.get_action_schema("Excel", "Open") is not None  # 실패해도 옛 것 유지
+    cat.get_action_schema("Excel", "Open")  # 백오프 — 같은 창에선 재트리거 안 함
     assert calls["n"] == 2
 
 
@@ -227,7 +275,7 @@ def test_ttl_zero_means_infinite_cache(monkeypatch):
 
 
 def test_trigger_menu_reloads_after_ttl(monkeypatch):
-    """트리거 메뉴도 TTL 경과 후 재적재한다(index와 대칭)."""
+    """트리거 메뉴도 TTL 경과 후 백그라운드 재적재한다(index와 대칭)."""
     clock = _clock(monkeypatch)
     monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
     calls = _counting_connect(monkeypatch, lambda n: (
@@ -235,7 +283,9 @@ def test_trigger_menu_reloads_after_ttl(monkeypatch):
         else [("T1", "trig one", "/x", "c", 0), ("T2", "trig two", "/y", "c", 0)]
     ))
     cat = BackendCatalog()
-    assert len(cat.list_trigger_schemas()) == 1
+    assert len(cat.list_trigger_schemas()) == 1  # 첫 동기 적재
     clock["t"] += 601
-    assert len(cat.list_trigger_schemas()) == 2
+    cat.list_trigger_schemas()  # stale 조회가 백그라운드 재적재를 트리거(반환값은 레이스)
+    _wait_reload(cat, "_reloading_triggers")
+    assert len(cat.list_trigger_schemas()) == 2  # 재적재 반영
     assert calls["n"] == 2

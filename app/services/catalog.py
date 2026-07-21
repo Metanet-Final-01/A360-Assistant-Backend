@@ -57,6 +57,10 @@ class BackendCatalog:
         # _index is None이 먼저 걸린다).
         self._index_loaded_at = 0.0
         self._triggers_loaded_at = 0.0
+        # 백그라운드 재적재 진행 플래그 — 같은 캐시를 여러 스레드가 동시에 재적재하지 않게
+        # (stale-while-revalidate, RPA-225).
+        self._reloading_index = False
+        self._reloading_triggers = False
         self._lock = threading.Lock()
 
     @staticmethod
@@ -65,6 +69,47 @@ class BackendCatalog:
         if _CATALOG_TTL_SEC <= 0:
             return False
         return (time.monotonic() - loaded_at) >= _CATALOG_TTL_SEC
+
+    def _start_reload(self, flag_attr: str, worker) -> None:
+        """stale-while-revalidate 재적재를 **백그라운드 스레드로 1개만** 시작한다 (RPA-225).
+
+        핵심: 재적재(DB 조회)를 요청 경로에서 락을 잡고 동기로 하면, TTL 경계에 들어온
+        동시 요청이 전부 락 대기로 막혀 지연 스파이크가 난다(검수 경로가 이 캐시를 부른다).
+        그래서 stale일 때 호출자는 **옛 값을 즉시 받고**, 갱신은 여기 백그라운드에서 돈다.
+        flag로 동시 재적재를 1개로 제한한다 — 락은 flag를 세우는 짧은 구간만 잡는다.
+        """
+        with self._lock:
+            if getattr(self, flag_attr):
+                return
+            setattr(self, flag_attr, True)
+
+        def _run():
+            try:
+                worker()
+            finally:
+                setattr(self, flag_attr, False)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _reload_index(self) -> None:
+        """백그라운드 인덱스 재적재. 실패 시 옛 인덱스 유지 + loaded_at 백오프."""
+        try:
+            self._index = self._load()
+            self._index_loaded_at = time.monotonic()
+        except Exception:  # noqa: BLE001
+            # 옛 인덱스로 버틴다. loaded_at을 현재로 당겨 다음 TTL까지 재적재를 다시
+            # 트리거하지 않는다(DB가 잠깐 죽었을 때 매 조회가 스레드를 띄우는 걸 막는다).
+            self._index_loaded_at = time.monotonic()
+            logger.warning("카탈로그 인덱스 재적재 실패 — 옛 인덱스 유지", exc_info=True)
+
+    def _reload_triggers(self) -> None:
+        """백그라운드 트리거 재적재. 실패 시 옛 목록 유지 + loaded_at 백오프."""
+        loaded = self._load_triggers()
+        if loaded is None:  # 일시 실패 — 옛 목록 유지, 다음 TTL까지 백오프
+            self._triggers_loaded_at = time.monotonic()
+            return
+        self._triggers = loaded
+        self._triggers_loaded_at = time.monotonic()
 
     def _load(self) -> dict[tuple[str, str], dict]:
         # 지연 임포트 — 카탈로그를 실제로 쓸 때만 DB(psycopg)에 의존하게 한다.
@@ -122,22 +167,18 @@ class BackendCatalog:
         return index
 
     def _ensure_index(self) -> dict[tuple[str, str], dict]:
-        # 최초 미적재이거나 TTL이 지났으면 (재)적재한다 (RPA-225).
-        if self._index is None or self._is_stale(self._index_loaded_at):
-            with self._lock:  # 병렬 step 노드의 최초/재적재 경합 방지 (더블 체크)
-                if self._index is None or self._is_stale(self._index_loaded_at):
-                    try:
-                        self._index = self._load()
-                        self._index_loaded_at = time.monotonic()
-                    except Exception:
-                        # 첫 적재 실패는 올린다 — 쓸 인덱스가 아예 없다(기존 동작).
-                        if self._index is None:
-                            raise
-                        # 재적재 실패는 옛 인덱스로 버틴다. loaded_at을 **현재로 갱신**해
-                        # 다음 TTL까지 재시도하지 않는다 — DB가 잠깐 죽었을 때 매 조회가
-                        # 재적재를 때리는 걸 막는다(옛 카탈로그로 한 창 더 감수하는 쪽이 낫다).
-                        self._index_loaded_at = time.monotonic()
-                        logger.warning("카탈로그 재적재 실패 — 옛 인덱스 유지", exc_info=True)
+        # 첫 적재는 **동기**로 막고 기다린다 — 쓸 인덱스가 아예 없으니 옛 값을 줄 수 없다.
+        # 첫 적재 실패는 그대로 올린다(기존 동작).
+        if self._index is None:
+            with self._lock:  # 병렬 step 노드의 최초 조회 경합 방지 (더블 체크)
+                if self._index is None:
+                    self._index = self._load()
+                    self._index_loaded_at = time.monotonic()
+            return self._index
+        # 이미 인덱스가 있으면 stale이어도 **호출자를 막지 않는다**: 옛 인덱스를 즉시
+        # 돌려주고 갱신은 백그라운드로 (stale-while-revalidate, RPA-225 — Qodo 리뷰 반영).
+        if self._is_stale(self._index_loaded_at):
+            self._start_reload("_reloading_index", self._reload_index)
         return self._index
 
     def get_action_schema(self, package: str, action: str) -> dict | None:
@@ -151,23 +192,20 @@ class BackendCatalog:
         희귀 소스타입은 하이브리드 검색 상위 k에서 굶는다(후단 필터 실측 0-hit).
         행이 없으면(구 카탈로그) 빈 목록을 반환해 소비처가 조용히 기능을 쉰다.
         """
-        # 최초 미적재이거나 TTL이 지났으면 (재)적재 (RPA-225, _ensure_index와 대칭).
-        if self._triggers is None or self._is_stale(self._triggers_loaded_at):
+        # 첫 적재는 동기 (_ensure_index와 대칭, RPA-225). 첫 적재 실패는 캐싱하지 않고
+        # 빈 목록을 반환해 다음 조회에서 재시도한다(옛 계약 유지).
+        if self._triggers is None:
             with self._lock:
-                if self._triggers is None or self._is_stale(self._triggers_loaded_at):
+                if self._triggers is None:
                     loaded = self._load_triggers()
                     if loaded is None:
-                        # 일시 실패는 캐싱하지 않는다 — 빈 목록으로 굳히면 DB가 복구돼도
-                        # 재시작 전까지 트리거 제안이 계속 죽는다.
-                        # 단 **재적재** 실패(옛 목록 보유)면 옛 것을 한 TTL 창 더 유지한다
-                        # (loaded_at 갱신) — 매 조회가 DB를 때리지 않게. 첫 적재 실패는
-                        # loaded_at을 안 건드려 다음 조회에서 재시도한다.
-                        if self._triggers is not None:
-                            self._triggers_loaded_at = time.monotonic()
-                            return self._triggers
                         return []
                     self._triggers = loaded
                     self._triggers_loaded_at = time.monotonic()
+            return self._triggers
+        # 이미 목록이 있으면 stale이어도 옛 목록을 즉시 반환하고 갱신은 백그라운드로.
+        if self._is_stale(self._triggers_loaded_at):
+            self._start_reload("_reloading_triggers", self._reload_triggers)
         return self._triggers
 
     def _load_triggers(self) -> list[dict] | None:
