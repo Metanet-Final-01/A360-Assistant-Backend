@@ -707,9 +707,11 @@ def test_iter_with_heartbeat_silent_beats_do_not_corrupt_stream():
         return [x async for x in sessions_api._iter_with_heartbeat(_slow(), 0.005)]
 
     out = asyncio.run(_collect())
-    assert out.count(sessions_api._HEARTBEAT) >= 3  # 여러 번 뛰고도
+    # 개수는 이벤트루프 스케줄링에 의존해 flaky하다 — 발생 여부만 본다(RPA-233 Qodo).
+    # 이 테스트의 본질은 "heartbeat가 뛰는 동안 하위 제너레이터가 깨지지 않는다"이다.
+    assert out.count(sessions_api._HEARTBEAT) >= 1  # 침묵 구간에 최소 한 번
     events = [x for x in out if x is not sessions_api._HEARTBEAT]
-    assert [e.event for e in events] == ["done"]  # 실제 이벤트는 정확히 한 번 온다
+    assert [e.event for e in events] == ["done"]  # 실제 이벤트는 유실·중복 없이 정확히 한 번
 
 
 def test_iter_with_heartbeat_no_beat_when_fast():

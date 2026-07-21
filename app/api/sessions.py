@@ -1063,6 +1063,13 @@ async def _iter_with_heartbeat(agen, interval: float):
             pending.cancel()
             with contextlib.suppress(BaseException):  # noqa: BLE001 — 취소 정리, 예외는 삼킨다
                 await pending
+        # 하위 제너레이터도 명시적으로 닫는다 (RPA-233 Qodo) — __anext__를 수동 구동해서
+        # wrapper의 GeneratorExit이 it로 자동 전파되지 않는다. pending을 먼저 취소했으니
+        # "generator already running" 없이 하위(graph.astream)의 finally 정리가 확실히 돈다.
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(BaseException):  # noqa: BLE001 — 정리 성격, 예외 삼킴
+                await aclose()
 
 
 @router.post("/{session_id}/turn")
