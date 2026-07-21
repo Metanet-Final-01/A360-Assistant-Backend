@@ -153,6 +153,12 @@ Parameters:
     NoEcho: true
     Description: "Optional. Shared llm_usage observability DB connection string, e.g. Neon. Falls back to the app RDS DB if unset."
 
+  AppDatabaseUrl:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: "Optional. Shared remote app DB connection string, e.g. Neon (app/db.py APP_DATABASE_URL). When set, the private RDS instance is not created at all. Setting this skips automatic schema migration on boot (RPA-186) — apply with scripts/migrate_shared_db.py."
+
   EnableOpenSearch:
     Type: String
     Default: "false"
@@ -215,6 +221,8 @@ Parameters:
 Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+  HasAppDatabaseUrl: !Not [!Equals [!Ref AppDatabaseUrl, ""]]
+  CreateManagedDatabase: !Not [!Condition HasAppDatabaseUrl]
   HasExternalOpenSearch: !Not [!Equals [!Ref OpenSearchHost, ""]]
   CreateOpenSearch: !And [!Not [!Condition HasExternalOpenSearch], !Equals [!Ref EnableOpenSearch, "true"]]
   UseManagedOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "managed"]]
@@ -459,6 +467,7 @@ Resources:
 
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Condition: CreateManagedDatabase
     Properties:
       GroupDescription: Private PostgreSQL security group
       VpcId: !Ref Vpc
@@ -496,6 +505,7 @@ Resources:
 
   DatabaseSecret:
     Type: AWS::SecretsManager::Secret
+    Condition: CreateManagedDatabase
     Properties:
       Name: !Sub "${ProjectName}/${Environment}/postgres"
       GenerateSecretString:
@@ -521,6 +531,7 @@ Resources:
           "JWT_SECRET": "${JwtSecret}",
           "RAG_DATABASE_URL": "${RagDatabaseUrl}",
           "OBSERVABILITY_DATABASE_URL": "${ObservabilityDatabaseUrl}",
+          "APP_DATABASE_URL": "${AppDatabaseUrl}",
           "OPENSEARCH_USERNAME": "${OpenSearchUsername}",
           "OPENSEARCH_PASSWORD": "${OpenSearchPassword}",
           "ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}",
@@ -579,6 +590,7 @@ Resources:
 
   DatabaseSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
+    Condition: CreateManagedDatabase
     Properties:
       DBSubnetGroupDescription: Private subnets for PostgreSQL
       SubnetIds:
@@ -590,6 +602,7 @@ Resources:
 
   Database:
     Type: AWS::RDS::DBInstance
+    Condition: CreateManagedDatabase
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
     Properties:
@@ -675,7 +688,7 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Ref DatabaseSecret
+                  - !If [CreateManagedDatabase, !Ref DatabaseSecret, !Ref "AWS::NoValue"]
                   - !Ref AppSecret
               - Effect: Allow
                 Action:
@@ -880,16 +893,23 @@ Resources:
 
               mkdir -p /opt/a360
 
-              export DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DatabaseSecret} --query SecretString --output text)"
+              DB_SECRET_ID="${DbSecretId}"
+              if [ -n "$DB_SECRET_ID" ]; then
+                export DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id "$DB_SECRET_ID" --query SecretString --output text)"
+                DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["username"])')
+                DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["password"])')
+              else
+                DB_USERNAME=""
+                DB_PASSWORD=""
+              fi
               export APP_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${AppSecret} --query SecretString --output text)"
-              DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["username"])')
-              DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["password"])')
               OPENAI_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENAI_API_KEY", ""))')
               GITHUB_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("GITHUB_TOKEN", ""))')
               VOYAGE_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("VOYAGE_API_KEY", ""))')
               JWT_SECRET=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("JWT_SECRET", ""))')
               RAG_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("RAG_DATABASE_URL", ""))')
               OBSERVABILITY_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OBSERVABILITY_DATABASE_URL", ""))')
+              APP_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("APP_DATABASE_URL", ""))')
               OPENSEARCH_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENSEARCH_USERNAME", ""))')
               OPENSEARCH_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENSEARCH_PASSWORD", ""))')
               ASSURANCE_WRITER_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_TOKEN", ""))')
@@ -910,11 +930,13 @@ Resources:
               # ⚠️ LogsBucket **리소스와 IAM 권한은 유지**한다(S3 버킷 삭제는 파괴적이고,
               #    S3 로그 업로드를 붙일 여지가 있다). 지금 지우는 건 '설정돼 있으니
               #    동작하겠지'라는 오해를 만드는 env 주입뿐이다.
-              DATABASE_HOST=${Database.Endpoint.Address}
-              DATABASE_PORT=${Database.Endpoint.Port}
+              DATABASE_HOST=${DatabaseHostValue}
+              DATABASE_PORT=${DatabasePortValue}
               DATABASE_NAME=${DatabaseName}
               DATABASE_USERNAME=$DB_USERNAME
               DATABASE_PASSWORD=$DB_PASSWORD
+              # 설정되면 위 DATABASE_* 대신 이 값을 그대로 씀(app/db.py) — 비어있으면 RDS 사용(미생성 시 위 값 전부 빈 문자열)
+              APP_DATABASE_URL=$APP_DATABASE_URL
               OPENAI_API_KEY=$OPENAI_API_KEY
               VOYAGE_API_KEY=$VOYAGE_API_KEY
               JWT_SECRET=$JWT_SECRET
@@ -963,7 +985,10 @@ Resources:
                 --stack ${AWS::StackName} \
                 --resource AppAutoScalingGroup \
                 --region ${AWS::Region}
-            - OpenSearchHost: !If
+            - DbSecretId: !If [CreateManagedDatabase, !Ref DatabaseSecret, ""]
+              DatabaseHostValue: !If [CreateManagedDatabase, !GetAtt Database.Endpoint.Address, ""]
+              DatabasePortValue: !If [CreateManagedDatabase, !GetAtt Database.Endpoint.Port, ""]
+              OpenSearchHost: !If
                 - HasExternalOpenSearch
                 - !Ref OpenSearchHost
                 - !If
@@ -1044,10 +1069,12 @@ Outputs:
     Value: !Sub "https://${ApplicationLoadBalancer.DNSName}"
 
   DatabaseEndpoint:
+    Condition: CreateManagedDatabase
     Description: Private PostgreSQL endpoint
     Value: !GetAtt Database.Endpoint.Address
 
   DatabaseSecretArn:
+    Condition: CreateManagedDatabase
     Description: Secrets Manager ARN containing DB credentials
     Value: !Ref DatabaseSecret
 
