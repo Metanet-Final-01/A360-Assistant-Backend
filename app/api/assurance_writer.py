@@ -19,6 +19,7 @@ from assurance.change.foundation import AssuranceError
 
 
 router = APIRouter(prefix="/api/internal/assurance", tags=["assurance-writer"])
+_WRITER_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 
 
 class ChangePublisherSource(BaseModel):
@@ -47,7 +48,10 @@ def require_assurance_writer(request: Request) -> str:
     expected = os.getenv("ASSURANCE_WRITER_TOKEN", "").strip()
     expected_repository = os.getenv("ASSURANCE_WRITER_REPOSITORY", "").strip()
     repository_pattern = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
-    if len(expected) < 32 or re.fullmatch(repository_pattern, expected_repository) is None:
+    if (
+        _WRITER_TOKEN_PATTERN.fullmatch(expected) is None
+        or re.fullmatch(repository_pattern, expected_repository) is None
+    ):
         raise HTTPException(
             503,
             detail={

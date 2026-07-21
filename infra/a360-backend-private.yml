@@ -95,6 +95,19 @@ Parameters:
     NoEcho: true
     Description: "Optional GitHub token for pulling private GHCR images."
 
+  AssuranceWriterToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    AllowedPattern: "^$|^[A-Za-z0-9_-]{32,128}$"
+    Description: "Dedicated bearer token for the protected Change Assurance writer."
+
+  AssuranceWriterRepository:
+    Type: String
+    Default: "Metanet-Final-01/A360-Assistant-Backend"
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    Description: "Single GitHub repository authorized to publish Change Assurance records."
+
   DatabaseName:
     Type: String
     Default: a360
@@ -509,7 +522,9 @@ Resources:
           "RAG_DATABASE_URL": "${RagDatabaseUrl}",
           "OBSERVABILITY_DATABASE_URL": "${ObservabilityDatabaseUrl}",
           "OPENSEARCH_USERNAME": "${OpenSearchUsername}",
-          "OPENSEARCH_PASSWORD": "${OpenSearchPassword}"
+          "OPENSEARCH_PASSWORD": "${OpenSearchPassword}",
+          "ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}",
+          "ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"
         }
       Tags:
         - Key: Project
@@ -825,7 +840,7 @@ Resources:
         UserData:
           Fn::Base64: !Sub
             - |
-              #!/bin/bash -eux
+              #!/bin/bash -eu
               exec > /var/log/user-data.log 2>&1
 
               dnf install -y amazon-cloudwatch-agent
@@ -877,11 +892,15 @@ Resources:
               OBSERVABILITY_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OBSERVABILITY_DATABASE_URL", ""))')
               OPENSEARCH_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENSEARCH_USERNAME", ""))')
               OPENSEARCH_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENSEARCH_PASSWORD", ""))')
+              ASSURANCE_WRITER_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_TOKEN", ""))')
+              ASSURANCE_WRITER_REPOSITORY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_REPOSITORY", ""))')
+              unset DB_SECRET_JSON APP_SECRET_JSON
 
               if [ -n "$GITHUB_TOKEN" ]; then
                 echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin
               fi
 
+              install -m 600 /dev/null /opt/a360/.env
               cat > /opt/a360/.env <<EOF
               APP_ENV=${Environment}
               FRONTEND_ORIGINS=${FrontendOrigins}
@@ -899,6 +918,8 @@ Resources:
               OPENAI_API_KEY=$OPENAI_API_KEY
               VOYAGE_API_KEY=$VOYAGE_API_KEY
               JWT_SECRET=$JWT_SECRET
+              ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
+              ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
               EMBEDDING_PROVIDER=openai
               # AGENT_RETRIEVER 제거 (RPA-189) — RPA-69가 fake 검색기 분기를 없애면서
               # 코드가 이 값을 읽지 않게 됐다. 남겨두면 '하이브리드가 켜져 있구나'라는
