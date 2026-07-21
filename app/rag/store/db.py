@@ -1,11 +1,21 @@
 """pgvector 저장소. docker-compose의 pgvector/pgvector:pg16 컨테이너를 그대로 사용한다."""
 
 import json
+import logging
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 import psycopg
 
 from .. import config
 from ..observability import log_call
+
+if TYPE_CHECKING:
+    from psycopg_pool import ConnectionPool
+
+logger = logging.getLogger(__name__)
 
 _DDL = f"""
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -33,6 +43,75 @@ CREATE INDEX IF NOT EXISTS idx_rag_documents_parent ON rag_documents (parent_id)
 
 def connect() -> psycopg.Connection:
     return psycopg.connect(config.database_dsn())
+
+
+_pool_lock = threading.Lock()
+_sync_pool: "ConnectionPool | None" = None
+_sync_pool_failed = False
+
+
+def _get_sync_pool() -> "ConnectionPool | None":
+    """검색 경로용 동기 커넥션 풀 (RPA-219). 기동 실패 시 None → 1회성 connect 폴백.
+
+    비동기 경로는 pool.py가 이미 풀을 쓰지만 에이전트가 타는 동기 검색은 검색마다
+    새 연결을 맺고 있었다. RAG_DATABASE_URL이 원격 Neon(ap-southeast-1)이라 연결
+    수립 자체가 비싸다 — 2026-07-20 실측 451ms/회, 풀에서 빌리면 0.0ms. 팬아웃
+    시에는 그 연결 수립이 직렬화된다(pool.py docstring의 k6 실측과 같은 현상).
+    """
+    global _sync_pool, _sync_pool_failed
+    if _sync_pool is not None or _sync_pool_failed:
+        return _sync_pool
+    with _pool_lock:
+        if _sync_pool is None and not _sync_pool_failed:
+            pool = None
+            try:
+                from psycopg_pool import ConnectionPool
+
+                pool = ConnectionPool(config.database_dsn(), min_size=1, max_size=20, open=False)
+                # wait=True — DB가 죽어 있으면 여기서 즉시 실패해 폴백한다. 기다리지 않으면
+                # 풀은 그냥 열리고 나중에 connection()에서 30초씩 블로킹된다(테스트가 멈춤).
+                pool.open(wait=True, timeout=5.0)
+                _sync_pool = pool
+            except Exception:  # noqa: BLE001 — 풀 기동 실패가 검색을 막으면 안 된다
+                # open()은 실패해도 이미 워커 스레드를 띄운 뒤다. _sync_pool에 담기 전이라
+                # close_sync_pool()이 회수할 수 없으므로 여기서 닫는다 — 안 닫으면 DB가
+                # 불안정할 때마다 유령 워커가 프로세스 종료까지 남는다.
+                if pool is not None:
+                    try:
+                        pool.close()
+                    except Exception:  # noqa: BLE001 — 정리 실패가 폴백을 막으면 안 된다
+                        logger.debug("실패한 풀 정리 중 예외 (무시)", exc_info=True)
+                logger.warning("RAG 동기 커넥션 풀 기동 실패 — 요청별 연결로 폴백", exc_info=True)
+                _sync_pool_failed = True
+    return _sync_pool
+
+
+@contextmanager
+def connection() -> Iterator[psycopg.Connection]:
+    """검색 경로용 연결 컨텍스트 — 풀에서 빌리고, 풀이 없으면 1회성 연결로 폴백한다.
+
+    적재(ingest)·debug는 계속 connect()를 직접 쓴다(수명이 길고 풀 대상이 아님).
+    """
+    pool = _get_sync_pool()
+    if pool is None:
+        conn = connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
+    else:
+        with pool.connection() as conn:
+            yield conn
+
+
+def close_sync_pool() -> None:
+    """앱 종료 시 동기 풀을 닫는다 (main.py lifespan)."""
+    global _sync_pool, _sync_pool_failed
+    with _pool_lock:
+        if _sync_pool is not None:
+            _sync_pool.close()
+            _sync_pool = None
+        _sync_pool_failed = False
 
 
 async def connect_async() -> psycopg.AsyncConnection:

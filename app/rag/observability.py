@@ -16,7 +16,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from . import config
+from . import config, event_queue
 
 _request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
 _write_lock = threading.Lock()  # 동시 요청(3개 모드 동시 검색 등)이 같은 로그 파일에 겹쳐 쓰지 않도록
@@ -72,33 +72,57 @@ def _mask_record(record: dict) -> dict:
     return r
 
 
-def _persist_rag_event(record: dict) -> None:
-    """관측 DB(Neon)에 RAG 이벤트를 best-effort로 적재 — 로컬 JSONL과 별개로 중앙화(RPA-128).
+def _rag_event_row(record: dict):
+    """마스킹된 record → RagEvent 행. 단건·배치 적재가 **같은 것**을 쓰게 하는 단일 출처.
 
-    record는 _write_log에서 이미 마스킹된 것을 받는다. hybrid_search엔 설정 스냅샷을 얹는다.
-    적재 실패가 검색을 죽이면 안 되므로 예외는 삼킨다.
+    두 벌로 갈리면 컬럼 절단(40/120/20자)이나 config 스냅샷이 경로마다 달라진다.
     """
+    from app import models
+
+    detail = {k: v for k, v in record.items()
+              if k not in ("request_id", "event", "function", "status", "duration_ms")}
+    if record.get("event") == "hybrid_search":
+        detail["config"] = _rag_config_snapshot()
+
+    return models.RagEvent(
+        request_id=record.get("request_id"),
+        event=str(record.get("event"))[:40],
+        function=(record.get("function") or None) and str(record["function"])[:120],
+        status=(record.get("status") or None) and str(record["status"])[:20],
+        duration_ms=record.get("duration_ms"),
+        detail=json.dumps(detail, ensure_ascii=False, default=str),
+    )
+
+
+def _persist_rag_events(records: list[dict]) -> None:
+    """관측 DB(Neon)에 RAG 이벤트를 **배치로** 적재 — 세션 1개 + COMMIT 1회 (RPA-221).
+
+    건당 세션을 열면 pre_ping→INSERT→COMMIT→리셋으로 왕복이 4번 든다. 원격 Neon
+    기준 실측 7건 2,327ms → 배치 858ms. INSERT 문장 수는 같고, 줄어드는 건 세션
+    부대비용이다. 적재 실패가 검색을 죽이면 안 되므로 예외는 삼킨다.
+    """
+    if not records:
+        return
     try:
-        from app import models
         from app.core.observability_db import observability_sessionmaker
 
-        detail = {k: v for k, v in record.items()
-                  if k not in ("request_id", "event", "function", "status", "duration_ms")}
-        if record.get("event") == "hybrid_search":
-            detail["config"] = _rag_config_snapshot()
-
         with observability_sessionmaker()() as db:
-            db.add(models.RagEvent(
-                request_id=record.get("request_id"),
-                event=str(record.get("event"))[:40],
-                function=(record.get("function") or None) and str(record["function"])[:120],
-                status=(record.get("status") or None) and str(record["status"])[:20],
-                duration_ms=record.get("duration_ms"),
-                detail=json.dumps(detail, ensure_ascii=False, default=str),
-            ))
+            for record in records:
+                db.add(_rag_event_row(record))
             db.commit()
     except Exception:  # noqa: BLE001 — 관측 적재 실패가 검색을 죽이면 안 됨
         pass
+
+
+def _persist_rag_event(record: dict) -> None:
+    """단건 적재 — 큐 비활성(RAG_EVENT_QUEUE=0) 시의 동기 경로.
+
+    record는 _write_log에서 이미 마스킹된 것을 받는다.
+    """
+    _persist_rag_events([record])
+
+
+event_queue.configure(_persist_rag_events)
 
 
 def _write_log(record: dict) -> None:
@@ -109,7 +133,17 @@ def _write_log(record: dict) -> None:
     with _write_lock:  # 여러 스레드(동시 검색 요청)가 같은 파일에 append할 때 줄이 섞이지 않게
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(line)
-    _persist_rag_event(record)  # 이미 마스킹된 record로 관측 DB에도 중앙화(RPA-128)
+    # 관측 DB 적재는 큐에 넘긴다 (RPA-221) — 여기서 기다리면 원격 Neon 왕복 ~332ms가
+    # 검색 시간에 얹히고, 비동기 경로에서는 이벤트 루프 전체가 그만큼 멈춘다.
+    # **마스킹 뒤에** 넣는 것이 중요하다 — 큐에 원문이 앉으면 fail-closed가 깨진다(#188).
+    #
+    # 포화 시 동기 폴백을 하지 않는다: 큐가 찼다는 건 적재가 이미 밀린다는 뜻이라,
+    # 거기서 동기로 기다리면 밀린 DB를 붙잡고 검색을 세운다 — 관측이 서비스를 끌어내리는
+    # 바로 그 상황이다. 대신 드롭하고 카운터에 남긴다(event_queue.dropped_count).
+    if event_queue.enabled():
+        event_queue.enqueue(record)
+    else:
+        _persist_rag_event(record)
 
 
 def log_event(event: str, **fields) -> None:

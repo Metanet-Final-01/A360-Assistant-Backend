@@ -6,7 +6,7 @@ get_current_user 의존성을 다른 라우터가 import해 보호 대상 엔드
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Cookie, Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, text, update
@@ -64,13 +64,73 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+# 쿠키명·경로는 발급과 삭제가 **반드시 같아야** 한다 — 속성이 하나라도 다르면 브라우저가
+# 별개 쿠키로 취급해 삭제되지 않는다. 그래서 상수로 묶어 두 곳이 같은 값을 읽게 한다.
+REFRESH_COOKIE_NAME = "a360_refresh_token"
+# 인증 엔드포인트에만 실리도록 범위를 좁힌다 — /api/rag 등 무관한 요청에 갱신 토큰을 보내지 않는다.
+REFRESH_COOKIE_PATH = "/api/auth"
+
+
+def _cookie_security() -> tuple[bool, str]:
+    """(secure, samesite) — 둘은 **한 토글로 함께** 정해야 한다 (RPA-216).
+
+    `SameSite=None`은 `Secure`를 강제하고, 브라우저는 `Secure` 없는 `SameSite=None`을
+    **거부**한다. 두 값을 따로 두면 "로컬만 secure를 껐는데 쿠키가 아예 안 실리는" 조합이 나온다.
+
+    기본값이 secure인 이유: 운영은 프론트(Vercel)와 백엔드가 다른 도메인이라 cross-site이고,
+    설정을 빠뜨렸을 때 **로컬이 불편한 쪽**이 **운영 보안이 조용히 꺼지는 쪽**보다 낫다.
+    로컬(http, 둘 다 localhost)은 same-site라 `lax`로도 정상 전달된다.
+    """
+    secure = os.getenv("SECURE_COOKIES", "true").strip().lower() not in ("false", "0", "no", "off")
+    return (True, "none") if secure else (False, "lax")
+
+
+def _set_refresh_cookie(response: Response, token: str, max_age_seconds: int) -> None:
+    secure, samesite = _cookie_security()
+    response.set_cookie(
+        REFRESH_COOKIE_NAME,
+        token,
+        max_age=max_age_seconds,
+        httponly=True,  # 페이지 JS(XSS 포함)가 값을 읽지 못하게 — 이 작업의 핵심
+        secure=secure,
+        samesite=samesite,
+        path=REFRESH_COOKIE_PATH,
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    """발급 때와 **동일한** 속성으로 지운다 — 다르면 브라우저가 다른 쿠키로 보고 남겨 둔다."""
+    secure, samesite = _cookie_security()
+    response.delete_cookie(
+        REFRESH_COOKIE_NAME,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+    )
+
+
 def _issue_tokens(
-    user_id: uuid.UUID, db: Session, *, family_id: uuid.UUID | None = None
+    user_id: uuid.UUID,
+    db: Session,
+    *,
+    response: Response,
+    family_id: uuid.UUID | None = None,
 ) -> TokenResponse:
     """액세스+리프레시 쌍을 발급하고 리프레시는 **해시로만** 저장한다 (RPA-200).
 
     원문은 응답으로 한 번 나가고 서버엔 남지 않는다 — DB가 유출돼도 세션을 복원할 수 없다.
     family_id를 주면 그 계열을 잇고(회전), 없으면 새 계열을 연다(신규 로그인).
+
+    리프레시 토큰은 httpOnly 쿠키로 내려간다 (RPA-216). `response`를 **필수 인자**로 둔 이유는
+    발급과 쿠키 설정이 갈라지지 않게 하기 위함이다 — 호출부에서 따로 부르게 두면 언젠가
+    빠뜨리고, 그때 증상은 "가끔 로그인이 안 풀린다"처럼 재현이 어렵게 나타난다.
+
+    ⚠️ 쿠키 만료는 DB의 `expires_at`과 **같은 `expire_days`**에서 파생시킨다. 따로 읽으면
+    한쪽만 바뀌었을 때 서버는 유효하다는데 브라우저엔 쿠키가 없는 상태가 된다.
+
+    응답 바디의 `refresh_token`은 과도기 하위호환으로 **함께** 내려간다 — 프론트가 쿠키 기반으로
+    전환을 마친 뒤 별도 배포에서 제거한다(RPA-205). 그전까지는 XSS 노출 범위가 줄지 않는다.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -85,7 +145,25 @@ def _issue_tokens(
         )
     )
     db.commit()
+    _set_refresh_cookie(response, refresh, expire_days * 24 * 60 * 60)
     return TokenResponse(access_token=create_access_token(user_id), refresh_token=refresh)
+
+
+def _read_refresh_token(cookie_token: str | None, payload: "RefreshRequest | None") -> str | None:
+    """쿠키를 먼저 보고, 없으면 요청 바디로 폴백한다 (RPA-216).
+
+    🔴 **바디 폴백을 남긴 이유**: 백엔드가 프론트보다 먼저 배포된다. 요청까지 즉시 쿠키 전용으로
+    바꾸면 프론트가 전환을 마치기 전까지 **모든 갱신·로그아웃이 401**이 된다(= 전원 재로그인).
+    응답만 병행하고 요청을 즉시 끊으면 앞뒤가 맞지 않는다.
+
+    쿠키를 우선하는 이유: 전환기에는 둘 다 올 수 있는데, 쿠키 쪽이 회전을 실제로 반영한 최신
+    값이다(바디는 프론트가 localStorage에 들고 있던 옛 값일 수 있다).
+
+    프론트 전환 완료 후 바디 경로를 제거한다(RPA-205 후속).
+    """
+    if cookie_token:
+        return cookie_token
+    return payload.refresh_token if payload is not None else None
 
 
 def _lock_family(family_id: uuid.UUID, db: Session) -> None:
@@ -234,7 +312,9 @@ def assert_session_owner(session: "models.AnalysisSession", user: models.User | 
 
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenResponse:
+def register(
+    payload: RegisterRequest, response: Response, db: Session = Depends(get_db)
+) -> TokenResponse:
     """회원가입 후 바로 로그인 상태가 되도록 토큰을 발급한다."""
     email = _normalize_email(payload.email)
     exists = db.scalar(select(models.User).where(models.User.email == email))
@@ -248,11 +328,13 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
     # 공개 가입은 관리자 권한을 절대 부여하지 않는다 — 시드 이메일을 선점한 공격자가
     # 관리자가 되는 권한 상승을 막기 위함(CodeRabbit #179). 승격은 운영자 설정
     # ADMIN_EMAILS 기반 기동 백필로만 일어난다(backfill_seed_admins).
-    return _issue_tokens(user.id, db)
+    return _issue_tokens(user.id, db, response=response)
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+def login(
+    payload: LoginRequest, response: Response, db: Session = Depends(get_db)
+) -> TokenResponse:
     """이메일/비밀번호로 로그인. 실패 사유는 열거 공격 방지를 위해 구분하지 않는다."""
     email = _normalize_email(payload.email)
     user = db.scalar(select(models.User).where(models.User.email == email))
@@ -261,11 +343,16 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         raise _error(401, "INVALID_CREDENTIALS", "이메일 또는 비밀번호가 올바르지 않습니다.")
     if not verify_password(payload.password, user.password_hash):
         raise _error(401, "INVALID_CREDENTIALS", "이메일 또는 비밀번호가 올바르지 않습니다.")
-    return _issue_tokens(user.id, db)
+    return _issue_tokens(user.id, db, response=response)
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResponse:
+def refresh(
+    response: Response,
+    payload: RefreshRequest | None = Body(default=None),
+    cookie_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+    db: Session = Depends(get_db),
+) -> TokenResponse:
     """리프레시 토큰으로 새 토큰 쌍을 받는다 — 재로그인 없이 세션을 잇는다 (RPA-200).
 
     **회전(rotation)**: 쓴 토큰은 즉시 폐기하고 새로 발급한다. 그래서 원문이 한 번만 유효하다.
@@ -279,8 +366,12 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
 
     invalid = _error(401, "INVALID_REFRESH_TOKEN", "다시 로그인해 주세요.")
 
+    token = _read_refresh_token(cookie_token, payload)
+    if token is None:  # 쿠키도 바디도 없다 — 사유는 구분하지 않는다(오라클 방지)
+        raise invalid
+
     # ① 서명·만료·용도(typ=refresh) 검증 — 액세스 토큰은 여기서 걸러진다
-    user_id = decode_refresh_token(payload.refresh_token)
+    user_id = decode_refresh_token(token)
     if user_id is None:
         raise invalid
     try:
@@ -289,7 +380,7 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
         raise invalid
 
     # ② 서버가 아는 토큰인지 (해시로 조회 — 원문은 저장돼 있지 않다)
-    row = _get_refresh_token(hash_token(payload.refresh_token), db)
+    row = _get_refresh_token(hash_token(token), db)
     if row is None:
         raise invalid
 
@@ -325,11 +416,17 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
     # ④ 회전 — 부모 폐기와 후손 INSERT를 같은 transaction으로 commit한다. 위 계열 잠금이
     # 동시 refresh와 logout을 직렬화하므로 중간에 계열 폐기가 빠져나갈 틈이 없다.
     row.revoked_at = now
-    return _issue_tokens(user_uuid, db, family_id=row.family_id)  # 계열을 잇고 함께 commit
+    # 계열을 잇고 함께 commit — 회전된 새 토큰이 Set-Cookie로 다시 내려간다
+    return _issue_tokens(user_uuid, db, response=response, family_id=row.family_id)
 
 
 @router.post("/logout", status_code=204)
-def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
+def logout(
+    response: Response,
+    payload: RefreshRequest | None = Body(default=None),
+    cookie_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
+    db: Session = Depends(get_db),
+) -> None:
     """리프레시 토큰을 폐기한다. 서버가 무효를 알아야 로그아웃이 주장이 아니라 사실이 된다.
 
     이미 없거나 폐기된 토큰이어도 204 — 멱등하게 두고 토큰 존재 여부를 알려주지 않는다.
@@ -340,7 +437,15 @@ def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
     (#273 리뷰 지적). 로그아웃은 "이 로그인을 끝낸다"는 뜻이므로 계열이 단위여야 한다.
     다른 기기(다른 계열)는 영향받지 않는다.
     """
-    row = _get_refresh_token(hash_token(payload.refresh_token), db)
+    # 쿠키는 **무조건** 지운다. 토큰이 이미 폐기됐거나 서버가 모르는 값이어도 마찬가지다 —
+    # 브라우저에 남겨 두면 로그아웃했는데 다음 요청에 죽은 쿠키가 계속 실린다.
+    _clear_refresh_cookie(response)
+
+    token = _read_refresh_token(cookie_token, payload)
+    if token is None:
+        return  # 멱등 — 지울 게 없어도 204
+
+    row = _get_refresh_token(hash_token(token), db)
     if row is not None:
         # refresh와 같은 잠금 — 이게 없으면 우리 UPDATE가 지나간 뒤 refresh가
         # 새 행을 INSERT해 살아남는다(옛 토큰으로 로그아웃할 때 실제로 발생).
