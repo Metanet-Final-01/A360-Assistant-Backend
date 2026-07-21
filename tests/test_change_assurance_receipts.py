@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
@@ -26,6 +27,21 @@ from tests.test_change_assurance import _load_scenarios, _run_scenario
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _CloudFormationLoader(yaml.SafeLoader):
+    """Parse CloudFormation tags as data without resolving or executing them."""
+
+
+def _construct_cloudformation_tag(loader, _tag_suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_mapping(node)
+
+
+_CloudFormationLoader.add_multi_constructor("!", _construct_cloudformation_tag)
 
 
 def _envelope(tmp_path, scenario_name: str = "good_import"):
@@ -540,35 +556,43 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
 
 
 def test_backend_deploy_injects_writer_credentials_from_protected_environment():
-    workflow = (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
-    template = (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8")
-    build_job, deploy_job = workflow.split("\n  deploy:", 1)
-    token_parameter = template.split("  AssuranceWriterToken:", 1)[1].split(
-        "\n  AssuranceWriterRepository:", 1
-    )[0]
-
-    assert "ASSURANCE_WRITER_TOKEN" not in build_job
-    assert "environment: change-assurance-writer" in deploy_job
-    assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4" in deploy_job
-    assert (
-        "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4"
-        in deploy_job
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
     )
-    assert "uses: actions/checkout@v4" not in deploy_job
-    assert "uses: aws-actions/configure-aws-credentials@v4" not in deploy_job
-    assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_job
-    assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_job
+    template = yaml.load(
+        (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
+        Loader=_CloudFormationLoader,
+    )
+    build_job = workflow["jobs"]["build"]
+    deploy_job = workflow["jobs"]["deploy"]
+    deploy_uses = {step["uses"] for step in deploy_job["steps"] if "uses" in step}
+    deploy_script = next(step["run"] for step in deploy_job["steps"] if "run" in step)
+    token_parameter = template["Parameters"]["AssuranceWriterToken"]
+    app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
+    user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
+        "LaunchTemplateData"
+    ]["UserData"]["Fn::Base64"][0]
 
-    assert "NoEcho: true" in token_parameter
-    assert 'AllowedPattern: "^$|^[A-Za-z0-9_-]{32,128}$"' in token_parameter
-    assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in template
-    assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in template
-    assert 'get("ASSURANCE_WRITER_TOKEN", "")' in template
-    assert 'get("ASSURANCE_WRITER_REPOSITORY", "")' in template
-    assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in template
-    assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in template
-    assert "#!/bin/bash -eu\n" in template
-    assert "#!/bin/bash -eux" not in template
-    env_mode = template.index("install -m 600 /dev/null /opt/a360/.env")
-    env_write = template.index("cat > /opt/a360/.env <<EOF")
+    assert "ASSURANCE_WRITER_TOKEN" not in str(build_job)
+    assert deploy_job["environment"] == "change-assurance-writer"
+    assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in deploy_uses
+    assert (
+        "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
+        in deploy_uses
+    )
+    assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
+    assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
+
+    assert token_parameter["NoEcho"] is True
+    assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
+    assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
+    assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
+    assert 'get("ASSURANCE_WRITER_TOKEN", "")' in user_data
+    assert 'get("ASSURANCE_WRITER_REPOSITORY", "")' in user_data
+    assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data
+    assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in user_data
+    assert user_data.startswith("#!/bin/bash -eu\n")
+    assert "#!/bin/bash -eux" not in user_data
+    env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
+    env_write = user_data.index("cat > /opt/a360/.env <<EOF")
     assert env_mode < env_write
