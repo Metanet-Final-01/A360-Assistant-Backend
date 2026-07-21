@@ -568,7 +568,11 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     build_job = workflow["jobs"]["build"]
     deploy_job = workflow["jobs"]["deploy"]
     deploy_uses = {step["uses"] for step in deploy_job["steps"] if "uses" in step}
-    deploy_script = next(step["run"] for step in deploy_job["steps"] if "run" in step)
+    deploy_script = next(
+        step["run"]
+        for step in deploy_job["steps"]
+        if step.get("name") == "Deploy CloudFormation"
+    )
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
@@ -610,7 +614,14 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     )
     build_job = workflow["jobs"]["build"]
     deploy_job = workflow["jobs"]["deploy"]
-    deploy_script = next(step["run"] for step in deploy_job["steps"] if "run" in step)
+    validate_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Validate Ops API credential"
+    )
+    deploy_script = next(
+        step["run"]
+        for step in deploy_job["steps"]
+        if step.get("name") == "Deploy CloudFormation"
+    )
     token_parameter = template["Parameters"]["OpsApiKey"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
@@ -619,6 +630,10 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
 
     assert "OPS_API_KEY" not in str(build_job)
     assert deploy_job["environment"] == "change-assurance-writer"
+    assert validate_step["env"]["OPS_API_KEY"] == "${{ secrets.OPS_API_KEY }}"
+    assert '[ -z "$OPS_API_KEY" ]' in validate_step["run"]
+    assert "exit 1" in validate_step["run"]
+    assert "secrets.OPS_API_KEY" not in validate_step["run"]
     assert 'OpsApiKey="${{ secrets.OPS_API_KEY }}"' in deploy_script
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
