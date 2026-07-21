@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
@@ -26,6 +27,21 @@ from tests.test_change_assurance import _load_scenarios, _run_scenario
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _CloudFormationLoader(yaml.SafeLoader):
+    """Parse CloudFormation tags as data without resolving or executing them."""
+
+
+def _construct_cloudformation_tag(loader, _tag_suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_mapping(node)
+
+
+_CloudFormationLoader.add_multi_constructor("!", _construct_cloudformation_tag)
 
 
 def _envelope(tmp_path, scenario_name: str = "good_import"):
@@ -248,6 +264,28 @@ def test_exact_change_receipt_retry_is_idempotent(tmp_path):
 def test_writer_endpoint_fails_closed_when_token_is_unset(monkeypatch):
     monkeypatch.delenv("ASSURANCE_WRITER_TOKEN", raising=False)
     monkeypatch.delenv("ASSURANCE_WRITER_REPOSITORY", raising=False)
+    app.dependency_overrides[get_db] = lambda: object()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/internal/assurance/change-receipts",
+            json={"schema_version": "1.0", "source": {}, "artifacts": {}},
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "ASSURANCE_WRITER_NOT_CONFIGURED"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "w" * 31,
+        "w" * 129,
+        "w" * 31 + ".",
+        "w" * 31 + "=",
+    ],
+)
+def test_writer_endpoint_fails_closed_for_non_base64url_token(monkeypatch, token):
+    monkeypatch.setenv("ASSURANCE_WRITER_TOKEN", token)
+    monkeypatch.setenv("ASSURANCE_WRITER_REPOSITORY", "Metanet-Final-01/A360-Assistant-Backend")
     app.dependency_overrides[get_db] = lambda: object()
     with TestClient(app) as client:
         response = client.post(
@@ -515,3 +553,46 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "secrets.ASSURANCE_WRITER_TOKEN" in publish_job
     assert "ASSURANCE_WRITER_TOKEN" not in observe
     assert "secrets." not in observe
+
+
+def test_backend_deploy_injects_writer_credentials_from_protected_environment():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    )
+    template = yaml.load(
+        (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
+        Loader=_CloudFormationLoader,
+    )
+    build_job = workflow["jobs"]["build"]
+    deploy_job = workflow["jobs"]["deploy"]
+    deploy_uses = {step["uses"] for step in deploy_job["steps"] if "uses" in step}
+    deploy_script = next(step["run"] for step in deploy_job["steps"] if "run" in step)
+    token_parameter = template["Parameters"]["AssuranceWriterToken"]
+    app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
+    user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
+        "LaunchTemplateData"
+    ]["UserData"]["Fn::Base64"][0]
+
+    assert "ASSURANCE_WRITER_TOKEN" not in str(build_job)
+    assert deploy_job["environment"] == "change-assurance-writer"
+    assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in deploy_uses
+    assert (
+        "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
+        in deploy_uses
+    )
+    assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
+    assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
+
+    assert token_parameter["NoEcho"] is True
+    assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
+    assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
+    assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
+    assert 'get("ASSURANCE_WRITER_TOKEN", "")' in user_data
+    assert 'get("ASSURANCE_WRITER_REPOSITORY", "")' in user_data
+    assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data
+    assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in user_data
+    assert user_data.startswith("#!/bin/bash -eu\n")
+    assert "#!/bin/bash -eux" not in user_data
+    env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
+    env_write = user_data.index("cat > /opt/a360/.env <<EOF")
+    assert env_mode < env_write
