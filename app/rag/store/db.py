@@ -41,7 +41,14 @@ CREATE INDEX IF NOT EXISTS idx_rag_documents_parent ON rag_documents (parent_id)
 """
 
 
-def connect() -> psycopg.Connection:
+def connect(*, connect_timeout: int | None = None) -> psycopg.Connection:
+    """1회성 psycopg 연결. connect_timeout(초)을 주면 연결 수립이 그만큼만 블로킹된다.
+
+    기본은 None(무제한, 기존 동작) — 적재처럼 오래 걸려도 되는 경로 호환. 백그라운드
+    재적재(catalog, RPA-225)처럼 무한 블로킹이 스레드/플래그 고착을 부르는 곳은 명시한다.
+    """
+    if connect_timeout is not None:
+        return psycopg.connect(config.database_dsn(), connect_timeout=connect_timeout)
     return psycopg.connect(config.database_dsn())
 
 
