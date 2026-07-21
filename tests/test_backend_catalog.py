@@ -5,6 +5,9 @@ v2 문서 카탈로그는 dl 추출 실패 + LLM 보강 미도달 행이 metadat
 스펙(schema)을 분리해 적재하는 계약을 검증한다. DB는 가짜 커넥션으로 대체한다.
 """
 
+import pytest
+
+from app.services import catalog as cat_mod
 from app.services.catalog import BackendCatalog
 
 
@@ -130,3 +133,109 @@ def test_placeholder_never_overwrites_schema_row(monkeypatch):
     ]
     cat = _catalog_with(rows, monkeypatch)
     assert "params_unknown" not in cat.get_action_schema("Email", "Send")
+
+
+# --- TTL 재적재 (RPA-225) — 적재 후 옛 카탈로그 영구화 방지 ---
+
+def _clock(monkeypatch, start=1000.0):
+    """catalog의 monotonic 시계를 제어 가능하게 대체한다."""
+    box = {"t": start}
+    monkeypatch.setattr(cat_mod.time, "monotonic", lambda: box["t"])
+    return box
+
+
+def _counting_connect(monkeypatch, rows_by_call):
+    """호출 순서별로 다른 rows를 주는 가짜 connect. 호출 횟수를 함께 돌려준다."""
+    from app.rag.store import db
+
+    calls = {"n": 0}
+
+    def _connect():
+        calls["n"] += 1
+        rows = rows_by_call(calls["n"])
+        if isinstance(rows, Exception):
+            raise rows
+        return _FakeConn(rows)
+
+    monkeypatch.setattr(db, "connect", _connect)
+    return calls
+
+
+def test_no_reload_within_ttl(monkeypatch):
+    """TTL 이내 반복 조회는 재적재하지 않는다 — 병렬 step 노드가 매번 DB를 때리면 안 된다."""
+    _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: [("Excel", "Open", {"schema": {"name": "Open"}})])
+    cat = BackendCatalog()
+    for _ in range(5):
+        cat.get_action_schema("Excel", "Open")
+    assert calls["n"] == 1
+
+
+def test_reload_after_ttl_reflects_new_ingest(monkeypatch):
+    """TTL 경과 후 조회는 재적재해 새로 적재된 액션을 본다 — 다중 인스턴스 수렴의 핵심."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: (
+        [("Excel", "Open", {"schema": {"name": "Open"}})] if n == 1
+        else [("Excel", "Open", {"schema": {"name": "Open"}}),
+              ("New", "Action", {"schema": {"name": "Action"}})]
+    ))
+    cat = BackendCatalog()
+    assert cat.get_action_schema("New", "Action") is None  # 적재 전 — 없음
+    assert calls["n"] == 1
+    clock["t"] += 601  # TTL 경과
+    assert cat.get_action_schema("New", "Action") is not None  # 재적재로 반영
+    assert calls["n"] == 2
+
+
+def test_reload_failure_keeps_old_index_and_backs_off(monkeypatch):
+    """재적재 실패 시 옛 인덱스를 유지하고, 다음 TTL까지 재시도하지 않는다(매 조회 DB 폭격 방지)."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: (
+        [("Excel", "Open", {"schema": {"name": "Open"}})] if n == 1 else RuntimeError("db down")
+    ))
+    cat = BackendCatalog()
+    assert cat.get_action_schema("Excel", "Open") is not None  # 첫 적재 성공
+    clock["t"] += 601
+    assert cat.get_action_schema("Excel", "Open") is not None  # 재적재 실패해도 옛 것 유지(예외 X)
+    assert calls["n"] == 2
+    cat.get_action_schema("Excel", "Open")  # 백오프 — 같은 창에선 재시도 안 함
+    assert calls["n"] == 2
+
+
+def test_first_load_failure_raises(monkeypatch):
+    """첫 적재 실패는 올린다 — 쓸 인덱스가 아예 없다(기존 동작 보존)."""
+    _clock(monkeypatch)
+    _counting_connect(monkeypatch, lambda n: RuntimeError("db down"))
+    cat = BackendCatalog()
+    with pytest.raises(RuntimeError):
+        cat.get_action_schema("Excel", "Open")
+
+
+def test_ttl_zero_means_infinite_cache(monkeypatch):
+    """TTL<=0이면 재적재하지 않는다(무한 캐시, RPA-225 이전 동작)."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 0)
+    calls = _counting_connect(monkeypatch, lambda n: [("Excel", "Open", {"schema": {"name": "Open"}})])
+    cat = BackendCatalog()
+    cat.get_action_schema("Excel", "Open")
+    clock["t"] += 100_000
+    cat.get_action_schema("Excel", "Open")
+    assert calls["n"] == 1
+
+
+def test_trigger_menu_reloads_after_ttl(monkeypatch):
+    """트리거 메뉴도 TTL 경과 후 재적재한다(index와 대칭)."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: (
+        [("T1", "trig one", "/x", "c", 0)] if n == 1
+        else [("T1", "trig one", "/x", "c", 0), ("T2", "trig two", "/y", "c", 0)]
+    ))
+    cat = BackendCatalog()
+    assert len(cat.list_trigger_schemas()) == 1
+    clock["t"] += 601
+    assert len(cat.list_trigger_schemas()) == 2
+    assert calls["n"] == 2
