@@ -49,8 +49,8 @@ async def lifespan(app: FastAPI):
         # 낡은 인스턴스도 /health/live 200을 줘 타겟그룹에 들어간다.
         app.state.migrations_ok = schema_is_current()
         logger.info("DB 마이그레이션 처리 (스키마 최신=%s)", app.state.migrations_ok)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("DB 마이그레이션 실패 (앱은 계속 기동): %s", e)
+    except Exception:  # noqa: BLE001
+        logger.exception("DB 마이그레이션 실패 (앱은 계속 기동)")
     # 관리자 부트스트랩(RPA-118) — ADMIN_EMAILS 시드 계정을 is_admin으로 백필(멱등).
     # migration 직후 재로그인을 기다리지 않고 여기서 승격 (DB 미가동이면 경고만).
     try:
@@ -269,7 +269,12 @@ def health(response: Response) -> dict:
 
 @app.get("/health/live")
 def health_live(response: Response) -> dict:
-    """ALB 타겟그룹·컨테이너 헬스체크 전용 — **인스턴스-로컬 판정만** 한다 (RPA-222).
+    """ALB 타겟그룹·컨테이너 헬스체크 전용 — 요청 시 저장된 부팅 판정만 읽는다 (RPA-222).
+
+    요청마다 공유 의존성을 호출하지는 않는다. 다만 `migrations_ok`는 lifespan 시작 때
+    앱 DB에 접속해 마이그레이션을 처리하고 Alembic revision을 한 번 확인한 결과다.
+    따라서 앱 DB 접근 실패·지연은 부팅 판정에 반영되지만, 헬스 요청 자체가 DB를 반복 조회해
+    공유 장애를 증폭하거나 타임아웃에 걸리지는 않는다.
 
     깊은 체크(/health)를 ALB에 물리면 양방향으로 틀린다:
     - 공유 의존성(Neon·OpenSearch) 장애는 전 인스턴스가 **동시에** 실패하는데,
