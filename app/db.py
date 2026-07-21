@@ -5,6 +5,7 @@
 
 import logging
 import os
+from contextlib import contextmanager
 from urllib.parse import quote
 
 from dotenv import load_dotenv
@@ -63,6 +64,73 @@ def get_db():
         db.close()
 
 
+# 기동 시 스키마 변경 직렬화용 advisory lock 키 (RPA-223) — 임의 고정 상수.
+# 같은 DB에서 새 advisory lock을 쓰게 되면 충돌하지 않게 여기에 등록한다:
+#   ...0001: 앱 DB alembic 마이그레이션 (아래 run_migrations)
+#   ...0002: 관측 DB 스키마 보장 (app/core/observability_db.py)
+APP_MIGRATION_LOCK_KEY = 736022230001
+OBS_SCHEMA_LOCK_KEY = 736022230002
+
+# 락 대기 상한 — 테스트가 monkeypatch로 줄인다. 초과 시 OperationalError가 호출자로
+# 올라간다(아래 pg_advisory_lock docstring의 "실패는 드러나야 한다" 근거 참고).
+_LOCK_TIMEOUT = "120s"
+
+
+@contextmanager
+def pg_advisory_lock(url: str, key: int, *, timeout: str | None = None):
+    """Postgres 세션 advisory lock — 동시 기동의 스키마 변경을 직렬화한다 (RPA-223).
+
+    ASG 롤링·스케일아웃은 여러 인스턴스가 **동시에** 부팅하며 각자 마이그레이션을 돌리는데,
+    alembic은 락을 잡지 않는다. 첫 인스턴스가 락을 쥐고 적용하는 동안 둘째는 여기서
+    대기하다가, 풀리면 이미 최신이 된 DB에 no-op을 돈다.
+
+    - timeout(기본 _LOCK_TIMEOUT): 무한 대기 방지. 초과하면 OperationalError가 올라간다 —
+      lifespan은 경고로 삼키지만 migrations_ok=False가 남아 /health/live가 503을 주고
+      (RPA-222) ASG가 인스턴스를 교체한다. "조용히 기다리다 반쯤 성공"보다 낫다.
+    - AUTOCOMMIT 연결: 세션 락 자체는 트랜잭션과 무관하지만, 암묵 트랜잭션이 롤백되면
+      `SET lock_timeout`까지 같이 롤백되는 함정이 있다(SET은 트랜잭셔널).
+    - NullPool 전용 엔진: 락을 쥔 커넥션이 풀로 반납돼 살아남으면 락이 유지된 채 새 주인을
+      만난다. dispose 시 연결이 끊겨 세션 락도 확실히 풀린다(unlock 실패 시의 안전망).
+    - 비-Postgres URL(sqlite 등)은 락 없이 통과 — advisory lock이 없는 방언이고, 그 환경은
+      단일 프로세스 개발·테스트다.
+    """
+    if not url.startswith("postgresql"):
+        yield
+        return
+    from sqlalchemy import create_engine as _create_engine, text
+    from sqlalchemy.pool import NullPool
+
+    engine = _create_engine(url, poolclass=NullPool)
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(
+                text("SELECT set_config('lock_timeout', :timeout, false)"),
+                {"timeout": timeout or _LOCK_TIMEOUT},
+            )
+            conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+            try:
+                yield
+            finally:
+                try:
+                    unlocked = conn.execute(
+                        text("SELECT pg_advisory_unlock(:key)"), {"key": key}
+                    ).scalar()
+                    if unlocked is False:
+                        logger.warning(
+                            "Postgres advisory lock이 현재 세션에 없어 명시적으로 해제되지 않았습니다 "
+                            "(key=%s). 연결 종료로 세션 락을 정리합니다.",
+                            key,
+                        )
+                except Exception:  # noqa: BLE001 - preserve the migration error, if any
+                    logger.exception(
+                        "Postgres advisory lock 명시적 해제 실패 (key=%s). "
+                        "연결 종료로 세션 락을 정리합니다.",
+                        key,
+                    )
+    finally:
+        engine.dispose()
+
+
 def run_migrations(*, allow_shared: bool = False) -> None:
     """Alembic 마이그레이션을 head까지 적용한다 (스키마의 단일 진실 공급원).
 
@@ -116,5 +184,9 @@ def run_migrations(*, allow_shared: bool = False) -> None:
     cfg.set_main_option("script_location", str(migrations_dir))
     # URL은 attributes(순수 dict)에 담는다 — set_main_option()은 configparser에 저장되는데,
     # 기본 보간(%-interpolation)이 '%'를 특수문자로 취급해 비밀번호에 '%'가 섞이면 죽는다.
-    cfg.attributes["sqlalchemy_url"] = _database_url()
-    command.upgrade(cfg, "head")
+    url = _database_url()
+    cfg.attributes["sqlalchemy_url"] = url
+    # 동시 기동 직렬화 (RPA-223) — 락과 upgrade가 **같은 url**을 읽는다(호출 시점 env 계약
+    # 유지). 근거·타임아웃 동작은 pg_advisory_lock docstring.
+    with pg_advisory_lock(url, APP_MIGRATION_LOCK_KEY, timeout=_LOCK_TIMEOUT):
+        command.upgrade(cfg, "head")

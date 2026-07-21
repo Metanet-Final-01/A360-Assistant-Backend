@@ -124,34 +124,45 @@ def ensure_observability_schema() -> bool:
     try:
         from sqlalchemy import text
 
+        from app.db import OBS_SCHEMA_LOCK_KEY, pg_advisory_lock
+
         sm = observability_sessionmaker()
         bind = sm.kw["bind"]
-        _observability_metadata().create_all(bind)
-        # create_all은 없는 테이블만 만들고 기존 테이블 ALTER는 안 한다. 후속 컬럼 추가는
-        # idempotent ALTER로 기존 관측 DB에도 보장한다 (RPA-158, Postgres IF NOT EXISTS).
-        with bind.begin() as conn:
-            conn.execute(text("ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS request_id VARCHAR(32)"))
-            # 프롬프트 캐시 적중분 (RPA-199) — nullable: 과거 행 NULL(측정 안 함)과 0(캐시 없음) 구분
-            conn.execute(text("ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS cached_tokens INTEGER"))
-            conn.execute(
-                text("CREATE INDEX IF NOT EXISTS ix_llm_usage_request_id ON llm_usage (request_id)")
-            )
-            # 예산 가드레일(RPA-171)이 매 턴 "주체의 기간내 누적 비용"을 조회한다 — 요청 경로라
-            # 인덱스 없이 두면 llm_usage가 커질수록 턴 지연이 함께 커진다. user_id는 단독
-            # 인덱스도 없었다(session_id만 있었음). 기간 필터가 항상 붙으므로 복합으로 만든다.
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_llm_usage_user_created "
-                "ON llm_usage (user_id, created_at)"))
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_llm_usage_session_created "
-                "ON llm_usage (session_id, created_at)"))
-            # 전역 상한은 주체 필터 없이 created_at 범위만으로 합산한다 — 위 두 인덱스는 주체가
-            # 선행이라 range seek이 안 걸린다(#239 리뷰). 전용 인덱스가 없으면 전역 상한을 켜는
-            # 순간 매 턴 full scan이 된다.
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_llm_usage_created_at ON llm_usage (created_at)"))
+        # 동시 기동 직렬화 (RPA-223) — checkfirst create_all도 "둘 다 없음을 보고 둘 다
+        # CREATE"로 경쟁하고, 아래 CREATE INDEX는 ACCESS EXCLUSIVE 락이다. 앱 DB와 달리
+        # 실패해도 기동은 계속한다(관측은 best-effort) — 바깥 try가 그 계약을 유지한다.
+        with pg_advisory_lock(url, OBS_SCHEMA_LOCK_KEY):
+            _observability_metadata().create_all(bind)
+            # create_all은 없는 테이블만 만들고 기존 테이블 ALTER는 안 한다. 후속 컬럼 추가는
+            # idempotent ALTER로 기존 관측 DB에도 보장한다 (RPA-158, Postgres IF NOT EXISTS).
+            _apply_observability_indexes(bind, text)
         logger.info("관측 DB 스키마 확인 완료 (audit_logs·llm_usage, request_id·예산조회 인덱스 보장)")
         return True
     except Exception as e:  # noqa: BLE001 — 관측 DB 장애가 앱 기동을 막으면 안 된다
         logger.warning("관측 DB 스키마 준비 실패 (앱은 계속, 기록은 폴백 없이 유실될 수 있음): %s", e)
         return False
+
+
+def _apply_observability_indexes(bind, text) -> None:
+    """idempotent ALTER·CREATE INDEX 묶음 — ensure_observability_schema의 락 안에서만 호출."""
+    with bind.begin() as conn:
+        conn.execute(text("ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS request_id VARCHAR(32)"))
+        # 프롬프트 캐시 적중분 (RPA-199) — nullable: 과거 행 NULL(측정 안 함)과 0(캐시 없음) 구분
+        conn.execute(text("ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS cached_tokens INTEGER"))
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_llm_usage_request_id ON llm_usage (request_id)")
+        )
+        # 예산 가드레일(RPA-171)이 매 턴 "주체의 기간내 누적 비용"을 조회한다 — 요청 경로라
+        # 인덱스 없이 두면 llm_usage가 커질수록 턴 지연이 함께 커진다. user_id는 단독
+        # 인덱스도 없었다(session_id만 있었음). 기간 필터가 항상 붙으므로 복합으로 만든다.
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_llm_usage_user_created "
+            "ON llm_usage (user_id, created_at)"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_llm_usage_session_created "
+            "ON llm_usage (session_id, created_at)"))
+        # 전역 상한은 주체 필터 없이 created_at 범위만으로 합산한다 — 위 두 인덱스는 주체가
+        # 선행이라 range seek이 안 걸린다(#239 리뷰). 전용 인덱스가 없으면 전역 상한을 켜는
+        # 순간 매 턴 full scan이 된다.
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_llm_usage_created_at ON llm_usage (created_at)"))
