@@ -96,6 +96,11 @@ REGISTRY: dict[str, EnvSpec] = {
     "LLM_CONNECT_TIMEOUT_SECONDS": EnvSpec("5.0", cast=float, group="llm", doc="LLM 연결 타임아웃(초)"),
     "LLM_MAX_RETRIES": EnvSpec("2", cast=int, group="llm", doc="LLM 재시도 횟수"),
     "AGENT_VERSION": EnvSpec(None, group="llm", doc="에이전트 그래프 버전 선택 (v1/v2/v3, 미설정=기본)"),
+    # LLM 단가(1M 토큰당 USD) — os.environ[]로 읽는 보조 모델 폴백 단가 (llm.py). 미설정 시
+    # None → 비용 계산 생략(기존 동작). RPA-224 래칫이 environ[]를 못 잡아 누락됐던 키들.
+    "LLM_INPUT_COST_PER_1M": EnvSpec(None, cast=float, group="llm", doc="입력 토큰 1M당 USD"),
+    "LLM_OUTPUT_COST_PER_1M": EnvSpec(None, cast=float, group="llm", doc="출력 토큰 1M당 USD"),
+    "LLM_CACHED_INPUT_COST_PER_1M": EnvSpec(None, cast=float, group="llm", doc="캐시 입력 토큰 1M당 USD"),
 
     # --- RAG ---
     "AA_DOCS_BASE_URL": EnvSpec("https://docs.automationanywhere.com", group="rag", doc="AA 문서 원본 베이스 URL"),
@@ -141,6 +146,19 @@ REGISTRY: dict[str, EnvSpec] = {
     "TURN_GAUGE_WARN_RATIO": EnvSpec("0.87", cast=float, group="obs", doc="턴 토큰 게이지 경고 비율"),
     "TURN_GAUGE_HARD_RATIO": EnvSpec("1.0", cast=float, group="obs", doc="턴 토큰 게이지 차단 비율"),
     "TURN_GAUGE_LIMIT_TOKENS": EnvSpec("6000", cast=int, group="obs", doc="턴 토큰 게이지 상한"),
+    # 보존 정책(일) — rollup.py가 _RETENTION 테이블의 키를 os.getenv(변수)로 읽는다.
+    "METRICS_RETENTION_DAYS": EnvSpec("30", cast=int, group="obs", doc="request_metrics 보존일"),
+    "TURN_EVENTS_RETENTION_DAYS": EnvSpec("30", cast=int, group="obs", doc="turn_events 보존일"),
+    "LLM_USAGE_RETENTION_DAYS": EnvSpec("90", cast=int, group="obs", doc="llm_usage 보존일"),
+    "AUDIT_RETENTION_DAYS": EnvSpec("365", cast=int, group="obs", doc="audit_logs 보존일"),
+    # 알림 임계 — alerts.py가 _threshold(name)로 읽는다. 미설정 시 그 알림 비활성.
+    "ALERT_GLOBAL_DAILY_USD": EnvSpec(None, cast=float, group="obs", doc="일일 전역 비용 알림 임계(USD)"),
+    "ALERT_5XX_DAILY": EnvSpec(None, cast=float, group="obs", doc="일일 5xx 건수 알림 임계"),
+    # 예산 상한 — budget.py가 _limit(name)로 읽는다. 미설정 시 그 상한 비활성(fail-open).
+    "BUDGET_SUBJECT_DAILY_USD": EnvSpec(None, cast=float, group="obs", doc="주체별 일 예산 상한(USD)"),
+    "BUDGET_SUBJECT_MONTHLY_USD": EnvSpec(None, cast=float, group="obs", doc="주체별 월 예산 상한(USD)"),
+    "BUDGET_GLOBAL_DAILY_USD": EnvSpec(None, cast=float, group="obs", doc="전역 일 예산 상한(USD)"),
+    "BUDGET_GLOBAL_MONTHLY_USD": EnvSpec(None, cast=float, group="obs", doc="전역 월 예산 상한(USD)"),
 
     # --- 업로드/파서 ---
     "DOCUMENT_BUCKET": EnvSpec("", group="upload", warn_if_unset=True,
