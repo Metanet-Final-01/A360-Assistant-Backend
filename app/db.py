@@ -148,9 +148,11 @@ def schema_is_current() -> bool:
         if not inspect(eng).has_table("alembic_version"):
             return False  # 스키마 자체가 없다 — 준비 안 됨
         with eng.connect() as c:
-            current = c.execute(
-                text("select version_num from alembic_version")
-            ).scalar_one_or_none()
+            # alembic_version은 **여러 head가 stamp되면 여러 행**일 수 있다 (Qodo) —
+            # scalar_one_or_none()은 그때 MultipleResultsFound로 터져 migrations_ok가
+            # 예외 경로로 빠진다. 행 집합으로 읽어 '현재 리비전 집합 == 코드 head 집합'인지
+            # 본다(단일·멀티 head 모두 정상 상태로 평가).
+            current = set(c.execute(text("select version_num from alembic_version")).scalars().all())
     finally:
         eng.dispose()
-    return current is not None and current in heads
+    return bool(current) and current == heads
