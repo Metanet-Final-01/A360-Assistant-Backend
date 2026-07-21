@@ -152,6 +152,8 @@ REGISTRY: dict[str, EnvSpec] = {
     "TURN_GAUGE_WARN_RATIO": EnvSpec("0.87", cast=float, group="obs", doc="턴 토큰 게이지 경고 비율"),
     "TURN_GAUGE_HARD_RATIO": EnvSpec("1.0", cast=float, group="obs", doc="턴 토큰 게이지 차단 비율"),
     "TURN_GAUGE_LIMIT_TOKENS": EnvSpec("6000", cast=int, group="obs", doc="턴 토큰 게이지 상한"),
+    "TURN_MAX_DURATION_SEC": EnvSpec("900", cast=float, group="obs",
+                                     doc="턴 전체 상한(초) — 초과 시 hung으로 보고 끊는다, 0이면 끔 (RPA-235)"),
     # 보존 정책(일) — rollup.py가 _RETENTION 테이블의 키를 os.getenv(변수)로 읽는다.
     "METRICS_RETENTION_DAYS": EnvSpec("30", cast=int, group="obs", doc="request_metrics 보존일"),
     "TURN_EVENTS_RETENTION_DAYS": EnvSpec("30", cast=int, group="obs", doc="turn_events 보존일"),
