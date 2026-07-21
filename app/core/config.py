@@ -49,7 +49,13 @@ class EnvSpec:
 
 
 def _bool(v: str) -> bool:
-    return v.strip().lower() in ("1", "true", "yes", "on")
+    """명시적 false 값만 False, 나머지(오타 포함)는 True — fail-secure (Qodo 반영).
+
+    보안 토글(SECURE_COOKIES)은 오타 하나가 secure를 꺼선 안 된다. 기존
+    auth._cookie_security와 **같은 규칙**(unknown→on)으로 맞춘다 — truthy 화이트리스트
+    (unknown→off)는 정반대라, 레지스트리 값과 실제 동작이 갈렸다.
+    """
+    return v.strip().lower() not in ("false", "0", "no", "off")
 
 
 # 그룹 순서: DB → 인증 → LLM → RAG → 관측/알림 → 업로드/파서 → 앱/디버그

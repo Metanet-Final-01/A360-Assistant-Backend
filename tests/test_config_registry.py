@@ -169,6 +169,19 @@ def test_cast_and_default(monkeypatch):
     assert config.SECURE_COOKIES is False
 
 
+def test_bool_is_fail_secure(monkeypatch):
+    """_bool은 오타/미지 값을 True로 본다 — 보안 토글이 오타로 꺼지지 않게 (Qodo 반영).
+
+    auth._cookie_security와 같은 규칙(명시적 false 값만 off). truthy 화이트리스트였다면
+    오타 'ture'가 SECURE_COOKIES를 False로 만들어 secure 쿠키가 꺼졌다.
+    """
+    monkeypatch.setenv("SECURE_COOKIES", "ture")  # 오타
+    assert config.SECURE_COOKIES is True
+    for off in ("false", "0", "no", "off", "OFF"):
+        monkeypatch.setenv("SECURE_COOKIES", off)
+        assert config.SECURE_COOKIES is False, off
+
+
 def test_empty_string_means_unset(monkeypatch):
     """빈 문자열 = 미설정 — 기존 산재 호출부의 `or` 폴백 의미론을 유지한다."""
     monkeypatch.setenv("OPENSEARCH_HOST", "")
