@@ -190,3 +190,41 @@ def run_migrations(*, allow_shared: bool = False) -> None:
     # 유지). 근거·타임아웃 동작은 pg_advisory_lock docstring.
     with pg_advisory_lock(url, APP_MIGRATION_LOCK_KEY, timeout=_LOCK_TIMEOUT):
         command.upgrade(cfg, "head")
+
+
+def schema_is_current() -> bool:
+    """DB의 현재 alembic 리비전이 코드 head와 일치하나 (RPA-222 헬스 판정).
+
+    `/health/live`의 `migrations_ok`를 '`run_migrations`가 예외 없이 리턴했다'(대리 지표)가
+    아니라 **스키마의 실제 상태**로 판정하기 위함이다 (Qodo 리뷰). `run_migrations`는 공유
+    DB(APP_DATABASE_URL)에서 마이그레이션을 적용하지 않고 early-return하므로, 그것만으로
+    True로 두면 스키마가 낡은 인스턴스도 200을 줘 타겟그룹에 들어간다. 여기서 실제 리비전이
+    코드 head와 같은지 봐서, 낡았으면 False → /health/live 503으로 진입을 막는다.
+
+    run_migrations와 **같은 URL**(호출 시점 _database_url)로 본다 — 모듈 전역 engine
+    (import 시점 고정)은 공유 DB 토글·테스트 env 전환과 갈릴 수 있다.
+    """
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine, inspect, text
+
+    migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
+    cfg = Config()
+    cfg.set_main_option("script_location", str(migrations_dir))
+    heads = set(ScriptDirectory.from_config(cfg).get_heads())
+
+    eng = create_engine(_database_url())
+    try:
+        if not inspect(eng).has_table("alembic_version"):
+            return False  # 스키마 자체가 없다 — 준비 안 됨
+        with eng.connect() as c:
+            # alembic_version은 **여러 head가 stamp되면 여러 행**일 수 있다 (Qodo) —
+            # scalar_one_or_none()은 그때 MultipleResultsFound로 터져 migrations_ok가
+            # 예외 경로로 빠진다. 행 집합으로 읽어 '현재 리비전 집합 == 코드 head 집합'인지
+            # 본다(단일·멀티 head 모두 정상 상태로 평가).
+            current = set(c.execute(text("select version_num from alembic_version")).scalars().all())
+    finally:
+        eng.dispose()
+    return bool(current) and current == heads
