@@ -89,6 +89,15 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Validate Ops API credential
+        env:
+          OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
+        run: |
+          if [ -z "$OPS_API_KEY" ]; then
+            echo "OPS_API_KEY secret is required for the deployed Backoffice integration." >&2
+            exit 1
+          fi
+
       - name: Deploy CloudFormation
         run: |
           aws cloudformation deploy \
@@ -103,6 +112,7 @@ jobs:
               VoyageApiKey="${{ secrets.VOYAGE_API_KEY }}" \
               JwtSecret="${{ secrets.JWT_SECRET }}" \
               GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
+              OpsApiKey="${{ secrets.OPS_API_KEY }}" \
               AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
               AssuranceWriterRepository="${{ github.repository }}" \
               EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}" \
