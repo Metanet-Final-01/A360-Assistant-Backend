@@ -103,14 +103,30 @@ def pg_advisory_lock(url: str, key: int, *, timeout: str | None = None):
     engine = _create_engine(url, poolclass=NullPool)
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            # SET은 바인드 파라미터를 못 받는다 — timeout은 코드 상수(_LOCK_TIMEOUT)만
-            # 들어오므로 f-string이어도 인젝션 면적이 없다.
-            conn.execute(text(f"SET lock_timeout = '{timeout or _LOCK_TIMEOUT}'"))
+            conn.execute(
+                text("SELECT set_config('lock_timeout', :timeout, false)"),
+                {"timeout": timeout or _LOCK_TIMEOUT},
+            )
             conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
             try:
                 yield
             finally:
-                conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+                try:
+                    unlocked = conn.execute(
+                        text("SELECT pg_advisory_unlock(:key)"), {"key": key}
+                    ).scalar()
+                    if unlocked is False:
+                        logger.warning(
+                            "Postgres advisory lock이 현재 세션에 없어 명시적으로 해제되지 않았습니다 "
+                            "(key=%s). 연결 종료로 세션 락을 정리합니다.",
+                            key,
+                        )
+                except Exception:  # noqa: BLE001 - preserve the migration error, if any
+                    logger.exception(
+                        "Postgres advisory lock 명시적 해제 실패 (key=%s). "
+                        "연결 종료로 세션 락을 정리합니다.",
+                        key,
+                    )
     finally:
         engine.dispose()
 
