@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -23,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app import models
 from app.api.auth import assert_session_owner, get_current_user, get_optional_user
+from app.core import config
 from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
@@ -1024,17 +1026,24 @@ _SSE_HEARTBEAT_SEC = 15.0
 _SSE_HEARTBEAT_FRAME = ": keepalive\n\n"  # SSE 주석 — EventSource는 무시하고 연결만 유지한다
 _HEARTBEAT = object()  # 침묵 구간 신호 (실제 이벤트와 구분되는 sentinel)
 
-# 전체 턴 상한 (RPA-235) — heartbeat가 idle 자동종료 안전망을 약화한 만큼, 에이전트가 hung이면
-# heartbeat만 무한히 나가며 /turn이 요청 세션·워커를 영영 붙잡는다. 넉넉한 상한으로 그것만 끊는다.
-# 정상 긴 턴(대형 문서 분석·검색·추천)을 죽이지 않도록 크게 잡고, env로 실측 후 조정한다. 0이면 끔.
-try:
-    _TURN_MAX_SEC = float(os.getenv("TURN_MAX_DURATION_SEC", "900"))
-except ValueError:
-    _TURN_MAX_SEC = 900.0
+_TURN_MAX_DEFAULT_SEC = 900.0
+
+
+def _turn_max_sec() -> float:
+    """Registry 값을 요청 시점에 읽고 비정상 상한은 안전한 기본값으로 복구한다."""
+    try:
+        value = float(config.TURN_MAX_DURATION_SEC)
+    except (TypeError, ValueError):
+        logger.warning("TURN_MAX_DURATION_SEC가 숫자가 아니어서 기본값 %.0f초를 사용합니다", _TURN_MAX_DEFAULT_SEC)
+        return _TURN_MAX_DEFAULT_SEC
+    if not math.isfinite(value) or value < 0:
+        logger.warning("TURN_MAX_DURATION_SEC가 유효 범위를 벗어나 기본값 %.0f초를 사용합니다", _TURN_MAX_DEFAULT_SEC)
+        return _TURN_MAX_DEFAULT_SEC
+    return value
 
 
 class _TurnTimeout(Exception):
-    """전체 턴 상한(_TURN_MAX_SEC) 초과 — hung 턴을 error로 끊는다 (RPA-235)."""
+    """전체 턴 상한 초과 — hung 턴을 error로 끊는다 (RPA-235)."""
 
 
 async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = None):
@@ -1061,10 +1070,16 @@ async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = 
     pending: asyncio.Future | None = None
     try:
         while True:
+            wait_timeout = interval
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise _TurnTimeout
+                wait_timeout = min(interval, remaining)
             if pending is None:
                 pending = asyncio.ensure_future(_next())
             try:
-                event, done = await asyncio.wait_for(asyncio.shield(pending), interval)
+                event, done = await asyncio.wait_for(asyncio.shield(pending), wait_timeout)
             except asyncio.TimeoutError:
                 # 전체 상한을 넘도록 진행이 없으면 hung으로 보고 끊는다 (RPA-235) — 그냥 두면
                 # heartbeat만 무한히 나가며 요청 세션·워커를 영영 붙잡는다. finally가 하위를 정리한다.
@@ -1076,6 +1091,8 @@ async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = 
             if done:
                 return
             yield event
+            if getattr(event, "event", None) == "done":
+                return
     finally:
         # 조기 종료(클라 끊김 등)면 진행 중이던 __anext__를 정리한다 — 진행 중 호출 1건만 취소.
         # 우리가 유발한 CancelledError만 삼킨다 — BaseException을 통째로 삼키면 바깥 취소까지
@@ -1196,6 +1213,7 @@ async def agent_turn(
         result_data = None
         saw_error = False
         disconnected = False
+        turn_max_sec = _turn_max_sec()
         turn_t0 = time.perf_counter()
         tev: list[dict] = []
 
@@ -1231,7 +1249,7 @@ async def agent_turn(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
             ):
                 async for event in _iter_with_heartbeat(
-                    stream_turn(message, agent_context), _SSE_HEARTBEAT_SEC, _TURN_MAX_SEC
+                    stream_turn(message, agent_context), _SSE_HEARTBEAT_SEC, turn_max_sec
                 ):
                     # 조용한 구간엔 heartbeat만 흘려 연결을 살린다 (RPA-233, CloudFront 60초 idle).
                     # 끊긴 클라이언트엔 보내지 않고 즉시 턴을 중단한다 — 계속 소비하면 비용만 나간다.
@@ -1300,7 +1318,7 @@ async def agent_turn(
                 ).to_sse()
         except _TurnTimeout:
             # 전체 상한 초과 — hung 턴을 error로 끊는다 (RPA-235). 하위 정리는 wrapper finally가 했다.
-            logger.warning("턴 시간 초과(%.0fs) — 중단: session=%s", _TURN_MAX_SEC, session_key)
+            logger.warning("턴 시간 초과(%.0fs) — 중단: session=%s", turn_max_sec, session_key)
             _tev("error", "agent", "처리 시간이 너무 길어 중단했습니다")
             yield ProgressEvent(
                 event="error", stage="agent", message="처리 시간이 너무 길어 중단했습니다"

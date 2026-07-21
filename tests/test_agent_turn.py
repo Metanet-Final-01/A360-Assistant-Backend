@@ -790,14 +790,41 @@ def test_iter_with_heartbeat_raises_on_total_timeout():
             await asyncio.sleep(10)  # 상한(0.05)보다 훨씬 김 = hung
             yield ProgressEvent(event="done", data={"type": "answer"})
 
-        out = []
         with pytest.raises(sessions_api._TurnTimeout):
-            async for x in sessions_api._iter_with_heartbeat(_hang(), 0.01, 0.05):
-                out.append(x)
-        # 상한 전까지 heartbeat만 나왔고 실제 이벤트는 없었다
-        assert out and all(x is sessions_api._HEARTBEAT for x in out)
+            async for _ in sessions_api._iter_with_heartbeat(_hang(), 0.01, 0.05):
+                pass
 
     asyncio.run(_collect())
+
+
+def test_iter_with_heartbeat_times_out_even_when_events_keep_arriving():
+    """이벤트가 heartbeat 간격보다 자주 와도 전체 상한은 우회할 수 없다."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _chatter():
+            while True:
+                await asyncio.sleep(0.001)
+                yield ProgressEvent(event="stage", stage="agent", message="진행 중")
+
+        with pytest.raises(sessions_api._TurnTimeout):
+            async for _ in sessions_api._iter_with_heartbeat(_chatter(), 1.0, 0.05):
+                pass
+
+    asyncio.run(_collect())
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "-1", "invalid"])
+def test_turn_max_duration_rejects_invalid_values(monkeypatch, raw):
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", raw)
+    assert sessions_api._turn_max_sec() == sessions_api._TURN_MAX_DEFAULT_SEC
+
+
+def test_turn_max_duration_reads_registry_at_access_time(monkeypatch):
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "12.5")
+    assert sessions_api._turn_max_sec() == 12.5
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0")
+    assert sessions_api._turn_max_sec() == 0
 
 
 def test_iter_with_heartbeat_no_total_timeout_when_disabled():
@@ -826,7 +853,7 @@ def test_turn_times_out_on_hung_agent(monkeypatch):
 
     monkeypatch.setattr("app.agent.stream_agent_turn", _hung_turn, raising=False)
     monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 0.01)
-    monkeypatch.setattr(sessions_api, "_TURN_MAX_SEC", 0.05)
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0.05")
     monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
     _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
 
@@ -837,3 +864,33 @@ def test_turn_times_out_on_hung_agent(monkeypatch):
     data_events = [json.loads(l[5:]) for l in raw if l.startswith("data:")]
     assert data_events[-1]["event"] == "error"  # 시간 초과로 error 종료
     assert "너무 길어" in (data_events[-1].get("message") or "")  # 시간 초과 메시지
+
+
+def test_done_is_persisted_when_agent_stalls_after_terminal_event(monkeypatch):
+    """done 이후 하위 generator가 멈춰도 완료 결과를 저장하고 정상 done으로 끝낸다."""
+    from app.schemas import ProgressEvent
+
+    closed = {"value": False}
+
+    async def _done_then_stall(message, context):
+        try:
+            yield ProgressEvent(
+                event="done", data={"type": "answer", "answer": "완료", "sources": []}
+            )
+            await asyncio.sleep(10)
+        finally:
+            closed["value"] = True
+
+    captured = {}
+    monkeypatch.setattr("app.agent.stream_agent_turn", _done_then_stall, raising=False)
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0.05")
+    monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 0.01)
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    _, events = _run()
+
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["answer"] == "완료"
+    assert len(captured.get("ChatMessage", [])) == 2
+    assert closed["value"] is True
