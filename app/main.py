@@ -224,6 +224,43 @@ def _check_opensearch() -> bool:
         return False
 
 
+def _check_opensearch_indexed() -> bool | None:
+    """BM25 색인에 문서가 **있나** (RPA-249) — 도달성만으론 못 잡는 반쪽 상태를 드러낸다.
+
+    `_check_opensearch`는 클러스터에 닿는지만 본다. 색인이 비어 있으면 BM25 질의가 200 OK로
+    0건을 반환하고, 검색은 조용히 dense-only 반쪽이 되는데 health는 계속 초록이다 —
+    실제 배포가 그 상태였다(bm25_available=true인데 bm25_rank=null).
+
+    True=문서 있음 / False=0건(미적재·인덱스 소실) / None=확인 불가.
+
+    ⚠️ status·checks 판정에는 **넣지 않는다**: 색인이 비어도 dense 검색은 동작하므로 "fail"이
+    아니고, checks 스키마를 늘리면 백오피스 계약이 깨진다. 정보 필드로만 노출한다.
+    """
+    import httpx
+
+    import app.rag.config as rag_config
+
+    host = rag_config.OPENSEARCH_HOST
+    auth = (
+        (rag_config.OPENSEARCH_USERNAME, rag_config.OPENSEARCH_PASSWORD)
+        if rag_config.OPENSEARCH_USERNAME
+        else None
+    )
+    try:
+        r = httpx.get(
+            f"{host.rstrip('/')}/{rag_config.OPENSEARCH_INDEX}/_count",
+            auth=auth,
+            timeout=3.0,
+            verify=host.startswith("https"),
+        )
+        if r.status_code != 200:  # 인덱스 부재(404) 등 — "0건"과 구분해 알 수 없음으로 둔다
+            return None
+        return int(r.json().get("count", 0)) > 0
+    except Exception as e:  # noqa: BLE001 — 확인 실패가 health를 죽이면 안 된다
+        logger.warning("opensearch 색인 확인 실패: %s", e)
+        return None
+
+
 @app.get("/api/health")
 def compute_health() -> dict:
     """의존성을 실제로 찔러 헬스를 판정한다 (RPA-117). 순수 함수 — 응답과 무관.
@@ -238,11 +275,12 @@ def compute_health() -> dict:
     import app.db as app_db
     from app.core.observability_db import observability_sessionmaker
 
+    os_reachable = _check_opensearch()
     checks = {
         "database": "ok" if _check_db(lambda: app_db.SessionLocal()) else "fail",
         "observability_database": "ok" if _check_db(lambda: observability_sessionmaker()()) else "fail",
         # BM25(OpenSearch) 도달성 — 실패해도 dense 검색은 살아 degraded (RPA-156)
-        "opensearch": "ok" if _check_opensearch() else "fail",
+        "opensearch": "ok" if os_reachable else "fail",
     }
     if checks["database"] == "fail":
         status = "unhealthy"
@@ -255,6 +293,9 @@ def compute_health() -> dict:
         "checks": checks,
         # 관측 DB가 공유(Neon)인지 로컬 폴백인지 — 폴백이면 위 체크는 앱 DB와 동일 대상
         "observability_shared": bool(os.getenv("OBSERVABILITY_DATABASE_URL")),
+        # BM25 색인에 문서가 있나 (RPA-249) — 도달성이 ok여도 색인이 비면 검색은 dense-only
+        # 반쪽이다. 도달 실패면 물어볼 필요도 없으니 None. status 판정에는 넣지 않는다.
+        "opensearch_indexed": _check_opensearch_indexed() if os_reachable else None,
     }
 
 

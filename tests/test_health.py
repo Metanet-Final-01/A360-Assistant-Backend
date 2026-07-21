@@ -26,7 +26,7 @@ def _factory(ok=True):
     return _S
 
 
-def _patch(monkeypatch, app_ok=True, obs_ok=True, os_ok=True):
+def _patch(monkeypatch, app_ok=True, obs_ok=True, os_ok=True, os_indexed=True):
     monkeypatch.setattr("app.db.SessionLocal", _factory(app_ok))
     monkeypatch.setattr(
         "app.core.observability_db.observability_sessionmaker", lambda: _factory(obs_ok)
@@ -34,6 +34,8 @@ def _patch(monkeypatch, app_ok=True, obs_ok=True, os_ok=True):
     # OpenSearch 도달성 체크는 실제 네트워크(RPA-156)라 테스트에선 스텁 — conftest가 host를
     # localhost로 격리하므로 스텁 안 하면 항상 fail로 잡힌다.
     monkeypatch.setattr("app.main._check_opensearch", lambda: os_ok)
+    # 색인 확인도 네트워크다 (RPA-249) — 스텁 안 하면 매 테스트가 타임아웃까지 기다린다.
+    monkeypatch.setattr("app.main._check_opensearch_indexed", lambda: os_indexed)
 
 
 def test_health_all_ok(monkeypatch):
@@ -158,6 +160,29 @@ def test_health_paths_skip_observability(monkeypatch):
         assert events == [] and metrics == []
         c.get("/api/message")  # 대조군 — 일반 경로는 여전히 기록돼야 한다
     assert len(events) == 1 and len(metrics) == 1
+
+
+def test_health_reports_empty_bm25_index_without_changing_status(monkeypatch):
+    """색인이 비면 opensearch_indexed=False로 드러나되, status·checks는 그대로 (RPA-249).
+
+    색인이 비어도 dense 검색은 동작하므로 'fail'이 아니다. 그러나 지금까지는 이 반쪽 상태가
+    health 어디에도 안 드러나 초록불이었다(배포 실측) — 그걸 보이게 만든다.
+    """
+    _patch(monkeypatch, os_indexed=False)
+    with TestClient(app) as c:
+        body = c.get("/health").json()
+    assert body["status"] == "healthy"                 # 서비스는 정상 — 판정 불변
+    assert body["checks"]["opensearch"] == "ok"        # 도달성도 정상 — 계약 불변
+    assert body["opensearch_indexed"] is False         # 그러나 색인이 비었다는 사실은 보인다
+
+
+def test_health_indexed_is_none_when_opensearch_unreachable(monkeypatch):
+    """도달 자체가 안 되면 색인은 물어볼 것도 없다 — False(0건)와 구분해 None."""
+    _patch(monkeypatch, os_ok=False)
+    with TestClient(app) as c:
+        body = c.get("/health").json()
+    assert body["status"] == "degraded"
+    assert body["opensearch_indexed"] is None
 
 
 def test_health_reports_shared_flag(monkeypatch):

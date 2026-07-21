@@ -85,13 +85,32 @@ def _fuse_candidates(
 
 
 def _bm25_health(results: list[dict]) -> bool | None:
-    """BM25 가용성 집계 — 필드가 없는 결과(vector 모드)는 None으로 구분한다 (RPA-211).
+    """BM25 **호출 성공** 집계 — 필드가 없는 결과(vector 모드)는 None으로 구분한다 (RPA-211).
 
-    True=정상 / False=저하(OpenSearch 실패) / None=해당 없음(BM25를 부르지 않음).
+    True=예외 없음 / False=저하(OpenSearch 실패) / None=해당 없음(BM25를 부르지 않음).
     셋을 뭉개면 "저하율"이 거짓말을 한다.
+
+    ⚠️ 이건 "예외가 없었다"이지 "검색에 기여했다"가 아니다 — 색인이 비어 200 OK로 0건이
+    와도 True다. 실제 기여는 _bm25_contributed()로 따로 본다 (RPA-249).
     """
     flags = [r["bm25_available"] for r in results if "bm25_available" in r]
     return all(flags) if flags else None
+
+
+def _bm25_contributed(results: list[dict]) -> bool | None:
+    """BM25가 **실제로 후보를 냈나** — 융합 결과에 bm25_rank가 하나라도 있으면 True (RPA-249).
+
+    왜 _bm25_health와 따로 두나: `bm25_available`은 예외 유무만 본다. 배포에서 OpenSearch
+    인덱스가 비어 있으면 200 OK로 0건이 오고, 그러면 available=True인 채 검색은 dense-only로
+    조용히 반쪽이 된다(실측). 지표가 "정상"이라고 말하는데 품질은 절반인 상태다.
+    가드는 동작이 읽는 것을 읽어야 한다 — 예외가 아니라 **기여**를 본다.
+
+    True=기여함 / False=호출했으나 0건(색인 비었거나 매칭 없음) / None=해당 없음(vector 모드).
+    """
+    scored = [r for r in results if "bm25_available" in r]
+    if not scored:
+        return None
+    return any(r.get("bm25_rank") is not None for r in scored)
 
 
 def _candidate_summary(item: dict) -> dict:
@@ -122,6 +141,10 @@ def _candidate_summary(item: dict) -> dict:
         #    "호출도 안 했는데 정상"으로 기록돼 저하 지표가 왜곡된다(#290 리뷰).
         #    필드가 하나도 없으면 None = "해당 없음"으로 남긴다.
         "bm25_available": _bm25_health(r),
+        # 🔴 예외 유무(위)와 **실제 기여**는 다르다 (RPA-249) — 색인이 비면 200 OK로 0건이
+        # 와서 available=True인 채 dense-only 반쪽이 된다. 배포에서 실제로 그 상태였고
+        # 어떤 지표도 울리지 않았다. contributed=False가 이어지면 색인 이상으로 읽는다.
+        "bm25_contributed": _bm25_contributed(r),
         "reranked": any("rerank_score" in item for item in r),
         # 실제로 뭐가 뽑혔나(상위 5) — "왜 이 스텝만 uncovered인지" 재구성·추천 근거(FR-11)
         "candidates": [_candidate_summary(item) for item in r[:5]],
@@ -185,6 +208,10 @@ def search(
         #    "호출도 안 했는데 정상"으로 기록돼 저하 지표가 왜곡된다(#290 리뷰).
         #    필드가 하나도 없으면 None = "해당 없음"으로 남긴다.
         "bm25_available": _bm25_health(r),
+        # 🔴 예외 유무(위)와 **실제 기여**는 다르다 (RPA-249) — 색인이 비면 200 OK로 0건이
+        # 와서 available=True인 채 dense-only 반쪽이 된다. 배포에서 실제로 그 상태였고
+        # 어떤 지표도 울리지 않았다. contributed=False가 이어지면 색인 이상으로 읽는다.
+        "bm25_contributed": _bm25_contributed(r),
         "reranked": any("rerank_score" in item for item in r),
     },
 )
