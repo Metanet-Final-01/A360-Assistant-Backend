@@ -1059,16 +1059,19 @@ async def _iter_with_heartbeat(agen, interval: float):
             yield event
     finally:
         # 조기 종료(클라 끊김 등)면 진행 중이던 __anext__를 정리한다 — 진행 중 호출 1건만 취소.
+        # 우리가 유발한 CancelledError만 삼킨다 — BaseException을 통째로 삼키면 바깥 취소까지
+        # 먹어 asyncio 협조적 취소가 깨진다(RPA-233 Qodo).
         if pending is not None:
             pending.cancel()
-            with contextlib.suppress(BaseException):  # noqa: BLE001 — 취소 정리, 예외는 삼킨다
+            with contextlib.suppress(asyncio.CancelledError):
                 await pending
-        # 하위 제너레이터도 명시적으로 닫는다 (RPA-233 Qodo) — __anext__를 수동 구동해서
-        # wrapper의 GeneratorExit이 it로 자동 전파되지 않는다. pending을 먼저 취소했으니
-        # "generator already running" 없이 하위(graph.astream)의 finally 정리가 확실히 돈다.
+        # 하위 제너레이터도 명시적으로 닫는다 — __anext__를 수동 구동해서 wrapper의 GeneratorExit이
+        # it로 자동 전파되지 않는다. pending을 먼저 취소했으니 "generator already running" 없이
+        # 하위(graph.astream)의 finally 정리가 확실히 돈다. 정리 중 하위 예외는 삼키되,
+        # CancelledError(바깥 취소)는 전파한다 — 취소가 최우선이다(RPA-233 Qodo).
         aclose = getattr(it, "aclose", None)
         if aclose is not None:
-            with contextlib.suppress(BaseException):  # noqa: BLE001 — 정리 성격, 예외 삼킴
+            with contextlib.suppress(Exception):  # noqa: BLE001 — 정리 예외만, 취소는 전파
                 await aclose()
 
 

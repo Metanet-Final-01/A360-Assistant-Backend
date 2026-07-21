@@ -750,3 +750,30 @@ def test_turn_emits_sse_heartbeat_during_silence(monkeypatch):
     assert any("keepalive" in line for line in raw)  # 주석 heartbeat가 실제 프레임으로 나감
     data_events = [json.loads(l[5:]) for l in raw if l.startswith("data:")]
     assert data_events[-1]["event"] == "done"  # heartbeat가 정상 완료를 가리지 않는다
+
+
+def test_iter_with_heartbeat_closes_underlying_on_early_exit():
+    """소비자가 조기 중단하면 하위 제너레이터의 finally 정리(aclose)가 돈다 (RPA-233).
+
+    __anext__ 수동 구동이라 wrapper의 GeneratorExit이 하위로 자동 전파되지 않으므로,
+    wrapper의 finally가 it.aclose()로 하위 정리를 명시적으로 돌려야 한다.
+    """
+    from app.schemas import ProgressEvent
+
+    closed = {"n": 0}
+
+    async def _collect():
+        async def _gen():
+            try:
+                yield ProgressEvent(event="token", message="a")
+                yield ProgressEvent(event="done", data={"type": "answer"})
+            finally:
+                closed["n"] += 1  # GeneratorExit(aclose) 시 정리 실행
+
+        wrapped = sessions_api._iter_with_heartbeat(_gen(), 10.0)
+        async for _ in wrapped:  # 첫 이벤트만 받고 중단 (끊김 흉내)
+            break
+        await wrapped.aclose()  # wrapper 정리 → 하위 aclose 전파
+
+    asyncio.run(_collect())
+    assert closed["n"] == 1  # 하위 제너레이터 finally가 정확히 한 번 실행됨
