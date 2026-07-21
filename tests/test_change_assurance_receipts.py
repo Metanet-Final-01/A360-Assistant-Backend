@@ -258,6 +258,28 @@ def test_writer_endpoint_fails_closed_when_token_is_unset(monkeypatch):
     assert response.json()["detail"]["code"] == "ASSURANCE_WRITER_NOT_CONFIGURED"
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        "w" * 31,
+        "w" * 129,
+        "w" * 31 + ".",
+        "w" * 31 + "=",
+    ],
+)
+def test_writer_endpoint_fails_closed_for_non_base64url_token(monkeypatch, token):
+    monkeypatch.setenv("ASSURANCE_WRITER_TOKEN", token)
+    monkeypatch.setenv("ASSURANCE_WRITER_REPOSITORY", "Metanet-Final-01/A360-Assistant-Backend")
+    app.dependency_overrides[get_db] = lambda: object()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/internal/assurance/change-receipts",
+            json={"schema_version": "1.0", "source": {}, "artifacts": {}},
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "ASSURANCE_WRITER_NOT_CONFIGURED"
+
+
 def test_writer_endpoint_rejects_admin_or_wrong_bearer(monkeypatch):
     monkeypatch.setenv("ASSURANCE_WRITER_TOKEN", "w" * 32)
     monkeypatch.setenv("ASSURANCE_WRITER_REPOSITORY", "Metanet-Final-01/A360-Assistant-Backend")
@@ -527,10 +549,18 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
 
     assert "ASSURANCE_WRITER_TOKEN" not in build_job
     assert "environment: change-assurance-writer" in deploy_job
+    assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4" in deploy_job
+    assert (
+        "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4"
+        in deploy_job
+    )
+    assert "uses: actions/checkout@v4" not in deploy_job
+    assert "uses: aws-actions/configure-aws-credentials@v4" not in deploy_job
     assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_job
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_job
 
     assert "NoEcho: true" in token_parameter
+    assert 'AllowedPattern: "^$|^[A-Za-z0-9_-]{32,128}$"' in token_parameter
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in template
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in template
     assert 'get("ASSURANCE_WRITER_TOKEN", "")' in template
