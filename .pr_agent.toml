@@ -1,0 +1,72 @@
+# Qodo Git integration policy for A360 Assistant Backend.
+# Reference: https://docs.qodo.ai/qodo-documentation/code-review/get-started/configuration-overview/configuration-file
+
+[config]
+response_language = "ko-KR"
+enable_comment_approval = false
+enable_auto_approval = false
+
+[ignore]
+glob = [
+  "data/**",
+]
+
+[github_app]
+feedback_on_draft_pr = false
+pr_commands = [
+  "/review",
+  "/improve",
+]
+handle_push_trigger = true
+push_commands = [
+  "/review",
+]
+
+[pr_reviewer]
+persistent_comment = true
+final_update_message = false
+enable_help_text = false
+require_score_review = false
+require_tests_review = true
+require_estimate_effort_to_review = true
+require_can_be_split_review = true
+require_security_review = true
+require_ticket_analysis_review = true
+enable_review_labels_security = false
+enable_review_labels_effort = false
+extra_instructions = """
+항상 한국어로 답변한다.
+실제 버그, 보안, 개인정보·시크릿 노출, 데이터 무결성, 동시성, 성능 회귀,
+API·SSE·스키마·DB·배포 계약 위반, 요구사항 누락과 필요한 테스트 누락만 지적한다.
+사소한 스타일, 취향성 리팩터링, 설명 가능한 명명 선호는 생략한다.
+결론이 맞더라도 주석·문서·테스트 설명의 이유가 실제 코드와 다르면 계약 불일치로 지적한다.
+app/schemas/** 변경은 Backend·Agent·Frontend 공유 계약과 docs/INTERFACES.md의 일관성을 확인한다.
+app/api/** 및 app/services/rag.py 변경은 라우트가 얇은지, 오류가 {code, message}인지,
+SSE 스트림 중 요청 범위 DB 세션을 오래 보유하지 않는지, search_actions 반환 계약을 확인한다.
+Python 변경은 시크릿 하드코딩, 외부 입력 검증, SSRF, 우회 가능한 권한 검사,
+직접 LLM 호출이 app/core/llm 경계를 우회하는지 확인한다.
+Markdown 변경은 문서를 정답으로 가정하지 말고 실제 코드·테스트·환경변수와 대조한다.
+app/agent/**는 다른 담당 영역이다. 내부 구현 취향을 지적하지 말고,
+공개 응답 필드·호출 계약·저장/조회 경계의 회귀만 지적한다.
+각 지적에는 재현 가능한 근거, 영향, 최소 수정 방향을 포함한다.
+"""
+
+[pr_code_suggestions]
+persistent_comment = true
+focus_only_on_problems = true
+suggestions_score_threshold = 5
+commitable_code_suggestions = false
+apply_suggestions_checkbox = false
+enable_more_suggestions_checkbox = false
+enable_help_text = false
+enable_chat_text = false
+publish_output_no_suggestions = false
+wiki_page_accepted_suggestions = false
+auto_extended_mode = true
+num_code_suggestions_per_chunk = 3
+max_number_of_calls = 3
+extra_instructions = """
+한국어로 답변하고, 실제 결함을 해결하는 최소 변경만 제안한다.
+보안·데이터·동시성·성능·계약·테스트 문제를 우선하며
+스타일 변경, 대규모 리팩터링, 책임 영역 밖 app/agent/** 내부 재설계는 제안하지 않는다.
+"""
