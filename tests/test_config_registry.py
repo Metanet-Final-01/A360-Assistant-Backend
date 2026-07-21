@@ -150,6 +150,38 @@ def test_all_app_files_parse():
     assert not parse_errors, f"파싱 실패로 래칫에서 누락된 파일: {list(parse_errors)}"
 
 
+@functools.cache
+def _config_key_imports() -> tuple[tuple[str, str], ...]:
+    """`from app.core.config import <REGISTRY키>` 직접 import를 수집한다 (Qodo)."""
+    hits: set[tuple[str, str]] = set()
+    for p in ROOT.rglob("*.py"):
+        rel = p.relative_to(ROOT).as_posix()
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "app.core.config":
+                for alias in node.names:
+                    if alias.name in config.REGISTRY:
+                        hits.add((rel, alias.name))
+    return tuple(sorted(hits))
+
+
+def test_no_direct_config_key_import():
+    """⑤(Qodo 반영): `from app.core.config import <KEY>`를 금지한다 — 호출 시점 읽기 우회.
+
+    그렇게 import하면 값이 import 시점에 고정돼 setenv 변화·테스트 격리·토글이 반영되지
+    않는다(래칫은 os.getenv 직접 호출만 막아 이 경로를 놓쳤다). `from app.core import config`
+    후 `config.KEY`(매번 __getattr__)로 접근해야 계약이 지켜진다.
+    """
+    hits = _config_key_imports()
+    assert not hits, (
+        f"REGISTRY 키를 직접 import한 곳: {list(hits)}\n"
+        "`from app.core import config` 후 config.KEY 로 접근하세요(호출 시점 읽기)."
+    )
+
+
 def test_get_reads_at_access_time(monkeypatch):
     """호출 시점 읽기 계약 — monkeypatch.setenv가 즉시 보여야 한다.
 
