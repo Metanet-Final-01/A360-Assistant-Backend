@@ -777,3 +777,63 @@ def test_iter_with_heartbeat_closes_underlying_on_early_exit():
 
     asyncio.run(_collect())
     assert closed["n"] == 1  # 하위 제너레이터 finally가 정확히 한 번 실행됨
+
+
+# --- 전체 턴 상한 (RPA-235): hung 턴을 끊는다 ---
+
+def test_iter_with_heartbeat_raises_on_total_timeout():
+    """전체 상한을 넘도록 진행이 전혀 없으면 _TurnTimeout을 올린다 (RPA-235)."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _hang():
+            await asyncio.sleep(10)  # 상한(0.05)보다 훨씬 김 = hung
+            yield ProgressEvent(event="done", data={"type": "answer"})
+
+        out = []
+        with pytest.raises(sessions_api._TurnTimeout):
+            async for x in sessions_api._iter_with_heartbeat(_hang(), 0.01, 0.05):
+                out.append(x)
+        # 상한 전까지 heartbeat만 나왔고 실제 이벤트는 없었다
+        assert out and all(x is sessions_api._HEARTBEAT for x in out)
+
+    asyncio.run(_collect())
+
+
+def test_iter_with_heartbeat_no_total_timeout_when_disabled():
+    """max_total이 없으면(0/None) 상한 없이 정상 진행한다 — 정상 긴 턴을 죽이지 않는다."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _slow():
+            await asyncio.sleep(0.05)
+            yield ProgressEvent(event="done", data={"type": "answer"})
+
+        return [x async for x in sessions_api._iter_with_heartbeat(_slow(), 0.01, 0)]
+
+    out = asyncio.run(_collect())  # 예외 없이 완주
+    events = [x for x in out if x is not sessions_api._HEARTBEAT]
+    assert [e.event for e in events] == ["done"]
+
+
+def test_turn_times_out_on_hung_agent(monkeypatch):
+    """/turn: 에이전트가 응답 없이 hang하면 전체 상한 초과로 error 종료 (RPA-235)."""
+    from app.schemas import ProgressEvent
+
+    async def _hung_turn(message, context):
+        await asyncio.sleep(10)  # 응답 없이 hang (상한 0.05 초과)
+        yield ProgressEvent(event="done", data={"type": "answer", "answer": "x", "sources": []})
+
+    monkeypatch.setattr("app.agent.stream_agent_turn", _hung_turn, raising=False)
+    monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 0.01)
+    monkeypatch.setattr(sessions_api, "_TURN_MAX_SEC", 0.05)
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        with c.stream("POST", f"/api/sessions/{SID}/turn", json={"message": "안녕"}) as r:
+            raw = list(r.iter_lines())
+
+    data_events = [json.loads(l[5:]) for l in raw if l.startswith("data:")]
+    assert data_events[-1]["event"] == "error"  # 시간 초과로 error 종료
+    assert "너무 길어" in (data_events[-1].get("message") or "")  # 시간 초과 메시지

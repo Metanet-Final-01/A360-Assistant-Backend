@@ -1024,15 +1024,30 @@ _SSE_HEARTBEAT_SEC = 15.0
 _SSE_HEARTBEAT_FRAME = ": keepalive\n\n"  # SSE 주석 — EventSource는 무시하고 연결만 유지한다
 _HEARTBEAT = object()  # 침묵 구간 신호 (실제 이벤트와 구분되는 sentinel)
 
+# 전체 턴 상한 (RPA-235) — heartbeat가 idle 자동종료 안전망을 약화한 만큼, 에이전트가 hung이면
+# heartbeat만 무한히 나가며 /turn이 요청 세션·워커를 영영 붙잡는다. 넉넉한 상한으로 그것만 끊는다.
+# 정상 긴 턴(대형 문서 분석·검색·추천)을 죽이지 않도록 크게 잡고, env로 실측 후 조정한다. 0이면 끔.
+try:
+    _TURN_MAX_SEC = float(os.getenv("TURN_MAX_DURATION_SEC", "900"))
+except ValueError:
+    _TURN_MAX_SEC = 900.0
 
-async def _iter_with_heartbeat(agen, interval: float):
+
+class _TurnTimeout(Exception):
+    """전체 턴 상한(_TURN_MAX_SEC) 초과 — hung 턴을 error로 끊는다 (RPA-235)."""
+
+
+async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = None):
     """`agen`의 이벤트를 흘리되, `interval`초 이상 조용하면 `_HEARTBEAT` sentinel을 낸다.
+    `max_total`초를 넘도록 진행이 전혀 없으면 `_TurnTimeout`을 올린다 (RPA-235, hung 턴 방어).
 
     다음 이벤트를 기다리는 `__anext__`를 `asyncio.shield`로 감싸 타임아웃이 하위 async
     제너레이터를 취소·훼손하지 않게 한다 — 취소하면 진행 중이던 LLM 호출·상태가 깨진다.
     타임아웃은 shield 래퍼만 취소하고 실제 대기는 다음 반복에서 그대로 이어진다.
     """
     it = agen.__aiter__()
+    loop = asyncio.get_running_loop()
+    deadline = None if not max_total or max_total <= 0 else loop.time() + max_total
 
     async def _next():
         # StopAsyncIteration을 태스크 경계로 넘기지 않는다 — __anext__를 직접 태스크화하면
@@ -1051,6 +1066,10 @@ async def _iter_with_heartbeat(agen, interval: float):
             try:
                 event, done = await asyncio.wait_for(asyncio.shield(pending), interval)
             except asyncio.TimeoutError:
+                # 전체 상한을 넘도록 진행이 없으면 hung으로 보고 끊는다 (RPA-235) — 그냥 두면
+                # heartbeat만 무한히 나가며 요청 세션·워커를 영영 붙잡는다. finally가 하위를 정리한다.
+                if deadline is not None and loop.time() >= deadline:
+                    raise _TurnTimeout
                 yield _HEARTBEAT  # 아직 다음 이벤트 없음 — 연결만 살린다
                 continue
             pending = None
@@ -1212,7 +1231,7 @@ async def agent_turn(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
             ):
                 async for event in _iter_with_heartbeat(
-                    stream_turn(message, agent_context), _SSE_HEARTBEAT_SEC
+                    stream_turn(message, agent_context), _SSE_HEARTBEAT_SEC, _TURN_MAX_SEC
                 ):
                     # 조용한 구간엔 heartbeat만 흘려 연결을 살린다 (RPA-233, CloudFront 60초 idle).
                     # 끊긴 클라이언트엔 보내지 않고 즉시 턴을 중단한다 — 계속 소비하면 비용만 나간다.
@@ -1279,6 +1298,13 @@ async def agent_turn(
                 yield ProgressEvent(
                     event="error", stage="agent", message="응답을 생성하지 못했습니다"
                 ).to_sse()
+        except _TurnTimeout:
+            # 전체 상한 초과 — hung 턴을 error로 끊는다 (RPA-235). 하위 정리는 wrapper finally가 했다.
+            logger.warning("턴 시간 초과(%.0fs) — 중단: session=%s", _TURN_MAX_SEC, session_key)
+            _tev("error", "agent", "처리 시간이 너무 길어 중단했습니다")
+            yield ProgressEvent(
+                event="error", stage="agent", message="처리 시간이 너무 길어 중단했습니다"
+            ).to_sse()
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
             _tev("error", "agent", f"에이전트 구성 오류: {e}")
             yield ProgressEvent(event="error", stage="agent", message=f"에이전트 구성 오류: {e}").to_sse()
