@@ -537,3 +537,8 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert 'get("ASSURANCE_WRITER_REPOSITORY", "")' in template
     assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in template
     assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in template
+    assert "#!/bin/bash -eu\n" in template
+    assert "#!/bin/bash -eux" not in template
+    env_mode = template.index("install -m 600 /dev/null /opt/a360/.env")
+    env_write = template.index("cat > /opt/a360/.env <<EOF")
+    assert env_mode < env_write
