@@ -39,6 +39,8 @@ def test_skips_get_requests(monkeypatch):
     """
     calls = []
     monkeypatch.setattr(hl, "_record_audit", lambda *a: calls.append(a))
+    monkeypatch.setattr("app.rag.observability.log_event", lambda *a, **k: None)
+    monkeypatch.setattr(hl, "_record_metric", lambda *a, **k: None)
     with TestClient(app) as c:
         c.get("/api/message")
     assert calls == []
