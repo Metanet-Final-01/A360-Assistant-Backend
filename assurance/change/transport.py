@@ -129,8 +129,11 @@ def _validate_source(source: Any) -> dict[str, Any]:
         raise AssuranceError("publisher source fields do not match the transport contract")
     if source.get("workflow_name") != "Change Assurance (Observe)":
         raise AssuranceError("publisher workflow is not authoritative")
-    if source.get("event") != "pull_request" or source.get("conclusion") != "success":
-        raise AssuranceError("publisher source is not a successful pull_request workflow")
+    if (
+        source.get("event") not in {"pull_request", "pull_request_review"}
+        or source.get("conclusion") != "success"
+    ):
+        raise AssuranceError("publisher source is not a successful pull request workflow")
     repository = source.get("repository")
     if not isinstance(repository, str) or re.fullmatch(
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository

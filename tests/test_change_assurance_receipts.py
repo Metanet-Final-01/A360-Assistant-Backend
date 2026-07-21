@@ -16,6 +16,7 @@ from app.api.admin import _assurance_receipt_out
 from app.db import get_db
 from app.main import app
 from app.services.assurance_evidence import (
+    _sanitize_human_review,
     build_change_receipt,
     persist_change_receipt,
     receipt_integrity,
@@ -27,6 +28,32 @@ from tests.test_change_assurance import _load_scenarios, _run_scenario
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_human_review_receipt_projection_keeps_only_display_contract():
+    projected = _sanitize_human_review({
+        "status": "approved",
+        "reason_code": "HUMAN_REVIEW_VERIFIED",
+        "pull_request_number": 329,
+        "expected_head_sha": "a" * 40,
+        "event_name": "pull_request_review",
+        "unexpected": {"large": "value"},
+        "review": {
+            "reviewer_login": "reviewer",
+            "submitted_at": "2026-07-21T08:00:00Z",
+            "commit_id": "a" * 40,
+            "body": "must not be persisted",
+        },
+    })
+
+    assert set(projected) == {
+        "status",
+        "reason_code",
+        "pull_request_number",
+        "expected_head_sha",
+        "review",
+    }
+    assert set(projected["review"]) == {"reviewer_login", "submitted_at", "commit_id"}
 
 
 class _CloudFormationLoader(yaml.SafeLoader):
@@ -223,6 +250,7 @@ def test_change_receipt_is_visible_through_existing_admin_contract(tmp_path):
 
     assert response["harness"] == "change"
     assert response["integrity_valid"] is True
+    assert response["human_review"]["status"] == "missing"
     assert response["receipt_payload"]["subject"]["pull_request_number"] == 281
 
 
@@ -419,6 +447,37 @@ def test_publisher_derives_identity_only_from_matching_workflow_run():
         source_from_event(event, expected_repository="Metanet-Final-01/A360-Assistant-Backend")
 
 
+def test_publisher_accepts_review_triggered_assurance_run():
+    event = {
+        "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
+        "workflow_run": {
+            "id": 12346,
+            "run_attempt": 1,
+            "name": "Change Assurance (Observe)",
+            "event": "pull_request_review",
+            "conclusion": "success",
+            "head_sha": "a" * 40,
+            "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
+            "pull_requests": [{"number": 329}],
+        },
+    }
+
+    source = source_from_event(
+        event, expected_repository="Metanet-Final-01/A360-Assistant-Backend"
+    )
+    assert source["event"] == "pull_request_review"
+    assert source["pull_request_number"] == 329
+
+
+def test_transport_accepts_review_triggered_follow_up_record(tmp_path):
+    envelope = _envelope(tmp_path)
+    envelope["source"]["event"] = "pull_request_review"
+
+    facts = validate_change_envelope(envelope)
+
+    assert facts["source"]["event"] == "pull_request_review"
+
+
 def test_publisher_accepts_one_sha_resolved_pull_request_when_event_list_is_empty():
     event = {
         "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
@@ -537,10 +596,15 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
 
     assert "workflow_run:" in workflow_header
     assert "pull_request_target" not in publisher
+    assert "pull_request_review:" in observe
+    assert "types: [submitted, dismissed]" in observe
+    assert "python -m assurance.change.review_evidence" in observe
+    assert "--review-evidence" in observe
     assert "actions: read" in workflow_header
     assert "contents: read" in workflow_header
     assert "pull-requests: read" in workflow_header
     assert "ASSURANCE_WRITER_ENABLED == 'true'" in resolve_job
+    assert "pull_request_review" in resolve_job
     assert "/commits/${HEAD_SHA}/pulls" in resolve_job
     assert 'api_output="$(mktemp)"' in resolve_job
     assert '> "$api_output"' in resolve_job

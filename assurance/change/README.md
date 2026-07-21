@@ -149,6 +149,13 @@ python -m pytest -q tests/test_change_assurance.py
 정책 보호와 Observe 승격 근거는 후속 운영 검증에서 다룬다. 이 MVP와 `RPA-207` 전송 코드만으로 보안 인증이나
 `Warn`·`Enforce` 승격을 주장하면 안 된다.
 
+## 사람 리뷰 후속 판정
+
+보호 대상 변경은 PR 생성 직후 CH-06 `PROTECTED_ORACLE_REVIEW_REQUIRED`로 기록된다. 이후 별도 사람이
+현재 PR HEAD를 승인하면 `pull_request_review` 이벤트가 하네스를 다시 실행하고
+`PROTECTED_ORACLE_REVIEW_VERIFIED` 후속 기록을 append-only로 추가한다. 최초 기록은 수정하지 않는다.
+승인 뒤 새 커밋이 올라오거나 승인이 취소되면 현재 HEAD에는 기존 승인을 적용하지 않고 다시 검토 필요로 판정한다.
+
 ## English Summary
 
 RPA-180 derives a manifest and assurance evidence from trusted Git objects, checks dependency and import closure,

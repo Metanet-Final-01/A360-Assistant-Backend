@@ -295,6 +295,31 @@ def _sanitize_change_controls(controls: Any) -> list[dict[str, Any]]:
     return sanitized
 
 
+def _sanitize_human_review(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    review = value.get("review")
+    sanitized_review = None
+    if isinstance(review, dict):
+        sanitized_review = {
+            "reviewer_login": _safe_text(review.get("reviewer_login"), limit=100),
+            "submitted_at": _safe_text(review.get("submitted_at"), limit=40),
+            "commit_id": _safe_text(review.get("commit_id"), limit=40),
+        }
+    pull_request_number = value.get("pull_request_number")
+    return {
+        "status": _safe_text(value.get("status"), limit=20),
+        "reason_code": _safe_text(value.get("reason_code"), limit=80),
+        "pull_request_number": (
+            pull_request_number
+            if isinstance(pull_request_number, int) and not isinstance(pull_request_number, bool)
+            else None
+        ),
+        "expected_head_sha": _safe_text(value.get("expected_head_sha"), limit=40),
+        "review": sanitized_review,
+    }
+
+
 def build_change_receipt(
     envelope: dict[str, Any],
 ) -> tuple[models.AssuranceReceipt, dict[str, Any]]:
@@ -318,6 +343,8 @@ def build_change_receipt(
     completeness_status = "complete" if evidence_complete and not missing else "incomplete"
     subject = report["subject"]
     enforcement = report["enforcement"]
+    protected_evidence = envelope["artifacts"].get("protected-change-evidence.json", {})
+    human_review = _sanitize_human_review(protected_evidence.get("human_review"))
     receipt_payload = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "harness": "change",
@@ -349,6 +376,7 @@ def build_change_receipt(
             "missing": missing,
         },
         "controls": _sanitize_change_controls(report["controls"]),
+        "human_review": deepcopy(human_review),
         "provenance": {
             "validator_version": f"change-assurance/{report['schema_version']}",
             "policy_digest": facts["policy_digest"],

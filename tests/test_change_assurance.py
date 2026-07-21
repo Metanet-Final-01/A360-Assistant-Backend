@@ -278,6 +278,64 @@ def test_protected_oracle_change_requires_separate_review(tmp_path: Path) -> Non
     assert ch06["reason_code"] == "PROTECTED_ORACLE_REVIEW_REQUIRED"
 
 
+def test_exact_head_human_review_closes_protected_oracle_control(tmp_path: Path) -> None:
+    scenario = {
+        "base_files": {
+            "requirements.txt": "",
+            "tests/test_example.py": "def test_value():\n    assert 1 == 1\n",
+        },
+        "head_files": {
+            "requirements.txt": "",
+            "tests/test_example.py": "def test_value():\n    assert 2 == 2\n",
+        },
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "allow_candidate",
+    }
+    repo, base, head = _fixture_repo(tmp_path, scenario)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps({
+        "schema_version": "1.0",
+        "repository": "Metanet-Final-01/fixture",
+        "pull_request_number": 42,
+        "event_name": "pull_request_review",
+        "event_action": "submitted",
+        "expected_head_sha": head,
+        "observed_head_sha": head,
+        "status": "approved",
+        "reason_code": "HUMAN_REVIEW_VERIFIED",
+        "review": {
+            "reviewer_login": "reviewer",
+            "submitted_at": "2026-07-21T08:00:00Z",
+            "commit_id": head,
+        },
+    }), encoding="utf-8")
+    policy = _policy(scenario)
+
+    report = _AssuranceRunner(
+        repo_root=repo,
+        base_sha=base,
+        head_sha=head,
+        repository="Metanet-Final-01/fixture",
+        output=tmp_path / "out",
+        policy=policy,
+        policy_uri="fixture-policy.json",
+        policy_digest=canonical_digest(policy),
+        environment=FixtureDependencyEnvironment(scenario["environment"]),
+        review_evidence_path=review_path,
+        now=FIXED_NOW,
+    ).run()
+
+    ch06 = next(item for item in report["controls"] if item["control_id"] == "CH-06")
+    assert ch06["status"] == "pass"
+    assert ch06["reason_code"] == "PROTECTED_ORACLE_REVIEW_VERIFIED"
+    assert report["assurance_decision"] == "allow_candidate"
+    protected = json.loads(
+        (tmp_path / "out" / "protected-change-evidence.json").read_text(encoding="utf-8")
+    )
+    assert protected["human_review"]["review"]["reviewer_login"] == "reviewer"
+
+
 def test_rename_out_of_protected_path_keeps_old_path_evidence(tmp_path: Path) -> None:
     content = "def test_value():\n    assert 1 == 1\n"
     scenario = {
