@@ -19,7 +19,9 @@ def test_qodo_config_is_parseable_and_fail_closed() -> None:
     assert qodo["config"]["enable_auto_approval"] is False
     assert qodo["github_app"]["feedback_on_draft_pr"] is False
     assert qodo["github_app"]["handle_push_trigger"] is True
-    assert set(qodo["github_app"]["pr_commands"]) == {"/review", "/improve"}
+    # 개선제안(/improve)은 "실제 에러"가 아니라 최적화·취향이라 자동 오픈에서 제외한다
+    # (RPA-230). 필요할 때만 수동 /improve.
+    assert set(qodo["github_app"]["pr_commands"]) == {"/review"}
     assert qodo["github_app"]["push_commands"] == ["/review"]
     assert "data/**" in qodo["ignore"]["glob"]
 
@@ -34,6 +36,13 @@ def test_qodo_review_policy_preserves_project_boundaries() -> None:
     assert reviewer["require_ticket_analysis_review"] is True
     assert reviewer["enable_review_labels_security"] is False
     assert reviewer["enable_review_labels_effort"] is False
+    # 리뷰 범위를 심각·필수 결함으로 좁힘 (RPA-230) — 부가 메타 섹션(공수 추정·분할 제안)을
+    # 끄고, 저심각·문서/주석·이론적 리스크는 지적하지 않도록 제외 규칙을 고정한다.
+    # 누가 되돌리면(다시 true / 규칙 삭제) 이 래칫이 잡는다.
+    assert reviewer["require_estimate_effort_to_review"] is False
+    assert reviewer["require_can_be_split_review"] is False
+    assert "지적하지 않는다" in reviewer["extra_instructions"]
+    assert "이론적·저확률" in reviewer["extra_instructions"]
     assert suggestions["focus_only_on_problems"] is True
     assert suggestions["commitable_code_suggestions"] is False
     assert suggestions["apply_suggestions_checkbox"] is False
