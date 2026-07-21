@@ -46,6 +46,8 @@ def test_qodo_review_policy_preserves_project_boundaries() -> None:
     assert suggestions["focus_only_on_problems"] is True
     assert suggestions["commitable_code_suggestions"] is False
     assert suggestions["apply_suggestions_checkbox"] is False
+    # 제안 임계도 정책의 일부 — 되돌아가면 저점수 노이즈가 다시 샌다 (RPA-230 Qodo).
+    assert suggestions["suggestions_score_threshold"] == 7
 
     instructions = reviewer["extra_instructions"] + suggestions["extra_instructions"]
     assert "app/agent/**" in instructions
