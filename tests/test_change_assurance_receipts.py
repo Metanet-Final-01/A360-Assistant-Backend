@@ -598,3 +598,32 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
     env_write = user_data.index("cat > /opt/a360/.env <<EOF")
     assert env_mode < env_write
+
+
+def test_backend_deploy_injects_ops_api_key_from_protected_environment():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    )
+    template = yaml.load(
+        (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
+        Loader=_CloudFormationLoader,
+    )
+    build_job = workflow["jobs"]["build"]
+    deploy_job = workflow["jobs"]["deploy"]
+    deploy_script = next(step["run"] for step in deploy_job["steps"] if "run" in step)
+    token_parameter = template["Parameters"]["OpsApiKey"]
+    app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
+    user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
+        "LaunchTemplateData"
+    ]["UserData"]["Fn::Base64"][0]
+
+    assert "OPS_API_KEY" not in str(build_job)
+    assert deploy_job["environment"] == "change-assurance-writer"
+    assert 'OpsApiKey="${{ secrets.OPS_API_KEY }}"' in deploy_script
+    assert token_parameter["NoEcho"] is True
+    assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
+    assert '"OPS_API_KEY": "${OpsApiKey}"' in app_secret
+    assert 'get("OPS_API_KEY", "")' in user_data
+    assert "OPS_API_KEY=$OPS_API_KEY" in user_data
+    assert user_data.startswith("#!/bin/bash -eu\n")
+    assert "#!/bin/bash -eux" not in user_data

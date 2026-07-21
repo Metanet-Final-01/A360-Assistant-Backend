@@ -103,6 +103,7 @@ jobs:
               VoyageApiKey="${{ secrets.VOYAGE_API_KEY }}" \
               JwtSecret="${{ secrets.JWT_SECRET }}" \
               GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
+              OpsApiKey="${{ secrets.OPS_API_KEY }}" \
               AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
               AssuranceWriterRepository="${{ github.repository }}" \
               EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}" \
