@@ -5,6 +5,9 @@ v2 문서 카탈로그는 dl 추출 실패 + LLM 보강 미도달 행이 metadat
 스펙(schema)을 분리해 적재하는 계약을 검증한다. DB는 가짜 커넥션으로 대체한다.
 """
 
+import pytest
+
+from app.services import catalog as cat_mod
 from app.services.catalog import BackendCatalog
 
 
@@ -39,7 +42,8 @@ class _FakeConn:
 def _catalog_with(rows, monkeypatch):
     from app.rag.store import db
 
-    monkeypatch.setattr(db, "connect", lambda: _FakeConn(rows))
+    # connect는 이제 connect_timeout= 키워드를 받는다(RPA-225) — 인자를 흡수한다.
+    monkeypatch.setattr(db, "connect", lambda **kw: _FakeConn(rows))
     return BackendCatalog()
 
 
@@ -110,7 +114,7 @@ def test_trigger_menu_failure_not_cached(monkeypatch):
     calls = {"n": 0}
     rows = [("Email trigger", "Creating an email trigger", "/x", "메일 수신 시 실행", 0)]
 
-    def _connect():
+    def _connect(**kw):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("db down")
@@ -130,3 +134,222 @@ def test_placeholder_never_overwrites_schema_row(monkeypatch):
     ]
     cat = _catalog_with(rows, monkeypatch)
     assert "params_unknown" not in cat.get_action_schema("Email", "Send")
+
+
+# --- TTL 재적재 (RPA-225) — 적재 후 옛 카탈로그 영구화 방지 ---
+
+def _clock(monkeypatch, start=1000.0):
+    """catalog의 monotonic 시계를 제어 가능하게 대체한다."""
+    box = {"t": start}
+    monkeypatch.setattr(cat_mod.time, "monotonic", lambda: box["t"])
+    return box
+
+
+def _counting_connect(monkeypatch, rows_by_call):
+    """호출 순서별로 다른 rows를 주는 가짜 connect. 호출 횟수를 함께 돌려준다."""
+    from app.rag.store import db
+
+    calls = {"n": 0}
+
+    def _connect(**kw):
+        calls["n"] += 1
+        rows = rows_by_call(calls["n"])
+        if isinstance(rows, Exception):
+            raise rows
+        return _FakeConn(rows)
+
+    monkeypatch.setattr(db, "connect", _connect)
+    return calls
+
+
+def _wait_reload(cat, flag_attr, timeout=5.0):
+    """백그라운드 재적재 스레드가 끝날 때까지 기다린다(플래그가 내려갈 때까지 폴링).
+
+    catalog의 monotonic만 monkeypatch되고 time.time/sleep은 실제라 폴링이 가능하다.
+    """
+    import time as real_time
+
+    deadline = real_time.time() + timeout
+    while getattr(cat, flag_attr) and real_time.time() < deadline:
+        real_time.sleep(0.005)
+    assert not getattr(cat, flag_attr), "백그라운드 재적재가 시간 내 끝나지 않음"
+
+
+def test_no_reload_within_ttl(monkeypatch):
+    """TTL 이내 반복 조회는 재적재하지 않는다 — 병렬 step 노드가 매번 DB를 때리면 안 된다."""
+    _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: [("Excel", "Open", {"schema": {"name": "Open"}})])
+    cat = BackendCatalog()
+    for _ in range(5):
+        cat.get_action_schema("Excel", "Open")
+    assert calls["n"] == 1
+
+
+def test_reload_after_ttl_reflects_new_ingest(monkeypatch):
+    """TTL 경과 후 재적재(백그라운드)로 새로 적재된 액션을 본다 — 다중 인스턴스 수렴의 핵심."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: (
+        [("Excel", "Open", {"schema": {"name": "Open"}})] if n == 1
+        else [("Excel", "Open", {"schema": {"name": "Open"}}),
+              ("New", "Action", {"schema": {"name": "Action"}})]
+    ))
+    cat = BackendCatalog()
+    assert cat.get_action_schema("New", "Action") is None  # 첫 동기 적재 — New 없음
+    assert calls["n"] == 1
+    clock["t"] += 601  # TTL 경과
+    cat.get_action_schema("New", "Action")  # stale 조회가 백그라운드 재적재를 트리거
+    #  (반환값은 옛 값/새 값 레이스라 검증하지 않는다 — non-blocking 보장은
+    #   test_reload_is_nonblocking_during_slow_load가 느린 DB로 안정적으로 검증한다)
+    _wait_reload(cat, "_reloading_index")  # 백그라운드 재적재 완료 대기
+    assert calls["n"] == 2
+    assert cat.get_action_schema("New", "Action") is not None  # 재적재 반영
+
+
+def test_reload_is_nonblocking_during_slow_load(monkeypatch):
+    """재적재(느린 DB) 중에도 다른 조회는 막히지 않는다 — Qodo 지적(락 블로킹)의 직접 검증."""
+    import threading as _th
+
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    release = _th.Event()
+    from app.rag.store import db
+
+    calls = {"n": 0}
+
+    def _connect(**kw):
+        calls["n"] += 1
+        if calls["n"] >= 2:  # 재적재는 release 전까지 블록(느린 DB 시뮬레이션)
+            release.wait(timeout=5)
+        return _FakeConn([("Excel", "Open", {"schema": {"name": "Open"}})])
+
+    monkeypatch.setattr(db, "connect", _connect)
+    cat = BackendCatalog()
+    cat.get_action_schema("Excel", "Open")  # 첫 동기 적재
+    clock["t"] += 601
+    cat.get_action_schema("Excel", "Open")  # 백그라운드 재적재 트리거(release 대기 중)
+    assert cat._reloading_index is True  # 재적재 진행 중
+    # 재적재가 DB에 매여 있어도 이 조회는 옛 값을 즉시 받아야 한다(락 대기로 막히면 실패)
+    assert cat.get_action_schema("Excel", "Open") is not None
+    release.set()
+    _wait_reload(cat, "_reloading_index")
+
+
+def test_reload_failure_keeps_old_index_and_backs_off(monkeypatch):
+    """재적재 실패 시 옛 인덱스를 유지하고, 다음 TTL까지 재시도하지 않는다(매 조회 DB 폭격 방지)."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: (
+        [("Excel", "Open", {"schema": {"name": "Open"}})] if n == 1 else RuntimeError("db down")
+    ))
+    cat = BackendCatalog()
+    assert cat.get_action_schema("Excel", "Open") is not None  # 첫 적재 성공
+    clock["t"] += 601
+    assert cat.get_action_schema("Excel", "Open") is not None  # 옛 것 즉시 반환(예외 X)
+    _wait_reload(cat, "_reloading_index")  # 백그라운드 재적재(실패) 완료
+    assert calls["n"] == 2  # 재적재 시도함
+    assert cat.get_action_schema("Excel", "Open") is not None  # 실패해도 옛 것 유지
+    cat.get_action_schema("Excel", "Open")  # 백오프 — 같은 창에선 재트리거 안 함
+    assert calls["n"] == 2
+
+
+def test_first_load_failure_raises(monkeypatch):
+    """첫 적재 실패는 올린다 — 쓸 인덱스가 아예 없다(기존 동작 보존)."""
+    _clock(monkeypatch)
+    _counting_connect(monkeypatch, lambda n: RuntimeError("db down"))
+    cat = BackendCatalog()
+    with pytest.raises(RuntimeError):
+        cat.get_action_schema("Excel", "Open")
+
+
+def test_ttl_zero_means_infinite_cache(monkeypatch):
+    """TTL<=0이면 재적재하지 않는다(무한 캐시, RPA-225 이전 동작)."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 0)
+    calls = _counting_connect(monkeypatch, lambda n: [("Excel", "Open", {"schema": {"name": "Open"}})])
+    cat = BackendCatalog()
+    cat.get_action_schema("Excel", "Open")
+    clock["t"] += 100_000
+    cat.get_action_schema("Excel", "Open")
+    assert calls["n"] == 1
+
+
+def test_trigger_menu_reloads_after_ttl(monkeypatch):
+    """트리거 메뉴도 TTL 경과 후 백그라운드 재적재한다(index와 대칭)."""
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: (
+        [("T1", "trig one", "/x", "c", 0)] if n == 1
+        else [("T1", "trig one", "/x", "c", 0), ("T2", "trig two", "/y", "c", 0)]
+    ))
+    cat = BackendCatalog()
+    assert len(cat.list_trigger_schemas()) == 1  # 첫 동기 적재
+    clock["t"] += 601
+    cat.list_trigger_schemas()  # stale 조회가 백그라운드 재적재를 트리거(반환값은 레이스)
+    _wait_reload(cat, "_reloading_triggers")
+    assert len(cat.list_trigger_schemas()) == 2  # 재적재 반영
+    assert calls["n"] == 2
+
+
+def test_reload_thread_start_failure_rolls_back_flag(monkeypatch):
+    """스레드 시작 실패 시 재적재 플래그가 롤백된다 — 영구 stale 고착 방지 (Qodo 리뷰).
+
+    _start_reload가 플래그를 True로 세운 뒤 Thread.start()가 실패하면 worker가 안 돌아
+    finally가 플래그를 못 내린다. 롤백이 없으면 이후 재적재가 영원히 억제된다.
+    """
+    import threading as _th
+
+    clock = _clock(monkeypatch)
+    monkeypatch.setattr(cat_mod, "_CATALOG_TTL_SEC", 600.0)
+    calls = _counting_connect(monkeypatch, lambda n: [("Excel", "Open", {"schema": {"name": "Open"}})])
+    cat = BackendCatalog()
+    cat.get_action_schema("Excel", "Open")  # 첫 적재
+    clock["t"] += 601
+
+    orig_start = _th.Thread.start
+    monkeypatch.setattr(_th.Thread, "start", lambda self: (_ for _ in ()).throw(RuntimeError("no thread")))
+    cat.get_action_schema("Excel", "Open")  # stale → _start_reload → start 실패
+    assert cat._reloading_index is False, "start 실패 후 플래그가 True로 고착됨"
+
+    # start 복구 후 다음 stale 조회는 재적재를 다시 시도할 수 있어야 한다
+    monkeypatch.setattr(_th.Thread, "start", orig_start)
+    cat.get_action_schema("Excel", "Open")
+    _wait_reload(cat, "_reloading_index")
+    assert calls["n"] == 2  # 재적재가 다시 돌았다(영구 정지 아님)
+
+
+def test_load_applies_db_timeouts(monkeypatch):
+    """_load가 connect_timeout과 statement_timeout을 건다 — 무한 블로킹 방지 (Qodo 리뷰)."""
+    from app.rag.store import db
+
+    captured = {"connect_timeout": "unset", "statements": []}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql):
+            captured["statements"].append(sql)
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    def _connect(**kw):
+        captured["connect_timeout"] = kw.get("connect_timeout")
+        return _Conn()
+
+    monkeypatch.setattr(db, "connect", _connect)
+    BackendCatalog().get_action_schema("x", "y")
+    assert captured["connect_timeout"] == cat_mod._CATALOG_DB_TIMEOUT_SEC
+    assert any("statement_timeout" in s for s in captured["statements"])

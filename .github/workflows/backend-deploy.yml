@@ -115,6 +115,15 @@ jobs:
           aws s3 cp "infra/rag-ingest-scheduler-sqs.yaml" "s3://${NESTED_BUCKET}/${KEY}"
           echo "rag_scheduler_template_url=https://${NESTED_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${KEY}" >> "$GITHUB_OUTPUT"
 
+      - name: Validate Ops API credential
+        env:
+          OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
+        run: |
+          if [ -z "$OPS_API_KEY" ]; then
+            echo "OPS_API_KEY secret is required for the deployed Backoffice integration." >&2
+            exit 1
+          fi
+
       - name: Deploy CloudFormation
         env:
           P_ENVIRONMENT: ${{ inputs.environment || 'dev' }}
@@ -124,6 +133,7 @@ jobs:
           P_VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
           P_JWT_SECRET: ${{ secrets.JWT_SECRET }}
           P_GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          P_OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
           P_ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
           P_ASSURANCE_WRITER_REPOSITORY: ${{ github.repository }}
           P_RAG_DATABASE_URL: ${{ secrets.RAG_DATABASE_URL }}
@@ -154,6 +164,7 @@ jobs:
               VoyageApiKey="$P_VOYAGE_API_KEY" \
               JwtSecret="$P_JWT_SECRET" \
               GithubToken="$P_GHCR_READ_TOKEN" \
+              OpsApiKey="$P_OPS_API_KEY" \
               AssuranceWriterToken="$P_ASSURANCE_WRITER_TOKEN" \
               AssuranceWriterRepository="$P_ASSURANCE_WRITER_REPOSITORY" \
               RagDatabaseUrl="$P_RAG_DATABASE_URL" \

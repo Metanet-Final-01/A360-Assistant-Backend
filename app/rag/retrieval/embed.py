@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -39,78 +40,112 @@ def _record_embed_usage(data: dict) -> None:
         logger.debug("임베딩 사용량 기록 실패 (무시)", exc_info=True)
 
 
+_client_lock = threading.Lock()
+_shared_client: httpx.Client | None = None
+
+
+def get_shared_client() -> httpx.Client:
+    """동기 외부 API 호출용 프로세스 공용 httpx.Client (RPA-219).
+
+    이전에는 post_with_retry가 호출마다 httpx.Client()를 열고 버려서 임베딩·리랭크
+    요청이 매번 새 TCP+TLS 연결로 나갔다. 비동기 경로(/api/rag/search)는 pool.py의
+    앱 전역 AsyncClient로 이미 연결을 재사용하는데 에이전트가 타는 이 동기 경로만
+    빠져 있었다 — 같은 이유로 keep-alive 이득을 전혀 못 받고 있었다.
+
+    httpx.Client는 스레드 세이프하므로 to_thread 워커들이 그대로 공유한다.
+    verify에 pool.py의 공용 SSL 컨텍스트를 넘겨 컨텍스트도 함께 재사용한다.
+    """
+    global _shared_client
+    if _shared_client is None:
+        with _client_lock:
+            if _shared_client is None:
+                from ..store.pool import get_ssl_context
+
+                _shared_client = httpx.Client(timeout=60.0, verify=get_ssl_context())
+    return _shared_client
+
+
+def close_shared_client() -> None:
+    """앱 종료 시 공용 클라이언트를 닫는다 (main.py lifespan)."""
+    global _shared_client
+    with _client_lock:
+        if _shared_client is not None:
+            _shared_client.close()
+            _shared_client = None
+
+
 def post_with_retry(url: str, headers: dict, payload: dict, retries: int = 5) -> dict:
     last_status = None
     last_body = ""
-    with httpx.Client(timeout=60.0) as client:
-        for attempt in range(retries):
-            started_at = datetime.now(timezone.utc)
-            started = time.perf_counter()
-            try:
-                resp = client.post(url, headers=headers, json=payload)
-            except httpx.HTTPError as exc:
-                log_event(
-                    "external_api_attempt",
-                    url=url,
-                    attempt=attempt + 1,
-                    retries=retries,
-                    status="error",
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                    started_at=started_at.isoformat(),
-                    ended_at=datetime.now(timezone.utc).isoformat(),
-                )
-                if attempt == retries - 1:
-                    raise RuntimeError(f"external API request failed: {url} {type(exc).__name__}: {exc}")
-                time.sleep(2**attempt)
-                continue
-
-            last_status = resp.status_code
-            last_body = resp.text[:500]
-            if resp.status_code == 429 or resp.status_code >= 500:
-                wait = float(resp.headers.get("retry-after", 2**attempt))
-                log_event(
-                    "external_api_attempt",
-                    url=url,
-                    attempt=attempt + 1,
-                    retries=retries,
-                    status="retry",
-                    status_code=resp.status_code,
-                    response_preview=last_body,
-                    wait_seconds=wait,
-                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                    started_at=started_at.isoformat(),
-                    ended_at=datetime.now(timezone.utc).isoformat(),
-                )
-                time.sleep(wait)
-                continue
-            if resp.status_code >= 400:
-                log_event(
-                    "external_api_attempt",
-                    url=url,
-                    attempt=attempt + 1,
-                    retries=retries,
-                    status="error",
-                    status_code=resp.status_code,
-                    response_preview=last_body,
-                    duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                    started_at=started_at.isoformat(),
-                    ended_at=datetime.now(timezone.utc).isoformat(),
-                )
-            resp.raise_for_status()
+    client = get_shared_client()
+    for attempt in range(retries):
+        started_at = datetime.now(timezone.utc)
+        started = time.perf_counter()
+        try:
+            resp = client.post(url, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
             log_event(
                 "external_api_attempt",
                 url=url,
                 attempt=attempt + 1,
                 retries=retries,
-                status="ok",
-                status_code=resp.status_code,
+                status="error",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
                 started_at=started_at.isoformat(),
                 ended_at=datetime.now(timezone.utc).isoformat(),
             )
-            return resp.json()
+            if attempt == retries - 1:
+                raise RuntimeError(f"external API request failed: {url} {type(exc).__name__}: {exc}")
+            time.sleep(2**attempt)
+            continue
+
+        last_status = resp.status_code
+        last_body = resp.text[:500]
+        if resp.status_code == 429 or resp.status_code >= 500:
+            wait = float(resp.headers.get("retry-after", 2**attempt))
+            log_event(
+                "external_api_attempt",
+                url=url,
+                attempt=attempt + 1,
+                retries=retries,
+                status="retry",
+                status_code=resp.status_code,
+                response_preview=last_body,
+                wait_seconds=wait,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                started_at=started_at.isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+            time.sleep(wait)
+            continue
+        if resp.status_code >= 400:
+            log_event(
+                "external_api_attempt",
+                url=url,
+                attempt=attempt + 1,
+                retries=retries,
+                status="error",
+                status_code=resp.status_code,
+                response_preview=last_body,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+                started_at=started_at.isoformat(),
+                ended_at=datetime.now(timezone.utc).isoformat(),
+            )
+        resp.raise_for_status()
+        log_event(
+            "external_api_attempt",
+            url=url,
+            attempt=attempt + 1,
+            retries=retries,
+            status="ok",
+            status_code=resp.status_code,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            started_at=started_at.isoformat(),
+            ended_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return resp.json()
     detail = f"status={last_status} body={last_body}" if last_status else "no response"
     raise RuntimeError(f"external API failed after {retries} retries: {url} ({detail})")
 

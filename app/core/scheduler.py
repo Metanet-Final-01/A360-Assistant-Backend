@@ -41,7 +41,9 @@ def _health_job() -> None:
 
 
 def _rollup_enabled() -> bool:
-    return os.getenv("METRICS_ROLLUP_ENABLED", "true").strip().lower() not in ("false", "0", "no")
+    # "off"도 off로 본다 — config._bool·auth._cookie_security와 같은 목록으로 통일 (RPA-224 Qodo).
+    # 여기만 off가 빠져 있어 METRICS_ROLLUP_ENABLED=off가 config 선언과 갈렸다.
+    return os.getenv("METRICS_ROLLUP_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
 
 def _health_watch_enabled() -> bool:

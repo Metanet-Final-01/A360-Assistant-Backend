@@ -31,11 +31,18 @@ def test_records_failed_mutation(monkeypatch):
 
 
 def test_skips_get_requests(monkeypatch):
-    """조회(GET)는 여전히 감사 DB에 안 남는다 (중요 이벤트만)."""
+    """조회(GET)는 여전히 감사 DB에 안 남는다 (중요 이벤트만).
+
+    ⚠️ /api/health를 쓰면 안 된다 — RPA-222부터 헬스 경로는 미들웨어 초입에서 통째로
+    스킵되므로 "GET이라서 제외"가 아니라 "경로라서 제외"로 공허하게 통과한다.
+    스킵 목록에 없는 GET 경로여야 이 테스트가 검증하려는 분기를 실제로 태운다.
+    """
     calls = []
     monkeypatch.setattr(hl, "_record_audit", lambda *a: calls.append(a))
+    monkeypatch.setattr("app.rag.observability.log_event", lambda *a, **k: None)
+    monkeypatch.setattr(hl, "_record_metric", lambda *a, **k: None)
     with TestClient(app) as c:
-        c.get("/api/health")
+        c.get("/api/message")
     assert calls == []
 
 

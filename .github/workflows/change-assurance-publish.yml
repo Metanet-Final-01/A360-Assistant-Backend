@@ -85,7 +85,7 @@ jobs:
           ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
           ASSURANCE_WRITER_URL: ${{ vars.ASSURANCE_WRITER_URL }}
         run: >-
-          python scripts/publish_change_assurance.py
+          python -m scripts.publish_change_assurance
           --event "$GITHUB_EVENT_PATH"
           --artifacts "$RUNNER_TEMP/change-assurance"
           --repository "$GITHUB_REPOSITORY"
