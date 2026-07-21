@@ -94,12 +94,14 @@ def test_health_obs_db_down_degraded_but_200(monkeypatch):
     assert r.json()["checks"]["observability_database"] == "fail"
 
 
-def test_health_live_ok_after_successful_boot():
-    """/health/live — 부팅(마이그레이션) 성공 시 200 (ALB 타겟그룹 계약, RPA-222).
+def test_health_live_ok_when_schema_current(monkeypatch):
+    """/health/live — 부팅 성공 + 스키마 최신이면 200 (ALB 타겟그룹 계약, RPA-222).
 
-    의존성 스텁이 없다는 것 자체가 계약이다: 이 라우트는 공유 의존성을 찌르면 안 된다
-    (공유 장애 시 ASG가 전 플릿을 교체하는 걸 막는 게 존재 이유).
+    유닛은 DB 없이 돈다 — run_migrations·schema_is_current를 스텁한다. schema_is_current의
+    실제 리비전 대조는 tests/integration이 실 Postgres로 검증한다(test_alerts와 같은 원칙).
     """
+    monkeypatch.setattr("app.db.run_migrations", lambda: None)
+    monkeypatch.setattr("app.db.schema_is_current", lambda: True)
     with TestClient(app) as c:
         r = c.get("/health/live")
     assert r.status_code == 200
@@ -107,15 +109,27 @@ def test_health_live_ok_after_successful_boot():
 
 
 def test_health_live_migration_failure_503(monkeypatch):
-    """마이그레이션 실패 인스턴스는 503 — 타겟그룹 진입 차단 (RPA-222).
-
-    이전 동작(경고만 남기고 정상 부팅)이면 스키마 깨진 인스턴스가 트래픽을 받았다.
-    """
+    """마이그레이션 실패(예외) 인스턴스는 503 — 타겟그룹 진입 차단 (RPA-222)."""
 
     def _boom():
         raise RuntimeError("migration failed")
 
     monkeypatch.setattr("app.db.run_migrations", _boom)
+    with TestClient(app) as c:
+        r = c.get("/health/live")
+    assert r.status_code == 503
+    assert r.json()["status"] == "boot_failed"
+
+
+def test_health_live_stale_schema_503(monkeypatch):
+    """run_migrations가 예외 없이 리턴해도 스키마가 낡으면 503 (RPA-222 Qodo 반영).
+
+    공유 DB(APP_DATABASE_URL) 구성에서 run_migrations는 마이그레이션을 적용하지 않고
+    early-return한다 — 그것만으로 200을 주면 스키마 낡은 인스턴스가 타겟그룹에 들어간다.
+    migrations_ok는 '리턴했다'(대리 지표)가 아니라 schema_is_current(실제 상태)로 판정한다.
+    """
+    monkeypatch.setattr("app.db.run_migrations", lambda: None)  # 성공/스킵
+    monkeypatch.setattr("app.db.schema_is_current", lambda: False)  # 스키마 낡음
     with TestClient(app) as c:
         r = c.get("/health/live")
     assert r.status_code == 503

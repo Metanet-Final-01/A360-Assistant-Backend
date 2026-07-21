@@ -40,11 +40,15 @@ async def lifespan(app: FastAPI):
     app.state.migrations_ok = False
     # Alembic으로 스키마를 head까지 올린다 (신규 DB는 전체 생성, 최신 DB는 no-op).
     try:
-        from app.db import run_migrations
+        from app.db import run_migrations, schema_is_current
 
         run_migrations()
-        app.state.migrations_ok = True
-        logger.info("DB 마이그레이션 완료 (alembic head)")
+        # migrations_ok는 'run_migrations가 예외 없이 리턴'(대리 지표)이 아니라 **스키마가
+        # 실제로 코드 head인지**로 판정한다 (RPA-222 Qodo 반영). run_migrations는 공유 DB에서
+        # 마이그레이션을 적용하지 않고 early-return하므로, 그것만으로 True로 두면 스키마가
+        # 낡은 인스턴스도 /health/live 200을 줘 타겟그룹에 들어간다.
+        app.state.migrations_ok = schema_is_current()
+        logger.info("DB 마이그레이션 처리 (스키마 최신=%s)", app.state.migrations_ok)
     except Exception as e:  # noqa: BLE001
         logger.warning("DB 마이그레이션 실패 (앱은 계속 기동): %s", e)
     # 관리자 부트스트랩(RPA-118) — ADMIN_EMAILS 시드 계정을 is_admin으로 백필(멱등).
