@@ -6,6 +6,9 @@ on:
       environment:
         description: "CloudFormation environment"
         required: true
+        type: choice
+        options:
+          - dev
         default: dev
       deploy_stack:
         description: "Deploy CloudFormation stack after image push"
@@ -89,6 +92,7 @@ jobs:
     needs: build
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)
     runs-on: ubuntu-latest
+    # 현재 STACK_NAME이 dev 전용이다. 이 Environment는 Writer 자격 증명의 보호 경계다.
     environment: change-assurance-writer
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

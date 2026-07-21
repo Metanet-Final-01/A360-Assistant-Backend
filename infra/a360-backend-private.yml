@@ -894,6 +894,7 @@ Resources:
               OPENSEARCH_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENSEARCH_PASSWORD", ""))')
               ASSURANCE_WRITER_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_TOKEN", ""))')
               ASSURANCE_WRITER_REPOSITORY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_REPOSITORY", ""))')
+              unset DB_SECRET_JSON APP_SECRET_JSON
 
               if [ -n "$GITHUB_TOKEN" ]; then
                 echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin

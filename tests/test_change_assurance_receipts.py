@@ -556,9 +556,11 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
 
 
 def test_backend_deploy_injects_writer_credentials_from_protected_environment():
-    workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    workflow_source = (ROOT / ".github/workflows/backend-deploy.yml").read_text(
+        encoding="utf-8"
     )
+    workflow = yaml.safe_load(workflow_source)
+    workflow_contract = yaml.load(workflow_source, Loader=yaml.BaseLoader)
     template = yaml.load(
         (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
         Loader=_CloudFormationLoader,
@@ -579,6 +581,11 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
 
     assert "ASSURANCE_WRITER_TOKEN" not in str(build_job)
     assert deploy_job["environment"] == "change-assurance-writer"
+    environment_input = workflow_contract["on"]["workflow_dispatch"]["inputs"][
+        "environment"
+    ]
+    assert environment_input["type"] == "choice"
+    assert environment_input["options"] == ["dev"]
     assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in deploy_uses
     assert (
         "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
@@ -601,4 +608,7 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "#!/bin/bash -eux" not in user_data
     env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
     env_write = user_data.index("cat > /opt/a360/.env <<EOF")
+    secret_unset = user_data.index("unset DB_SECRET_JSON APP_SECRET_JSON")
+    writer_extract = user_data.index('get("ASSURANCE_WRITER_TOKEN", "")')
+    assert writer_extract < secret_unset < env_write
     assert env_mode < env_write
