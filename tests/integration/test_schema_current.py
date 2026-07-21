@@ -18,14 +18,19 @@ def test_true_after_head_migration(integration_engine, monkeypatch):
 def test_false_when_revision_stale(integration_engine, db_session, monkeypatch):
     """리비전이 낡으면 False — 공유 DB 스키마 낡음 시나리오(run_migrations는 스킵해도).
 
-    alembic_version을 낡은 값으로 바꿔 확인하고 원복한다(다른 테스트에 영향 없게).
+    alembic_version 전체 행을 백업/복구한다 — 멀티 head면 여러 행일 수 있어 scalar()로
+    1개만 스냅샷하면 복구 시 나머지를 잃어 이후 테스트 DB를 오염시킨다(Qodo).
     """
     monkeypatch.setenv("DATABASE_NAME", "a360_test")
-    orig = db_session.execute(text("select version_num from alembic_version")).scalar()
+    orig = [r[0] for r in db_session.execute(text("select version_num from alembic_version")).all()]
     db_session.execute(text("update alembic_version set version_num = '0001'"))
     db_session.commit()
     try:
         assert app_db.schema_is_current() is False
     finally:
-        db_session.execute(text("update alembic_version set version_num = :v"), {"v": orig})
+        db_session.execute(text("delete from alembic_version"))
+        for v in orig:
+            db_session.execute(
+                text("insert into alembic_version (version_num) values (:v)"), {"v": v}
+            )
         db_session.commit()
