@@ -600,6 +600,8 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "types: [submitted, dismissed]" in observe
     assert "python -m assurance.change.review_evidence" in observe
     assert "--review-evidence" in observe
+    assert "First rollout: execute only the checker already trusted" in observe
+    assert "grep -q -- '--review-evidence' assurance/change/cli.py" in observe
     assert "actions: read" in workflow_header
     assert "contents: read" in workflow_header
     assert "pull-requests: read" in workflow_header

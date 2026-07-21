@@ -69,19 +69,30 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check \
             -r requirements.txt -r requirements-dev.txt
-          python -m assurance.change.review_evidence \
-            --event "$GITHUB_EVENT_PATH" \
-            --event-name "$ASSURANCE_EVENT_NAME" \
-            --repository "$ASSURANCE_REPOSITORY" \
-            --head-sha "$ASSURANCE_HEAD_SHA" \
-            --output "$ASSURANCE_REVIEW_EVIDENCE"
-          python -m assurance.change.cli \
-            --repo "$ASSURANCE_SUBJECT" \
-            --base-sha "$ASSURANCE_BASE_SHA" \
-            --head-sha "$ASSURANCE_HEAD_SHA" \
-            --repository "$ASSURANCE_REPOSITORY" \
-            --review-evidence "$ASSURANCE_REVIEW_EVIDENCE" \
-            --output "$ASSURANCE_OUTPUT"
+          if [[ -f assurance/change/review_evidence.py ]] && \
+             grep -q -- '--review-evidence' assurance/change/cli.py; then
+            python -m assurance.change.review_evidence \
+              --event "$GITHUB_EVENT_PATH" \
+              --event-name "$ASSURANCE_EVENT_NAME" \
+              --repository "$ASSURANCE_REPOSITORY" \
+              --head-sha "$ASSURANCE_HEAD_SHA" \
+              --output "$ASSURANCE_REVIEW_EVIDENCE"
+            python -m assurance.change.cli \
+              --repo "$ASSURANCE_SUBJECT" \
+              --base-sha "$ASSURANCE_BASE_SHA" \
+              --head-sha "$ASSURANCE_HEAD_SHA" \
+              --repository "$ASSURANCE_REPOSITORY" \
+              --review-evidence "$ASSURANCE_REVIEW_EVIDENCE" \
+              --output "$ASSURANCE_OUTPUT"
+          else
+            # First rollout: execute only the checker already trusted on the base branch.
+            python -m assurance.change.cli \
+              --repo "$ASSURANCE_SUBJECT" \
+              --base-sha "$ASSURANCE_BASE_SHA" \
+              --head-sha "$ASSURANCE_HEAD_SHA" \
+              --repository "$ASSURANCE_REPOSITORY" \
+              --output "$ASSURANCE_OUTPUT"
+          fi
 
       - name: Record bootstrap as unassured
         if: steps.trusted_runner.outputs.available != 'true'
