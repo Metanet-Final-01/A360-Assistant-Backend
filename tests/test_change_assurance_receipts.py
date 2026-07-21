@@ -566,7 +566,11 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     build_job = workflow["jobs"]["build"]
     deploy_job = workflow["jobs"]["deploy"]
     deploy_uses = {step["uses"] for step in deploy_job["steps"] if "uses" in step}
-    deploy_script = next(step["run"] for step in deploy_job["steps"] if "run" in step)
+    deploy_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Deploy CloudFormation"
+    )
+    deploy_env = deploy_step["env"]
+    deploy_script = deploy_step["run"]
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
@@ -580,8 +584,10 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
         "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
         in deploy_uses
     )
-    assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
-    assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
+    assert deploy_env["P_ASSURANCE_WRITER_TOKEN"] == "${{ secrets.ASSURANCE_WRITER_TOKEN }}"
+    assert deploy_env["P_ASSURANCE_WRITER_REPOSITORY"] == "${{ github.repository }}"
+    assert 'AssuranceWriterToken="$P_ASSURANCE_WRITER_TOKEN"' in deploy_script
+    assert 'AssuranceWriterRepository="$P_ASSURANCE_WRITER_REPOSITORY"' in deploy_script
 
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
