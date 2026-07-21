@@ -11,12 +11,13 @@
 
 import base64
 import hashlib
-import os
 import time
 import uuid
 
 import bcrypt
 import jwt
+
+from app.core import config
 
 _JWT_ALGORITHM = "HS256"
 # 사용자 없음일 때 login이 비교에 쓰는 더미 해시 — 존재 여부에 따른 타이밍 차이를 없앤다
@@ -45,10 +46,10 @@ def verify_dummy() -> None:
 
 
 def _secret() -> str:
-    secret = os.getenv("JWT_SECRET", "").strip()
+    secret = (config.JWT_SECRET or "").strip()
     if secret:
         return secret
-    if os.getenv("APP_ENV", "development").lower() == "production":
+    if config.APP_ENV.lower() == "production":
         raise RuntimeError("JWT_SECRET 환경변수가 프로덕션에서 반드시 필요합니다")
     return "dev-only-insecure-secret-do-not-use-in-prod"  # 로컬 개발 전용
 
@@ -74,13 +75,13 @@ def _create_token(user_id: uuid.UUID | str, *, typ: str, ttl_seconds: int) -> st
 
 
 def create_access_token(user_id: uuid.UUID | str) -> str:
-    expire_minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+    expire_minutes = config.ACCESS_TOKEN_EXPIRE_MINUTES
     return _create_token(user_id, typ=TOKEN_TYPE_ACCESS, ttl_seconds=expire_minutes * 60)
 
 
 def create_refresh_token(user_id: uuid.UUID | str) -> str:
     """장수명 갱신 토큰. 원문은 클라이언트만 갖고, 서버는 해시만 저장한다(RPA-200)."""
-    expire_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "14"))
+    expire_days = config.REFRESH_TOKEN_EXPIRE_DAYS
     return _create_token(user_id, typ=TOKEN_TYPE_REFRESH, ttl_seconds=expire_days * 86400)
 
 

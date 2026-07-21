@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 
 # /debug, /api/rag/logs/recent는 디버그 콘솔이 1.5초마다 스스로 폴링하는 경로라 제외한다
 # (그러지 않으면 로그가 자기 자신의 폴링 기록으로 도배된다).
-_SKIP_HTTP_LOG_PREFIXES = ("/api/rag/logs/recent", "/debug")
+# 헬스 경로도 같은 병이다 (RPA-222): ALB(30초×AZ 2) + docker healthcheck(30초)면
+# 인스턴스당 하루 8,640회 — 현재 request_metrics 일평균의 22배가 프로브 기록으로 찬다.
+# prefix 매칭이라 "/health"가 /health/live까지 덮는다.
+_SKIP_HTTP_LOG_PREFIXES = ("/api/rag/logs/recent", "/debug", "/health", "/api/health")
 _AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # 성능 메트릭(request_metrics)에서 제외 — CORS preflight 등 노이즈 (RPA-103)
 _METRIC_SKIP_METHODS = {"OPTIONS", "HEAD"}

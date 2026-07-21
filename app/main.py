@@ -32,15 +32,30 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 설정 레지스트리 리포트 (RPA-224) — 미설정 시 조용히 저하되는 키를 기동 로그에 드러낸다
+    # (RPA-160: OPENSEARCH_HOST 무음 폴백 사고의 처방 — 폴백을 없애는 게 아니라 보이게 한다).
+    from app.core import config as app_config
+
+    app_config.startup_report()
     # DB 없이도 앱은 기동돼야 한다 (프론트 로컬 개발 등) — 실패는 경고만 남긴다.
+    # 단 그 결과는 상태로 남긴다(RPA-222): /health/live가 이 플래그로 503을 줘서,
+    # 마이그레이션이 실패한 인스턴스가 ALB 타겟그룹에 들어가는 걸 막는다. 이전엔
+    # 경고만 남기고 정상 부팅해 스키마 깨진 채 트래픽을 받았다.
+    # (매 기동마다 False에서 시작 — 재기동 시 직전 성공이 남아 있으면 안 된다.)
+    app.state.migrations_ok = False
     # Alembic으로 스키마를 head까지 올린다 (신규 DB는 전체 생성, 최신 DB는 no-op).
     try:
-        from app.db import run_migrations
+        from app.db import run_migrations, schema_is_current
 
         run_migrations()
-        logger.info("DB 마이그레이션 완료 (alembic head)")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("DB 마이그레이션 실패 (앱은 계속 기동): %s", e)
+        # migrations_ok는 'run_migrations가 예외 없이 리턴'(대리 지표)이 아니라 **스키마가
+        # 실제로 코드 head인지**로 판정한다 (RPA-222 Qodo 반영). run_migrations는 공유 DB에서
+        # 마이그레이션을 적용하지 않고 early-return하므로, 그것만으로 True로 두면 스키마가
+        # 낡은 인스턴스도 /health/live 200을 줘 타겟그룹에 들어간다.
+        app.state.migrations_ok = schema_is_current()
+        logger.info("DB 마이그레이션 처리 (스키마 최신=%s)", app.state.migrations_ok)
+    except Exception:  # noqa: BLE001
+        logger.exception("DB 마이그레이션 실패 (앱은 계속 기동)")
     # 관리자 부트스트랩(RPA-118) — ADMIN_EMAILS 시드 계정을 is_admin으로 백필(멱등).
     # migration 직후 재로그인을 기다리지 않고 여기서 승격 (DB 미가동이면 경고만).
     try:
@@ -73,6 +88,21 @@ async def lifespan(app: FastAPI):
     yield
     stop_scheduler()
     await close_pools()
+    # 에이전트가 타는 동기 검색 경로의 재사용 자원 (RPA-219) — 지연 생성이라 여기선 정리만 한다.
+    from app.rag.retrieval.embed import close_shared_client as close_external_client
+    from app.rag.store.db import close_sync_pool
+    from app.rag.store.opensearch_client import close_shared_client as close_opensearch_client
+
+    close_sync_pool()
+    close_external_client()
+    close_opensearch_client()
+    # 관측 이벤트 큐(RPA-221) — 남은 이벤트를 내보내고 워커를 정리한다. 지연 생성이라
+    # 기동 시 할 일은 없고, 여기서 flush해야 정상 종료에서 유실이 0이 된다.
+    # **맨 마지막**에 둔다: 위 정리 단계가 이벤트를 남기더라도 그것까지 내보내고 끝낸다.
+    # 큐 워커는 관측 DB(별도 엔진)를 쓰므로 위에서 닫은 검색 경로 자원과 무관하다.
+    from app.rag.event_queue import stop as stop_event_queue
+
+    stop_event_queue()
 
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
@@ -230,15 +260,40 @@ def compute_health() -> dict:
 
 @app.get("/health")
 def health(response: Response) -> dict:
-    """의존성 체크 포함 헬스 (RPA-117) — 백오피스 생존 감시 probe·ALB 헬스체크의 대상.
+    """의존성 체크 포함 헬스 (RPA-117) — 백오피스 생존 감시 probe의 대상.
 
     판정은 compute_health()가 한다(알림 잡과 공유). 여기선 HTTP 상태코드만 매핑한다:
     앱 DB가 죽으면 503 — probe가 DOWN으로 봐야 한다. degraded는 200(UP이되 반쯤 죽음).
+    ⚠️ ALB 헬스체크는 여기가 아니라 /health/live다 (RPA-222) — 이유는 그쪽 docstring.
     """
     result = compute_health()
     if result["status"] == "unhealthy":
         response.status_code = 503
     return result
+
+
+@app.get("/health/live")
+def health_live(response: Response) -> dict:
+    """ALB 타겟그룹·컨테이너 헬스체크 전용 — 요청 시 저장된 부팅 판정만 읽는다 (RPA-222).
+
+    요청마다 공유 의존성을 호출하지는 않는다. 다만 `migrations_ok`는 lifespan 시작 때
+    앱 DB에 접속해 마이그레이션을 처리하고 Alembic revision을 한 번 확인한 결과다.
+    따라서 앱 DB 접근 실패·지연은 부팅 판정에 반영되지만, 헬스 요청 자체가 DB를 반복 조회해
+    공유 장애를 증폭하거나 타임아웃에 걸리지는 않는다.
+
+    깊은 체크(/health)를 ALB에 물리면 양방향으로 틀린다:
+    - 공유 의존성(Neon·OpenSearch) 장애는 전 인스턴스가 **동시에** 실패하는데,
+      HealthCheckType: ELB라 ASG가 멀쩡한 인스턴스를 전부 교체한다 — 장애는 그대로에
+      재생성 루프만 얹힌다. 인스턴스 교체로 고칠 수 있는 문제만 봐야 한다.
+    - 의존성 3개 동기 호출은 실측 4.6초로 헬스체크 타임아웃 5초와 여유가 400ms다.
+
+    그래서 여기선 "이 인스턴스의 부팅이 성공했나"만 본다: 마이그레이션이 실패한
+    인스턴스는 이후 쿼리에서 터지므로 503으로 타겟그룹 진입을 막는다.
+    """
+    ok = bool(getattr(app.state, "migrations_ok", False))
+    if not ok:
+        response.status_code = 503
+    return {"status": "alive" if ok else "boot_failed"}
 
 
 _STATIC_DIR = Path(__file__).parent / "static"

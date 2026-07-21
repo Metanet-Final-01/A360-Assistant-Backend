@@ -107,6 +107,12 @@ def test_startup_migration_still_runs_on_local(monkeypatch):
     called = []
     monkeypatch.setattr("alembic.command.upgrade", lambda *a, **k: called.append(a))
     monkeypatch.delenv("APP_DATABASE_URL", raising=False)
+    # advisory lock(RPA-223)은 스텁 — 유닛 스위트는 DB 없이 돌아야 한다(CI postgres엔
+    # `a360`이 없다, tests/test_alerts.py 상단의 선례). 락 계약은
+    # tests/integration/test_migration_lock_pg.py가 실 Postgres로 검증한다.
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(db_mod, "pg_advisory_lock", lambda *a, **k: nullcontext())
 
     db_mod.run_migrations()
 
@@ -122,6 +128,12 @@ def test_explicit_script_can_override_the_guard(monkeypatch):
     called = []
     monkeypatch.setattr("alembic.command.upgrade", lambda *a, **k: called.append(a))
     monkeypatch.setenv("APP_DATABASE_URL", NEON)
+    # advisory lock(RPA-223)은 스텁 — NEON은 가짜 URL이라 락이 실제 접속을 시도하면
+    # 여기서 죽는다. 이 테스트의 관심사는 가드 탈출구이고, 락 계약(잡음·해제·타임아웃)은
+    # tests/integration/test_migration_lock_pg.py가 실제 Postgres로 검증한다.
+    from contextlib import nullcontext
+
+    monkeypatch.setattr(db_mod, "pg_advisory_lock", lambda *a, **k: nullcontext())
 
     db_mod.run_migrations(allow_shared=True)
 

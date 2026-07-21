@@ -95,6 +95,13 @@ Parameters:
     NoEcho: true
     Description: "Optional GitHub token for pulling private GHCR images."
 
+  OpsApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    AllowedPattern: "^$|^[A-Za-z0-9_-]{32,128}$"
+    Description: "Dedicated machine credential for Backoffice access to admin APIs."
+
   AssuranceWriterToken:
     Type: String
     Default: ""
@@ -534,6 +541,7 @@ Resources:
           "APP_DATABASE_URL": "${AppDatabaseUrl}",
           "OPENSEARCH_USERNAME": "${OpenSearchUsername}",
           "OPENSEARCH_PASSWORD": "${OpenSearchPassword}",
+          "OPS_API_KEY": "${OpsApiKey}",
           "ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}",
           "ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"
         }
@@ -751,7 +759,8 @@ Resources:
       Port: 8000
       TargetType: instance
       HealthCheckEnabled: true
-      HealthCheckPath: /api/health
+      # The request itself checks startup state only; startup verifies the app DB revision once.
+      HealthCheckPath: /health/live
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
@@ -912,6 +921,7 @@ Resources:
               APP_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("APP_DATABASE_URL", ""))')
               OPENSEARCH_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENSEARCH_USERNAME", ""))')
               OPENSEARCH_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENSEARCH_PASSWORD", ""))')
+              OPS_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPS_API_KEY", ""))')
               ASSURANCE_WRITER_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_TOKEN", ""))')
               ASSURANCE_WRITER_REPOSITORY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_REPOSITORY", ""))')
               unset DB_SECRET_JSON APP_SECRET_JSON
@@ -940,6 +950,7 @@ Resources:
               OPENAI_API_KEY=$OPENAI_API_KEY
               VOYAGE_API_KEY=$VOYAGE_API_KEY
               JWT_SECRET=$JWT_SECRET
+              OPS_API_KEY=$OPS_API_KEY
               ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
               ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
               EMBEDDING_PROVIDER=openai
@@ -970,7 +981,7 @@ Resources:
                   ports:
                     - "8000:8000"
                   healthcheck:
-                    test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/api/health', timeout=3)\nPY"]
+                    test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/health/live', timeout=3)\nPY"]
                     interval: 30s
                     timeout: 5s
                     retries: 3

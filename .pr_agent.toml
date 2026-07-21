@@ -1,0 +1,92 @@
+# Qodo Git integration policy for A360 Assistant Backend.
+# Reference: https://docs.qodo.ai/qodo-documentation/code-review/get-started/configuration-overview/configuration-file
+
+[config]
+response_language = "ko-KR"
+enable_comment_approval = false
+enable_auto_approval = false
+
+[ignore]
+glob = [
+  "data/**",
+]
+
+[github_app]
+feedback_on_draft_pr = false
+pr_commands = [
+  "/review",
+]
+handle_push_trigger = true
+push_commands = [
+  "/review",
+]
+
+[pr_reviewer]
+persistent_comment = true
+final_update_message = false
+enable_help_text = false
+require_score_review = false
+require_tests_review = true
+require_estimate_effort_to_review = false
+require_can_be_split_review = false
+require_security_review = true
+require_ticket_analysis_review = true
+enable_review_labels_security = false
+enable_review_labels_effort = false
+extra_instructions = """
+항상 한국어로 답변한다.
+심각하고 실제 영향이 있는 결함만 지적한다 — 다음만 대상으로 한다:
+런타임 에러·크래시·멈춤(hang), 잘못된 결과, 보안 취약점, 개인정보·시크릿 노출,
+데이터 손실·무결성 위반, 동시성 결함, 성능 회귀,
+API·SSE·스키마·DB·배포 계약 위반, 요구사항 누락과 그 결함을 막는 필수 테스트 누락.
+다음은 지적하지 않는다(노이즈):
+- 순수 문서·주석·테스트 설명이 코드와 다른 것으로, 런타임·보안·데이터 영향이 없는 경우.
+- 최대 2대 배포에서도 재현·영향이 없다고 입증 가능한 순수 이론적·저확률 리스크.
+  (2대에서 실제로 재현되는 멀티 인스턴스 결함 — 아래 프로세스 전역 상태·중복 발화 등 —
+   은 제외 대상이 아니라 반드시 지적한다. "이론적"은 재현·영향을 댈 수 없을 때만이다.)
+- 심각도가 낮은(minor/low) 지적, 사소한 스타일, 취향성 리팩터링, 설명 가능한 명명 선호.
+각 지적에는 재현 경로, 실제 영향, 최소 수정 방향을 반드시 포함하고,
+재현이나 영향을 구체적으로 댈 수 없으면 지적하지 않는다.
+app/schemas/** 변경은 Backend·Agent·Frontend 공유 계약과 docs/INTERFACES.md의 일관성을 확인한다.
+app/api/** 및 app/services/rag.py 변경은 오류가 {code, message}인지,
+SSE 스트림 중 요청 범위 DB 세션을 오래 보유하지 않는지, search_actions 반환 계약을 확인한다.
+Python 변경은 시크릿 하드코딩, 외부 입력 검증, SSRF, 우회 가능한 권한 검사,
+직접 LLM 호출이 app/core/llm 경계를 우회하는지 확인한다.
+Markdown 변경은 문서를 정답으로 가정하지 말고 실제 코드·테스트·환경변수와 대조한다.
+app/agent/**는 다른 담당 영역이다. 내부 구현 취향을 지적하지 말고,
+공개 응답 필드·호출 계약·저장/조회 경계의 회귀만 지적한다.
+배포 환경을 전제로 검토한다: 이 서비스는 ALB + Auto Scaling(다중 인스턴스, 최대 2대) +
+CloudFormation(EC2 Docker)으로 뜨는데 코드베이스는 단일 인스턴스를 가정한 곳이 많다.
+- 프로세스 전역 상태(모듈 전역 캐시·카운터·인메모리 집합·스케줄러)를 추가·변경하면
+  "인스턴스가 2대면 어떻게 되나"를 먼저 따진다: 캐시에 TTL이나 무효화 경로가 있는지,
+  스케줄러·알림이 리더 선출이나 멱등으로 중복 발화를 막는지, 카운터가 인스턴스마다
+  분기되어 잘못 집계되지 않는지.
+- secret(토큰·키·비밀번호)이 로그·bash xtrace(set -x)·평문 파일 권한(.env)·예외 메시지·
+  CloudWatch 수집 경로로 새지 않는지 확인한다.
+- CFN·UserData·infra 변경은 기동 시 재실행 부작용(secret 재노출), 헬스체크가 인스턴스-로컬
+  판정인지(공유 의존성 장애가 전 인스턴스 교체 루프를 부르지 않게), 다중 동시 기동에서
+  마이그레이션·스키마 변경이 직렬화되는지 확인한다.
+각 지적에는 재현 가능한 근거, 영향, 최소 수정 방향을 포함한다.
+"""
+
+[pr_code_suggestions]
+persistent_comment = true
+focus_only_on_problems = true
+# 수동 /improve 시에도 심각한 제안만 — 저점수 노이즈 컷 (RPA-230)
+suggestions_score_threshold = 7
+commitable_code_suggestions = false
+apply_suggestions_checkbox = false
+enable_more_suggestions_checkbox = false
+enable_help_text = false
+enable_chat_text = false
+publish_output_no_suggestions = false
+wiki_page_accepted_suggestions = false
+auto_extended_mode = true
+num_code_suggestions_per_chunk = 3
+max_number_of_calls = 3
+extra_instructions = """
+한국어로 답변하고, 실제 결함을 해결하는 최소 변경만 제안한다.
+보안·데이터·동시성·성능·계약·테스트 문제를 우선하며
+스타일 변경, 대규모 리팩터링, 책임 영역 밖 app/agent/** 내부 재설계는 제안하지 않는다.
+프로세스 전역 상태·secret 노출·CFN/infra 변경은 다중 인스턴스 배포 안전성을 기준으로 본다.
+"""
