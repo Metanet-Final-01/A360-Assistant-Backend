@@ -849,15 +849,19 @@ def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
                 await asyncio.wait_for(_run(), 0.1)
             assert cancel_seen.is_set()
             assert not closed.is_set()
+            assert len(sessions_api._SSE_DEFERRED_PENDING) == 1
+            assert not sessions_api._SSE_DEFERRED_CLOSES
         finally:
             release.set()
         await asyncio.wait_for(closed.wait(), 0.1)
+
         async def _wait_for_deferred_cleanup():
-            while sessions_api._SSE_DEFERRED_CLEANUPS:
+            while sessions_api._SSE_DEFERRED_PENDING or sessions_api._SSE_DEFERRED_CLOSES:
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(_wait_for_deferred_cleanup(), 0.1)
-        assert not sessions_api._SSE_DEFERRED_CLEANUPS
+        assert not sessions_api._SSE_DEFERRED_PENDING
+        assert not sessions_api._SSE_DEFERRED_CLOSES
 
     asyncio.run(_collect())
 

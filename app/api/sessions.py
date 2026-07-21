@@ -1026,7 +1026,8 @@ _SSE_HEARTBEAT_SEC = 15.0
 _SSE_HEARTBEAT_FRAME = ": keepalive\n\n"  # SSE 주석 — EventSource는 무시하고 연결만 유지한다
 _HEARTBEAT = object()  # 침묵 구간 신호 (실제 이벤트와 구분되는 sentinel)
 _SSE_CLEANUP_TIMEOUT_SEC = 1.0
-_SSE_DEFERRED_CLEANUPS: set[asyncio.Task] = set()
+_SSE_DEFERRED_PENDING: set[asyncio.Future] = set()
+_SSE_DEFERRED_CLOSES: set[asyncio.Task] = set()
 
 _TURN_MAX_DEFAULT_SEC = 900.0
 
@@ -1075,10 +1076,8 @@ async def _wait_for_cleanup(task: asyncio.Future, label: str) -> bool:
     return True
 
 
-async def _finish_deferred_cleanup(pending: asyncio.Future, it) -> None:
-    """취소를 지연한 다음 이벤트 대기가 끝나는 즉시 하위 generator를 닫는다."""
-    await asyncio.wait({pending})
-    _consume_cleanup_result(pending)
+async def _close_deferred_generator(it) -> None:
+    """늦게 끝난 다음 이벤트 대기 뒤 하위 generator를 제한 시간 내 닫는다."""
     aclose = getattr(it, "aclose", None)
     if aclose is not None:
         close_task = asyncio.ensure_future(aclose())
@@ -1086,15 +1085,22 @@ async def _finish_deferred_cleanup(pending: asyncio.Future, it) -> None:
 
 
 def _schedule_deferred_cleanup(pending: asyncio.Future, it) -> None:
-    """요청 반환을 막지 않으면서 미완료 하위 generator 정리를 추적한다."""
-    cleanup = asyncio.create_task(_finish_deferred_cleanup(pending, it))
-    _SSE_DEFERRED_CLEANUPS.add(cleanup)
+    """별도 waiter 없이 미완료 대기를 추적하고 완료 시 generator를 닫는다."""
+    _SSE_DEFERRED_PENDING.add(pending)
 
-    def _done(task: asyncio.Task) -> None:
-        _SSE_DEFERRED_CLEANUPS.discard(task)
+    def _pending_done(task: asyncio.Future) -> None:
+        _SSE_DEFERRED_PENDING.discard(task)
         _consume_cleanup_result(task)
+        close_task = asyncio.create_task(_close_deferred_generator(it))
+        _SSE_DEFERRED_CLOSES.add(close_task)
 
-    cleanup.add_done_callback(_done)
+        def _close_done(done: asyncio.Task) -> None:
+            _SSE_DEFERRED_CLOSES.discard(done)
+            _consume_cleanup_result(done)
+
+        close_task.add_done_callback(_close_done)
+
+    pending.add_done_callback(_pending_done)
 
 
 async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = None):
