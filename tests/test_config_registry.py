@@ -222,6 +222,16 @@ def test_empty_string_means_unset(monkeypatch):
     assert config.DATABASE_PORT == "5432"  # 빈 값이면 선언된 기본값
 
 
+def test_whitespace_only_is_unset(monkeypatch):
+    """공백만인 값도 미설정 — startup_report와 같은 .strip 기준, int("   ") 방지 (Qodo)."""
+    monkeypatch.setenv("DATABASE_PORT", "   ")
+    assert config.DATABASE_PORT == "5432"  # 기본값
+    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "  ")
+    assert config.ACCESS_TOKEN_EXPIRE_MINUTES == 60  # int("  ")로 안 터지고 기본값
+    monkeypatch.setenv("OPENSEARCH_HOST", "  ")
+    assert config.OPENSEARCH_HOST is None  # default=None → 부재
+
+
 def test_unknown_key_raises():
     """미선언 키는 조용한 None이 아니라 즉시 예외 — 오타가 무음 폴백이 되지 않게."""
     with pytest.raises(AttributeError):

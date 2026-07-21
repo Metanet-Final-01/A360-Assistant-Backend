@@ -198,9 +198,11 @@ def get(key: str):
     """
     spec = REGISTRY[key]
     raw = os.getenv(key)
-    if raw is None or raw == "":
-        # 빈 문자열은 "미설정"으로 본다 — 기존 산재 호출부 대부분이 `or` 폴백으로 그렇게
-        # 다뤄왔고(예: OPENSEARCH_HOST), 그 의미론을 유지해야 마이그레이션이 동작 불변이다.
+    if raw is None or raw.strip() == "":
+        # 빈 문자열·**공백만인 값**을 "미설정"으로 본다 — startup_report()가 .strip 기준으로
+        # 판정하므로 여기도 같아야 한다(Qodo): 안 그러면 기동 로그는 '미설정' 경고인데
+        # 런타임은 공백을 그대로 cast해 int("   ")로 터진다. 기존 산재 호출부의 `or` 폴백
+        # 의미론(예: OPENSEARCH_HOST)과도 일치한다.
         if spec.default is None:
             return None
         raw = spec.default
