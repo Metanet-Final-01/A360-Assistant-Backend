@@ -815,30 +815,49 @@ def test_iter_with_heartbeat_times_out_even_when_events_keep_arriving():
 
 
 def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
-    """하위 대기가 취소를 지연해도 전체 timeout은 호출자까지 전파된다."""
+    """timeout 반환 뒤 취소 지연이 풀리면 하위 generator도 닫힌다."""
     from app.schemas import ProgressEvent
 
     async def _collect():
         release = asyncio.Event()
         cancel_seen = asyncio.Event()
+        closed = asyncio.Event()
 
         async def _resists_cancel():
             try:
-                await asyncio.Future()
-            except asyncio.CancelledError:
-                cancel_seen.set()
-                await release.wait()
-            return
-            yield ProgressEvent(event="done", data={"type": "answer"})  # pragma: no cover
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    asyncio.current_task().uncancel()
+                    cancel_seen.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        asyncio.current_task().uncancel()
+                        await release.wait()
+                yield ProgressEvent(event="done", data={"type": "answer"})
+            finally:
+                closed.set()
 
         monkeypatch.setattr(sessions_api, "_SSE_CLEANUP_TIMEOUT_SEC", 0.01)
-        with pytest.raises(sessions_api._TurnTimeout):
+        async def _run():
             async for _ in sessions_api._iter_with_heartbeat(_resists_cancel(), 1.0, 0.01):
                 pass
 
-        assert cancel_seen.is_set()
-        release.set()
-        await asyncio.sleep(0.01)
+        try:
+            with pytest.raises(sessions_api._TurnTimeout):
+                await asyncio.wait_for(_run(), 0.1)
+            assert cancel_seen.is_set()
+            assert not closed.is_set()
+        finally:
+            release.set()
+        await asyncio.wait_for(closed.wait(), 0.1)
+        async def _wait_for_deferred_cleanup():
+            while sessions_api._SSE_DEFERRED_CLEANUPS:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_wait_for_deferred_cleanup(), 0.1)
+        assert not sessions_api._SSE_DEFERRED_CLEANUPS
 
     asyncio.run(_collect())
 

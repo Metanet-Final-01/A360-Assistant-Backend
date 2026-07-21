@@ -1026,6 +1026,7 @@ _SSE_HEARTBEAT_SEC = 15.0
 _SSE_HEARTBEAT_FRAME = ": keepalive\n\n"  # SSE 주석 — EventSource는 무시하고 연결만 유지한다
 _HEARTBEAT = object()  # 침묵 구간 신호 (실제 이벤트와 구분되는 sentinel)
 _SSE_CLEANUP_TIMEOUT_SEC = 1.0
+_SSE_DEFERRED_CLEANUPS: set[asyncio.Task] = set()
 
 _TURN_MAX_DEFAULT_SEC = 900.0
 
@@ -1072,6 +1073,28 @@ async def _wait_for_cleanup(task: asyncio.Future, label: str) -> bool:
         return False
     _consume_cleanup_result(task)
     return True
+
+
+async def _finish_deferred_cleanup(pending: asyncio.Future, it) -> None:
+    """취소를 지연한 다음 이벤트 대기가 끝나는 즉시 하위 generator를 닫는다."""
+    await asyncio.wait({pending})
+    _consume_cleanup_result(pending)
+    aclose = getattr(it, "aclose", None)
+    if aclose is not None:
+        close_task = asyncio.ensure_future(aclose())
+        await _wait_for_cleanup(close_task, "deferred generator aclose")
+
+
+def _schedule_deferred_cleanup(pending: asyncio.Future, it) -> None:
+    """요청 반환을 막지 않으면서 미완료 하위 generator 정리를 추적한다."""
+    cleanup = asyncio.create_task(_finish_deferred_cleanup(pending, it))
+    _SSE_DEFERRED_CLEANUPS.add(cleanup)
+
+    def _done(task: asyncio.Task) -> None:
+        _SSE_DEFERRED_CLEANUPS.discard(task)
+        _consume_cleanup_result(task)
+
+    cleanup.add_done_callback(_done)
 
 
 async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = None):
@@ -1125,15 +1148,18 @@ async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = 
         # 조기 종료(클라 끊김 등)면 진행 중이던 __anext__를 정리한다 — 진행 중 호출 1건만 취소.
         # 우리가 유발한 CancelledError만 삼킨다 — BaseException을 통째로 삼키면 바깥 취소까지
         # 먹어 asyncio 협조적 취소가 깨진다(RPA-233 Qodo).
+        pending_finished = True
         if pending is not None:
             pending.cancel()
-            await _wait_for_cleanup(pending, "pending task")
+            pending_finished = await _wait_for_cleanup(pending, "pending task")
         # 하위 제너레이터도 명시적으로 닫는다 — __anext__를 수동 구동해서 wrapper의 GeneratorExit이
         # it로 자동 전파되지 않는다. pending을 먼저 취소했으니 "generator already running" 없이
         # 하위(graph.astream)의 finally 정리가 확실히 돈다. 정리 중 하위 예외는 삼키되,
         # CancelledError(바깥 취소)는 전파한다 — 취소가 최우선이다(RPA-233 Qodo).
         aclose = getattr(it, "aclose", None)
-        if aclose is not None and (pending is None or pending.done()):
+        if aclose is not None and pending is not None and not pending_finished:
+            _schedule_deferred_cleanup(pending, it)
+        elif aclose is not None:
             close_task = asyncio.ensure_future(aclose())
             await _wait_for_cleanup(close_task, "generator aclose")
 
