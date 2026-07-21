@@ -511,19 +511,51 @@ def _combine_rule_status(current: str, candidate: str) -> str:
     return candidate if rank[candidate] > rank[current] else current
 
 
-def _license_matches(expression: str | None, allowed: set[str]) -> tuple[str, str]:
-    if not expression:
-        return "unassured", "installed distribution has no usable license metadata"
-    normalized = expression.strip()
+def _normalize_license_expression(expression: str) -> str:
     aliases = {
         "MIT License": "MIT",
         "Python Software Foundation License": "PSF-2.0",
         "Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0",
+        "GNU Lesser General Public License v3 (LGPLv3)": "LGPL-3.0-only",
     }
-    normalized = aliases.get(normalized, normalized)
+    normalized = expression.strip()
+    return aliases.get(normalized, normalized)
+
+
+def _license_matches(expression: str | None, allowed: set[str]) -> tuple[str, str]:
+    if not expression:
+        return "unassured", "installed distribution has no usable license metadata"
+    normalized = _normalize_license_expression(expression)
     if normalized in allowed:
         return "pass", f"license {normalized} is allowed"
     return "fail", f"license is outside the allowlist: {normalized[:100]}"
+
+
+def _license_status(
+    package: str,
+    version: str,
+    expression: str | None,
+    license_policy: dict[str, Any],
+) -> tuple[str, str, bool]:
+    """전역 정책 또는 package/version 고정 예외로 license를 판정한다."""
+    status, reason = _license_matches(expression, set(license_policy["allowed_spdx"]))
+    if not expression:
+        return status, reason, False
+
+    normalized = _normalize_license_expression(expression)
+    approval = license_policy.get("approved_exceptions", {}).get(package, {})
+    if (
+        approval.get("version") == version
+        and approval.get("license_expression") == normalized
+        and isinstance(approval.get("approval_ref"), str)
+        and approval["approval_ref"].strip()
+    ):
+        return (
+            "pass",
+            f"license {normalized} is approved for {package}=={version} by {approval['approval_ref']}",
+            True,
+        )
+    return status, reason, False
 
 
 def _vulnerability_status(
@@ -648,8 +680,8 @@ def derive_dependency_evidence(
 
     changed_packages = {item["package"] for item in requirement_delta}
     candidate_packages = sorted(changed_packages | set(imports_by_package))
-    allowed_licenses = set(policy["license_policy"]["allowed_spdx"])
     approved_additions = policy.get("approved_additions", {})
+    explicit_license_approvals: dict[str, bool] = {}
 
     for package in candidate_packages:
         base_record = base_requirements.get(package)
@@ -766,10 +798,13 @@ def derive_dependency_evidence(
         )
         rules["dep.vuln"]["reasons"].append(f"{package}: {vuln_reason}")
 
-        license_status, license_reason = _license_matches(
+        license_status, license_reason, explicitly_approved = _license_status(
+            package,
+            head_record.version,
             distribution.license_expression if distribution.installed else None,
-            allowed_licenses,
+            policy["license_policy"],
         )
+        explicit_license_approvals[package] = explicitly_approved
         checks["license"] = {"status": license_status, "detail": license_reason}
         rules["dep.license"]["status"] = _combine_rule_status(
             rules["dep.license"]["status"], license_status
@@ -785,11 +820,23 @@ def derive_dependency_evidence(
     ]
     if active_candidate_packages and decision_state not in {"approved", "approved_fixture"}:
         reason = "vulnerability and license policy still requires a human approval decision"
-        for rule_id in ("dep.vuln", "dep.license"):
-            rules[rule_id]["status"] = _combine_rule_status(
-                rules[rule_id]["status"], "unassured"
+        rules["dep.vuln"]["status"] = _combine_rule_status(
+            rules["dep.vuln"]["status"], "unassured"
+        )
+        rules["dep.vuln"]["reasons"] = sorted(
+            set([*rules["dep.vuln"]["reasons"], reason])
+        )
+        all_licenses_explicitly_approved = all(
+            explicit_license_approvals.get(package, False)
+            for package in active_candidate_packages
+        )
+        if not all_licenses_explicitly_approved:
+            rules["dep.license"]["status"] = _combine_rule_status(
+                rules["dep.license"]["status"], "unassured"
             )
-            rules[rule_id]["reasons"] = sorted(set([*rules[rule_id]["reasons"], reason]))
+            rules["dep.license"]["reasons"] = sorted(
+                set([*rules["dep.license"]["reasons"], reason])
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,

@@ -71,7 +71,39 @@
       "MIT",
       "MPL-2.0",
       "PSF-2.0"
-    ]
+    ],
+    "approved_exceptions": {
+      "psycopg": {
+        "version": "3.2.3",
+        "license_expression": "LGPL-3.0-only",
+        "approval_ref": "RPA-241",
+        "conditions": [
+          "unmodified upstream package",
+          "version change requires a new approval",
+          "retain bundled license text and upstream source reference"
+        ]
+      },
+      "psycopg-binary": {
+        "version": "3.2.3",
+        "license_expression": "LGPL-3.0-only",
+        "approval_ref": "RPA-241",
+        "conditions": [
+          "unmodified upstream package",
+          "version change requires a new approval",
+          "retain bundled license text and upstream source reference"
+        ]
+      },
+      "psycopg-pool": {
+        "version": "3.3.1",
+        "license_expression": "LGPL-3.0-only",
+        "approval_ref": "RPA-241",
+        "conditions": [
+          "unmodified upstream package",
+          "version change requires a new approval",
+          "retain bundled license text and upstream source reference"
+        ]
+      }
+    }
   },
   "vulnerability_policy": {
     "source": "initial empty Observe snapshot; operational OSV approval is decision-needed",
