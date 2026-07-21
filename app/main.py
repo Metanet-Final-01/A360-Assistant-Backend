@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 설정 레지스트리 리포트 (RPA-224) — 미설정 시 조용히 저하되는 키를 기동 로그에 드러낸다
+    # (RPA-160: OPENSEARCH_HOST 무음 폴백 사고의 처방 — 폴백을 없애는 게 아니라 보이게 한다).
+    from app.core import config as app_config
+
+    app_config.startup_report()
     # DB 없이도 앱은 기동돼야 한다 (프론트 로컬 개발 등) — 실패는 경고만 남긴다.
     # 단 그 결과는 상태로 남긴다(RPA-222): /health/live가 이 플래그로 503을 줘서,
     # 마이그레이션이 실패한 인스턴스가 ALB 타겟그룹에 들어가는 걸 막는다. 이전엔

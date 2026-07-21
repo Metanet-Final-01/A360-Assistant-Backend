@@ -8,6 +8,8 @@ import logging
 import os
 from pathlib import Path
 
+from app.core import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,14 +35,14 @@ def save(session_id: str, doc_id: str, filename: str, content: bytes) -> str:
     filename은 표시용 메타데이터로 documents.filename에 따로 보존되므로 여기서 축소해도 무방하다.
     """
     key = f"documents/{session_id}/{doc_id}/{_safe_name(filename)}"
-    bucket = os.getenv("DOCUMENT_BUCKET", "").strip()
+    bucket = (config.DOCUMENT_BUCKET or "").strip()
     if bucket:
         import boto3  # 로컬 개발에서는 불필요하므로 지연 import
 
         boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=content)
         return f"s3://{bucket}/{key}"
 
-    base = Path(os.getenv("UPLOAD_DIR", "data/uploads"))
+    base = Path(config.UPLOAD_DIR)
     path = base / key
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
