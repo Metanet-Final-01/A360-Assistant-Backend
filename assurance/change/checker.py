@@ -32,9 +32,32 @@ from .foundation import (
     utc_now,
 )
 from .schema_validation import SchemaValidationError, validate_json_schema
+from .review_evidence import load_review_evidence
 
 
 POLICY_SCHEMA = Path(__file__).resolve().parent / "schemas" / "dependency-policy.schema.json"
+
+
+def _review_decision_identity(review_evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return only review fields that can change the assurance decision identity.
+
+    GitHub pull-request actions such as ``reopened`` and ``ready_for_review`` are useful raw
+    evidence, but they must not create a new receipt when the subject and review decision are
+    otherwise identical. Approval, dismissal, reviewer, and reviewed commit remain identity inputs.
+    """
+    return {
+        key: review_evidence[key]
+        for key in (
+            "schema_version",
+            "repository",
+            "pull_request_number",
+            "expected_head_sha",
+            "observed_head_sha",
+            "status",
+            "reason_code",
+            "review",
+        )
+    }
 
 
 def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -71,6 +94,7 @@ class _AssuranceRunner:
         policy_uri: str,
         policy_digest: str,
         environment: DependencyEnvironment,
+        review_evidence_path: Path | None = None,
         now: datetime | None = None,
     ):
         self.repo = GitRepository(repo_root)
@@ -82,6 +106,7 @@ class _AssuranceRunner:
         self.policy_uri = policy_uri
         self.policy_digest = policy_digest
         self.environment = environment
+        self.review_evidence_path = review_evidence_path
         self.now = now or utc_now()
 
     def run(self) -> dict[str, Any]:
@@ -125,6 +150,12 @@ class _AssuranceRunner:
         protected = derive_protected_evidence(
             self.repo, merge_base, head, changes, self.policy
         )
+        review_evidence = load_review_evidence(
+            self.review_evidence_path,
+            repository=self.repository,
+            expected_head_sha=head,
+        )
+        protected["human_review"] = review_evidence
         dependency = derive_dependency_evidence(
             self.repo,
             merge_base,
@@ -204,20 +235,30 @@ class _AssuranceRunner:
         )
         protected_changed = bool(protected["protected_paths_changed"])
         sensitive = bool(protected["sensitive_indicators"])
+        review_verified = review_evidence["status"] == "approved"
+        review_required = protected_changed or sensitive
         controls.append(
             {
                 "control_id": "CH-06",
-                "status": "unassured" if protected_changed or sensitive else "pass",
+                "status": "unassured" if review_required and not review_verified else "pass",
                 "reason_code": (
-                    "PROTECTED_ORACLE_REVIEW_REQUIRED"
-                    if protected_changed or sensitive
-                    else "PROTECTED_ORACLE_UNCHANGED"
+                    "PROTECTED_ORACLE_REVIEW_VERIFIED"
+                    if review_required and review_verified
+                    else (
+                        "PROTECTED_ORACLE_REVIEW_REQUIRED"
+                        if review_required
+                        else "PROTECTED_ORACLE_UNCHANGED"
+                    )
                 ),
                 "reason": (
-                    "Tests, workflows, assurance policy, or Agent-owned paths changed; "
-                    "separate human ownership review is required."
-                    if protected_changed or sensitive
-                    else "No protected oracle or ownership path changed."
+                    "A separate human approved the exact protected-change subject."
+                    if review_required and review_verified
+                    else (
+                        "Tests, workflows, assurance policy, or Agent-owned paths changed; "
+                        "separate human ownership review is required."
+                        if review_required
+                        else "No protected oracle or ownership path changed."
+                    )
                 ),
                 "evidence": protected_ref,
             }
@@ -261,7 +302,8 @@ class _AssuranceRunner:
             decision = "allow_candidate"
 
         run_id = "CA-" + hashlib.sha256(
-            f"{self.repository}\0{base}\0{head}\0{diff_digest}\0{self.policy_digest}".encode("utf-8")
+            f"{self.repository}\0{base}\0{head}\0{diff_digest}\0{self.policy_digest}\0"
+            f"{canonical_digest(_review_decision_identity(review_evidence))}".encode("utf-8")
         ).hexdigest()[:16]
         report = {
             "schema_version": SCHEMA_VERSION,
@@ -317,6 +359,7 @@ def run_assurance(
     output: Path,
     policy_path: Path,
     environment: DependencyEnvironment | None = None,
+    review_evidence_path: Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     policy, policy_digest = load_policy(policy_path)
@@ -334,6 +377,7 @@ def run_assurance(
         policy_uri=policy_uri,
         policy_digest=policy_digest,
         environment=environment or InstalledDependencyEnvironment(),
+        review_evidence_path=review_evidence_path,
         now=now,
     )
     return runner.run()

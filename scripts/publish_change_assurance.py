@@ -56,8 +56,12 @@ def source_from_event(
         raise AssuranceError("workflow_run repository does not match the trusted repository")
     if run.get("name") != WORKFLOW_NAME:
         raise AssuranceError("workflow_run name is not authoritative")
-    if run.get("event") != "pull_request" or run.get("conclusion") != "success":
-        raise AssuranceError("workflow_run is not a successful pull_request run")
+    run_event = run.get("event")
+    if (
+        run_event not in {"pull_request", "pull_request_review"}
+        or run.get("conclusion") != "success"
+    ):
+        raise AssuranceError("workflow_run is not a successful pull request assurance run")
     pull_requests = run.get("pull_requests")
     if not isinstance(pull_requests, list) or len(pull_requests) > 1:
         raise AssuranceError("workflow_run must identify at most one pull request")
@@ -90,7 +94,7 @@ def source_from_event(
         "workflow_name": WORKFLOW_NAME,
         "workflow_run_id": _positive_int(run.get("id"), field="id"),
         "run_attempt": _positive_int(run.get("run_attempt"), field="run_attempt"),
-        "event": "pull_request",
+        "event": run_event,
         "conclusion": "success",
         "head_sha": head_sha,
         "pull_request_number": event_pull_request_number or resolved_number,

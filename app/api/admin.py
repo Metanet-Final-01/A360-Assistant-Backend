@@ -193,6 +193,8 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
     payload = row.receipt_payload if isinstance(row.receipt_payload, dict) else {}
     completeness = payload.get("completeness")
     completeness = completeness if isinstance(completeness, dict) else {}
+    human_review = payload.get("human_review")
+    human_review = human_review if isinstance(human_review, dict) else None
     result = {
         "receipt_digest": row.receipt_digest,
         "schema_version": row.schema_version,
@@ -221,6 +223,7 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
         "requested_agent_version": row.requested_agent_version,
         "resolved_agent_version": row.resolved_agent_version,
         "integrity_valid": receipt_integrity(row),
+        "human_review": human_review,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
     if detail:
