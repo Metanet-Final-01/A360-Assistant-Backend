@@ -214,7 +214,13 @@ def main(argv: list[str] | None = None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(canonical_bytes(evidence))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, AssuranceError) as exc:
-        print(f"Human review evidence failed: {type(exc).__name__}", file=sys.stderr)
+        # Contract errors contain fixed validator messages and are safe to expose. File and
+        # parser errors stay generalized so paths or payload fragments do not leak into CI logs.
+        detail = f": {exc}" if isinstance(exc, AssuranceError) else ""
+        print(
+            f"Human review evidence failed: {type(exc).__name__}{detail}",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

@@ -7,6 +7,7 @@ import pytest
 from assurance.change.foundation import AssuranceError
 from assurance.change.review_evidence import (
     build_review_evidence,
+    main,
     validate_review_evidence,
 )
 
@@ -98,3 +99,54 @@ def test_approved_evidence_cannot_be_rebound_to_another_head():
 
     with pytest.raises(AssuranceError, match="different commit"):
         validate_review_evidence(forged, repository=REPOSITORY, expected_head_sha=HEAD)
+
+
+def test_cli_reports_safe_contract_error_detail(tmp_path, capsys):
+    event_path = tmp_path / "event.json"
+    output_path = tmp_path / "evidence.json"
+    event_path.write_text("{}", encoding="utf-8")
+
+    result = main(
+        [
+            "--event",
+            str(event_path),
+            "--event-name",
+            "pull_request_review",
+            "--repository",
+            REPOSITORY,
+            "--head-sha",
+            HEAD,
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert result == 2
+    assert (
+        capsys.readouterr().err
+        == "Human review evidence failed: AssuranceError: review event is missing pull_request\n"
+    )
+
+
+def test_cli_generalizes_file_errors(tmp_path, capsys):
+    missing_path = tmp_path / "sensitive-event-name.json"
+
+    result = main(
+        [
+            "--event",
+            str(missing_path),
+            "--event-name",
+            "pull_request_review",
+            "--repository",
+            REPOSITORY,
+            "--head-sha",
+            HEAD,
+            "--output",
+            str(tmp_path / "evidence.json"),
+        ]
+    )
+
+    error = capsys.readouterr().err
+    assert result == 2
+    assert error == "Human review evidence failed: FileNotFoundError\n"
+    assert str(missing_path) not in error
