@@ -617,6 +617,12 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "needs.resolve_pr.outputs.pull_request_number" in publish_job
     assert "github.event.repository.default_branch" in publish_job
     assert "secrets.ASSURANCE_WRITER_TOKEN" in publish_job
+    assert 'entries=("$artifact_dir"/*)' in publish_job
+    assert '${#entries[@]} -eq 1' in publish_job
+    assert '! -L "$bootstrap"' in publish_job
+    assert "required=(SHA256SUMS assurance-report.json evidence-index.json)" in publish_job
+    assert "Incomplete Change Assurance bundle" in publish_job
+    assert "steps.evidence.outputs.publish == 'true'" in publish_job
     assert "python -m scripts.publish_change_assurance" in publish_job
     assert "python scripts/publish_change_assurance.py" not in publish_job
     assert "ASSURANCE_WRITER_TOKEN" not in observe
