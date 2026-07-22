@@ -777,3 +777,203 @@ def test_iter_with_heartbeat_closes_underlying_on_early_exit():
 
     asyncio.run(_collect())
     assert closed["n"] == 1  # 하위 제너레이터 finally가 정확히 한 번 실행됨
+
+
+# --- 전체 턴 상한 (RPA-235): hung 턴을 끊는다 ---
+
+def test_iter_with_heartbeat_raises_on_total_timeout():
+    """전체 상한을 넘도록 진행이 전혀 없으면 _TurnTimeout을 올린다 (RPA-235)."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _hang():
+            await asyncio.sleep(10)  # 상한(0.05)보다 훨씬 김 = hung
+            yield ProgressEvent(event="done", data={"type": "answer"})
+
+        with pytest.raises(sessions_api._TurnTimeout):
+            async for _ in sessions_api._iter_with_heartbeat(_hang(), 0.01, 0.05):
+                pass
+
+    asyncio.run(_collect())
+
+
+def test_iter_with_heartbeat_times_out_even_when_events_keep_arriving():
+    """이벤트가 heartbeat 간격보다 자주 와도 전체 상한은 우회할 수 없다."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _chatter():
+            while True:
+                await asyncio.sleep(0.001)
+                yield ProgressEvent(event="stage", stage="agent", message="진행 중")
+
+        with pytest.raises(sessions_api._TurnTimeout):
+            async for _ in sessions_api._iter_with_heartbeat(_chatter(), 1.0, 0.05):
+                pass
+
+    asyncio.run(_collect())
+
+
+def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
+    """timeout 반환 뒤 취소 지연이 풀리면 하위 generator도 닫힌다."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        initial_pending = set(sessions_api._SSE_DEFERRED_PENDING)
+        initial_closes = set(sessions_api._SSE_DEFERRED_CLOSES)
+        release = asyncio.Event()
+        cancel_seen = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def _resists_cancel():
+            try:
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    asyncio.current_task().uncancel()
+                    cancel_seen.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        asyncio.current_task().uncancel()
+                        await release.wait()
+                yield ProgressEvent(event="done", data={"type": "answer"})
+            finally:
+                closed.set()
+
+        monkeypatch.setattr(sessions_api, "_SSE_CLEANUP_TIMEOUT_SEC", 0.01)
+        async def _run():
+            async for _ in sessions_api._iter_with_heartbeat(_resists_cancel(), 1.0, 0.01):
+                pass
+
+        try:
+            with pytest.raises(sessions_api._TurnTimeout):
+                await asyncio.wait_for(_run(), 0.1)
+            assert cancel_seen.is_set()
+            assert not closed.is_set()
+            assert len(sessions_api._SSE_DEFERRED_PENDING - initial_pending) == 1
+            assert sessions_api._SSE_DEFERRED_CLOSES == initial_closes
+        finally:
+            release.set()
+        await asyncio.wait_for(closed.wait(), 0.1)
+
+        async def _wait_for_deferred_cleanup():
+            while sessions_api._SSE_DEFERRED_PENDING or sessions_api._SSE_DEFERRED_CLOSES:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(_wait_for_deferred_cleanup(), 0.1)
+        assert sessions_api._SSE_DEFERRED_PENDING == initial_pending
+        assert sessions_api._SSE_DEFERRED_CLOSES == initial_closes
+
+    asyncio.run(_collect())
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "-1", "invalid"])
+def test_turn_max_duration_rejects_invalid_values(monkeypatch, raw):
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", raw)
+    assert sessions_api._turn_max_sec() == sessions_api._TURN_MAX_DEFAULT_SEC
+
+
+def test_turn_max_duration_reads_registry_at_access_time(monkeypatch):
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "12.5")
+    assert sessions_api._turn_max_sec() == 12.5
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0")
+    assert sessions_api._turn_max_sec() == 0
+
+
+def test_iter_with_heartbeat_no_total_timeout_when_disabled():
+    """max_total이 없으면(0/None) 상한 없이 정상 진행한다 — 정상 긴 턴을 죽이지 않는다."""
+    from app.schemas import ProgressEvent
+
+    async def _collect():
+        async def _slow():
+            await asyncio.sleep(0.05)
+            yield ProgressEvent(event="done", data={"type": "answer"})
+
+        return [x async for x in sessions_api._iter_with_heartbeat(_slow(), 0.01, 0)]
+
+    out = asyncio.run(_collect())  # 예외 없이 완주
+    events = [x for x in out if x is not sessions_api._HEARTBEAT]
+    assert [e.event for e in events] == ["done"]
+
+
+def test_turn_times_out_on_hung_agent(monkeypatch):
+    """/turn: 에이전트가 응답 없이 hang하면 전체 상한 초과로 error 종료 (RPA-235)."""
+    from app.schemas import ProgressEvent
+
+    async def _hung_turn(message, context):
+        await asyncio.sleep(10)  # 응답 없이 hang (상한 0.05 초과)
+        yield ProgressEvent(event="done", data={"type": "answer", "answer": "x", "sources": []})
+
+    monkeypatch.setattr("app.agent.stream_agent_turn", _hung_turn, raising=False)
+    monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 0.01)
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0.05")
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist({}))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        with c.stream("POST", f"/api/sessions/{SID}/turn", json={"message": "안녕"}) as r:
+            raw = list(r.iter_lines())
+
+    data_events = [json.loads(l[5:]) for l in raw if l.startswith("data:")]
+    assert data_events[-1]["event"] == "error"  # 시간 초과로 error 종료
+    assert "너무 길어" in (data_events[-1].get("message") or "")  # 시간 초과 메시지
+
+
+def test_turn_timeout_persists_event_when_client_disconnected(monkeypatch):
+    """timeout 직전 연결이 끊겨도 전송만 생략하고 turn event는 저장한다."""
+    from app.schemas import ProgressEvent
+
+    async def _hung_turn(message, context):
+        await asyncio.sleep(10)
+        yield ProgressEvent(event="done", data={"type": "answer"})
+
+    async def _disconnected(self):
+        return True
+
+    saved = []
+    monkeypatch.setattr("app.agent.stream_agent_turn", _hung_turn, raising=False)
+    monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 1.0)
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0.01")
+    monkeypatch.setattr("starlette.requests.Request.is_disconnected", _disconnected)
+    monkeypatch.setattr(
+        sessions_api,
+        "_save_turn_events",
+        lambda session_id, request_id, rows: saved.extend(rows),
+    )
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    _, events = _run()
+
+    assert events == []
+    assert [row["kind"] for row in saved] == ["error"]
+
+
+def test_done_is_persisted_when_agent_stalls_after_terminal_event(monkeypatch):
+    """done 이후 하위 generator가 멈춰도 완료 결과를 저장하고 정상 done으로 끝낸다."""
+    from app.schemas import ProgressEvent
+
+    closed = {"value": False}
+
+    async def _done_then_stall(message, context):
+        try:
+            yield ProgressEvent(
+                event="done", data={"type": "answer", "answer": "완료", "sources": []}
+            )
+            await asyncio.sleep(10)
+        finally:
+            closed["value"] = True
+
+    captured = {}
+    monkeypatch.setattr("app.agent.stream_agent_turn", _done_then_stall, raising=False)
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0.05")
+    monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 0.01)
+    monkeypatch.setattr("app.db.SessionLocal", _make_persist(captured))
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    _, events = _run()
+
+    assert events[-1]["event"] == "done"
+    assert events[-1]["data"]["answer"] == "완료"
+    assert len(captured.get("ChatMessage", [])) == 2
+    assert closed["value"] is True
