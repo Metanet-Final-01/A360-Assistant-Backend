@@ -38,6 +38,28 @@ from .review_evidence import load_review_evidence
 POLICY_SCHEMA = Path(__file__).resolve().parent / "schemas" / "dependency-policy.schema.json"
 
 
+def _review_decision_identity(review_evidence: dict[str, Any]) -> dict[str, Any]:
+    """Return only review fields that can change the assurance decision identity.
+
+    GitHub pull-request actions such as ``reopened`` and ``ready_for_review`` are useful raw
+    evidence, but they must not create a new receipt when the subject and review decision are
+    otherwise identical. Approval, dismissal, reviewer, and reviewed commit remain identity inputs.
+    """
+    return {
+        key: review_evidence[key]
+        for key in (
+            "schema_version",
+            "repository",
+            "pull_request_number",
+            "expected_head_sha",
+            "observed_head_sha",
+            "status",
+            "reason_code",
+            "review",
+        )
+    }
+
+
 def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -281,7 +303,7 @@ class _AssuranceRunner:
 
         run_id = "CA-" + hashlib.sha256(
             f"{self.repository}\0{base}\0{head}\0{diff_digest}\0{self.policy_digest}\0"
-            f"{canonical_digest(review_evidence)}".encode("utf-8")
+            f"{canonical_digest(_review_decision_identity(review_evidence))}".encode("utf-8")
         ).hexdigest()[:16]
         report = {
             "schema_version": SCHEMA_VERSION,

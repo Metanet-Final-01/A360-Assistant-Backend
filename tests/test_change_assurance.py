@@ -14,6 +14,7 @@ import assurance.change as change_api
 from assurance.change.checker import (
     AssuranceError,
     _AssuranceRunner,
+    _review_decision_identity,
     canonical_digest,
     load_policy,
     write_error_report,
@@ -334,6 +335,57 @@ def test_exact_head_human_review_closes_protected_oracle_control(tmp_path: Path)
         (tmp_path / "out" / "protected-change-evidence.json").read_text(encoding="utf-8")
     )
     assert protected["human_review"]["review"]["reviewer_login"] == "reviewer"
+
+
+def test_pull_request_action_does_not_change_review_decision_identity() -> None:
+    evidence = {
+        "schema_version": "1.0",
+        "repository": "Metanet-Final-01/fixture",
+        "pull_request_number": 42,
+        "event_name": "pull_request",
+        "event_action": "reopened",
+        "expected_head_sha": "a" * 40,
+        "observed_head_sha": "a" * 40,
+        "status": "missing",
+        "reason_code": "HUMAN_REVIEW_NOT_SUBMITTED",
+        "review": None,
+    }
+    ready = {**evidence, "event_action": "ready_for_review"}
+
+    assert canonical_digest(_review_decision_identity(evidence)) == canonical_digest(
+        _review_decision_identity(ready)
+    )
+
+
+def test_review_status_change_changes_review_decision_identity() -> None:
+    missing = {
+        "schema_version": "1.0",
+        "repository": "Metanet-Final-01/fixture",
+        "pull_request_number": 42,
+        "event_name": "pull_request",
+        "event_action": "opened",
+        "expected_head_sha": "a" * 40,
+        "observed_head_sha": "a" * 40,
+        "status": "missing",
+        "reason_code": "HUMAN_REVIEW_NOT_SUBMITTED",
+        "review": None,
+    }
+    approved = {
+        **missing,
+        "event_name": "pull_request_review",
+        "event_action": "submitted",
+        "status": "approved",
+        "reason_code": "HUMAN_REVIEW_VERIFIED",
+        "review": {
+            "reviewer_login": "reviewer",
+            "submitted_at": "2026-07-21T08:00:00Z",
+            "commit_id": "a" * 40,
+        },
+    }
+
+    assert canonical_digest(_review_decision_identity(missing)) != canonical_digest(
+        _review_decision_identity(approved)
+    )
 
 
 def test_rename_out_of_protected_path_keeps_old_path_evidence(tmp_path: Path) -> None:
