@@ -22,6 +22,7 @@ from assurance.change.checker import (
 from assurance.change.dependency_checks import (
     _combine_rule_status,
     _license_matches,
+    _license_status,
     _local_roots,
     _overall_dependency_status,
     derive_risk_profiles,
@@ -131,7 +132,8 @@ def _policy(scenario: dict) -> dict:
                 "MIT",
                 "MPL-2.0",
                 "PSF-2.0",
-            ]
+            ],
+            "approved_exceptions": {},
         },
         "vulnerability_policy": {
             "source": "deterministic fixture",
@@ -685,6 +687,98 @@ def test_nested_python_file_does_not_create_a_local_import_root(tmp_path: Path) 
 def test_ambiguous_license_label_is_not_converted_to_spdx(ambiguous: str) -> None:
     status, _ = _license_matches(ambiguous, {"Apache-2.0", "BSD-3-Clause"})
     assert status == "fail"
+
+
+def test_license_exception_requires_exact_package_version_and_expression() -> None:
+    policy = {
+        "allowed_spdx": ["MIT"],
+        "approved_exceptions": {
+            "psycopg-pool": {
+                "version": "3.3.1",
+                "license_expression": "LGPL-3.0-only",
+                "approval_ref": "RPA-241",
+                "conditions": ["version change requires a new approval"],
+            }
+        },
+    }
+    assert _license_status("psycopg-pool", "3.3.1", "LGPL-3.0-only", policy) == (
+        "pass",
+        "license LGPL-3.0-only is approved for psycopg-pool==3.3.1 by RPA-241",
+        True,
+    )
+    status, _, approved = _license_status(
+        "psycopg-pool", "3.3.2", "LGPL-3.0-only", policy
+    )
+    assert status == "fail"
+    assert approved is False
+
+
+@pytest.mark.parametrize(
+    ("package", "version", "expression"),
+    [
+        ("psycopg", "3.2.3", "GNU Lesser General Public License v3 (LGPLv3)"),
+        ("psycopg-binary", "3.2.3", "GNU Lesser General Public License v3 (LGPLv3)"),
+        ("psycopg-pool", "3.3.1", "LGPL-3.0-only"),
+    ],
+)
+def test_production_psycopg_license_exceptions_are_exact(
+    package: str,
+    version: str,
+    expression: str,
+) -> None:
+    policy = json.loads(
+        (ROOT / "assurance" / "change" / "policy" / "dependency-policy.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    status, reason, approved = _license_status(
+        package, version, expression, policy["license_policy"]
+    )
+    assert status == "pass"
+    assert "RPA-241" in reason
+    assert approved is True
+
+
+def test_explicit_license_exception_does_not_approve_vulnerability_policy(
+    tmp_path: Path,
+) -> None:
+    scenario = _load_scenarios()["good_import"]
+    repo, base, head = _fixture_repo(tmp_path, scenario)
+    policy = _policy(scenario)
+    policy["policy_decision_state"] = "decision_needed"
+    policy["license_policy"]["approved_exceptions"] = {
+        "samplepkg": {
+            "version": "1.0.0",
+            "license_expression": "MIT",
+            "approval_ref": "RPA-241-fixture",
+            "conditions": ["fixture only"],
+        }
+    }
+    output = tmp_path / "out"
+    report = _AssuranceRunner(
+        repo_root=repo,
+        base_sha=base,
+        head_sha=head,
+        repository="Metanet-Final-01/fixture",
+        output=output,
+        policy=policy,
+        policy_uri="fixture-policy.json",
+        policy_digest=canonical_digest(policy),
+        environment=FixtureDependencyEnvironment(scenario["environment"]),
+        now=FIXED_NOW,
+    ).run()
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["rules"]["dep.license"]["status"] == "pass"
+    assert evidence["rules"]["dep.vuln"]["status"] == "unassured"
+    assert (
+        "vulnerability policy still requires a human approval decision"
+        in evidence["rules"]["dep.vuln"]["reasons"]
+    )
+    assert not any(
+        "license policy still requires" in reason
+        for reason in evidence["rules"]["dep.vuln"]["reasons"]
+    )
+    assert report["assurance_decision"] == "unassured"
 
 
 def test_explicit_dependency_failure_takes_precedence_over_detector_error() -> None:
