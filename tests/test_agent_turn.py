@@ -868,6 +868,64 @@ def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
     asyncio.run(_collect())
 
 
+def test_deferred_pending_tracking_expires(monkeypatch, caplog):
+    """영구 미완료 pending은 TTL 뒤 전역 강한 참조에서 제거된다."""
+
+    async def _collect():
+        initial_pending = set(sessions_api._SSE_DEFERRED_PENDING)
+        pending = asyncio.get_running_loop().create_future()
+
+        class _Iterator:
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr(sessions_api, "_SSE_DEFERRED_PENDING_TTL_SEC", 0.01)
+        sessions_api._schedule_deferred_cleanup(pending, _Iterator())
+        assert pending in sessions_api._SSE_DEFERRED_PENDING
+
+        await asyncio.sleep(0.02)
+        assert pending not in sessions_api._SSE_DEFERRED_PENDING
+        assert "참조를 해제" in caplog.text
+
+        pending.set_result((None, True))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert sessions_api._SSE_DEFERRED_PENDING == initial_pending
+
+    asyncio.run(_collect())
+
+
+def test_deferred_pending_tracking_has_hard_cap(monkeypatch, caplog):
+    """취소 저항성 작업이 반복돼도 전역 추적 집합은 상한을 넘지 않는다."""
+
+    async def _collect():
+        initial_pending = set(sessions_api._SSE_DEFERRED_PENDING)
+        first = asyncio.get_running_loop().create_future()
+        second = asyncio.get_running_loop().create_future()
+
+        class _Iterator:
+            async def aclose(self):
+                return None
+
+        monkeypatch.setattr(sessions_api, "_SSE_DEFERRED_PENDING_MAX", 1)
+        monkeypatch.setattr(sessions_api, "_SSE_DEFERRED_PENDING_TTL_SEC", 60.0)
+        sessions_api._schedule_deferred_cleanup(first, _Iterator())
+        sessions_api._schedule_deferred_cleanup(second, _Iterator())
+
+        assert len(sessions_api._SSE_DEFERRED_PENDING - initial_pending) == 1
+        assert first in sessions_api._SSE_DEFERRED_PENDING
+        assert second not in sessions_api._SSE_DEFERRED_PENDING
+        assert "추적 상한" in caplog.text
+
+        first.set_result((None, True))
+        second.set_result((None, True))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert sessions_api._SSE_DEFERRED_PENDING == initial_pending
+
+    asyncio.run(_collect())
+
+
 @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "-1", "invalid"])
 def test_turn_max_duration_rejects_invalid_values(monkeypatch, raw):
     monkeypatch.setenv("TURN_MAX_DURATION_SEC", raw)
