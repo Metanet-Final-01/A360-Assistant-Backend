@@ -148,7 +148,7 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 | 키 | 내용 |
 |---|---|
 | `solution` | 라우팅 키 (세션 확정값, 기본 `"a360"`) — 에이전트가 전용 그래프를 고른다 |
-| `operation` | `"chat"` \| `"compact"` \| `"fill_cards"` — 버튼발 결정론 신호(LLM 라우터 우회). `compact`는 압축 노드 직행, `fill_cards`는 질문 카드 응답 적용 |
+| `operation` | `"chat"` \| `"compact"` \| `"fill_cards"` — 버튼발 결정론 신호(LLM 라우터 우회). `compact`는 압축 노드 직행, **`fill_cards`는 v3 전용**(v1·v2는 조용히 무시 — 아래 ⚠️) |
 | `card_values` | `operation="fill_cards"`일 때만 — `{card_id: 값}`. 에이전트(v3)가 카드의 `targets` 좌표로 결정론 적용한다(**백엔드는 흐름도 구조를 해석하지 않는다** — 원본을 그대로 넘긴다). ⚠️ **여기 담긴 값은 추천 payload에 기록되어 버전으로 영속 저장된다** — 민감정보 제약은 아래 질문 카드 절 참고 |
 | `agent_version` | 에이전트 구현 버전 (`"v1"` \| `"v2"` \| `"v3"` \| 없음). 없으면 env `AGENT_VERSION`. 백엔드가 `AgentTurnRequest`로 받아 실어 보내고, 진입점이 이 키로 버전 그래프를 고른다. 사용 가능 목록·기본값은 `app.agent.available_versions()`/`default_version()`이 정한다(백엔드가 `GET /api/agent/versions`로 노출, RPA-167) |
 | `history` | 대화 이력 `[{"role","content"}]` (마지막 compact 이후분, 절삭 없이) |
@@ -205,6 +205,11 @@ QuestionCard = {
   - `input_type="file_path"`도 경로 문자열이 그대로 남으므로 사내 절대경로 노출에 유의한다.
 - **응답 흐름**: 프론트가 카드에 답한 뒤 다음 턴을 `operation="fill_cards"` +
   `card_values={card_id: 값}`로 보낸다. `node_path`는 단계 내 트리 경로(예: `actions[0].children[1]`).
+- ⚠️ **`fill_cards`는 v3 전용이다.** v1·v2 그래프는 `compact` 외의 `operation`을 전부 일반
+  intake/chat으로 라우팅한다(`v2/orchestrator/graph.py`). 따라서 v1/v2 세션에 `fill_cards`를
+  보내면 **카드 적용이 조용히 일어나지 않는다** — `card_values`가 무시되고 평범한 대화 턴이 된다.
+  질문 카드 자체가 v3 산출물이므로, **프론트는 카드를 렌더한 턴의 `agent_version`을 그대로 유지해**
+  응답을 보내야 한다.
 - ⚠️ **`fill_cards`가 항상 결정론·항상 추천 버전 생성인 것은 아니다.** 카드 종류로 경로가 갈린다:
 
   | `kind` | 적용 경로 | LLM |
