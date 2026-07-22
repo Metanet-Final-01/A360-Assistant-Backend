@@ -149,7 +149,7 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 |---|---|
 | `solution` | 라우팅 키 (세션 확정값, 기본 `"a360"`) — 에이전트가 전용 그래프를 고른다 |
 | `operation` | `"chat"` \| `"compact"` \| `"fill_cards"` — 버튼발 결정론 신호(LLM 라우터 우회). `compact`는 압축 노드 직행, `fill_cards`는 질문 카드 응답 적용 |
-| `card_values` | `operation="fill_cards"`일 때만 — `{card_id: 값}`. 에이전트(v3)가 카드의 `targets` 좌표로 결정론 적용한다(**백엔드는 흐름도 구조를 해석하지 않는다** — 원본을 그대로 넘긴다) |
+| `card_values` | `operation="fill_cards"`일 때만 — `{card_id: 값}`. 에이전트(v3)가 카드의 `targets` 좌표로 결정론 적용한다(**백엔드는 흐름도 구조를 해석하지 않는다** — 원본을 그대로 넘긴다). ⚠️ **여기 담긴 값은 추천 payload에 기록되어 버전으로 영속 저장된다** — 민감정보 제약은 아래 질문 카드 절 참고 |
 | `agent_version` | 에이전트 구현 버전 (`"v1"` \| `"v2"` \| `"v3"` \| 없음). 없으면 env `AGENT_VERSION`. 백엔드가 `AgentTurnRequest`로 받아 실어 보내고, 진입점이 이 키로 버전 그래프를 고른다. 사용 가능 목록·기본값은 `app.agent.available_versions()`/`default_version()`이 정한다(백엔드가 `GET /api/agent/versions`로 노출, RPA-167) |
 | `history` | 대화 이력 `[{"role","content"}]` (마지막 compact 이후분, 절삭 없이) |
 | `compact` | 최신 대화 압축본 (없으면 None) |
@@ -187,7 +187,7 @@ QuestionCard = {
   "targets":    [{"step_id": str, "node_path": str, "param_name": str}],  # 채울 위치
   "input_type": "text" | "number" | "select" | "file_path" | "credential_ref" | "confirm",
   "options":    list | None,         # select일 때 — 카탈로그 enum에서 결정론 추출
-  "default":    Any,                 # 시안값 — 사용자가 승인만 해도 되게
+  "default":    Any | None,          # 시안값 — 사용자가 승인만 해도 되게. **null일 수 있다**(아래)
   "blocking":   bool,                # 미해결 시 봇이 아예 실행 불가한가
   "resolved":   bool,                # fill_cards로 해소되었는가
 }
@@ -195,6 +195,14 @@ QuestionCard = {
 
 - **흐름도는 항상 완성 상태로 출고된다** — 카드는 '빈칸'이 아니라 `default`(시안값)가 채워진
   **확인 요청**이 기본이고, 진짜 빈칸은 `kind="missing_param"`뿐이다.
+- ⚠️ **그렇다고 `default`가 항상 있는 건 아니다 — null일 수 있다.** `ambiguity` 카드나
+  카탈로그에 기본값이 없는 `missing_param`은 v3가 실제로 `default=null`로 낸다.
+  클라이언트는 시안값 존재를 가정하지 말고 **빈 입력으로 렌더**할 수 있어야 한다.
+- 🔒 **민감정보 제약**: `card_values`로 보낸 값은 `targets` 좌표에 그대로 기록돼 **추천 버전으로
+  영속 저장**된다(마스킹 대상 아님). 따라서
+  - `input_type="credential_ref"`는 **자격증명 저장소의 불투명 참조**(키·별칭)를 담는 타입이지
+    **비밀번호 입력칸이 아니다** — 실제 시크릿·토큰을 보내지 않는다.
+  - `input_type="file_path"`도 경로 문자열이 그대로 남으므로 사내 절대경로 노출에 유의한다.
 - **응답 흐름**: 프론트가 카드에 답한 뒤 다음 턴을 `operation="fill_cards"` +
   `card_values={card_id: 값}`로 보낸다 → 에이전트(v3)가 `targets` 좌표로 set_params를
   결정론 생성해 적용한다. `node_path`는 단계 내 트리 경로(예: `actions[0].children[1]`).
