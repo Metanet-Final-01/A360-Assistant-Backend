@@ -1090,7 +1090,8 @@ def _schedule_deferred_cleanup(pending: asyncio.Future, it) -> None:
 
     def _pending_done(task: asyncio.Future) -> None:
         _SSE_DEFERRED_PENDING.discard(task)
-        _consume_cleanup_result(task)
+        # _wait_for_cleanup()이 timeout 경로에서 이미 결과 회수 callback을 등록했다.
+        # 여기서 다시 회수하면 같은 정리 예외가 경고로 두 번 기록된다.
         close_task = asyncio.create_task(_close_deferred_generator(it))
         _SSE_DEFERRED_CLOSES.add(close_task)
 
@@ -1379,9 +1380,12 @@ async def agent_turn(
             # 전체 상한 초과 — hung 턴을 error로 끊는다 (RPA-235). 하위 정리는 wrapper finally가 했다.
             logger.warning("턴 시간 초과(%.0fs) — 중단: session=%s", turn_max_sec, session_key)
             _tev("error", "agent", "처리 시간이 너무 길어 중단했습니다")
-            yield ProgressEvent(
-                event="error", stage="agent", message="처리 시간이 너무 길어 중단했습니다"
-            ).to_sse()
+            # 이미 끊긴 클라이언트에 yield하다 취소되면 아래 turn_events 적재가 건너뛰어진다.
+            # 완료 응답과 같은 경계로 전송만 생략하고 관측 기록은 끝까지 저장한다.
+            if not await request.is_disconnected():
+                yield ProgressEvent(
+                    event="error", stage="agent", message="처리 시간이 너무 길어 중단했습니다"
+                ).to_sse()
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
             _tev("error", "agent", f"에이전트 구성 오류: {e}")
             yield ProgressEvent(event="error", stage="agent", message=f"에이전트 구성 오류: {e}").to_sse()

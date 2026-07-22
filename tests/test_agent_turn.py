@@ -819,6 +819,8 @@ def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
     from app.schemas import ProgressEvent
 
     async def _collect():
+        initial_pending = set(sessions_api._SSE_DEFERRED_PENDING)
+        initial_closes = set(sessions_api._SSE_DEFERRED_CLOSES)
         release = asyncio.Event()
         cancel_seen = asyncio.Event()
         closed = asyncio.Event()
@@ -849,8 +851,8 @@ def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
                 await asyncio.wait_for(_run(), 0.1)
             assert cancel_seen.is_set()
             assert not closed.is_set()
-            assert len(sessions_api._SSE_DEFERRED_PENDING) == 1
-            assert not sessions_api._SSE_DEFERRED_CLOSES
+            assert len(sessions_api._SSE_DEFERRED_PENDING - initial_pending) == 1
+            assert sessions_api._SSE_DEFERRED_CLOSES == initial_closes
         finally:
             release.set()
         await asyncio.wait_for(closed.wait(), 0.1)
@@ -860,8 +862,8 @@ def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
                 await asyncio.sleep(0)
 
         await asyncio.wait_for(_wait_for_deferred_cleanup(), 0.1)
-        assert not sessions_api._SSE_DEFERRED_PENDING
-        assert not sessions_api._SSE_DEFERRED_CLOSES
+        assert sessions_api._SSE_DEFERRED_PENDING == initial_pending
+        assert sessions_api._SSE_DEFERRED_CLOSES == initial_closes
 
     asyncio.run(_collect())
 
@@ -916,6 +918,35 @@ def test_turn_times_out_on_hung_agent(monkeypatch):
     data_events = [json.loads(l[5:]) for l in raw if l.startswith("data:")]
     assert data_events[-1]["event"] == "error"  # 시간 초과로 error 종료
     assert "너무 길어" in (data_events[-1].get("message") or "")  # 시간 초과 메시지
+
+
+def test_turn_timeout_persists_event_when_client_disconnected(monkeypatch):
+    """timeout 직전 연결이 끊겨도 전송만 생략하고 turn event는 저장한다."""
+    from app.schemas import ProgressEvent
+
+    async def _hung_turn(message, context):
+        await asyncio.sleep(10)
+        yield ProgressEvent(event="done", data={"type": "answer"})
+
+    async def _disconnected(self):
+        return True
+
+    saved = []
+    monkeypatch.setattr("app.agent.stream_agent_turn", _hung_turn, raising=False)
+    monkeypatch.setattr(sessions_api, "_SSE_HEARTBEAT_SEC", 1.0)
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0.01")
+    monkeypatch.setattr("starlette.requests.Request.is_disconnected", _disconnected)
+    monkeypatch.setattr(
+        sessions_api,
+        "_save_turn_events",
+        lambda session_id, request_id, rows: saved.extend(rows),
+    )
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    _, events = _run()
+
+    assert events == []
+    assert [row["kind"] for row in saved] == ["error"]
 
 
 def test_done_is_persisted_when_agent_stalls_after_terminal_event(monkeypatch):
