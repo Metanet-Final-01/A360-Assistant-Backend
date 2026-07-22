@@ -148,8 +148,9 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 | 키 | 내용 |
 |---|---|
 | `solution` | 라우팅 키 (세션 확정값, 기본 `"a360"`) — 에이전트가 전용 그래프를 고른다 |
-| `operation` | `"chat"` \| `"compact"` (compact면 LLM 라우터 우회, 압축 노드 직행) |
-| `agent_version` | 에이전트 구현 버전 (`"v1"` \| `"v2"` … \| 없음). 없으면 env `AGENT_VERSION`(기본 `v2`). 백엔드가 `AgentTurnRequest`로 받아 실어 보내고, 진입점이 이 키로 버전 그래프를 고른다. 사용 가능 목록은 `app.agent.available_versions()`(백엔드가 `GET /api/agent/versions`로 노출, RPA-167) |
+| `operation` | `"chat"` \| `"compact"` \| `"fill_cards"` — 버튼발 결정론 신호(LLM 라우터 우회). `compact`는 압축 노드 직행, `fill_cards`는 질문 카드 응답 적용 |
+| `card_values` | `operation="fill_cards"`일 때만 — `{card_id: 값}`. 에이전트(v3)가 카드의 `targets` 좌표로 결정론 적용한다(**백엔드는 흐름도 구조를 해석하지 않는다** — 원본을 그대로 넘긴다) |
+| `agent_version` | 에이전트 구현 버전 (`"v1"` \| `"v2"` \| `"v3"` \| 없음). 없으면 env `AGENT_VERSION`. 백엔드가 `AgentTurnRequest`로 받아 실어 보내고, 진입점이 이 키로 버전 그래프를 고른다. 사용 가능 목록·기본값은 `app.agent.available_versions()`/`default_version()`이 정한다(백엔드가 `GET /api/agent/versions`로 노출, RPA-167) |
 | `history` | 대화 이력 `[{"role","content"}]` (마지막 compact 이후분, 절삭 없이) |
 | `compact` | 최신 대화 압축본 (없으면 None) |
 | `analysis` / `recommendation` / `parsed_doc` | 세션의 최신 분석·추천·파싱 문서 (있으면) |
@@ -166,6 +167,38 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 ```
 - **비-null 산출물은 type과 무관하게 모두 저장**한다(분석 선행 후 흐름도 턴의 참조 무결성). 백엔드가
   `updated_recommendation`을 저장 후 응답엔 `recommendation`+버전 메타로 노출한다.
+
+#### 질문 카드 (v3) — `updated_recommendation` 안의 필드
+
+⚠️ **별도 done `type`이 아니다.** 추천 payload 안에 실려 온다:
+
+```python
+updated_recommendation = {
+  ...,
+  "needs_input": [QuestionCard],   # 사용자 입력 대기 카드 (없으면 [])
+  "flow_confidence": float | None, # 흐름도 수준 신뢰도 0~1 (must 커버리지×blocker×시뮬레이션)
+}
+
+QuestionCard = {
+  "card_id":    str,
+  "kind":       "missing_param" | "ambiguity" | "assumption_confirm",
+  "question":   str,                 # 사용자에게 보일 질문
+  "why":        str | None,          # 왜 이 값이 필요한지
+  "targets":    [{"step_id": str, "node_path": str, "param_name": str}],  # 채울 위치
+  "input_type": "text" | "number" | "select" | "file_path" | "credential_ref" | "confirm",
+  "options":    list | None,         # select일 때 — 카탈로그 enum에서 결정론 추출
+  "default":    Any,                 # 시안값 — 사용자가 승인만 해도 되게
+  "blocking":   bool,                # 미해결 시 봇이 아예 실행 불가한가
+  "resolved":   bool,                # fill_cards로 해소되었는가
+}
+```
+
+- **흐름도는 항상 완성 상태로 출고된다** — 카드는 '빈칸'이 아니라 `default`(시안값)가 채워진
+  **확인 요청**이 기본이고, 진짜 빈칸은 `kind="missing_param"`뿐이다.
+- **응답 흐름**: 프론트가 카드에 답한 뒤 다음 턴을 `operation="fill_cards"` +
+  `card_values={card_id: 값}`로 보낸다 → 에이전트(v3)가 `targets` 좌표로 set_params를
+  결정론 생성해 적용한다. `node_path`는 단계 내 트리 경로(예: `actions[0].children[1]`).
+- `blocking=true` 카드가 남아 있으면 그 봇은 실행 불가 상태다 — 프론트가 구분해 보여줄 것.
 - `compact`는 고정 섹션 JSON: `task_overview`/`decisions`/`flow_journal`/`open_questions`/`verbatim`.
 - 대화 누적 게이지(`usage_gauge`)는 **백엔드가** intake 사용량으로 계산해 붙인다(에이전트 책임 아님).
   단 그 전제는 에이전트의 intake 호출이 `purpose="intake"`로 태깅되고 history+compact를 절삭 없이
