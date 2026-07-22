@@ -1026,6 +1026,8 @@ _SSE_HEARTBEAT_SEC = 15.0
 _SSE_HEARTBEAT_FRAME = ": keepalive\n\n"  # SSE 주석 — EventSource는 무시하고 연결만 유지한다
 _HEARTBEAT = object()  # 침묵 구간 신호 (실제 이벤트와 구분되는 sentinel)
 _SSE_CLEANUP_TIMEOUT_SEC = 1.0
+_SSE_DEFERRED_PENDING_MAX = 128
+_SSE_DEFERRED_PENDING_TTL_SEC = 300.0
 _SSE_DEFERRED_PENDING: set[asyncio.Future] = set()
 _SSE_DEFERRED_CLOSES: set[asyncio.Task] = set()
 
@@ -1084,11 +1086,40 @@ async def _close_deferred_generator(it) -> None:
         await _wait_for_cleanup(close_task, "deferred generator aclose")
 
 
+def _expire_deferred_pending(pending: asyncio.Future) -> None:
+    if pending not in _SSE_DEFERRED_PENDING:
+        return
+    _SSE_DEFERRED_PENDING.discard(pending)
+    if pending.done():
+        return
+    logger.error(
+        "SSE 지연 정리 추적이 %.0f초를 초과해 참조를 해제합니다: remaining=%d",
+        _SSE_DEFERRED_PENDING_TTL_SEC,
+        len(_SSE_DEFERRED_PENDING),
+    )
+
+
 def _schedule_deferred_cleanup(pending: asyncio.Future, it) -> None:
-    """별도 waiter 없이 미완료 대기를 추적하고 완료 시 generator를 닫는다."""
-    _SSE_DEFERRED_PENDING.add(pending)
+    """미완료 대기를 제한적으로 추적하고 완료 시 generator를 닫는다."""
+    tracked = len(_SSE_DEFERRED_PENDING) < _SSE_DEFERRED_PENDING_MAX
+    expiry_handle = None
+    if tracked:
+        _SSE_DEFERRED_PENDING.add(pending)
+        expiry_handle = asyncio.get_running_loop().call_later(
+            _SSE_DEFERRED_PENDING_TTL_SEC,
+            _expire_deferred_pending,
+            pending,
+        )
+    else:
+        logger.error(
+            "SSE 지연 정리 추적 상한을 초과해 새 항목을 보관하지 않습니다: tracked=%d max=%d",
+            len(_SSE_DEFERRED_PENDING),
+            _SSE_DEFERRED_PENDING_MAX,
+        )
 
     def _pending_done(task: asyncio.Future) -> None:
+        if expiry_handle is not None:
+            expiry_handle.cancel()
         _SSE_DEFERRED_PENDING.discard(task)
         # _wait_for_cleanup()이 timeout 경로에서 이미 결과 회수 callback을 등록했다.
         # 여기서 다시 회수하면 같은 정리 예외가 경고로 두 번 기록된다.
