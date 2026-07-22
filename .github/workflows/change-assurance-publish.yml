@@ -20,7 +20,8 @@ jobs:
     if: >-
       ${{ vars.ASSURANCE_WRITER_ENABLED == 'true' &&
           github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.event == 'pull_request' }}
+          contains(fromJSON('["pull_request", "pull_request_review"]'),
+                   github.event.workflow_run.event) }}
     runs-on: ubuntu-latest
     outputs:
       pull_request_number: ${{ steps.resolve.outputs.pull_request_number }}
@@ -80,7 +81,38 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
+      - name: Classify the downloaded evidence bundle
+        id: evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/change-assurance"
+          bootstrap="$artifact_dir/BOOTSTRAP_UNASSURED.md"
+          shopt -s nullglob dotglob
+          entries=("$artifact_dir"/*)
+
+          if [[ ${#entries[@]} -eq 1 && -f "$bootstrap" && ! -L "$bootstrap" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "### Change Assurance publish skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "The Observe run produced a bootstrap-only unassured bundle." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          required=(SHA256SUMS assurance-report.json evidence-index.json)
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ ! -f "$artifact_dir/$name" || -L "$artifact_dir/$name" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if [[ ${#missing[@]} -ne 0 ]]; then
+            printf 'Incomplete Change Assurance bundle; missing: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
       - name: Revalidate and publish the Change record
+        if: ${{ steps.evidence.outputs.publish == 'true' }}
         env:
           ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
           ASSURANCE_WRITER_URL: ${{ vars.ASSURANCE_WRITER_URL }}

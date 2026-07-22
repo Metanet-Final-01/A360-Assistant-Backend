@@ -14,6 +14,7 @@ import assurance.change as change_api
 from assurance.change.checker import (
     AssuranceError,
     _AssuranceRunner,
+    _review_decision_identity,
     canonical_digest,
     load_policy,
     write_error_report,
@@ -21,6 +22,7 @@ from assurance.change.checker import (
 from assurance.change.dependency_checks import (
     _combine_rule_status,
     _license_matches,
+    _license_status,
     _local_roots,
     _overall_dependency_status,
     derive_risk_profiles,
@@ -130,7 +132,8 @@ def _policy(scenario: dict) -> dict:
                 "MIT",
                 "MPL-2.0",
                 "PSF-2.0",
-            ]
+            ],
+            "approved_exceptions": {},
         },
         "vulnerability_policy": {
             "source": "deterministic fixture",
@@ -276,6 +279,115 @@ def test_protected_oracle_change_requires_separate_review(tmp_path: Path) -> Non
     assert report["assurance_decision"] == "unassured"
     ch06 = next(item for item in report["controls"] if item["control_id"] == "CH-06")
     assert ch06["reason_code"] == "PROTECTED_ORACLE_REVIEW_REQUIRED"
+
+
+def test_exact_head_human_review_closes_protected_oracle_control(tmp_path: Path) -> None:
+    scenario = {
+        "base_files": {
+            "requirements.txt": "",
+            "tests/test_example.py": "def test_value():\n    assert 1 == 1\n",
+        },
+        "head_files": {
+            "requirements.txt": "",
+            "tests/test_example.py": "def test_value():\n    assert 2 == 2\n",
+        },
+        "environment": {"inventory": {}, "import_map": {}, "imports": {}, "distributions": {}},
+        "snapshot": {},
+        "expected_decision": "allow_candidate",
+    }
+    repo, base, head = _fixture_repo(tmp_path, scenario)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps({
+        "schema_version": "1.0",
+        "repository": "Metanet-Final-01/fixture",
+        "pull_request_number": 42,
+        "event_name": "pull_request_review",
+        "event_action": "submitted",
+        "expected_head_sha": head,
+        "observed_head_sha": head,
+        "status": "approved",
+        "reason_code": "HUMAN_REVIEW_VERIFIED",
+        "review": {
+            "reviewer_login": "reviewer",
+            "submitted_at": "2026-07-21T08:00:00Z",
+            "commit_id": head,
+        },
+    }), encoding="utf-8")
+    policy = _policy(scenario)
+
+    report = _AssuranceRunner(
+        repo_root=repo,
+        base_sha=base,
+        head_sha=head,
+        repository="Metanet-Final-01/fixture",
+        output=tmp_path / "out",
+        policy=policy,
+        policy_uri="fixture-policy.json",
+        policy_digest=canonical_digest(policy),
+        environment=FixtureDependencyEnvironment(scenario["environment"]),
+        review_evidence_path=review_path,
+        now=FIXED_NOW,
+    ).run()
+
+    ch06 = next(item for item in report["controls"] if item["control_id"] == "CH-06")
+    assert ch06["status"] == "pass"
+    assert ch06["reason_code"] == "PROTECTED_ORACLE_REVIEW_VERIFIED"
+    assert report["assurance_decision"] == "allow_candidate"
+    protected = json.loads(
+        (tmp_path / "out" / "protected-change-evidence.json").read_text(encoding="utf-8")
+    )
+    assert protected["human_review"]["review"]["reviewer_login"] == "reviewer"
+
+
+def test_pull_request_action_does_not_change_review_decision_identity() -> None:
+    evidence = {
+        "schema_version": "1.0",
+        "repository": "Metanet-Final-01/fixture",
+        "pull_request_number": 42,
+        "event_name": "pull_request",
+        "event_action": "reopened",
+        "expected_head_sha": "a" * 40,
+        "observed_head_sha": "a" * 40,
+        "status": "missing",
+        "reason_code": "HUMAN_REVIEW_NOT_SUBMITTED",
+        "review": None,
+    }
+    ready = {**evidence, "event_action": "ready_for_review"}
+
+    assert canonical_digest(_review_decision_identity(evidence)) == canonical_digest(
+        _review_decision_identity(ready)
+    )
+
+
+def test_review_status_change_changes_review_decision_identity() -> None:
+    missing = {
+        "schema_version": "1.0",
+        "repository": "Metanet-Final-01/fixture",
+        "pull_request_number": 42,
+        "event_name": "pull_request",
+        "event_action": "opened",
+        "expected_head_sha": "a" * 40,
+        "observed_head_sha": "a" * 40,
+        "status": "missing",
+        "reason_code": "HUMAN_REVIEW_NOT_SUBMITTED",
+        "review": None,
+    }
+    approved = {
+        **missing,
+        "event_name": "pull_request_review",
+        "event_action": "submitted",
+        "status": "approved",
+        "reason_code": "HUMAN_REVIEW_VERIFIED",
+        "review": {
+            "reviewer_login": "reviewer",
+            "submitted_at": "2026-07-21T08:00:00Z",
+            "commit_id": "a" * 40,
+        },
+    }
+
+    assert canonical_digest(_review_decision_identity(missing)) != canonical_digest(
+        _review_decision_identity(approved)
+    )
 
 
 def test_rename_out_of_protected_path_keeps_old_path_evidence(tmp_path: Path) -> None:
@@ -575,6 +687,98 @@ def test_nested_python_file_does_not_create_a_local_import_root(tmp_path: Path) 
 def test_ambiguous_license_label_is_not_converted_to_spdx(ambiguous: str) -> None:
     status, _ = _license_matches(ambiguous, {"Apache-2.0", "BSD-3-Clause"})
     assert status == "fail"
+
+
+def test_license_exception_requires_exact_package_version_and_expression() -> None:
+    policy = {
+        "allowed_spdx": ["MIT"],
+        "approved_exceptions": {
+            "psycopg-pool": {
+                "version": "3.3.1",
+                "license_expression": "LGPL-3.0-only",
+                "approval_ref": "RPA-241",
+                "conditions": ["version change requires a new approval"],
+            }
+        },
+    }
+    assert _license_status("psycopg-pool", "3.3.1", "LGPL-3.0-only", policy) == (
+        "pass",
+        "license LGPL-3.0-only is approved for psycopg-pool==3.3.1 by RPA-241",
+        True,
+    )
+    status, _, approved = _license_status(
+        "psycopg-pool", "3.3.2", "LGPL-3.0-only", policy
+    )
+    assert status == "fail"
+    assert approved is False
+
+
+@pytest.mark.parametrize(
+    ("package", "version", "expression"),
+    [
+        ("psycopg", "3.2.3", "GNU Lesser General Public License v3 (LGPLv3)"),
+        ("psycopg-binary", "3.2.3", "GNU Lesser General Public License v3 (LGPLv3)"),
+        ("psycopg-pool", "3.3.1", "LGPL-3.0-only"),
+    ],
+)
+def test_production_psycopg_license_exceptions_are_exact(
+    package: str,
+    version: str,
+    expression: str,
+) -> None:
+    policy = json.loads(
+        (ROOT / "assurance" / "change" / "policy" / "dependency-policy.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    status, reason, approved = _license_status(
+        package, version, expression, policy["license_policy"]
+    )
+    assert status == "pass"
+    assert "RPA-241" in reason
+    assert approved is True
+
+
+def test_explicit_license_exception_does_not_approve_vulnerability_policy(
+    tmp_path: Path,
+) -> None:
+    scenario = _load_scenarios()["good_import"]
+    repo, base, head = _fixture_repo(tmp_path, scenario)
+    policy = _policy(scenario)
+    policy["policy_decision_state"] = "decision_needed"
+    policy["license_policy"]["approved_exceptions"] = {
+        "samplepkg": {
+            "version": "1.0.0",
+            "license_expression": "MIT",
+            "approval_ref": "RPA-241-fixture",
+            "conditions": ["fixture only"],
+        }
+    }
+    output = tmp_path / "out"
+    report = _AssuranceRunner(
+        repo_root=repo,
+        base_sha=base,
+        head_sha=head,
+        repository="Metanet-Final-01/fixture",
+        output=output,
+        policy=policy,
+        policy_uri="fixture-policy.json",
+        policy_digest=canonical_digest(policy),
+        environment=FixtureDependencyEnvironment(scenario["environment"]),
+        now=FIXED_NOW,
+    ).run()
+    evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["rules"]["dep.license"]["status"] == "pass"
+    assert evidence["rules"]["dep.vuln"]["status"] == "unassured"
+    assert (
+        "vulnerability policy still requires a human approval decision"
+        in evidence["rules"]["dep.vuln"]["reasons"]
+    )
+    assert not any(
+        "license policy still requires" in reason
+        for reason in evidence["rules"]["dep.vuln"]["reasons"]
+    )
+    assert report["assurance_decision"] == "unassured"
 
 
 def test_explicit_dependency_failure_takes_precedence_over_detector_error() -> None:

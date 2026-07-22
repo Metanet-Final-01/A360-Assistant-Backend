@@ -4,8 +4,11 @@
 레거시 개별 엔드포인트(/analyze, /recommend, /api/agent/chat)는 /turn으로 흡수돼 제거됐다 (RPA-67).
 """
 
+import asyncio
+import contextlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -21,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app import models
 from app.api.auth import assert_session_owner, get_current_user, get_optional_user
+from app.core import config
 from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
@@ -1015,6 +1019,189 @@ async def _run_internal_compact(session_id: uuid.UUID, message: str, stream_turn
         return False
 
 
+# SSE heartbeat (RPA-233) — 에이전트가 다음 이벤트를 내기까지 조용한 구간이 길면(LLM 긴 생성 등)
+# CloudFront OriginReadTimeout(60초)에 연결이 끊긴다. 침묵이 이어지면 주석 프레임을 흘려 연결을
+# 살려둔다. 60초보다 넉넉히 짧게 둬 idle마다 최소 한 번은 반드시 들어가게 한다.
+_SSE_HEARTBEAT_SEC = 15.0
+_SSE_HEARTBEAT_FRAME = ": keepalive\n\n"  # SSE 주석 — EventSource는 무시하고 연결만 유지한다
+_HEARTBEAT = object()  # 침묵 구간 신호 (실제 이벤트와 구분되는 sentinel)
+_SSE_CLEANUP_TIMEOUT_SEC = 1.0
+_SSE_DEFERRED_PENDING_MAX = 128
+_SSE_DEFERRED_PENDING_TTL_SEC = 300.0
+_SSE_DEFERRED_PENDING: set[asyncio.Future] = set()
+_SSE_DEFERRED_CLOSES: set[asyncio.Task] = set()
+
+_TURN_MAX_DEFAULT_SEC = 900.0
+
+
+def _turn_max_sec() -> float:
+    """Registry 값을 요청 시점에 읽고 비정상 상한은 안전한 기본값으로 복구한다."""
+    try:
+        value = float(config.TURN_MAX_DURATION_SEC)
+    except (TypeError, ValueError):
+        logger.warning("TURN_MAX_DURATION_SEC가 숫자가 아니어서 기본값 %.0f초를 사용합니다", _TURN_MAX_DEFAULT_SEC)
+        return _TURN_MAX_DEFAULT_SEC
+    if not math.isfinite(value) or value < 0:
+        logger.warning("TURN_MAX_DURATION_SEC가 유효 범위를 벗어나 기본값 %.0f초를 사용합니다", _TURN_MAX_DEFAULT_SEC)
+        return _TURN_MAX_DEFAULT_SEC
+    return value
+
+
+class _TurnTimeout(Exception):
+    """전체 턴 상한 초과 — hung 턴을 error로 끊는다 (RPA-235)."""
+
+
+def _consume_cleanup_result(task: asyncio.Future) -> None:
+    """시간 제한 뒤 백그라운드에서 끝난 정리 태스크의 예외를 회수한다."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 — 요청 종료 뒤 정리 실패는 경고만 남긴다
+        logger.warning("SSE 백그라운드 정리 실패", exc_info=True)
+
+
+async def _wait_for_cleanup(task: asyncio.Future, label: str) -> bool:
+    """정리 태스크를 제한 시간만 기다리되 바깥 취소는 그대로 전파한다."""
+    try:
+        done, _ = await asyncio.wait({task}, timeout=_SSE_CLEANUP_TIMEOUT_SEC)
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_cleanup_result)
+        raise
+    if task not in done:
+        task.cancel()
+        task.add_done_callback(_consume_cleanup_result)
+        logger.warning("SSE %s 정리가 %.1f초를 초과했습니다", label, _SSE_CLEANUP_TIMEOUT_SEC)
+        return False
+    _consume_cleanup_result(task)
+    return True
+
+
+async def _close_deferred_generator(it) -> None:
+    """늦게 끝난 다음 이벤트 대기 뒤 하위 generator를 제한 시간 내 닫는다."""
+    aclose = getattr(it, "aclose", None)
+    if aclose is not None:
+        close_task = asyncio.ensure_future(aclose())
+        await _wait_for_cleanup(close_task, "deferred generator aclose")
+
+
+def _expire_deferred_pending(pending: asyncio.Future) -> None:
+    if pending not in _SSE_DEFERRED_PENDING:
+        return
+    _SSE_DEFERRED_PENDING.discard(pending)
+    if pending.done():
+        return
+    logger.error(
+        "SSE 지연 정리 추적이 %.0f초를 초과해 참조를 해제합니다: remaining=%d",
+        _SSE_DEFERRED_PENDING_TTL_SEC,
+        len(_SSE_DEFERRED_PENDING),
+    )
+
+
+def _schedule_deferred_cleanup(pending: asyncio.Future, it) -> None:
+    """미완료 대기를 제한적으로 추적하고 완료 시 generator를 닫는다."""
+    tracked = len(_SSE_DEFERRED_PENDING) < _SSE_DEFERRED_PENDING_MAX
+    expiry_handle = None
+    if tracked:
+        _SSE_DEFERRED_PENDING.add(pending)
+        expiry_handle = asyncio.get_running_loop().call_later(
+            _SSE_DEFERRED_PENDING_TTL_SEC,
+            _expire_deferred_pending,
+            pending,
+        )
+    else:
+        logger.error(
+            "SSE 지연 정리 추적 상한을 초과해 새 항목을 보관하지 않습니다: tracked=%d max=%d",
+            len(_SSE_DEFERRED_PENDING),
+            _SSE_DEFERRED_PENDING_MAX,
+        )
+
+    def _pending_done(task: asyncio.Future) -> None:
+        if expiry_handle is not None:
+            expiry_handle.cancel()
+        _SSE_DEFERRED_PENDING.discard(task)
+        # _wait_for_cleanup()이 timeout 경로에서 이미 결과 회수 callback을 등록했다.
+        # 여기서 다시 회수하면 같은 정리 예외가 경고로 두 번 기록된다.
+        close_task = asyncio.create_task(_close_deferred_generator(it))
+        _SSE_DEFERRED_CLOSES.add(close_task)
+
+        def _close_done(done: asyncio.Task) -> None:
+            _SSE_DEFERRED_CLOSES.discard(done)
+            _consume_cleanup_result(done)
+
+        close_task.add_done_callback(_close_done)
+
+    pending.add_done_callback(_pending_done)
+
+
+async def _iter_with_heartbeat(agen, interval: float, max_total: float | None = None):
+    """`agen`의 이벤트를 흘리되, `interval`초 이상 조용하면 `_HEARTBEAT` sentinel을 낸다.
+    `max_total`초가 지나면 이벤트 진행 여부와 관계없이 `_TurnTimeout`을 올린다 (RPA-235).
+
+    다음 이벤트를 기다리는 `__anext__`를 `asyncio.shield`로 감싸 타임아웃이 하위 async
+    제너레이터를 취소·훼손하지 않게 한다 — 취소하면 진행 중이던 LLM 호출·상태가 깨진다.
+    타임아웃은 shield 래퍼만 취소하고 실제 대기는 다음 반복에서 그대로 이어진다.
+    """
+    it = agen.__aiter__()
+    loop = asyncio.get_running_loop()
+    deadline = None if not max_total or max_total <= 0 else loop.time() + max_total
+
+    async def _next():
+        # StopAsyncIteration을 태스크 경계로 넘기지 않는다 — __anext__를 직접 태스크화하면
+        # 종료 신호 전파가 깨져(무한 대기) heartbeat만 영원히 나간다. 코루틴 안에서 잡아
+        # (값, 종료여부) 튜플로 바꾼다.
+        try:
+            return await it.__anext__(), False
+        except StopAsyncIteration:
+            return None, True
+
+    pending: asyncio.Future | None = None
+    try:
+        while True:
+            wait_timeout = interval
+            if deadline is not None:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise _TurnTimeout
+                wait_timeout = min(interval, remaining)
+            if pending is None:
+                pending = asyncio.ensure_future(_next())
+            try:
+                event, done = await asyncio.wait_for(asyncio.shield(pending), wait_timeout)
+            except asyncio.TimeoutError:
+                # 전체 상한을 넘으면 hung으로 보고 끊는다 (RPA-235) — 그냥 두면
+                # heartbeat만 무한히 나가며 요청 세션·워커를 영영 붙잡는다. finally가 하위를 정리한다.
+                if deadline is not None and loop.time() >= deadline:
+                    raise _TurnTimeout
+                yield _HEARTBEAT  # 아직 다음 이벤트 없음 — 연결만 살린다
+                continue
+            pending = None
+            if done:
+                return
+            yield event
+            if getattr(event, "event", None) == "done":
+                return
+    finally:
+        # 조기 종료(클라 끊김 등)면 진행 중이던 __anext__를 정리한다 — 진행 중 호출 1건만 취소.
+        # 우리가 유발한 CancelledError만 삼킨다 — BaseException을 통째로 삼키면 바깥 취소까지
+        # 먹어 asyncio 협조적 취소가 깨진다(RPA-233 Qodo).
+        pending_finished = True
+        if pending is not None:
+            pending.cancel()
+            pending_finished = await _wait_for_cleanup(pending, "pending task")
+        # 하위 제너레이터도 명시적으로 닫는다 — __anext__를 수동 구동해서 wrapper의 GeneratorExit이
+        # it로 자동 전파되지 않는다. pending을 먼저 취소했으니 "generator already running" 없이
+        # 하위(graph.astream)의 finally 정리가 확실히 돈다. 정리 중 하위 예외는 삼키되,
+        # CancelledError(바깥 취소)는 전파한다 — 취소가 최우선이다(RPA-233 Qodo).
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None and pending is not None and not pending_finished:
+            _schedule_deferred_cleanup(pending, it)
+        elif aclose is not None:
+            close_task = asyncio.ensure_future(aclose())
+            await _wait_for_cleanup(close_task, "generator aclose")
+
+
 @router.post("/{session_id}/turn")
 async def agent_turn(
     session_id: str,
@@ -1117,6 +1304,7 @@ async def agent_turn(
         result_data = None
         saw_error = False
         disconnected = False
+        turn_max_sec = _turn_max_sec()
         turn_t0 = time.perf_counter()
         tev: list[dict] = []
 
@@ -1151,7 +1339,19 @@ async def agent_turn(
             with usage_context(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
             ):
-                async for event in stream_turn(message, agent_context):
+                async for event in _iter_with_heartbeat(
+                    stream_turn(message, agent_context), _SSE_HEARTBEAT_SEC, turn_max_sec
+                ):
+                    # 조용한 구간엔 heartbeat만 흘려 연결을 살린다 (RPA-233, CloudFront 60초 idle).
+                    # 끊긴 클라이언트엔 보내지 않고 즉시 턴을 중단한다 — 계속 소비하면 비용만 나간다.
+                    if event is _HEARTBEAT:
+                        if await request.is_disconnected():
+                            logger.info("클라이언트 끊김 — 턴 중단(heartbeat): session=%s", session_key)
+                            _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
+                            disconnected = True
+                            break
+                        yield _SSE_HEARTBEAT_FRAME
+                        continue
                     # done은 끊김 체크보다 먼저 잡는다 (CodeRabbit #164) — 같은 반복에서
                     # 끊김이 감지되면 이미 완료된 작업(전체 LLM 비용 지출됨)이 저장 없이
                     # 버려지는 누락이 생긴다. done을 먼저 확보하면 그 케이스가 "done 후
@@ -1206,6 +1406,16 @@ async def agent_turn(
                 _tev("error", "agent", "응답을 생성하지 못했습니다")
                 yield ProgressEvent(
                     event="error", stage="agent", message="응답을 생성하지 못했습니다"
+                ).to_sse()
+        except _TurnTimeout:
+            # 전체 상한 초과 — hung 턴을 error로 끊는다 (RPA-235). 하위 정리는 wrapper finally가 했다.
+            logger.warning("턴 시간 초과(%.0fs) — 중단: session=%s", turn_max_sec, session_key)
+            _tev("error", "agent", "처리 시간이 너무 길어 중단했습니다")
+            # 이미 끊긴 클라이언트에 yield하다 취소되면 아래 turn_events 적재가 건너뛰어진다.
+            # 완료 응답과 같은 경계로 전송만 생략하고 관측 기록은 끝까지 저장한다.
+            if not await request.is_disconnected():
+                yield ProgressEvent(
+                    event="error", stage="agent", message="처리 시간이 너무 길어 중단했습니다"
                 ).to_sse()
         except RuntimeError as e:  # OPENAI_API_KEY 미설정 등 구성 오류
             _tev("error", "agent", f"에이전트 구성 오류: {e}")

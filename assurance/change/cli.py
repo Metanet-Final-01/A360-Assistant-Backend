@@ -21,6 +21,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--repository", required=True)
     value.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     value.add_argument("--output", type=Path, default=Path(".artifacts/change-assurance"))
+    value.add_argument("--review-evidence", type=Path)
     return value
 
 
@@ -42,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
             repository=args.repository,
             output=args.output,
             policy_path=args.policy,
+            review_evidence_path=args.review_evidence,
         )
     except Exception as exc:
         try:

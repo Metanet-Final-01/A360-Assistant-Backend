@@ -43,6 +43,10 @@ def test_qodo_review_policy_preserves_project_boundaries() -> None:
     assert reviewer["require_can_be_split_review"] is False
     assert "지적하지 않는다" in reviewer["extra_instructions"]
     assert "이론적·저확률" in reviewer["extra_instructions"]
+    # 한국어 강제 — response_language만으론 **제목이 영어로** 나오는 일이 실제로 있었다.
+    # 지시가 지워지면 다시 영어 제목이 섞이므로 래칫으로 고정한다.
+    assert "제목(title)" in reviewer["extra_instructions"]
+    assert "제목(title)" in suggestions["extra_instructions"]
     assert suggestions["focus_only_on_problems"] is True
     assert suggestions["commitable_code_suggestions"] is False
     assert suggestions["apply_suggestions_checkbox"] is False

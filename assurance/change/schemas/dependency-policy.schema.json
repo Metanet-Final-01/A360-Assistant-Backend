@@ -80,11 +80,42 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "allowed_spdx"
+        "allowed_spdx",
+        "approved_exceptions"
       ],
       "properties": {
         "allowed_spdx": {
           "$ref": "#/$defs/nonEmptyStringArray"
+        },
+        "approved_exceptions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "license_expression",
+              "approval_ref",
+              "conditions"
+            ],
+            "properties": {
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "license_expression": {
+                "type": "string",
+                "minLength": 1
+              },
+              "approval_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "conditions": {
+                "$ref": "#/$defs/nonEmptyStringArray"
+              }
+            }
+          }
         }
       }
     },
