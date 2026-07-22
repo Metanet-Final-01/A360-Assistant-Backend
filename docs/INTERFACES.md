@@ -206,7 +206,7 @@ QuestionCard = {
 - **응답 흐름**: 프론트가 카드에 답한 뒤 다음 턴을 `operation="fill_cards"` +
   `card_values={card_id: 값}`로 보낸다. `node_path`는 단계 내 트리 경로(예: `actions[0].children[1]`).
 - ⚠️ **`fill_cards`는 v3 전용이다.** v1·v2 그래프는 `compact` 외의 `operation`을 전부 일반
-  intake/chat으로 라우팅한다(`v2/orchestrator/graph.py`). 따라서 v1/v2 세션에 `fill_cards`를
+  intake/chat으로 라우팅한다(`app/agent/v2/orchestrator/graph.py`). 따라서 v1/v2 세션에 `fill_cards`를
   보내면 **카드 적용이 조용히 일어나지 않는다** — `card_values`가 무시되고 평범한 대화 턴이 된다.
   질문 카드 자체가 v3 산출물이므로, **프론트는 카드를 렌더한 턴의 `agent_version`을 그대로 유지해**
   응답을 보내야 한다.
