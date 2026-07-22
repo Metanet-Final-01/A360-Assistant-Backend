@@ -1086,25 +1086,29 @@ async def _close_deferred_generator(it) -> None:
         await _wait_for_cleanup(close_task, "deferred generator aclose")
 
 
+def _expire_deferred_pending(pending: asyncio.Future) -> None:
+    if pending not in _SSE_DEFERRED_PENDING:
+        return
+    _SSE_DEFERRED_PENDING.discard(pending)
+    if pending.done():
+        return
+    logger.error(
+        "SSE 지연 정리 추적이 %.0f초를 초과해 참조를 해제합니다: remaining=%d",
+        _SSE_DEFERRED_PENDING_TTL_SEC,
+        len(_SSE_DEFERRED_PENDING),
+    )
+
+
 def _schedule_deferred_cleanup(pending: asyncio.Future, it) -> None:
     """미완료 대기를 제한적으로 추적하고 완료 시 generator를 닫는다."""
     tracked = len(_SSE_DEFERRED_PENDING) < _SSE_DEFERRED_PENDING_MAX
     expiry_handle = None
     if tracked:
         _SSE_DEFERRED_PENDING.add(pending)
-
-        def _expire_pending() -> None:
-            if pending in _SSE_DEFERRED_PENDING:
-                _SSE_DEFERRED_PENDING.discard(pending)
-                logger.error(
-                    "SSE 지연 정리 추적이 %.0f초를 초과해 참조를 해제합니다: remaining=%d",
-                    _SSE_DEFERRED_PENDING_TTL_SEC,
-                    len(_SSE_DEFERRED_PENDING),
-                )
-
         expiry_handle = asyncio.get_running_loop().call_later(
             _SSE_DEFERRED_PENDING_TTL_SEC,
-            _expire_pending,
+            _expire_deferred_pending,
+            pending,
         )
     else:
         logger.error(

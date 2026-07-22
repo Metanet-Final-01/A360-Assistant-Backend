@@ -868,28 +868,35 @@ def test_timeout_is_not_blocked_by_cancellation_resistant_cleanup(monkeypatch):
     asyncio.run(_collect())
 
 
-def test_deferred_pending_tracking_expires(monkeypatch, caplog):
+def test_deferred_pending_tracking_expires(caplog):
     """영구 미완료 pending은 TTL 뒤 전역 강한 참조에서 제거된다."""
 
     async def _collect():
         initial_pending = set(sessions_api._SSE_DEFERRED_PENDING)
         pending = asyncio.get_running_loop().create_future()
-
-        class _Iterator:
-            async def aclose(self):
-                return None
-
-        monkeypatch.setattr(sessions_api, "_SSE_DEFERRED_PENDING_TTL_SEC", 0.01)
-        sessions_api._schedule_deferred_cleanup(pending, _Iterator())
+        sessions_api._SSE_DEFERRED_PENDING.add(pending)
         assert pending in sessions_api._SSE_DEFERRED_PENDING
 
-        await asyncio.sleep(0.02)
+        sessions_api._expire_deferred_pending(pending)
         assert pending not in sessions_api._SSE_DEFERRED_PENDING
         assert "참조를 해제" in caplog.text
+        assert sessions_api._SSE_DEFERRED_PENDING == initial_pending
 
+    asyncio.run(_collect())
+
+
+def test_deferred_pending_completion_at_expiry_is_not_logged_as_error(caplog):
+    """TTL 경계에서 이미 완료된 pending은 지연 오류로 기록하지 않는다."""
+
+    async def _collect():
+        initial_pending = set(sessions_api._SSE_DEFERRED_PENDING)
+        pending = asyncio.get_running_loop().create_future()
+        sessions_api._SSE_DEFERRED_PENDING.add(pending)
         pending.set_result((None, True))
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+
+        sessions_api._expire_deferred_pending(pending)
+        assert pending not in sessions_api._SSE_DEFERRED_PENDING
+        assert "참조를 해제" not in caplog.text
         assert sessions_api._SSE_DEFERRED_PENDING == initial_pending
 
     asyncio.run(_collect())
