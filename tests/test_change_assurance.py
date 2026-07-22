@@ -660,6 +660,14 @@ def test_explicit_license_exception_does_not_approve_vulnerability_policy(
     evidence = json.loads((output / "dependency-evidence.json").read_text(encoding="utf-8"))
     assert evidence["rules"]["dep.license"]["status"] == "pass"
     assert evidence["rules"]["dep.vuln"]["status"] == "unassured"
+    assert (
+        "vulnerability policy still requires a human approval decision"
+        in evidence["rules"]["dep.vuln"]["reasons"]
+    )
+    assert not any(
+        "license policy still requires" in reason
+        for reason in evidence["rules"]["dep.vuln"]["reasons"]
+    )
     assert report["assurance_decision"] == "unassured"
 
 

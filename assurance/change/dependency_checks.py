@@ -819,12 +819,14 @@ def derive_dependency_evidence(
         package for package in candidate_packages if package in head_requirements
     ]
     if active_candidate_packages and decision_state not in {"approved", "approved_fixture"}:
-        reason = "vulnerability and license policy still requires a human approval decision"
+        vulnerability_reason = (
+            "vulnerability policy still requires a human approval decision"
+        )
         rules["dep.vuln"]["status"] = _combine_rule_status(
             rules["dep.vuln"]["status"], "unassured"
         )
         rules["dep.vuln"]["reasons"] = sorted(
-            set([*rules["dep.vuln"]["reasons"], reason])
+            set([*rules["dep.vuln"]["reasons"], vulnerability_reason])
         )
         all_licenses_explicitly_approved = all(
             explicit_license_approvals.get(package, False)
@@ -834,8 +836,9 @@ def derive_dependency_evidence(
             rules["dep.license"]["status"] = _combine_rule_status(
                 rules["dep.license"]["status"], "unassured"
             )
+            license_reason = "license policy still requires a human approval decision"
             rules["dep.license"]["reasons"] = sorted(
-                set([*rules["dep.license"]["reasons"], reason])
+                set([*rules["dep.license"]["reasons"], license_reason])
             )
 
     return {
