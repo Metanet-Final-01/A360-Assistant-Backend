@@ -914,7 +914,11 @@ def test_deferred_pending_tracking_has_hard_cap(monkeypatch, caplog):
             async def aclose(self):
                 return None
 
-        monkeypatch.setattr(sessions_api, "_SSE_DEFERRED_PENDING_MAX", 1)
+        monkeypatch.setattr(
+            sessions_api,
+            "_SSE_DEFERRED_PENDING_MAX",
+            len(initial_pending) + 1,
+        )
         monkeypatch.setattr(sessions_api, "_SSE_DEFERRED_PENDING_TTL_SEC", 60.0)
         sessions_api._schedule_deferred_cleanup(first, _Iterator())
         sessions_api._schedule_deferred_cleanup(second, _Iterator())
