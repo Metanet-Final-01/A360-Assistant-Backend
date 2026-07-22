@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import _probe_opensearch, app
 
 
 def _factory(ok=True):
@@ -31,11 +31,12 @@ def _patch(monkeypatch, app_ok=True, obs_ok=True, os_ok=True, os_indexed=True):
     monkeypatch.setattr(
         "app.core.observability_db.observability_sessionmaker", lambda: _factory(obs_ok)
     )
-    # OpenSearch 도달성 체크는 실제 네트워크(RPA-156)라 테스트에선 스텁 — conftest가 host를
-    # localhost로 격리하므로 스텁 안 하면 항상 fail로 잡힌다.
-    monkeypatch.setattr("app.main._check_opensearch", lambda: os_ok)
-    # 색인 확인도 네트워크다 (RPA-249) — 스텁 안 하면 매 테스트가 타임아웃까지 기다린다.
-    monkeypatch.setattr("app.main._check_opensearch_indexed", lambda: os_indexed)
+    # OpenSearch 프로브는 실제 네트워크(RPA-156)라 테스트에선 스텁 — conftest가 host를
+    # localhost로 격리하므로 스텁 안 하면 항상 fail로 잡히고 타임아웃까지 기다린다.
+    # 도달성·색인을 한 번에 반환한다 (RPA-249 Qodo: health의 OpenSearch 호출은 1회).
+    monkeypatch.setattr(
+        "app.main._probe_opensearch", lambda: (os_ok, os_indexed if os_ok else None)
+    )
 
 
 def test_health_all_ok(monkeypatch):

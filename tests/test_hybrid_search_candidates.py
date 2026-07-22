@@ -55,4 +55,10 @@ def test_bm25_contributed_none_for_vector_mode():
 
 
 def test_bm25_contributed_none_for_empty_results():
+    """결과가 0건이면 판단 근거가 없어 None — vector 모드(None)와 같은 값이다 (Qodo).
+
+    그래서 이 지표는 단독으로 읽으면 안 된다. 같은 로그의 mode·count와 조합해야 구분된다:
+    mode=vector면 '해당 없음', mode!=vector이고 count==0이면 '결과 자체가 없음'.
+    우리가 잡으려는 신호는 count>0인데 contributed=False인 경우다(아래 테스트가 그 케이스).
+    """
     assert _bm25_contributed([]) is None

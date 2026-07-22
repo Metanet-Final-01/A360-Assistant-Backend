@@ -194,47 +194,20 @@ def _check_db(open_session) -> bool:
         return False
 
 
-def _check_opensearch() -> bool:
-    """OpenSearch(BM25) 도달성 — 얕은 _cluster/health 핑(짧은 타임아웃, RPA-156).
+def _probe_opensearch() -> tuple[bool, bool | None]:
+    """OpenSearch 도달성 + 색인 문서 유무를 **한 번의 호출**로 본다 (RPA-156, RPA-249).
 
-    BM25는 보강 신호라 실패해도 degraded(본 검색은 dense로 동작)다. 신선 요청으로 '인프라
-    도달성'을 본다 — 앱-전역 클라이언트가 죽어 dense-only로 저하되는 건 여기선 못 잡지만
-    (그건 검색 경로의 BM25 실패 로그가 잡는다), Bonsai 자체가 내려간 건 이걸로 드러난다.
-    """
-    import httpx
+    `(도달 가능, 색인에 문서 있음 | None=알 수 없음)`.
 
-    import app.rag.config as rag_config
+    ⚠️ 왜 한 번인가 (Qodo 반영): health는 의존성을 **동기로** 찌르므로 호출 수가 곧 지연
+    예산이다. 도달성(`_cluster/health`)과 색인(`_count`)을 따로 부르면 OpenSearch가 느릴 때
+    타임아웃이 2배(최악 6초)가 되어 /health 자체가 호출자 타임아웃을 유발한다.
+    `_count` 하나로 둘 다 답할 수 있다 — **응답이 왔다는 것이 도달**이고, 그 본문이 문서 수다.
+    게다가 이건 실제 BM25 질의가 타는 인덱스라 `_cluster/health`보다 검색 경로에 가깝다.
 
-    host = rag_config.OPENSEARCH_HOST
-    auth = (
-        (rag_config.OPENSEARCH_USERNAME, rag_config.OPENSEARCH_PASSWORD)
-        if rag_config.OPENSEARCH_USERNAME
-        else None
-    )
-    try:
-        r = httpx.get(
-            f"{host.rstrip('/')}/_cluster/health",
-            auth=auth,
-            timeout=3.0,
-            verify=host.startswith("https"),
-        )
-        return r.status_code == 200
-    except Exception as e:  # noqa: BLE001 — 어떤 실패든 "fail"로 보고
-        logger.warning("opensearch health 체크 실패: %s", e)
-        return False
-
-
-def _check_opensearch_indexed() -> bool | None:
-    """BM25 색인에 문서가 **있나** (RPA-249) — 도달성만으론 못 잡는 반쪽 상태를 드러낸다.
-
-    `_check_opensearch`는 클러스터에 닿는지만 본다. 색인이 비어 있으면 BM25 질의가 200 OK로
-    0건을 반환하고, 검색은 조용히 dense-only 반쪽이 되는데 health는 계속 초록이다 —
-    실제 배포가 그 상태였다(bm25_available=true인데 bm25_rank=null).
-
-    True=문서 있음 / False=0건(미적재·인덱스 소실) / None=확인 불가.
-
-    ⚠️ status·checks 판정에는 **넣지 않는다**: 색인이 비어도 dense 검색은 동작하므로 "fail"이
-    아니고, checks 스키마를 늘리면 백오피스 계약이 깨진다. 정보 필드로만 노출한다.
+    BM25는 보강 신호라 도달 실패해도 degraded(본 검색은 dense로 동작)다.
+    색인 유무는 status 판정에 **넣지 않는다**: 비어 있어도 dense 검색은 동작하므로 "fail"이
+    아니고, checks 스키마를 늘리면 백오피스 계약이 깨진다 — 정보 필드로만 노출한다.
     """
     import httpx
 
@@ -253,12 +226,19 @@ def _check_opensearch_indexed() -> bool | None:
             timeout=3.0,
             verify=host.startswith("https"),
         )
-        if r.status_code != 200:  # 인덱스 부재(404) 등 — "0건"과 구분해 알 수 없음으로 둔다
-            return None
-        return int(r.json().get("count", 0)) > 0
-    except Exception as e:  # noqa: BLE001 — 확인 실패가 health를 죽이면 안 된다
-        logger.warning("opensearch 색인 확인 실패: %s", e)
-        return None
+    except Exception as e:  # noqa: BLE001 — 어떤 실패든 "fail"로 보고
+        logger.warning("opensearch health 체크 실패: %s", e)
+        return False, None
+    if r.status_code == 404:
+        # 응답이 온 것 자체가 도달 성공 — 인덱스가 아직 없는 상태(미적재·소실)다.
+        return True, False
+    if r.status_code != 200:
+        return False, None
+    try:
+        return True, int(r.json().get("count", 0)) > 0
+    except Exception as e:  # noqa: BLE001 — 본문이 예상과 달라도 도달은 성공이다
+        logger.warning("opensearch 색인 수 파싱 실패: %s", e)
+        return True, None
 
 
 @app.get("/api/health")
@@ -275,7 +255,7 @@ def compute_health() -> dict:
     import app.db as app_db
     from app.core.observability_db import observability_sessionmaker
 
-    os_reachable = _check_opensearch()
+    os_reachable, os_indexed = _probe_opensearch()  # 한 번의 호출로 도달성+색인 (RPA-249 Qodo)
     checks = {
         "database": "ok" if _check_db(lambda: app_db.SessionLocal()) else "fail",
         "observability_database": "ok" if _check_db(lambda: observability_sessionmaker()()) else "fail",
@@ -294,8 +274,8 @@ def compute_health() -> dict:
         # 관측 DB가 공유(Neon)인지 로컬 폴백인지 — 폴백이면 위 체크는 앱 DB와 동일 대상
         "observability_shared": bool(os.getenv("OBSERVABILITY_DATABASE_URL")),
         # BM25 색인에 문서가 있나 (RPA-249) — 도달성이 ok여도 색인이 비면 검색은 dense-only
-        # 반쪽이다. 도달 실패면 물어볼 필요도 없으니 None. status 판정에는 넣지 않는다.
-        "opensearch_indexed": _check_opensearch_indexed() if os_reachable else None,
+        # 반쪽이다. 도달 실패면 None(알 수 없음). status 판정에는 넣지 않는다.
+        "opensearch_indexed": os_indexed,
     }
 
 

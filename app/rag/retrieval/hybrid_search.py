@@ -105,7 +105,15 @@ def _bm25_contributed(results: list[dict]) -> bool | None:
     조용히 반쪽이 된다(실측). 지표가 "정상"이라고 말하는데 품질은 절반인 상태다.
     가드는 동작이 읽는 것을 읽어야 한다 — 예외가 아니라 **기여**를 본다.
 
-    True=기여함 / False=호출했으나 0건(색인 비었거나 매칭 없음) / None=해당 없음(vector 모드).
+    True=기여함 / False=호출했으나 0건(색인 비었거나 매칭 없음) / None=판단 불가.
+
+    ⚠️ None은 두 상황에서 나온다 (Qodo 지적) — **단독으로 읽으면 안 된다**:
+      1. mode="vector" — BM25를 아예 부르지 않음(해당 없음)
+      2. 하이브리드였지만 **결과 자체가 0건**([]) — 판단 근거가 없음
+    같은 로그에 `mode`(capture_args)와 `count`(capture_result)가 함께 남으므로 해석은
+    이 조합으로 한다: `mode != vector && count == 0` → 2번, `mode == vector` → 1번.
+    우리가 잡으려는 신호는 `mode != vector && count > 0 && contributed is False`
+    (= 결과는 나왔는데 BM25가 한 건도 기여 못 함)다.
     """
     scored = [r for r in results if "bm25_available" in r]
     if not scored:
