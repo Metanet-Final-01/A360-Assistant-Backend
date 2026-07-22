@@ -204,8 +204,21 @@ QuestionCard = {
     **비밀번호 입력칸이 아니다** — 실제 시크릿·토큰을 보내지 않는다.
   - `input_type="file_path"`도 경로 문자열이 그대로 남으므로 사내 절대경로 노출에 유의한다.
 - **응답 흐름**: 프론트가 카드에 답한 뒤 다음 턴을 `operation="fill_cards"` +
-  `card_values={card_id: 값}`로 보낸다 → 에이전트(v3)가 `targets` 좌표로 set_params를
-  결정론 생성해 적용한다. `node_path`는 단계 내 트리 경로(예: `actions[0].children[1]`).
+  `card_values={card_id: 값}`로 보낸다. `node_path`는 단계 내 트리 경로(예: `actions[0].children[1]`).
+- ⚠️ **`fill_cards`가 항상 결정론·항상 추천 버전 생성인 것은 아니다.** 카드 종류로 경로가 갈린다:
+
+  | `kind` | 적용 경로 | LLM |
+  |---|---|---|
+  | `missing_param` | `targets` 좌표로 파라미터 값 치환(`value_source="user"`) | ❌ 불개입 |
+  | `assumption_confirm` | 승인(참)이면 변경 없음 / **자유 서술이면 edit 위임** | 조건부 |
+  | `ambiguity` | **항상 edit 위임**(구조 변경 가능성) | ✅ 호출 |
+
+  edit 위임분은 카드 문맥을 합성 메시지로 만들어 편집 노드를 태우므로, 그런 턴은
+  **지연·비용이 일반 편집 턴과 같다**. "카드 응답은 늘 즉시"라고 가정하지 말 것.
+- ⚠️ **`fill_cards` 턴이 `type="answer"`로 끝날 수 있다** — 다음 경우 추천 버전이 생기지 않는다:
+  ① 반영할 흐름도가 없음(추천 생성 전), ② `card_values`가 비어 있음,
+  ③ 적용된 카드가 0건(좌표 불일치·edit 위임 실패 등 — `answer`에 사유가 담긴다).
+  성공 시에는 `type="recommendation"`으로 새 버전이 저장되고 `answer`에 `n건 반영 (해소/전체)`가 온다.
 - `blocking=true` 카드가 남아 있으면 그 봇은 실행 불가 상태다 — 프론트가 구분해 보여줄 것.
 - `compact`는 고정 섹션 JSON: `task_overview`/`decisions`/`flow_journal`/`open_questions`/`verbatim`.
 - 대화 누적 게이지(`usage_gauge`)는 **백엔드가** intake 사용량으로 계산해 붙인다(에이전트 책임 아님).
