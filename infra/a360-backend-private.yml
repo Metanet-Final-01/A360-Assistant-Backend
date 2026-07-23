@@ -193,17 +193,19 @@ Parameters:
   ExternalOpenSearchHost:
     Type: String
     Default: ""
-    AllowedPattern: "^$|^https://[^@/]+(?:/.*)?$"
+    AllowedPattern: "^$|^https://[^@/?#]+$"
     Description: >-
       Host-only HTTPS endpoint for an existing external OpenSearch service such as Bonsai.
-      Do not include username or password in this value.
+      Do not include username, password, query, fragment, or path in this value.
 
   ExternalOpenSearchCredentialsSecretArn:
     Type: String
     Default: ""
+    AllowedPattern: "^$|^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$"
     Description: >-
       Secrets Manager ARN containing username and password for ExternalOpenSearchHost.
-      It must be set together with ExternalOpenSearchHost.
+      It must be set together with ExternalOpenSearchHost. Cross-region ARNs are read from
+      the region encoded in the ARN.
 
   BackofficeOpsSecurityGroupId:
     Type: String
@@ -574,8 +576,6 @@ Resources:
 
   DatabaseSecret:
     Type: AWS::SecretsManager::Secret
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       Name: !Sub "${ProjectName}/${Environment}/postgres"
       GenerateSecretString:
@@ -596,7 +596,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Name: !Sub "${ProjectName}/${Environment}/postgres-observability-master"
       GenerateSecretString:
         SecretStringTemplate: '{"username":"a360_observability_admin"}'
         GenerateStringKey: password
@@ -615,7 +614,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Name: !Sub "${ProjectName}/${Environment}/postgres-rag-master"
       GenerateSecretString:
         SecretStringTemplate: '{"username":"a360_rag_admin"}'
         GenerateStringKey: password
@@ -634,7 +632,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Name: !Sub "${ProjectName}/${Environment}/postgres-service-app"
       GenerateSecretString:
         SecretStringTemplate: '{"username":"service_app"}'
         GenerateStringKey: password
@@ -653,7 +650,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Name: !Sub "${ProjectName}/${Environment}/postgres-observability-writer"
       GenerateSecretString:
         SecretStringTemplate: '{"username":"observability_writer"}'
         GenerateStringKey: password
@@ -672,7 +668,6 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Name: !Sub "${ProjectName}/${Environment}/postgres-rag-runtime"
       GenerateSecretString:
         SecretStringTemplate: '{"username":"rag_runtime"}'
         GenerateStringKey: password
@@ -1160,7 +1155,8 @@ Resources:
               OPENSEARCH_PASSWORD=""
               EXTERNAL_OPENSEARCH_SECRET_ARN="${ExternalOpenSearchCredentialsSecretArn}"
               if [ -n "$EXTERNAL_OPENSEARCH_SECRET_ARN" ]; then
-                export OPENSEARCH_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id "$EXTERNAL_OPENSEARCH_SECRET_ARN" --query SecretString --output text)"
+                OPENSEARCH_SECRET_REGION=$(printf '%s' "$EXTERNAL_OPENSEARCH_SECRET_ARN" | cut -d: -f4)
+                export OPENSEARCH_SECRET_JSON="$(aws secretsmanager get-secret-value --region "$OPENSEARCH_SECRET_REGION" --secret-id "$EXTERNAL_OPENSEARCH_SECRET_ARN" --query SecretString --output text)"
                 OPENSEARCH_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["OPENSEARCH_SECRET_JSON"])["username"])')
                 OPENSEARCH_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["OPENSEARCH_SECRET_JSON"])["password"])')
               fi

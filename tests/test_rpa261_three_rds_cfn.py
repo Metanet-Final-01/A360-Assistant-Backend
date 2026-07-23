@@ -161,8 +161,19 @@ def test_backend_reads_runtime_database_secrets_but_not_master_secrets():
     for master_secret in ("ObservabilityDatabaseSecret", "RagDatabaseSecret"):
         assert master_secret not in scalar_resources
 
-    for master_secret in ("DatabaseSecret", "ObservabilityDatabaseSecret", "RagDatabaseSecret"):
+    assert "DeletionPolicy" not in resources["DatabaseSecret"]
+    assert "UpdateReplacePolicy" not in resources["DatabaseSecret"]
+    for master_secret in ("ObservabilityDatabaseSecret", "RagDatabaseSecret"):
         assert resources[master_secret]["DeletionPolicy"] == "Retain"
+
+    for generated_secret in (
+        "ObservabilityDatabaseSecret",
+        "RagDatabaseSecret",
+        "ServiceAppDatabaseSecret",
+        "ObservabilityWriterDatabaseSecret",
+        "RagRuntimeDatabaseSecret",
+    ):
+        assert "Name" not in resources[generated_secret]["Properties"]
 
 
 def test_user_data_injects_three_database_boundaries_and_external_opensearch_secret():
@@ -196,6 +207,8 @@ def test_user_data_injects_three_database_boundaries_and_external_opensearch_sec
     assert "${SeparatedDatabaseEnvBlock}" in user_data
 
     assert 'EXTERNAL_OPENSEARCH_SECRET_ARN="${ExternalOpenSearchCredentialsSecretArn}"' in user_data
+    assert "OPENSEARCH_SECRET_REGION=$(printf '%s'" in user_data
+    assert '--region "$OPENSEARCH_SECRET_REGION"' in user_data
     assert "OPENSEARCH_USERNAME=$OPENSEARCH_USERNAME" in user_data
     assert "OPENSEARCH_PASSWORD=$OPENSEARCH_PASSWORD" in user_data
     assert "https://user:" not in user_data
@@ -224,6 +237,9 @@ def test_external_opensearch_host_and_credentials_must_be_selected_together():
     parameters = template["Parameters"]
     rules = template["Rules"]
 
-    assert parameters["ExternalOpenSearchHost"]["AllowedPattern"] == "^$|^https://[^@/]+(?:/.*)?$"
+    assert parameters["ExternalOpenSearchHost"]["AllowedPattern"] == "^$|^https://[^@/?#]+$"
     assert parameters["ExternalOpenSearchCredentialsSecretArn"]["Default"] == ""
+    assert "secretsmanager" in parameters["ExternalOpenSearchCredentialsSecretArn"][
+        "AllowedPattern"
+    ]
     assert len(rules["ExternalOpenSearchConfiguration"]["Assertions"]) == 2
