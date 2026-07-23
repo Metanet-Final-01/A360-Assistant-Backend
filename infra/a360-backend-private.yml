@@ -39,11 +39,6 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
-  GithubUsername:
-    Type: String
-    Default: ""
-    Description: GitHub username that owns the GHCR read token.
-    AllowedPattern: "^$|^[A-Za-z0-9_.-]+$"
   OpenAiApiKey:
     Type: String
     Default: ""
@@ -100,7 +95,6 @@ Resources:
         {
           "OPENAI_API_KEY": "${OpenAiApiKey}",
           "GITHUB_TOKEN": "${GithubToken}",
-          "GITHUB_USERNAME": "${GithubUsername}",
           "VOYAGE_API_KEY": "${VoyageApiKey}",
           "JWT_SECRET": "${JwtSecret}",
           "OPS_API_KEY": "${OpsApiKey}",
@@ -315,9 +309,8 @@ Resources:
               aws secretsmanager get-secret-value --secret-id '${RagRuntimeSecretArn}' --query SecretString --output text > /opt/a360/secrets/rag.json
 
               GITHUB_TOKEN=$(jq -r '.GITHUB_TOKEN // ""' /opt/a360/secrets/app.json)
-              GITHUB_USERNAME=$(jq -r '.GITHUB_USERNAME // ""' /opt/a360/secrets/app.json)
               if [ -n "$GITHUB_TOKEN" ]; then
-                echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin
+                echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin
               fi
 
               SERVICE_USER=$(jq -r '.username' /opt/a360/secrets/service.json)

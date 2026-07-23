@@ -652,7 +652,6 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
         step for step in deploy_job["steps"] if step.get("name") == "Validate deployment credentials"
     )
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
-    github_username_parameter = template["Parameters"]["GithubUsername"]
     opensearch_parameter = template["Parameters"]["ExternalOpenSearchHost"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
@@ -673,21 +672,21 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert '[ -z "$GHCR_READ_TOKEN" ]' in validate_step["run"]
     assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
-    assert 'GithubUsername="${{ secrets.GHCR_USERNAME || github.repository_owner }}"' in deploy_script
     assert 'ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}"' in deploy_script
     assert opensearch_step["env"]["OPENSEARCH_HOST"] == "${{ secrets.OPENSEARCH_HOST }}"
     assert "^https?://[^[:space:]]+$" in opensearch_step["run"]
 
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
-    assert github_username_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_.-]+$"
     assert opensearch_parameter["NoEcho"] is True
     assert opensearch_parameter["AllowedPattern"] == "^https?://[^\\s]+$"
-    assert '"GITHUB_USERNAME": "${GithubUsername}"' in app_secret
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
-    assert "jq -r '.GITHUB_USERNAME // \"\"'" in user_data
-    assert 'docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin' in user_data
+    assert "GithubUsername" not in template["Parameters"]
+    assert "GITHUB_USERNAME" not in app_secret
+    assert "GITHUB_USERNAME" not in user_data
+    assert "GithubUsername=" not in deploy_script
+    assert 'docker login ghcr.io -u token --password-stdin' in user_data
     assert "jq -r '.ASSURANCE_WRITER_TOKEN // \"\"'" in user_data
     assert "jq -r '.ASSURANCE_WRITER_REPOSITORY // \"\"'" in user_data
     assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data

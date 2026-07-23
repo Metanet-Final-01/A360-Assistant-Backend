@@ -134,7 +134,6 @@ jobs:
               JwtSecret="${{ secrets.JWT_SECRET }}" \
               ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}" \
               GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
-              GithubUsername="${{ secrets.GHCR_USERNAME || github.repository_owner }}" \
               OpsApiKey="${{ secrets.OPS_API_KEY }}" \
               AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
               AssuranceWriterRepository="${{ github.repository }}" \
