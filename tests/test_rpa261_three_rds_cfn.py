@@ -6,6 +6,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_PATH = ROOT / "infra" / "a360-backend-private.yml"
+DEPLOY_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "backend-deploy.yml"
 
 
 class _CloudFormationLoader(yaml.SafeLoader):
@@ -25,6 +26,10 @@ _CloudFormationLoader.add_multi_constructor("!", _construct_cloudformation_tag)
 
 def _template() -> dict:
     return yaml.load(TEMPLATE_PATH.read_text(encoding="utf-8"), Loader=_CloudFormationLoader)
+
+
+def _deploy_workflow() -> dict:
+    return yaml.safe_load(DEPLOY_WORKFLOW_PATH.read_text(encoding="utf-8"))
 
 
 def _scalar_values(value) -> set[str]:
@@ -201,7 +206,8 @@ def test_user_data_injects_three_database_boundaries_and_external_opensearch_sec
         "UseSeparatedDatabaseRuntime",
         "OBSERVABILITY_DATABASE_URL=$OBSERVABILITY_DATABASE_URL\n"
         "RAG_DATABASE_URL=$RAG_DATABASE_URL\n",
-        "# Separated database runtime cutover is staged but not enabled.",
+        "OBSERVABILITY_DATABASE_URL=$OBSERVABILITY_DATABASE_URL\n"
+        "RAG_DATABASE_URL=$RAG_DATABASE_URL\n",
     ]
     assert "${DatabaseRuntimeBootstrapBlock}" in user_data
     assert "${SeparatedDatabaseEnvBlock}" in user_data
@@ -212,6 +218,10 @@ def test_user_data_injects_three_database_boundaries_and_external_opensearch_sec
     assert "OPENSEARCH_USERNAME=$OPENSEARCH_USERNAME" in user_data
     assert "OPENSEARCH_PASSWORD=$OPENSEARCH_PASSWORD" in user_data
     assert "https://user:" not in user_data
+    assert '["LEGACY_OBSERVABILITY_DATABASE_URL"]' in legacy_bootstrap
+    assert '["LEGACY_RAG_DATABASE_URL"]' in legacy_bootstrap
+    assert "${LegacyObservabilityDatabaseUrl}" not in user_data
+    assert "${LegacyRagDatabaseUrl}" not in user_data
 
     all_shell = "\n".join((user_data, separated_bootstrap, legacy_bootstrap))
     python_commands = re.findall(r"python3 -c '([^']+)'", all_shell)
@@ -224,12 +234,80 @@ def test_separated_database_runtime_requires_an_explicit_cutover():
     template = _template()
 
     parameter = template["Parameters"]["SeparatedDatabaseCutoverEnabled"]
+    parameters = template["Parameters"]
     assert parameter["Default"] == "false"
     assert parameter["AllowedValues"] == ["true", "false"]
     assert template["Conditions"]["UseSeparatedDatabaseRuntime"] == [
         "SeparatedDatabaseCutoverEnabled",
         "true",
     ]
+    for name in ("LegacyObservabilityDatabaseUrl", "LegacyRagDatabaseUrl"):
+        assert parameters[name]["Default"] == ""
+        assert parameters[name]["NoEcho"] is True
+
+    rule = template["Rules"]["LegacyDatabaseConfiguration"]["Assertions"][0]
+    assert {
+        "SeparatedDatabaseCutoverEnabled",
+        "LegacyObservabilityDatabaseUrl",
+        "LegacyRagDatabaseUrl",
+        "true",
+    }.issubset(_scalar_values(rule["Assert"]))
+    assert "required" in rule["AssertDescription"]
+
+    app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
+    assert '"LEGACY_OBSERVABILITY_DATABASE_URL": "${LegacyObservabilityDatabaseUrl}"' in app_secret
+    assert '"LEGACY_RAG_DATABASE_URL": "${LegacyRagDatabaseUrl}"' in app_secret
+
+
+def test_backend_deploy_wires_staged_database_and_external_opensearch_inputs():
+    workflow = _deploy_workflow()
+    deploy_job = workflow["jobs"]["deploy"]
+    build_job = workflow["jobs"]["build"]
+    validation = next(
+        step
+        for step in deploy_job["steps"]
+        if step.get("name") == "Validate database cutover and external OpenSearch inputs"
+    )
+    deploy_script = next(
+        step["run"]
+        for step in deploy_job["steps"]
+        if step.get("name") == "Deploy CloudFormation"
+    )
+    deploy_step = next(
+        step
+        for step in deploy_job["steps"]
+        if step.get("name") == "Deploy CloudFormation"
+    )
+
+    assert "RAG_DATABASE_URL" not in str(build_job)
+    assert "OBSERVABILITY_DATABASE_URL" not in str(build_job)
+    assert validation["env"]["LEGACY_RAG_DATABASE_URL"] == "${{ secrets.RAG_DATABASE_URL }}"
+    assert validation["env"]["LEGACY_OBSERVABILITY_DATABASE_URL"] == (
+        "${{ secrets.OBSERVABILITY_DATABASE_URL }}"
+    )
+    assert validation["env"]["CUTOVER_ENABLED"] == (
+        "${{ vars.SEPARATED_DATABASE_CUTOVER_ENABLED || 'false' }}"
+    )
+    assert '[ "$CUTOVER_ENABLED" = "false" ]' in validation["run"]
+    assert 'ENABLE_OPENSEARCH must be false' in validation["run"]
+
+    assert deploy_step["env"]["LEGACY_RAG_DATABASE_URL"] == "${{ secrets.RAG_DATABASE_URL }}"
+    assert deploy_step["env"]["LEGACY_OBSERVABILITY_DATABASE_URL"] == (
+        "${{ secrets.OBSERVABILITY_DATABASE_URL }}"
+    )
+    assert "${{ secrets.RAG_DATABASE_URL }}" not in deploy_script
+    assert "${{ secrets.OBSERVABILITY_DATABASE_URL }}" not in deploy_script
+    expected_parameters = (
+        'SeparatedDatabaseCutoverEnabled="$CUTOVER_ENABLED"',
+        'LegacyObservabilityDatabaseUrl="$LEGACY_OBSERVABILITY_DATABASE_URL"',
+        'LegacyRagDatabaseUrl="$LEGACY_RAG_DATABASE_URL"',
+        'ExternalOpenSearchHost="$EXTERNAL_OPENSEARCH_HOST"',
+        'ExternalOpenSearchCredentialsSecretArn="$EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN"',
+        'BackofficeOpsSecurityGroupId="$BACKOFFICE_OPS_SECURITY_GROUP_ID"',
+        'RagIngestSecurityGroupId="$RAG_INGEST_SECURITY_GROUP_ID"',
+    )
+    for expected in expected_parameters:
+        assert expected in deploy_script
 
 
 def test_external_opensearch_host_and_credentials_must_be_selected_together():

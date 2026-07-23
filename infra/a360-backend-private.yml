@@ -141,8 +141,24 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
     Description: >-
-      Two-phase safety gate. false provisions separated RDS and secrets but keeps the existing
-      service DB runtime connection. Set true only after roles, restore, grants, and validation finish.
+      Two-phase safety gate. false provisions separated RDS and secrets while observability and RAG
+      keep using the explicit legacy URLs. Set true only after roles, restore, grants, and validation finish.
+
+  LegacyObservabilityDatabaseUrl:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      Transitional observability PostgreSQL URL used only while separated database cutover is false.
+      It is stored in AppSecret and never written directly into launch template user data.
+
+  LegacyRagDatabaseUrl:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      Transitional RAG PostgreSQL URL used only while separated database cutover is false.
+      It is stored in AppSecret and never written directly into launch template user data.
 
   DatabaseInstanceClass:
     Type: String
@@ -220,6 +236,17 @@ Parameters:
     Description: "Optional approved RAG ingest worker security group allowed to write the RAG RDS."
 
 Rules:
+  LegacyDatabaseConfiguration:
+    Assertions:
+      - Assert: !Or
+          - !Equals [!Ref SeparatedDatabaseCutoverEnabled, "true"]
+          - !And
+            - !Not [!Equals [!Ref LegacyObservabilityDatabaseUrl, ""]]
+            - !Not [!Equals [!Ref LegacyRagDatabaseUrl, ""]]
+        AssertDescription: >-
+          LegacyObservabilityDatabaseUrl and LegacyRagDatabaseUrl are required while
+          SeparatedDatabaseCutoverEnabled is false.
+
   ExternalOpenSearchConfiguration:
     Assertions:
       - Assert: !Equals
@@ -693,7 +720,9 @@ Resources:
           "JWT_SECRET": "${JwtSecret}",
           "OPS_API_KEY": "${OpsApiKey}",
           "ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}",
-          "ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"
+          "ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}",
+          "LEGACY_OBSERVABILITY_DATABASE_URL": "${LegacyObservabilityDatabaseUrl}",
+          "LEGACY_RAG_DATABASE_URL": "${LegacyRagDatabaseUrl}"
         }
       Tags:
         - Key: Project
@@ -1254,12 +1283,16 @@ Resources:
                     export SERVICE_DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DatabaseSecret} --query SecretString --output text)"
                     SERVICE_DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["username"])')
                     SERVICE_DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["password"])')
+                    OBSERVABILITY_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"])["LEGACY_OBSERVABILITY_DATABASE_URL"])')
+                    RAG_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"])["LEGACY_RAG_DATABASE_URL"])')
               SeparatedDatabaseEnvBlock: !If
                 - UseSeparatedDatabaseRuntime
                 - |
                     OBSERVABILITY_DATABASE_URL=$OBSERVABILITY_DATABASE_URL
                     RAG_DATABASE_URL=$RAG_DATABASE_URL
-                - "# Separated database runtime cutover is staged but not enabled."
+                - |
+                    OBSERVABILITY_DATABASE_URL=$OBSERVABILITY_DATABASE_URL
+                    RAG_DATABASE_URL=$RAG_DATABASE_URL
               OpenSearchHost: !If
                 - UseExternalOpenSearch
                 - !Ref ExternalOpenSearchHost

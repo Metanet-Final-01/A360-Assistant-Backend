@@ -98,7 +98,45 @@ jobs:
             exit 1
           fi
 
+      - name: Validate database cutover and external OpenSearch inputs
+        env:
+          CUTOVER_ENABLED: ${{ vars.SEPARATED_DATABASE_CUTOVER_ENABLED || 'false' }}
+          LEGACY_OBSERVABILITY_DATABASE_URL: ${{ secrets.OBSERVABILITY_DATABASE_URL }}
+          LEGACY_RAG_DATABASE_URL: ${{ secrets.RAG_DATABASE_URL }}
+          EXTERNAL_OPENSEARCH_HOST: ${{ vars.EXTERNAL_OPENSEARCH_HOST }}
+          EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN: ${{ vars.EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN }}
+          ENABLE_OPENSEARCH: ${{ vars.ENABLE_OPENSEARCH || 'false' }}
+        run: |
+          if [ "$CUTOVER_ENABLED" != "true" ] && [ "$CUTOVER_ENABLED" != "false" ]; then
+            echo "SEPARATED_DATABASE_CUTOVER_ENABLED must be true or false." >&2
+            exit 1
+          fi
+          if [ "$CUTOVER_ENABLED" = "false" ]; then
+            if [ -z "$LEGACY_OBSERVABILITY_DATABASE_URL" ] || [ -z "$LEGACY_RAG_DATABASE_URL" ]; then
+              echo "Legacy observability and RAG database URLs are required before separated RDS cutover." >&2
+              exit 1
+            fi
+          fi
+          if [ -n "$EXTERNAL_OPENSEARCH_HOST" ] || [ -n "$EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN" ]; then
+            if [ -z "$EXTERNAL_OPENSEARCH_HOST" ] || [ -z "$EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN" ]; then
+              echo "External OpenSearch host and credentials secret ARN must be configured together." >&2
+              exit 1
+            fi
+            if [ "$ENABLE_OPENSEARCH" != "false" ]; then
+              echo "ENABLE_OPENSEARCH must be false when external OpenSearch is configured." >&2
+              exit 1
+            fi
+          fi
+
       - name: Deploy CloudFormation
+        env:
+          CUTOVER_ENABLED: ${{ vars.SEPARATED_DATABASE_CUTOVER_ENABLED || 'false' }}
+          LEGACY_OBSERVABILITY_DATABASE_URL: ${{ secrets.OBSERVABILITY_DATABASE_URL }}
+          LEGACY_RAG_DATABASE_URL: ${{ secrets.RAG_DATABASE_URL }}
+          EXTERNAL_OPENSEARCH_HOST: ${{ vars.EXTERNAL_OPENSEARCH_HOST }}
+          EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN: ${{ vars.EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN }}
+          BACKOFFICE_OPS_SECURITY_GROUP_ID: ${{ vars.BACKOFFICE_OPS_SECURITY_GROUP_ID }}
+          RAG_INGEST_SECURITY_GROUP_ID: ${{ vars.RAG_INGEST_SECURITY_GROUP_ID }}
         run: |
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
@@ -115,8 +153,15 @@ jobs:
               OpsApiKey="${{ secrets.OPS_API_KEY }}" \
               AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
               AssuranceWriterRepository="${{ github.repository }}" \
+              SeparatedDatabaseCutoverEnabled="$CUTOVER_ENABLED" \
+              LegacyObservabilityDatabaseUrl="$LEGACY_OBSERVABILITY_DATABASE_URL" \
+              LegacyRagDatabaseUrl="$LEGACY_RAG_DATABASE_URL" \
               EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}" \
               OpenSearchMode="${{ vars.OPENSEARCH_MODE || 'managed' }}" \
+              ExternalOpenSearchHost="$EXTERNAL_OPENSEARCH_HOST" \
+              ExternalOpenSearchCredentialsSecretArn="$EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN" \
+              BackofficeOpsSecurityGroupId="$BACKOFFICE_OPS_SECURITY_GROUP_ID" \
+              RagIngestSecurityGroupId="$RAG_INGEST_SECURITY_GROUP_ID" \
               NetworkMode="${{ inputs.network_mode || 'private' }}" \
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
