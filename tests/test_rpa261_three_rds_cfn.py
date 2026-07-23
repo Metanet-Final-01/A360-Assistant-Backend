@@ -218,8 +218,9 @@ def test_user_data_injects_three_database_boundaries_and_external_opensearch_sec
     assert "OPENSEARCH_USERNAME=$OPENSEARCH_USERNAME" in user_data
     assert "OPENSEARCH_PASSWORD=$OPENSEARCH_PASSWORD" in user_data
     assert "https://user:" not in user_data
-    assert '["LEGACY_OBSERVABILITY_DATABASE_URL"]' in legacy_bootstrap
-    assert '["LEGACY_RAG_DATABASE_URL"]' in legacy_bootstrap
+    assert '.get("LEGACY_OBSERVABILITY_DATABASE_URL", "")' in legacy_bootstrap
+    assert '.get("LEGACY_RAG_DATABASE_URL", "")' in legacy_bootstrap
+    assert "Legacy observability and RAG database URLs are missing from AppSecret." in legacy_bootstrap
     assert "${LegacyObservabilityDatabaseUrl}" not in user_data
     assert "${LegacyRagDatabaseUrl}" not in user_data
 
@@ -244,6 +245,14 @@ def test_separated_database_runtime_requires_an_explicit_cutover():
     for name in ("LegacyObservabilityDatabaseUrl", "LegacyRagDatabaseUrl"):
         assert parameters[name]["Default"] == ""
         assert parameters[name]["NoEcho"] is True
+        pattern = parameters[name]["AllowedPattern"]
+        assert re.fullmatch(pattern, "postgresql://user:pass@db.example/a360?sslmode=require")
+        assert re.fullmatch(
+            pattern,
+            "postgresql+psycopg://user:pass@db.example/a360?sslmode=require",
+        )
+        assert not re.fullmatch(pattern, "   ")
+        assert not re.fullmatch(pattern, "postgresql://db.example/a360 bad")
 
     rule = template["Rules"]["LegacyDatabaseConfiguration"]["Assertions"][0]
     assert {
@@ -289,6 +298,8 @@ def test_backend_deploy_wires_staged_database_and_external_opensearch_inputs():
         "${{ vars.SEPARATED_DATABASE_CUTOVER_ENABLED || 'false' }}"
     )
     assert '[ "$CUTOVER_ENABLED" = "false" ]' in validation["run"]
+    assert '${LEGACY_OBSERVABILITY_DATABASE_URL//[[:space:]]/}' in validation["run"]
+    assert '${LEGACY_RAG_DATABASE_URL//[[:space:]]/}' in validation["run"]
     assert 'ENABLE_OPENSEARCH must be false' in validation["run"]
 
     assert deploy_step["env"]["LEGACY_RAG_DATABASE_URL"] == "${{ secrets.RAG_DATABASE_URL }}"

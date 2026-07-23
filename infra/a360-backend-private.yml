@@ -148,6 +148,7 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
+    AllowedPattern: '^$|^postgres(?:ql)?(?:\+[A-Za-z0-9_.-]+)?://\S+$'
     Description: >-
       Transitional observability PostgreSQL URL used only while separated database cutover is false.
       It is stored in AppSecret and never written directly into launch template user data.
@@ -156,6 +157,7 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
+    AllowedPattern: '^$|^postgres(?:ql)?(?:\+[A-Za-z0-9_.-]+)?://\S+$'
     Description: >-
       Transitional RAG PostgreSQL URL used only while separated database cutover is false.
       It is stored in AppSecret and never written directly into launch template user data.
@@ -1283,8 +1285,12 @@ Resources:
                     export SERVICE_DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DatabaseSecret} --query SecretString --output text)"
                     SERVICE_DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["username"])')
                     SERVICE_DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["password"])')
-                    OBSERVABILITY_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"])["LEGACY_OBSERVABILITY_DATABASE_URL"])')
-                    RAG_DATABASE_URL=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"])["LEGACY_RAG_DATABASE_URL"])')
+                    OBSERVABILITY_DATABASE_URL=$(python3 -c 'import json, os; print(str(json.loads(os.environ["APP_SECRET_JSON"]).get("LEGACY_OBSERVABILITY_DATABASE_URL", "")).strip())')
+                    RAG_DATABASE_URL=$(python3 -c 'import json, os; print(str(json.loads(os.environ["APP_SECRET_JSON"]).get("LEGACY_RAG_DATABASE_URL", "")).strip())')
+                    if [ -z "$OBSERVABILITY_DATABASE_URL" ] || [ -z "$RAG_DATABASE_URL" ]; then
+                      echo "Legacy observability and RAG database URLs are missing from AppSecret." >&2
+                      exit 1
+                    fi
               SeparatedDatabaseEnvBlock: !If
                 - UseSeparatedDatabaseRuntime
                 - |
