@@ -287,7 +287,12 @@ Resources:
               exec > >(tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log) 2>&1
               echo "[a360-bootstrap] starting user-data"
               dnf install -y awscli aws-cfn-bootstrap
-              trap '/opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region}' ERR
+              INSTANCE_ID=$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
+              upload_bootstrap_logs() {
+                aws s3 cp /var/log/a360-bootstrap.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/a360-bootstrap.log" || true
+                aws s3 cp /var/log/cloud-init-output.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/cloud-init-output.log" || true
+              }
+              trap 'upload_bootstrap_logs; /opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region}' ERR
 
               if [ "${StartBackendContainer}" != "true" ]; then
                 dnf install -y postgresql15
@@ -358,6 +363,7 @@ Resources:
                     --stack ${AWS::StackName} \
                     --resource AppAutoScalingGroup \
                     --region ${AWS::Region}
+                  upload_bootstrap_logs
                   exit 0
                 fi
                 sleep 5
