@@ -667,10 +667,11 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
     assert 'ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}"' in deploy_script
     assert opensearch_step["env"]["OPENSEARCH_HOST"] == "${{ secrets.OPENSEARCH_HOST }}"
-    assert 'http://*|https://*' in opensearch_step["run"]
+    assert "^https?://[^[:space:]]+$" in opensearch_step["run"]
 
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
+    assert opensearch_parameter["NoEcho"] is True
     assert opensearch_parameter["AllowedPattern"] == "^https?://[^\\s]+$"
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
