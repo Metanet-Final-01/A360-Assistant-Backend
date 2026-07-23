@@ -251,8 +251,11 @@ def test_separated_database_runtime_requires_an_explicit_cutover():
             pattern,
             "postgresql+psycopg://user:pass@db.example/a360?sslmode=require",
         )
+        assert not re.fullmatch(pattern, "postgres://user:pass@db.example/a360")
         assert not re.fullmatch(pattern, "   ")
         assert not re.fullmatch(pattern, "postgresql://db.example/a360 bad")
+        assert not re.fullmatch(pattern, 'postgresql://user:"pass@db.example/a360')
+        assert not re.fullmatch(pattern, "postgresql://user:\\pass@db.example/a360")
 
     rule = template["Rules"]["LegacyDatabaseConfiguration"]["Assertions"][0]
     assert {
@@ -300,6 +303,9 @@ def test_backend_deploy_wires_staged_database_and_external_opensearch_inputs():
     assert '[ "$CUTOVER_ENABLED" = "false" ]' in validation["run"]
     assert '${LEGACY_OBSERVABILITY_DATABASE_URL//[[:space:]]/}' in validation["run"]
     assert '${LEGACY_RAG_DATABASE_URL//[[:space:]]/}' in validation["run"]
+    assert '"$LEGACY_OBSERVABILITY_DATABASE_URL" =~ [[:space:]]' in validation["run"]
+    assert '"$LEGACY_RAG_DATABASE_URL" =~ [[:space:]]' in validation["run"]
+    assert "must not contain whitespace" in validation["run"]
     assert 'ENABLE_OPENSEARCH must be false' in validation["run"]
 
     assert deploy_step["env"]["LEGACY_RAG_DATABASE_URL"] == "${{ secrets.RAG_DATABASE_URL }}"

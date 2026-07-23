@@ -117,6 +117,11 @@ jobs:
               echo "Legacy observability and RAG database URLs are required before separated RDS cutover." >&2
               exit 1
             fi
+            if [[ "$LEGACY_OBSERVABILITY_DATABASE_URL" =~ [[:space:]] ]] || \
+               [[ "$LEGACY_RAG_DATABASE_URL" =~ [[:space:]] ]]; then
+              echo "Legacy observability and RAG database URLs must not contain whitespace." >&2
+              exit 1
+            fi
           fi
           if [ -n "$EXTERNAL_OPENSEARCH_HOST" ] || [ -n "$EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN" ]; then
             if [ -z "$EXTERNAL_OPENSEARCH_HOST" ] || [ -z "$EXTERNAL_OPENSEARCH_CREDENTIALS_SECRET_ARN" ]; then

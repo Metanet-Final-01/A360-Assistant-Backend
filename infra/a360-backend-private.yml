@@ -148,19 +148,21 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
-    AllowedPattern: '^$|^postgres(?:ql)?(?:\+[A-Za-z0-9_.-]+)?://\S+$'
+    AllowedPattern: '^$|^postgresql(?:\+[A-Za-z0-9_.-]+)?://[^"\\\x00-\x20]+$'
     Description: >-
       Transitional observability PostgreSQL URL used only while separated database cutover is false.
-      It is stored in AppSecret and never written directly into launch template user data.
+      Credentials and query values must be URL-encoded. The URL is stored in AppSecret and never
+      written directly into launch template user data.
 
   LegacyRagDatabaseUrl:
     Type: String
     Default: ""
     NoEcho: true
-    AllowedPattern: '^$|^postgres(?:ql)?(?:\+[A-Za-z0-9_.-]+)?://\S+$'
+    AllowedPattern: '^$|^postgresql(?:\+[A-Za-z0-9_.-]+)?://[^"\\\x00-\x20]+$'
     Description: >-
       Transitional RAG PostgreSQL URL used only while separated database cutover is false.
-      It is stored in AppSecret and never written directly into launch template user data.
+      Credentials and query values must be URL-encoded. The URL is stored in AppSecret and never
+      written directly into launch template user data.
 
   DatabaseInstanceClass:
     Type: String
