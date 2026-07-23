@@ -75,6 +75,42 @@ def test_ensure_schema_survives_bad_url(monkeypatch):
         _reset_singleton()
 
 
+def test_ensure_schema_uses_short_best_effort_lock_timeout(monkeypatch):
+    """관측 DB 락 경합이 앱 기동을 앱 마이그레이션 제한(120초)만큼 막지 않는다."""
+    from app.db import OBS_SCHEMA_LOCK_KEY
+
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "sqlite:///:memory:")
+    _reset_singleton()
+    lock_calls = []
+
+    class _Lock:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            return False
+
+    def _capture_lock(url, key, *, timeout=None):
+        lock_calls.append((url, key, timeout))
+        return _Lock()
+
+    metadata = SimpleNamespace(create_all=lambda bind: None)
+    monkeypatch.setattr("app.db.pg_advisory_lock", _capture_lock)
+    monkeypatch.setattr(obs, "_observability_metadata", lambda: metadata)
+    monkeypatch.setattr(obs, "_apply_observability_indexes", lambda *args: None)
+    try:
+        assert obs.ensure_observability_schema() is True
+        assert lock_calls == [
+            (
+                "sqlite:///:memory:",
+                OBS_SCHEMA_LOCK_KEY,
+                "5s",
+            )
+        ]
+    finally:
+        _reset_singleton()
+
+
 def test_obs_metadata_strips_foreign_keys():
     """관측 테이블 사본은 FK 제약이 없어야 한다 — 관측 DB엔 부모 테이블이 없다."""
     meta = obs._observability_metadata()

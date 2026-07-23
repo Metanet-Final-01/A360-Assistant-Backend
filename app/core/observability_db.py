@@ -28,6 +28,9 @@ _engine = None
 _sessionmaker = None
 _url_cached: str | None = None
 
+# 관측 스키마는 best-effort이므로 앱 DB 마이그레이션의 120초 대기를 공유하지 않는다.
+_OBS_SCHEMA_LOCK_TIMEOUT = "5s"
+
 
 def observability_url() -> str:
     return os.getenv("OBSERVABILITY_DATABASE_URL", "").strip()
@@ -131,7 +134,11 @@ def ensure_observability_schema() -> bool:
         # 동시 기동 직렬화 (RPA-223) — checkfirst create_all도 "둘 다 없음을 보고 둘 다
         # CREATE"로 경쟁하고, 아래 CREATE INDEX는 ACCESS EXCLUSIVE 락이다. 앱 DB와 달리
         # 실패해도 기동은 계속한다(관측은 best-effort) — 바깥 try가 그 계약을 유지한다.
-        with pg_advisory_lock(url, OBS_SCHEMA_LOCK_KEY):
+        with pg_advisory_lock(
+            url,
+            OBS_SCHEMA_LOCK_KEY,
+            timeout=_OBS_SCHEMA_LOCK_TIMEOUT,
+        ):
             _observability_metadata().create_all(bind)
             # create_all은 없는 테이블만 만들고 기존 테이블 ALTER는 안 한다. 후속 컬럼 추가는
             # idempotent ALTER로 기존 관측 DB에도 보장한다 (RPA-158, Postgres IF NOT EXISTS).
