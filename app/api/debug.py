@@ -354,13 +354,22 @@ def rag_debug_status(probe: bool = False) -> dict:
         status["embedding"] = embedding
         return status
 
-    # probe=1 — 검색 critical path를 실제로 태워 SEARCH_UNAVAILABLE의 원인 단계를 격리한다(RPA-232).
-    # 임베딩(외부 API)이 죽으면 벡터 쿼리는 건너뛴다(임베딩 없이는 못 돈다).
+    # probe=1은 외부 임베딩 API 실호출 + DB 쿼리라 비용/부하가 든다 — 디버그 라우터 게이트
+    # (require_debug_enabled) 위에 추가 opt-in을 요구한다(http 프록시의 DEBUG_HTTP_CLIENT_ENABLED와 동형).
+    if os.getenv("DEBUG_RAG_PROBE_ENABLED", "").lower() != "true":
+        raise _error(
+            403, "PROBE_DISABLED",
+            "probe=1은 DEBUG_RAG_PROBE_ENABLED=true가 필요합니다(외부 API 비용·부하 발생).",
+        )
+
+    # 검색 critical path를 실제로 태워 SEARCH_UNAVAILABLE의 원인 단계를 격리한다(RPA-232).
+    # 임베딩은 캐시를 우회하고(캐시 히트로 도달성이 가려지지 않게) 짧은 timeout·단일 시도로 부른다 —
+    # 장애 시 60초×재시도로 매달리지 않게(진단이 가장 필요한 순간에 멈추면 안 됨). 벡터쿼리도 connect 상한.
     probe_vec = None
     try:
-        from app.rag.retrieval.embed import embed_query
+        from app.rag.retrieval.embed import embed_query_live
 
-        probe_vec = embed_query("rag search healthcheck probe")
+        probe_vec = embed_query_live("rag search healthcheck probe", timeout=5.0)
         embedding["reachable"] = True
         embedding["dim"] = len(probe_vec)
     except Exception as e:  # noqa: BLE001 — 키 무효·egress 차단·타임아웃 등 실제 실패를 그대로 노출
@@ -372,7 +381,7 @@ def rag_debug_status(probe: bool = False) -> dict:
         status["vector_query"] = {"skipped": "임베딩 실패로 pgvector 쿼리 생략"}
     else:
         try:
-            conn = db.connect()
+            conn = db.connect(connect_timeout=5)  # 무제한 블로킹 방지
             try:
                 hits = db.search(conn, probe_vec, limit=1)
             finally:

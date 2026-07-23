@@ -309,6 +309,29 @@ def embed_query(text: str) -> list[float]:
     return vector
 
 
+def embed_query_live(text: str, *, timeout: float = 5.0) -> list[float]:
+    """진단 프로브 전용(RPA-232) — 캐시를 우회하고 짧은 timeout·단일 시도로 임베딩 provider를
+    실제 호출한다. embed_query와 달리 (1) 캐시 히트로 도달성이 가려지지 않고, (2) 장애 시
+    60초×재시도(post_with_retry)로 매달리지 않는다. 결과를 캐시에 쓰지도 않는다(프로브가 실제
+    캐시를 오염시키지 않게). 실패(키 무효·egress 차단·타임아웃·4xx/5xx)는 예외로 그대로 올린다."""
+    if config.EMBEDDING_PROVIDER == "voyage":
+        if not config.VOYAGE_API_KEY:
+            raise RuntimeError("VOYAGE_API_KEY 환경변수가 필요합니다")
+        url = "https://api.voyageai.com/v1/embeddings"
+        headers = {"Authorization": f"Bearer {config.VOYAGE_API_KEY}"}
+        payload = {"model": config.EMBEDDING_MODEL, "input": [text], "input_type": "query"}
+    else:
+        if not config.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY 환경변수가 필요합니다")
+        url = "https://api.openai.com/v1/embeddings"
+        headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
+        payload = {"model": config.EMBEDDING_MODEL, "input": [text]}
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+    return resp.json()["data"][0]["embedding"]
+
+
 @log_call(
     "embed_query",
     capture_args=("text",),

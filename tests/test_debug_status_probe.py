@@ -3,6 +3,9 @@
 기본(probe=false)은 키 설정 여부만 본다 — 키가 있어도 무효·egress 차단이면 검색은 죽는데
 초록으로 보이는 "가짜 초록불"이라, probe=1은 실제 임베딩 호출 + pgvector 쿼리까지 태워
 SEARCH_UNAVAILABLE의 원인 단계(임베딩 vs 벡터쿼리)를 격리한다.
+
+probe=1은 외부 API 비용/부하가 들어 추가 게이트(DEBUG_RAG_PROBE_ENABLED)를 요구하고,
+임베딩은 캐시를 우회하는 짧은-timeout 라이브 호출(embed_query_live)을 쓴다(Qodo 리뷰).
 """
 
 from fastapi.testclient import TestClient
@@ -28,11 +31,12 @@ class _FakeOSClient:
 
 
 def _patch_service_checks(monkeypatch):
-    """상단의 DB/OpenSearch 연결 체크가 실제 인프라를 때리지 않게 고정한다."""
+    """상단의 DB/OpenSearch 연결 체크가 실제 인프라를 때리지 않게 고정한다.
+    db.connect는 상단 체크(무인자)와 프로브(connect_timeout=)에서 모두 불리므로 kwargs를 받는다."""
     import app.rag.store.db as db
     import app.rag.store.opensearch_client as osc
 
-    monkeypatch.setattr(db, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(db, "connect", lambda *a, **k: _FakeConn())
     monkeypatch.setattr(osc, "connect", lambda: _FakeOSClient())
 
 
@@ -48,12 +52,23 @@ def test_status_without_probe_only_reports_key_configured(monkeypatch):
     assert "vector_query" not in body   # 프로브 미실행
 
 
+def test_probe_requires_gate_env(monkeypatch):
+    # DEBUG_RAG_PROBE_ENABLED 없이 probe=1 → 403 (비용/부하 유발 방지)
+    _patch_service_checks(monkeypatch)
+    monkeypatch.delenv("DEBUG_RAG_PROBE_ENABLED", raising=False)
+    with TestClient(app) as c:
+        r = c.get("/api/rag/debug/status", params={"probe": "1"})
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "PROBE_DISABLED"
+
+
 def test_probe_reports_embedding_and_vector_reachable(monkeypatch):
     _patch_service_checks(monkeypatch)
+    monkeypatch.setenv("DEBUG_RAG_PROBE_ENABLED", "true")
     import app.rag.retrieval.embed as embed_mod
     import app.rag.store.db as db
 
-    monkeypatch.setattr(embed_mod, "embed_query", lambda q: [0.1] * 8)
+    monkeypatch.setattr(embed_mod, "embed_query_live", lambda text, **kw: [0.1] * 8)
     monkeypatch.setattr(db, "search", lambda conn, vec, limit=1: [{"id": "doc-1"}])
 
     with TestClient(app) as c:
@@ -66,13 +81,14 @@ def test_probe_reports_embedding_and_vector_reachable(monkeypatch):
 
 def test_probe_embedding_failure_surfaces_error_and_skips_vector(monkeypatch):
     _patch_service_checks(monkeypatch)
+    monkeypatch.setenv("DEBUG_RAG_PROBE_ENABLED", "true")
     import app.rag.retrieval.embed as embed_mod
     import app.rag.store.db as db
 
-    def _boom(q):
+    def _boom(text, **kw):
         raise RuntimeError("VOYAGE egress blocked")
 
-    monkeypatch.setattr(embed_mod, "embed_query", _boom)
+    monkeypatch.setattr(embed_mod, "embed_query_live", _boom)
     # 임베딩이 죽으면 벡터쿼리는 아예 시도하면 안 된다 — 호출되면 실패시켜 그 계약을 고정.
     monkeypatch.setattr(db, "search", lambda *a, **k: (_ for _ in ()).throw(AssertionError("불려선 안 됨")))
 
@@ -86,10 +102,11 @@ def test_probe_embedding_failure_surfaces_error_and_skips_vector(monkeypatch):
 
 def test_probe_vector_query_failure_surfaces_error(monkeypatch):
     _patch_service_checks(monkeypatch)
+    monkeypatch.setenv("DEBUG_RAG_PROBE_ENABLED", "true")
     import app.rag.retrieval.embed as embed_mod
     import app.rag.store.db as db
 
-    monkeypatch.setattr(embed_mod, "embed_query", lambda q: [0.1] * 8)
+    monkeypatch.setattr(embed_mod, "embed_query_live", lambda text, **kw: [0.1] * 8)
 
     def _boom(*a, **k):
         raise RuntimeError("dimension 8 does not match column vector(1024)")
