@@ -104,15 +104,8 @@ jobs:
             echo "OPENSEARCH_HOST secret is required for deployed RAG search." >&2
             exit 1
           fi
-          case "$OPENSEARCH_HOST" in
-            http://*|https://*) ;;
-            *)
-              echo "OPENSEARCH_HOST must start with http:// or https://." >&2
-              exit 1
-              ;;
-          esac
-          if printf '%s' "$OPENSEARCH_HOST" | grep -q '[[:space:]]'; then
-            echo "OPENSEARCH_HOST must not contain whitespace." >&2
+          if ! printf '%s' "$OPENSEARCH_HOST" | grep -Eq '^https?://[^[:space:]]+$'; then
+            echo "OPENSEARCH_HOST must be a non-empty http(s) URL without whitespace." >&2
             exit 1
           fi
 

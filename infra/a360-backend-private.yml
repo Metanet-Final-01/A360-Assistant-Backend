@@ -70,6 +70,7 @@ Parameters:
     Default: 8000
   ExternalOpenSearchHost:
     Type: String
+    NoEcho: true
     AllowedPattern: "^https?://[^\\s]+$"
     ConstraintDescription: ExternalOpenSearchHost must be a non-empty http(s) URL without whitespace.
   StartBackendContainer:
