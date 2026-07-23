@@ -648,7 +648,11 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     opensearch_step = next(
         step for step in deploy_job["steps"] if step.get("name") == "Validate OpenSearch host"
     )
+    validate_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Validate deployment credentials"
+    )
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
+    github_username_parameter = template["Parameters"]["GithubUsername"]
     opensearch_parameter = template["Parameters"]["ExternalOpenSearchHost"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
@@ -663,18 +667,27 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
         in deploy_uses
     )
     assert deploy_job["env"]["STACK_NAME"] == "a360-assistant-${{ inputs.environment }}-backend"
+    assert validate_step["env"]["ASSURANCE_WRITER_TOKEN"] == "${{ secrets.ASSURANCE_WRITER_TOKEN }}"
+    assert validate_step["env"]["GHCR_READ_TOKEN"] == "${{ secrets.GHCR_READ_TOKEN }}"
+    assert '[ -z "$ASSURANCE_WRITER_TOKEN" ]' in validate_step["run"]
+    assert '[ -z "$GHCR_READ_TOKEN" ]' in validate_step["run"]
     assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
+    assert 'GithubUsername="${{ secrets.GHCR_USERNAME || github.repository_owner }}"' in deploy_script
     assert 'ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}"' in deploy_script
     assert opensearch_step["env"]["OPENSEARCH_HOST"] == "${{ secrets.OPENSEARCH_HOST }}"
     assert "^https?://[^[:space:]]+$" in opensearch_step["run"]
 
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
+    assert github_username_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_.-]+$"
     assert opensearch_parameter["NoEcho"] is True
     assert opensearch_parameter["AllowedPattern"] == "^https?://[^\\s]+$"
+    assert '"GITHUB_USERNAME": "${GithubUsername}"' in app_secret
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
+    assert "jq -r '.GITHUB_USERNAME // \"\"'" in user_data
+    assert 'docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin' in user_data
     assert "jq -r '.ASSURANCE_WRITER_TOKEN // \"\"'" in user_data
     assert "jq -r '.ASSURANCE_WRITER_REPOSITORY // \"\"'" in user_data
     assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data
@@ -685,7 +698,8 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log" in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
-    assert user_data.index("cfn-signal --success false") < user_data.index("dnf install -y")
+    assert "dnf install -y awscli aws-cfn-bootstrap" in user_data
+    assert user_data.index("dnf install -y awscli aws-cfn-bootstrap") < user_data.index("cfn-signal --success false")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index("mkdir -p /opt/a360/secrets")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index('docker login ghcr.io')
     env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
@@ -704,7 +718,7 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     build_job = workflow["jobs"]["build"]
     deploy_job = workflow["jobs"]["deploy"]
     validate_step = next(
-        step for step in deploy_job["steps"] if step.get("name") == "Validate Ops API credential"
+        step for step in deploy_job["steps"] if step.get("name") == "Validate deployment credentials"
     )
     deploy_script = next(
         step["run"]
@@ -765,4 +779,23 @@ def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
         300,
         "AWS::NoValue",
     ]
-    assert 'dnf install -y awscli aws-cfn-bootstrap postgresql15' in user_data
+    assert 'dnf install -y awscli aws-cfn-bootstrap' in user_data
+    assert 'dnf install -y postgresql15' in user_data
+
+
+def test_backend_instance_role_can_read_bootstrap_role_secrets():
+    template = yaml.load(
+        (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
+        Loader=_CloudFormationLoader,
+    )
+    role_policy = template["Resources"]["AppInstanceRole"]["Properties"]["Policies"][0][
+        "PolicyDocument"
+    ]
+    policy_text = json.dumps(role_policy, ensure_ascii=False)
+
+    assert "secretsmanager:GetSecretValue" in policy_text
+    assert "${ProjectName}-${Environment}-ServiceAppSecretArn" in policy_text
+    assert "${ProjectName}-${Environment}-ObservabilityWriterSecretArn" in policy_text
+    assert "${ProjectName}-${Environment}-OpsReaderSecretArn" in policy_text
+    assert "${ProjectName}-${Environment}-RagRuntimeSecretArn" in policy_text
+    assert "${ProjectName}-${Environment}-RagIngestSecretArn" in policy_text
