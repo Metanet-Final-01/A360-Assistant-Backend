@@ -686,6 +686,8 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
     assert user_data.index("cfn-signal --success false") < user_data.index("dnf install -y")
+    assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index("mkdir -p /opt/a360/secrets")
+    assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index('docker login ghcr.io')
     env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
     env_write = user_data.index("cat > /opt/a360/.env <<EOF")
     assert env_mode < env_write
@@ -749,6 +751,9 @@ def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
         "StartBackendContainer",
         "true",
     ]
+    user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
+        "LaunchTemplateData"
+    ]["UserData"]["Fn::Base64"][0]
     assert asg_properties["TargetGroupARNs"] == [
         "StartsBackendContainer",
         ["BackendTargetGroup"],
@@ -760,3 +765,4 @@ def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
         300,
         "AWS::NoValue",
     ]
+    assert 'dnf install -y awscli aws-cfn-bootstrap postgresql15' in user_data
