@@ -246,7 +246,7 @@ def test_external_opensearch_host_and_credentials_must_be_selected_together():
 
     valid_secret_arn = (
         "arn:aws:secretsmanager:us-east-1:123456789012:"
-        "secret:a360/opensearch-abc123"
+        "secret:a360/opensearch-credentials-AbCd12"
     )
     assert parameters["ExternalOpenSearchCredentialsSecretArn"]["Default"] == ""
     assert re.fullmatch(secret_pattern, valid_secret_arn)
@@ -257,5 +257,10 @@ def test_external_opensearch_host_and_credentials_must_be_selected_together():
     assert not re.fullmatch(
         secret_pattern,
         "arn:aws:secretsmanager:us-east-1:123456789012:secret:bad name",
+    )
+    assert not re.fullmatch(
+        secret_pattern,
+        "arn:aws:secretsmanager:us-east-1:123456789012:"
+        "secret:a360/opensearch-credentials",
     )
     assert len(rules["ExternalOpenSearchConfiguration"]["Assertions"]) == 2

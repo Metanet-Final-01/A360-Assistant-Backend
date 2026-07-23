@@ -201,7 +201,7 @@ Parameters:
   ExternalOpenSearchCredentialsSecretArn:
     Type: String
     Default: ""
-    AllowedPattern: "^$|^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+    AllowedPattern: "^$|^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$"
     Description: >-
       Secrets Manager ARN containing username and password for ExternalOpenSearchHost.
       It must be set together with ExternalOpenSearchHost. Cross-region ARNs are read from
