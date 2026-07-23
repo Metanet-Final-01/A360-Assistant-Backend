@@ -77,7 +77,7 @@ jobs:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
     runs-on: ubuntu-latest
-    environment: change-assurance-writer
+    environment: backend-deploy-dev
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
