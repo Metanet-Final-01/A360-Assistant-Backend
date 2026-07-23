@@ -191,6 +191,7 @@ REGISTRY: dict[str, EnvSpec] = {
         group="app", doc="Vercel 해시 배포 URL 허용 정규식"),
     "DEBUG_ENDPOINTS_ENABLED": EnvSpec("", group="debug", doc="디버그 엔드포인트 토글"),
     "DEBUG_HTTP_CLIENT_ENABLED": EnvSpec("", group="debug", doc="디버그 HTTP 클라이언트 토글"),
+    "DEBUG_RAG_PROBE_ENABLED": EnvSpec("", group="debug", doc="RAG 검색 도달성 프로브(/api/rag/debug/status?probe=1) 토글 — 외부 API 비용 유발이라 별도 opt-in (RPA-232)"),
 }
 
 
