@@ -24,6 +24,11 @@ on:
         description: "Max app instance count"
         required: true
         default: "2"
+      start_backend_container:
+        description: "Start backend container after EC2 bootstrap. Set false before DB role bootstrap."
+        required: true
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -109,4 +114,5 @@ jobs:
               AssuranceWriterRepository="${{ github.repository }}" \
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
-              MaxCapacity="${{ inputs.max_capacity || '2' }}"
+              MaxCapacity="${{ inputs.max_capacity || '2' }}" \
+              StartBackendContainer="${{ inputs.start_backend_container }}"

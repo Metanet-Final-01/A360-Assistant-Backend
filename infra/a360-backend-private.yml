@@ -71,6 +71,11 @@ Parameters:
   ExternalOpenSearchHost:
     Type: String
     Default: ""
+  StartBackendContainer:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set false for the first deployment when DB roles still need manual bootstrap from the EC2 host.
   LogRetentionDays:
     Type: Number
     Default: 14
@@ -198,9 +203,19 @@ Resources:
                 Resource: !Ref AWS::StackId
               - Effect: Allow
                 Action:
+                  - cloudformation:DescribeStacks
+                Resource: "*"
+              - Effect: Allow
+                Action:
                   - secretsmanager:GetSecretValue
                 Resource:
                   - !Ref AppSecret
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-ServiceRdsSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-ObservabilityRdsSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-RagRdsSecretArn"
                   - Fn::ImportValue:
                       Fn::Sub: "${ProjectName}-${Environment}-ServiceAppSecretArn"
                   - Fn::ImportValue:
@@ -257,7 +272,7 @@ Resources:
               #!/bin/bash -eu
               set -o pipefail
               dnf update -y
-              dnf install -y docker awscli jq curl aws-cfn-bootstrap
+              dnf install -y docker awscli jq curl aws-cfn-bootstrap postgresql15
               trap '/opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region}' ERR
               systemctl enable --now docker
 
@@ -320,6 +335,15 @@ Resources:
               ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
               EOF
               jq -r 'to_entries[] | select((.key == "OPS_API_KEY" or .key == "ASSURANCE_WRITER_TOKEN" or .key == "ASSURANCE_WRITER_REPOSITORY") | not) | "\(.key)=\(.value)"' /opt/a360/secrets/app.json >> /opt/a360/.env
+
+              if [ "${StartBackendContainer}" != "true" ]; then
+                echo "StartBackendContainer=false; leaving EC2 ready for DB bootstrap through SSM."
+                /opt/aws/bin/cfn-signal --success true \
+                  --stack ${AWS::StackName} \
+                  --resource AppAutoScalingGroup \
+                  --region ${AWS::Region}
+                exit 0
+              fi
 
               docker rm -f a360-backend || true
               docker run -d --restart unless-stopped --name a360-backend \
