@@ -9,11 +9,13 @@ services:
       - path: .env
         required: false
     environment:
-      # 앱 DB(users/sessions)만 로컬 컨테이너로 오버라이드 — .env는 호스트 CLI용(localhost/외부
-      # 포트)이라 컨테이너 안에선 서비스명·내부 포트로 고정한다. RAG 코퍼스(RAG_DATABASE_URL)·
-      # 관측 DB(OBSERVABILITY_DATABASE_URL)는 .env의 공유 Neon 값을 그대로 쓴다(여기서 안 덮음).
+      # 로컬도 서비스·관측·RAG DB를 서로 다른 논리 DB로 명시한다. 환경별 무음 폴백을 없애
+      # "로컬에선 되는데 배포에선 섞이는" 구성을 방지한다. 기존 .env의 공유 Neon URL이 다시
+      # 들어오지 않도록 앱 변수와 다른 LOCAL_* override만 받는다.
       DATABASE_HOST: db
       DATABASE_PORT: "5432"           # 컨테이너↔db는 내부 5432 (호스트 매핑 포트 5433과 무관)
+      OBSERVABILITY_DATABASE_URL: ${LOCAL_OBSERVABILITY_DATABASE_URL:-postgresql+psycopg://${DATABASE_USERNAME:-a360_admin}:${DATABASE_PASSWORD:-a360_local_password}@db:5432/a360_observability}
+      RAG_DATABASE_URL: ${LOCAL_RAG_DATABASE_URL:-postgresql://${DATABASE_USERNAME:-a360_admin}:${DATABASE_PASSWORD:-a360_local_password}@db:5432/a360_rag}
       # OPENSEARCH는 로컬로 안 덮는다 — RAG BM25 색인은 공유 Bonsai에 있으므로 컨테이너도 .env의
       # Bonsai(OPENSEARCH_HOST/USERNAME/PASSWORD)를 써야 한다 (RPA-160). 로컬 검색은 아래 opensearch
       # 서비스를 프로파일로 띄우고 .env OPENSEARCH_HOST를 로컬로 두면 된다.
@@ -41,6 +43,7 @@ services:
       - "${DATABASE_PORT:-5432}:5432"
     volumes:
       - a360-postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init-databases.sql:/docker-entrypoint-initdb.d/10-init-databases.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USERNAME:-a360_admin} -d ${DATABASE_NAME:-a360}"]
       interval: 5s

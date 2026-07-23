@@ -260,7 +260,7 @@ def check_health(now: datetime | None = None) -> bool:
 
 
 def _obs_session():
-    """관측 DB 세션 — 미설정이면 앱 DB로 폴백(observability_db가 알아서 한다)."""
+    """관측 DB 세션. 미설정 시 호출부의 fail-open 경계가 로컬 스로틀로 저하한다."""
     from app.core.observability_db import observability_sessionmaker
 
     return observability_sessionmaker()()

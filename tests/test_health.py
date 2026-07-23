@@ -187,11 +187,19 @@ def test_health_indexed_is_none_when_opensearch_unreachable(monkeypatch):
 
 
 def test_health_reports_shared_flag(monkeypatch):
-    """OBSERVABILITY_DATABASE_URL 설정 여부가 응답에 드러난다 (로컬 폴백 구분)."""
+    """OBSERVABILITY_DATABASE_URL 설정 여부가 응답에 드러난다 (unavailable 구분)."""
     _patch(monkeypatch)
     monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "postgresql://shared/obs")
     with TestClient(app) as c:
         assert c.get("/health").json()["observability_shared"] is True
     monkeypatch.delenv("OBSERVABILITY_DATABASE_URL")
+    with TestClient(app) as c:
+        assert c.get("/health").json()["observability_shared"] is False
+
+
+def test_health_treats_whitespace_observability_url_as_unconfigured(monkeypatch):
+    """공백 URL은 런타임과 동일하게 미설정으로 표시한다."""
+    _patch(monkeypatch)
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "   ")
     with TestClient(app) as c:
         assert c.get("/health").json()["observability_shared"] is False
