@@ -70,11 +70,15 @@ def _classify_os_error(exc: Exception) -> str:
 
 
 def _opensearch_status() -> dict:
-    """OpenSearch 도달성 — 실패해도 error_type만(host 미노출)."""
+    """OpenSearch 도달성 — 실패해도 error_type만(host 미노출).
+
+    공유 클라이언트(get_shared_client)를 재사용한다 — 매 호출 connect()로 새 클라이언트를 만들면
+    urllib3 풀이 재생성돼 연결 재사용이 깨진다(health/probe 폴링 시 churn, Qodo 리뷰).
+    """
     from app.rag.store import opensearch_client
 
     try:
-        client = opensearch_client.connect()
+        client = opensearch_client.get_shared_client()
         health = client.cluster.health(request_timeout=3)
         return {"reachable": True, "cluster_status": health.get("status")}
     except Exception as e:  # noqa: BLE001
@@ -102,17 +106,17 @@ def service_status() -> dict:
         status["database"] = {"reachable": False, "error_type": _classify_db_error(e)}
 
     status["opensearch"] = _opensearch_status()
+    # .strip(): 공백-only 키("   ")를 "설정됨"으로 오표시하지 않게 한다(Qodo 리뷰). truthy이지만 무효.
+    _emb_key = config.VOYAGE_API_KEY if config.EMBEDDING_PROVIDER == "voyage" else config.OPENAI_API_KEY
     status["embedding"] = {
         "provider": config.EMBEDDING_PROVIDER,
         "model": config.EMBEDDING_MODEL,
-        "api_key_configured": bool(
-            config.VOYAGE_API_KEY if config.EMBEDDING_PROVIDER == "voyage" else config.OPENAI_API_KEY
-        ),
+        "api_key_configured": bool((_emb_key or "").strip()),
         "live_check": "키 설정 여부만 — 실제 도달성은 POST /api/admin/rag/probe",
     }
     status["reranker"] = {
         "model": config.RERANK_MODEL,
-        "api_key_configured": bool(config.VOYAGE_API_KEY),
+        "api_key_configured": bool((config.VOYAGE_API_KEY or "").strip()),
     }
     return status
 

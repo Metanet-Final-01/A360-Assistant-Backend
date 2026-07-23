@@ -30,7 +30,8 @@ def _patch_infra(monkeypatch):
     import app.rag.store.opensearch_client as osc
 
     monkeypatch.setattr(db, "connect", lambda *a, **k: _FakeConn())
-    monkeypatch.setattr(osc, "connect", lambda: _FakeOS())
+    # _opensearch_status는 공유 클라이언트를 쓴다(churn 방지) → get_shared_client를 모킹
+    monkeypatch.setattr(osc, "get_shared_client", lambda: _FakeOS())
 
 
 # ── 분류기 (원문 대신 error_type) ──────────────────────────────────────────────
@@ -72,6 +73,18 @@ def test_service_status_makes_no_external_embedding_call(monkeypatch):
     assert s["database"]["reachable"] is True
     assert s["opensearch"]["reachable"] is True
     assert "api_key_configured" in s["embedding"]
+
+
+def test_service_status_whitespace_key_is_unconfigured(monkeypatch):
+    _patch_infra(monkeypatch)
+    import app.rag.config as rag_config
+
+    monkeypatch.setattr(rag_config, "EMBEDDING_PROVIDER", "voyage")
+    monkeypatch.setattr(rag_config, "VOYAGE_API_KEY", "   ")  # 공백-only 키는 무효
+
+    s = diag.service_status()
+    assert s["embedding"]["api_key_configured"] is False
+    assert s["reranker"]["api_key_configured"] is False
 
 
 # ── run_live_probe: 단계별 판정 + 정제 ────────────────────────────────────────

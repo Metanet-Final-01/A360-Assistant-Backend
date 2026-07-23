@@ -688,6 +688,11 @@ def put_budget_limits(
 # ── RAG 검색 경로 진단 (RPA-232/RPA-270) ─────────────────────────────────────────
 # SEARCH_UNAVAILABLE의 원인을 배포에서 확정한다. debug 라우터(SSRF 프록시 포함) 전체를 열지 않고
 # admin 인증(require_admin) 뒤에서만 노출한다. 판정은 app/services/rag_diagnostics 공용 함수.
+#
+# ⚠️ cooldown은 프로세스-로컬(best-effort) — uvicorn 멀티워커/다중 인스턴스에서 전역 보장은 아니다
+#    (AlertState와 같은 인메모리 한계). probe의 1차 방어선은 require_admin 인증이고, cooldown은
+#    한 워커가 우발적으로 연타되는 걸 막는 보조 스로틀이다. 진단용 저빈도 명령이라 분산 rate-limit
+#    (Redis/DB)은 과하다는 판단(codex 수용, 유사 제안 PR#239 거절 전례).
 _probe_cooldown_lock = threading.Lock()
 _probe_last_monotonic = 0.0
 _PROBE_COOLDOWN_SEC = 30.0
