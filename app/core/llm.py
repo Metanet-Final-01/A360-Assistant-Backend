@@ -313,7 +313,7 @@ def record_usage(
         from app.models import LlmUsage
         from app.rag.observability import get_request_id
 
-        # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 미설정이면 앱 DB 폴백
+        # 관측 전용 DB(RPA-90) — 미설정/장애 시 아래 best-effort 경계에서 기록만 건너뛴다.
         with observability_sessionmaker()() as db:
             db.add(
                 LlmUsage(

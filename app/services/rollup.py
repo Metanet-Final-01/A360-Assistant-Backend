@@ -191,9 +191,16 @@ def run_rollup(days_back: int = 1) -> None:
 
     실패는 경고만 — 다음 주기에 멱등 재시도되므로 유실이 아니다.
     """
-    from app.core.observability_db import observability_sessionmaker
+    from app.core.observability_db import (
+        ObservabilityUnavailableError,
+        observability_sessionmaker,
+    )
 
-    sf = observability_sessionmaker()
+    try:
+        sf = observability_sessionmaker()
+    except ObservabilityUnavailableError:
+        logger.warning("관측 DB 미설정으로 롤업·retention을 건너뜁니다")
+        return
     today = localtime.local_date(datetime.now(timezone.utc))  # KST 기준 '오늘' — _day_bounds와 같은 축
     for i in range(days_back + 1):
         day = today - timedelta(days=i)

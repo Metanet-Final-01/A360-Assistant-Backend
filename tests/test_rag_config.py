@@ -1,21 +1,21 @@
 """RAG 저장소 DB 연결 분리 테스트 (RPA-132).
 
 RAG_DATABASE_URL이 있으면 RAG 코퍼스를 앱 DB와 분리된 전용 공유 DB로 보내고,
-없으면 기존 DATABASE_*(앱 DB)로 폴백한다. RAG store는 raw psycopg라 libpq URL만 받으므로
+없으면 기동 설정 오류로 처리한다. RAG store는 raw psycopg라 libpq URL만 받으므로
 SQLAlchemy 드라이버 접미사(+psycopg)는 벗겨야 한다.
 """
+
+import pytest
 
 import app.rag.config as config
 
 
-def test_dsn_falls_back_to_app_database_when_unset(monkeypatch):
-    """RAG_DATABASE_URL 미설정이면 기존 DATABASE_*(libpq 키워드 형식)로 폴백."""
+def test_dsn_rejects_unset_url(monkeypatch):
+    """RAG_DATABASE_URL 미설정이 서비스 DB로 조용히 우회하지 않는다."""
     monkeypatch.delenv("RAG_DATABASE_URL", raising=False)
     monkeypatch.setenv("DATABASE_HOST", "db.example")
-    monkeypatch.setenv("DATABASE_NAME", "a360")
-    dsn = config.database_dsn()
-    assert dsn.startswith("host=")          # 키워드 형식(=폴백)
-    assert "host=db.example" in dsn and "dbname=a360" in dsn
+    with pytest.raises(config.RagDatabaseConfigurationError):
+        config.database_dsn()
 
 
 def test_dsn_prefers_rag_database_url(monkeypatch):
@@ -35,9 +35,9 @@ def test_dsn_strips_sqlalchemy_driver_suffix(monkeypatch):
     assert config.database_dsn() == "postgresql://u:p@h/db"
 
 
-def test_empty_rag_database_url_falls_back(monkeypatch):
-    """빈 값(RAG_DATABASE_URL=)은 미설정과 동일하게 앱 DB로 폴백 — 빈 채 커밋된 .env 대응."""
+def test_empty_rag_database_url_is_rejected(monkeypatch):
+    """빈 값도 미설정과 동일한 오류다. DATABASE_* 값은 우회 경로가 아니다."""
     monkeypatch.setenv("RAG_DATABASE_URL", "")
     monkeypatch.setenv("DATABASE_HOST", "fallback.host")
-    dsn = config.database_dsn()
-    assert dsn.startswith("host=") and "fallback.host" in dsn
+    with pytest.raises(config.RagDatabaseConfigurationError):
+        config.database_dsn()

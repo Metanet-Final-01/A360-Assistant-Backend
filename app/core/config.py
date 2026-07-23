@@ -70,9 +70,11 @@ REGISTRY: dict[str, EnvSpec] = {
     "DATABASE_USERNAME": EnvSpec("a360_admin", group="db", dynamic=True, doc="앱 DB 사용자"),
     "DATABASE_PASSWORD": EnvSpec("", group="db", secret=True, dynamic=True, doc="앱 DB 비밀번호"),
     "OBSERVABILITY_DATABASE_URL": EnvSpec("", group="db", secret=True, dynamic=True,
-        doc="관측 전용 공유 DB(RPA-90). 미설정 시 앱 DB 폴백. conftest가 테스트별로 격리"),
+        warn_if_unset=True,
+        doc="관측 전용 DB(RPA-90). 프로덕션 필수, 미설정 시 관측 unavailable(서비스 DB 폴백 금지)"),
     "RAG_DATABASE_URL": EnvSpec(None, group="db", secret=True, dynamic=True,
-        doc="RAG 코퍼스 DB(RPA-132). 미설정 시 DATABASE_* 폴백"),
+        warn_if_unset=True,
+        doc="RAG 코퍼스 전용 DB(RPA-132). 프로덕션 필수, 미설정 시 기동 실패"),
 
     # --- 인증/보안 ---
     "JWT_SECRET": EnvSpec("", group="auth", secret=True, warn_if_unset=True,

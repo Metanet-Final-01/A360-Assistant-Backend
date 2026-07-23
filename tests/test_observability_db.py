@@ -1,12 +1,14 @@
 """관측 전용 DB 분리 테스트 (RPA-90).
 
 핵심 계약:
-- OBSERVABILITY_DATABASE_URL 미설정 → 앱 SessionLocal 폴백 (기존 로컬 개발·테스트 호환)
+- OBSERVABILITY_DATABASE_URL 미설정 → unavailable (서비스 DB 폴백 금지)
 - 설정 → 별도 엔진의 세션 팩토리 (앱 DB와 분리)
 - 관측 DB 장애·미설정이 쓰기 호출(record_usage/_record_audit)을 실패시키지 않음
 """
 
 from types import SimpleNamespace
+
+import pytest
 
 import app.core.observability_db as obs
 
@@ -17,13 +19,47 @@ def _reset_singleton():
     obs._url_cached = None
 
 
-def test_fallback_to_app_sessionlocal_when_unset(monkeypatch):
-    """URL 미설정이면 앱 SessionLocal을 호출 시점에 참조한다 — monkeypatch 호환 계약."""
+def test_unset_url_never_falls_back_to_app_database(monkeypatch):
+    """URL 미설정은 명시적 unavailable이며 앱 SessionLocal을 절대 참조하지 않는다."""
     monkeypatch.delenv("OBSERVABILITY_DATABASE_URL", raising=False)
     _reset_singleton()
-    sentinel = object()
-    monkeypatch.setattr("app.db.SessionLocal", sentinel)
-    assert obs.observability_sessionmaker() is sentinel
+    with pytest.raises(obs.ObservabilityUnavailableError):
+        obs.observability_sessionmaker()
+
+
+def test_admin_dependency_returns_503_when_unconfigured(monkeypatch):
+    """관리자 관측 조회는 빈 결과나 서비스 DB 데이터 대신 표준 503을 반환한다."""
+    from app.core.errors import AppError
+
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "")
+    _reset_singleton()
+    dependency = obs.get_obs_db()
+    with pytest.raises(AppError) as exc:
+        next(dependency)
+    assert exc.value.status_code == 503
+    assert exc.value.code == "OBSERVABILITY_UNAVAILABLE"
+
+
+def test_admin_dependency_returns_503_when_connection_fails(monkeypatch):
+    """URL은 있어도 DB가 내려간 경우 raw 500이나 드라이버 오류를 노출하지 않는다."""
+    from app.core.errors import AppError
+
+    closed = []
+
+    class _Session:
+        def connection(self):
+            raise RuntimeError("driver detail must stay private")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(obs, "observability_sessionmaker", lambda: lambda: _Session())
+    dependency = obs.get_obs_db()
+    with pytest.raises(AppError) as exc:
+        next(dependency)
+    assert exc.value.status_code == 503
+    assert exc.value.code == "OBSERVABILITY_UNAVAILABLE"
+    assert closed == [True]
 
 
 def test_separate_engine_when_url_set(monkeypatch):
@@ -138,3 +174,16 @@ def test_record_usage_uses_observability_session(monkeypatch):
     monkeypatch.setattr("app.models.LlmUsage", lambda **kw: SimpleNamespace(**kw))
     record_usage(purpose="intake", model="m", input_tokens=10, output_tokens=2)
     assert len(saved) == 1 and saved[0].purpose == "intake"
+
+
+def test_record_usage_is_best_effort_without_observability_url(monkeypatch):
+    """관측 미설정은 기록만 유실시키고 LLM 호출자나 서비스 DB에 영향을 주지 않는다."""
+    from app.core.llm import record_usage
+
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "")
+    _reset_singleton()
+    monkeypatch.setattr(
+        "app.db.SessionLocal",
+        lambda: (_ for _ in ()).throw(AssertionError("service DB fallback used")),
+    )
+    record_usage(purpose="intake", model="m", input_tokens=10, output_tokens=2)

@@ -5,7 +5,7 @@
 각자 로컬을 유지한다 (wiki 의사결정-기록 2026-07-10 "관측 로그, 왜 수집하나").
 
 - OBSERVABILITY_DATABASE_URL 설정 시: 관측 쓰기/읽기가 이 엔진으로 간다.
-- 미설정 시: 앱 DB(app.db.SessionLocal)로 폴백 — 로컬 단독 개발은 기존과 동일.
+- 미설정 시: 명시적으로 unavailable. 앱 DB에는 절대 대신 기록하지 않는다.
 - 관측 DB 장애는 호출자를 실패시키지 않는다 (쓰기는 전부 best-effort).
 
 관측 DB의 테이블은 앱 스키마의 FK(users·analysis_sessions)를 만족할 수 없으므로,
@@ -32,6 +32,10 @@ _url_cached: str | None = None
 _OBS_SCHEMA_LOCK_TIMEOUT = "5s"
 
 
+class ObservabilityUnavailableError(RuntimeError):
+    """관측 DB가 구성되지 않아 읽기·쓰기를 수행할 수 없음."""
+
+
 def observability_url() -> str:
     return os.getenv("OBSERVABILITY_DATABASE_URL", "").strip()
 
@@ -43,18 +47,11 @@ def _build(url: str):
 
 
 def observability_sessionmaker():
-    """관측 세션 팩토리 — URL 설정 시 관측 엔진, 미설정 시 앱 SessionLocal 폴백.
-
-    폴백은 호출 시점에 app.db 모듈 속성을 참조한다 — 테스트의
-    monkeypatch("app.db.SessionLocal")이 그대로 효과를 갖는 계약(기존 테스트 호환).
-    URL이 바뀌면(테스트 setenv 등) 엔진을 재생성한다.
-    """
+    """관측 세션 팩토리. URL 누락을 서비스 DB 폴백으로 숨기지 않는다."""
     global _engine, _sessionmaker, _url_cached
     url = observability_url()
     if not url:
-        import app.db as app_db
-
-        return app_db.SessionLocal
+        raise ObservabilityUnavailableError("OBSERVABILITY_DATABASE_URL is not configured")
     with _lock:
         if _sessionmaker is None or url != _url_cached:
             if _engine is not None:
@@ -65,8 +62,28 @@ def observability_sessionmaker():
 
 
 def get_obs_db():
-    """FastAPI 의존성: 관측 조회용 세션 (admin stats 등)."""
-    db = observability_sessionmaker()()
+    """FastAPI 의존성: 관측 조회 불가를 관리자 API의 503으로 표면화한다."""
+    from app.core.errors import AppError
+
+    try:
+        db = observability_sessionmaker()()
+    except ObservabilityUnavailableError as exc:
+        raise AppError(
+            "OBSERVABILITY_UNAVAILABLE",
+            "관측 데이터베이스가 구성되지 않았습니다",
+            status_code=503,
+        ) from exc
+    try:
+        # Session 생성은 지연 연결이라 DB가 죽어도 성공한다. 의존성 단계에서 한 번 연결해
+        # 관리자 조회가 뒤늦은 500 대신 안정적인 503 계약으로 실패하게 한다.
+        db.connection()
+    except Exception as exc:  # noqa: BLE001 — 드라이버별 연결 예외를 외부에 노출하지 않는다
+        db.close()
+        raise AppError(
+            "OBSERVABILITY_UNAVAILABLE",
+            "관측 데이터베이스에 연결할 수 없습니다",
+            status_code=503,
+        ) from exc
     try:
         yield db
     finally:
