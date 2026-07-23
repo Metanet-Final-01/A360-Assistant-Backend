@@ -87,12 +87,22 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Validate Ops API credential
+      - name: Validate deployment credentials
         env:
           OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
+          ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
         run: |
           if [ -z "$OPS_API_KEY" ]; then
-            echo "OPS_API_KEY secret is required for the deployed Backoffice integration." >&2
+            echo "OPS_API_KEY is missing from the selected GitHub Environment." >&2
+            exit 1
+          fi
+          if [ -z "$ASSURANCE_WRITER_TOKEN" ]; then
+            echo "ASSURANCE_WRITER_TOKEN is missing from the selected GitHub Environment." >&2
+            exit 1
+          fi
+          if [ -z "$GHCR_READ_TOKEN" ]; then
+            echo "GHCR_READ_TOKEN repository secret is missing." >&2
             exit 1
           fi
 
@@ -124,6 +134,7 @@ jobs:
               JwtSecret="${{ secrets.JWT_SECRET }}" \
               ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}" \
               GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
+              GithubUsername="${{ secrets.GHCR_USERNAME || github.repository_owner }}" \
               OpsApiKey="${{ secrets.OPS_API_KEY }}" \
               AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
               AssuranceWriterRepository="${{ github.repository }}" \

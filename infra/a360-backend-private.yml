@@ -39,6 +39,11 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
+  GithubUsername:
+    Type: String
+    Default: ""
+    Description: GitHub username that owns the GHCR read token.
+    AllowedPattern: "^$|^[A-Za-z0-9_.-]+$"
   OpenAiApiKey:
     Type: String
     Default: ""
@@ -95,6 +100,7 @@ Resources:
         {
           "OPENAI_API_KEY": "${OpenAiApiKey}",
           "GITHUB_TOKEN": "${GithubToken}",
+          "GITHUB_USERNAME": "${GithubUsername}",
           "VOYAGE_API_KEY": "${VoyageApiKey}",
           "JWT_SECRET": "${JwtSecret}",
           "OPS_API_KEY": "${OpsApiKey}",
@@ -224,7 +230,11 @@ Resources:
                   - Fn::ImportValue:
                       Fn::Sub: "${ProjectName}-${Environment}-ObservabilityWriterSecretArn"
                   - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-OpsReaderSecretArn"
+                  - Fn::ImportValue:
                       Fn::Sub: "${ProjectName}-${Environment}-RagRuntimeSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-RagIngestSecretArn"
               - Effect: Allow
                 Action:
                   - s3:GetObject
@@ -274,12 +284,13 @@ Resources:
             - |
               #!/bin/bash -eu
               set -o pipefail
-              trap '/opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region}' ERR
               exec > >(tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log) 2>&1
               echo "[a360-bootstrap] starting user-data"
+              dnf install -y awscli aws-cfn-bootstrap
+              trap '/opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region}' ERR
 
               if [ "${StartBackendContainer}" != "true" ]; then
-                dnf install -y awscli aws-cfn-bootstrap postgresql15
+                dnf install -y postgresql15
                 echo "StartBackendContainer=false; leaving EC2 ready for DB bootstrap through SSM."
                 /opt/aws/bin/cfn-signal --success true \
                   --stack ${AWS::StackName} \
@@ -288,7 +299,7 @@ Resources:
                 exit 0
               fi
 
-              dnf install -y docker awscli jq curl aws-cfn-bootstrap postgresql15
+              dnf install -y docker jq curl postgresql15
               systemctl enable --now docker
 
               mkdir -p /opt/a360/secrets
@@ -299,8 +310,9 @@ Resources:
               aws secretsmanager get-secret-value --secret-id '${RagRuntimeSecretArn}' --query SecretString --output text > /opt/a360/secrets/rag.json
 
               GITHUB_TOKEN=$(jq -r '.GITHUB_TOKEN // ""' /opt/a360/secrets/app.json)
+              GITHUB_USERNAME=$(jq -r '.GITHUB_USERNAME // ""' /opt/a360/secrets/app.json)
               if [ -n "$GITHUB_TOKEN" ]; then
-                echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin
+                echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_USERNAME" --password-stdin
               fi
 
               SERVICE_USER=$(jq -r '.username' /opt/a360/secrets/service.json)
