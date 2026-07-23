@@ -84,6 +84,19 @@ def test_no_limits_configured_is_noop(monkeypatch):
     assert v.exceeded is False and called["n"] == 0
 
 
+def test_missing_observability_db_does_not_break_business_turn(monkeypatch):
+    """관측 URL 누락은 예산을 fail-open하고 업무 요청을 500으로 만들지 않는다."""
+    monkeypatch.setenv("BUDGET_SUBJECT_DAILY_USD", "1.0")
+    import app.core.observability_db as obs
+
+    def _missing():
+        raise obs.ObservabilityUnavailableError("missing")
+
+    monkeypatch.setattr(obs, "observability_sessionmaker", _missing)
+    verdict = budget.check_budget(budget.subject_of(None, SID), now=NOW)
+    assert verdict.exceeded is False
+
+
 @pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-5"])
 def test_invalid_or_zero_limit_disables_that_check(monkeypatch, bad):
     """비정상·0·음수 상한은 그 검사를 끈다(fail-open) — 오설정으로 서비스를 막지 않는다."""

@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
     from app.api.sessions import warmup_token_encoder
 
     threading.Thread(target=warmup_token_encoder, daemon=True).start()
-    # 관측 전용 DB(RPA-90) — OBSERVABILITY_DATABASE_URL 설정 시 테이블 보장 (실패해도 기동)
+    # 관측 전용 DB(RPA-90) — 미설정/장애여도 업무는 기동하되 서비스 DB로 우회하지 않는다.
     from app.core.observability_db import ensure_observability_schema
 
     ensure_observability_schema()
@@ -271,7 +271,7 @@ def compute_health() -> dict:
     return {
         "status": status,
         "checks": checks,
-        # 관측 DB가 공유(Neon)인지 로컬 폴백인지 — 폴백이면 위 체크는 앱 DB와 동일 대상
+        # 관측 DB가 명시적으로 구성됐는지. False면 위 체크는 fail이며 서비스 DB를 대신 보지 않는다.
         "observability_shared": bool(os.getenv("OBSERVABILITY_DATABASE_URL")),
         # BM25 색인에 문서가 있나 (RPA-249) — 도달성이 ok여도 색인이 비면 검색은 dense-only
         # 반쪽이다. 도달 실패면 None(알 수 없음). status 판정에는 넣지 않는다.

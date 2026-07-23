@@ -80,24 +80,20 @@ VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 
+class RagDatabaseConfigurationError(RuntimeError):
+    """RAG 전용 DB 설정이 없어 서비스 DB 격리를 보장할 수 없음."""
+
+
 def database_dsn() -> str:
     """RAG 저장소(pgvector) 접속 문자열.
 
-    RAG_DATABASE_URL이 있으면 그걸 우선한다 — RAG 코퍼스를 앱 DB(users/sessions)와 분리된
-    전용 공유 DB(Neon 등)에 둘 수 있게 한다(관측 DB의 OBSERVABILITY_DATABASE_URL과 같은
-    폴백 패턴). 미설정/빈값이면 기존 DATABASE_*(앱 DB와 동일)로 폴백 — 로컬 단독 개발 무변경.
+    RAG_DATABASE_URL만 사용한다. 미설정/빈값이면 기동을 거부해 RAG 코퍼스가 서비스 DB에
+    조용히 섞이는 구성을 막는다. 로컬도 docker-compose가 별도 논리 DB URL을 명시한다.
     """
-    url = os.getenv("RAG_DATABASE_URL")
+    url = (os.getenv("RAG_DATABASE_URL") or "").strip()
     if url:
         # RAG store는 raw psycopg라 libpq URL(postgresql://)만 받는다 — SQLAlchemy용
         # 'postgresql+psycopg://' 접두사를 그대로 넘기면 psycopg가 스킴을 못 읽는다.
         # 관측 URL 형식을 복붙해도 동작하도록 드라이버 접미사(+psycopg 등)를 방어적으로 벗긴다.
         return _PG_DRIVER_SUFFIX.sub(r"\1://", url, count=1)
-    # os.getenv(key, default)는 .env에 키가 "빈 값"으로라도 존재하면 default를 안 쓴다 —
-    # `or`로 빈 문자열도 default로 폴백되게 한다 (DATABASE_HOST= 처럼 빈 채로 커밋된 .env.example 대응).
-    host = os.getenv("DATABASE_HOST") or "localhost"
-    port = os.getenv("DATABASE_PORT") or "5432"
-    name = os.getenv("DATABASE_NAME") or "a360"
-    user = os.getenv("DATABASE_USERNAME") or "a360_admin"
-    password = os.getenv("DATABASE_PASSWORD") or "a360_local_password"
-    return f"host={host} port={port} dbname={name} user={user} password={password}"
+    raise RagDatabaseConfigurationError("RAG_DATABASE_URL is required")

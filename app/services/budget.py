@@ -273,18 +273,26 @@ def check_budget(subject: Subject, now: datetime | None = None) -> BudgetVerdict
         return BudgetVerdict(exceeded=False)
 
     now = now or datetime.now(timezone.utc)
-    from app.core.observability_db import observability_sessionmaker
+    from app.core.observability_db import (
+        ObservabilityUnavailableError,
+        observability_sessionmaker,
+    )
 
-    with observability_sessionmaker()() as s:
-        for scope, period, limit, subj in active:
-            start = _period_start(period, now)
-            spent = _spent(s, start, subj)
-            if spent >= limit:
-                return BudgetVerdict(
-                    exceeded=True, scope=scope, period=period,
-                    spent_usd=round(spent, 6), limit_usd=limit,
-                    resets_at=_period_end(period, start).isoformat(),
-                )
+    try:
+        with observability_sessionmaker()() as s:
+            for scope, period, limit, subj in active:
+                start = _period_start(period, now)
+                spent = _spent(s, start, subj)
+                if spent >= limit:
+                    return BudgetVerdict(
+                        exceeded=True, scope=scope, period=period,
+                        spent_usd=round(spent, 6), limit_usd=limit,
+                        resets_at=_period_end(period, start).isoformat(),
+                    )
+    except ObservabilityUnavailableError:
+        # 관측 설정 누락이 업무 API를 500으로 만들지는 않는다. 헬스는 degraded, 관리자 조회는
+        # 503으로 드러나므로 운영자가 원인을 볼 수 있고 서비스 DB로 조용히 우회하지 않는다.
+        logger.warning("관측 DB 미설정으로 예산 판정을 건너뜁니다")
     return BudgetVerdict(exceeded=False)
 
 

@@ -92,9 +92,9 @@ def _isolate_observability_db(monkeypatch):
     """테스트가 공유 관측 DB(Neon)를 절대 때리지 않게 격리한다 (RPA-90).
 
     개발자 .env에 OBSERVABILITY_DATABASE_URL이 설정돼 있으면 record_usage/_record_audit이
-    실제 팀 공유 DB에 테스트 쓰레기를 쓴다 — env를 **빈 문자열로 덮어** 앱 SessionLocal
-    폴백(각 테스트가 monkeypatch하는 대상)으로 고정하고 모듈 싱글톤도 초기화한다. 관측 DB
-    라우팅 자체를 검증하는 테스트(test_observability_db.py)는 자기 setenv로 다시 켠다.
+    실제 팀 공유 DB에 테스트 쓰레기를 쓴다 — env를 **빈 문자열로 덮어** 관측 기능을
+    unavailable로 고정하고 모듈 싱글톤도 초기화한다. 관측 DB 라우팅 자체를 검증하는
+    테스트(test_observability_db.py)는 자기 setenv로 다시 켠다.
 
     ⚠️⚠️ **delenv가 아니라 빈 문자열이어야 한다** (2026-07-16 실측으로 구멍 발견, RPA-189).
     delenv로 지워도 **아래 `_isolate_rag_shared_infra`가 `import app.rag.config`를 하는 순간
@@ -164,10 +164,10 @@ def _isolate_rag_shared_infra(monkeypatch):
     관측 DB(위 fixture)만 격리돼 있고 RAG store는 안 돼 있어, .env에 RAG_DATABASE_URL·
     OPENSEARCH_HOST(공유 크레덴셜)가 있으면 lifespan의 open_pools()가 min_size=2로 **기동
     시점에 공유 Neon에 실제 커넥션을 연다** — 로컬 pytest가 팀 데모 데이터를 오염시킬 표면.
-    관측 DB와 대칭으로 막는다: RAG store 연결을 전부 localhost로 저하시켜, 개별 테스트가
-    모킹을 빠뜨려도 shared가 아니라 로컬(있으면 접속, 없으면 fail-open)로 떨어지게 한다.
+    관측 DB와 대칭으로 막는다: RAG store 연결을 명시적인 localhost URL로 고정해, 개별
+    테스트가 모킹을 빠뜨려도 shared가 아니라 로컬(있으면 접속, 없으면 fail-open)로 간다.
 
-    - RAG_DATABASE_URL: database_dsn()이 참조 시점에 읽는 env → delenv면 DATABASE_*(로컬)로 폴백.
+    - RAG_DATABASE_URL: database_dsn()이 참조 시점에 읽는 env → 테스트 전용 로컬 URL 명시.
     - OPENSEARCH_*: config 상수라 import 시점 고정 → 속성 자체를 로컬로 monkeypatch(env 삭제로는 안 됨).
 
     RAG 라우팅/DSN 파싱 자체를 검증하는 테스트(test_rag_config.py)는 자기 setenv/monkeypatch로
@@ -177,7 +177,10 @@ def _isolate_rag_shared_infra(monkeypatch):
 
     # ⚠️ delenv가 아니라 빈 문자열 — 이 모듈(app.rag.config)이 import 시점에 load_dotenv()를
     #    부르므로, 지워도 .env에서 되살아난다. 위 _isolate_observability_db 주석 참고(RPA-189).
-    monkeypatch.setenv("RAG_DATABASE_URL", "")
+    monkeypatch.setenv(
+        "RAG_DATABASE_URL",
+        "postgresql://a360_admin:a360_local_password@127.0.0.1:1/a360_rag",
+    )
     monkeypatch.setattr(rag_config, "OPENSEARCH_HOST", "http://localhost:9200")
     monkeypatch.setattr(rag_config, "OPENSEARCH_USERNAME", "")
     monkeypatch.setattr(rag_config, "OPENSEARCH_PASSWORD", "")
