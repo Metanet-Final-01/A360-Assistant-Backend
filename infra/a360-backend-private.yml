@@ -281,7 +281,8 @@ Resources:
               exec > >(tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log) 2>&1
               echo "[a360-bootstrap] starting user-data"
               dnf install -y awscli aws-cfn-bootstrap
-              INSTANCE_ID=$(curl -fsS http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
+              IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
+              INSTANCE_ID=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
               upload_bootstrap_logs() {
                 aws s3 cp /var/log/a360-bootstrap.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/a360-bootstrap.log" || true
                 aws s3 cp /var/log/cloud-init-output.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/cloud-init-output.log" || true
@@ -298,7 +299,7 @@ Resources:
                 exit 0
               fi
 
-              dnf install -y docker jq curl postgresql15
+              dnf install -y docker jq postgresql15
               systemctl enable --now docker
 
               mkdir -p /opt/a360/secrets
