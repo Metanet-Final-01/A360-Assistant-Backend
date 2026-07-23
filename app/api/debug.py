@@ -303,9 +303,14 @@ def rag_logs_recent(limit: int = 100) -> dict:
 
 
 @router.get("/api/rag/debug/status")
-def rag_debug_status() -> dict:
-    """DB/OpenSearch/임베딩/리랭커 실시간 연결 상태 — 로컬 개발 중 코드가 실제로 각 서비스에
-    잘 붙어 있는지 한눈에 점검하기 위한 디버그 전용 엔드포인트."""
+def rag_debug_status(probe: bool = False) -> dict:
+    """DB/OpenSearch/임베딩/리랭커 실시간 연결 상태 — 각 서비스에 실제로 붙어 있는지 점검.
+
+    ⚠️ 기본은 임베딩/리랭커의 **키 설정 여부(api_key_configured)만** 본다 — 키가 있어도 무효
+    이거나 egress(NAT)가 막히면 검색은 죽는데 여기선 초록으로 보인다("가짜 초록불", RPA-232).
+    `?probe=1`을 주면 **실제 임베딩 1회 호출 + 그 벡터로 pgvector top-1 쿼리**까지 돌려
+    검색 critical path(=SEARCH_UNAVAILABLE을 내는 그 경로)의 실제 도달성을 단계별로 확인한다
+    (외부 API 비용·지연 발생, 디버그 전용)."""
     from app.rag import config
     from app.rag.store import db, opensearch_client
 
@@ -333,7 +338,7 @@ def rag_debug_status() -> dict:
             "error": str(e),
         }
 
-    status["embedding"] = {
+    embedding: dict = {
         "provider": config.EMBEDDING_PROVIDER,
         "model": config.EMBEDDING_MODEL,
         "api_key_configured": bool(config.VOYAGE_API_KEY if config.EMBEDDING_PROVIDER == "voyage" else config.OPENAI_API_KEY),
@@ -342,4 +347,38 @@ def rag_debug_status() -> dict:
         "model": config.RERANK_MODEL,
         "api_key_configured": bool(config.VOYAGE_API_KEY),
     }
+
+    if not probe:
+        # 키 존재만 봤다는 걸 명시 — 이 초록은 "검색이 된다"를 뜻하지 않는다(RPA-232).
+        embedding["live_check"] = "키 설정 여부만 확인함 — 실제 도달성은 ?probe=1"
+        status["embedding"] = embedding
+        return status
+
+    # probe=1 — 검색 critical path를 실제로 태워 SEARCH_UNAVAILABLE의 원인 단계를 격리한다(RPA-232).
+    # 임베딩(외부 API)이 죽으면 벡터 쿼리는 건너뛴다(임베딩 없이는 못 돈다).
+    probe_vec = None
+    try:
+        from app.rag.retrieval.embed import embed_query
+
+        probe_vec = embed_query("rag search healthcheck probe")
+        embedding["reachable"] = True
+        embedding["dim"] = len(probe_vec)
+    except Exception as e:  # noqa: BLE001 — 키 무효·egress 차단·타임아웃 등 실제 실패를 그대로 노출
+        embedding["reachable"] = False
+        embedding["error"] = f"{type(e).__name__}: {e}"
+    status["embedding"] = embedding
+
+    if probe_vec is None:
+        status["vector_query"] = {"skipped": "임베딩 실패로 pgvector 쿼리 생략"}
+    else:
+        try:
+            conn = db.connect()
+            try:
+                hits = db.search(conn, probe_vec, limit=1)
+            finally:
+                conn.close()
+            status["vector_query"] = {"reachable": True, "hits": len(hits)}
+        except Exception as e:  # noqa: BLE001 — 차원 불일치·컬럼 부재 등 pgvector 쿼리 실패 노출
+            status["vector_query"] = {"reachable": False, "error": f"{type(e).__name__}: {e}"}
+
     return status
