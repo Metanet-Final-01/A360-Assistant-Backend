@@ -184,3 +184,7 @@ def _isolate_rag_shared_infra(monkeypatch):
     monkeypatch.setattr(rag_config, "OPENSEARCH_HOST", "http://localhost:9200")
     monkeypatch.setattr(rag_config, "OPENSEARCH_USERNAME", "")
     monkeypatch.setattr(rag_config, "OPENSEARCH_PASSWORD", "")
+    # RAG 캐시 Redis 백엔드(RPA-274)도 같은 이유로 격리 — .env에 운영 Redis가 있으면
+    # 테스트가 공유 캐시를 오염시킨다. 빈 문자열(delenv 아님 — load_dotenv 부활 함정)이면
+    # rag_cache가 인프로세스 모드로 동작한다. Redis 경로 테스트는 자기 setenv+팩토리 패치로 켠다.
+    monkeypatch.setenv("REDIS_URL", "")
