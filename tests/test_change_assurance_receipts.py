@@ -695,12 +695,16 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "python3" not in user_data
     assert "dnf update -y" not in user_data
     assert "tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log" in user_data
+    assert "latest/api/token" in user_data
+    assert "X-aws-ec2-metadata-token" in user_data
     assert "upload_bootstrap_logs()" in user_data
     assert "backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID" in user_data
     assert "trap 'upload_bootstrap_logs;" in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
     assert "dnf install -y awscli aws-cfn-bootstrap" in user_data
+    assert "dnf install -y docker jq postgresql15" in user_data
+    assert "dnf install -y docker jq curl postgresql15" not in user_data
     assert user_data.index("dnf install -y awscli aws-cfn-bootstrap") < user_data.index("cfn-signal --success false")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index("mkdir -p /opt/a360/secrets")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index('docker login ghcr.io')
