@@ -696,6 +696,9 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "python3" not in user_data
     assert "dnf update -y" not in user_data
     assert "tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log" in user_data
+    assert "upload_bootstrap_logs()" in user_data
+    assert "backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID" in user_data
+    assert "trap 'upload_bootstrap_logs;" in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
     assert "dnf install -y awscli aws-cfn-bootstrap" in user_data
