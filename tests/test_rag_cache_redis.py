@@ -158,6 +158,45 @@ def test_bust_search_clears_search_but_keeps_embeddings(fake_redis):
     assert rag_cache.get_embedding(ek) == [1.0, 2.0]  # 임베딩은 코퍼스와 무관 — 유지
 
 
+def test_corrupt_redis_value_is_miss_and_evicted(fake_redis):
+    """오염된 값은 예외가 아니라 miss다 (Qodo #365) — fail-open은 데이터 오류에도 적용.
+
+    hot path에서 json.loads가 터지면 캐시가 성능 장치가 아니라 장애 지점이 된다.
+    오염 키는 지워져 반복 실패하지 않아야 하고, hit로 집계되면 적중률이 거짓말한다.
+    """
+    key = rag_cache.search_key("q", 5, None, _Params(), "e", "r")
+    fake_redis.set("rag:search:" + key, "{이건 JSON이 아니다")
+
+    assert rag_cache.get_search(key) is None          # 예외 전파 없이 miss
+
+    s = rag_cache.stats()
+    assert s["redis_decode_error"] == 1
+    assert s["search_hit"] == 0 and s["search_miss"] == 1
+    assert fake_redis.exists("rag:search:" + key) == 0  # 오염 키는 제거됐다
+
+
+def test_url_change_clears_backoff_immediately(monkeypatch):
+    """장애 백오프는 '그 대상이 죽어 있다'는 지식이다 (Qodo #365) — URL을 갈아끼우면
+    새 대상은 즉시 시도해야 한다. 순서가 반대면 건강한 새 엔드포인트가 30초 무시된다."""
+    down = _DownRedis()
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    clients = {"redis://old-dead:6379/0": down, "redis://new-alive:6379/0": fake}
+    monkeypatch.setenv("RAG_CACHE_ENABLED", "true")
+    monkeypatch.setattr(rag_cache, "_make_redis_client", lambda url: clients[url])
+    monkeypatch.setattr(rag_cache, "_redis_client", None)
+    monkeypatch.setattr(rag_cache, "_redis_url_cached", None)
+    monkeypatch.setattr(rag_cache, "_redis_down_until", 0.0)
+
+    monkeypatch.setenv("REDIS_URL", "redis://old-dead:6379/0")
+    key = rag_cache.embedding_key("q", "m", 8)
+    assert rag_cache.get_embedding(key) is None       # 죽은 대상 → 백오프 진입
+    assert rag_cache._redis_down_until > 0
+
+    monkeypatch.setenv("REDIS_URL", "redis://new-alive:6379/0")
+    rag_cache.put_embedding(key, [1.5])               # 백오프 창 안이지만 새 대상은 즉시 시도
+    assert rag_cache.get_embedding(key) == [1.5]
+
+
 def test_memory_backend_when_url_unset(monkeypatch):
     """REDIS_URL 미설정(conftest 기본)이면 기존 인프로세스 동작 그대로."""
     monkeypatch.setenv("RAG_CACHE_ENABLED", "true")

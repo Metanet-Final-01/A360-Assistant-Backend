@@ -69,7 +69,8 @@ _search_cache: TTLCache | None = None
 
 # 관측용 카운터 — "적중률이 왜 낮은가"에 답하려면 건너뛴 이유까지 세야 한다
 _stats = {"embed_hit": 0, "embed_miss": 0, "search_hit": 0, "search_miss": 0,
-          "skip_degraded": 0, "skip_empty": 0, "skip_unserializable": 0, "redis_error": 0}
+          "skip_degraded": 0, "skip_empty": 0, "skip_unserializable": 0,
+          "redis_error": 0, "redis_decode_error": 0}
 
 # ── Redis 백엔드 (RPA-274) ───────────────────────────────────────────────────
 
@@ -114,22 +115,48 @@ def _redis() -> Any | None:
     """활성 Redis 클라이언트, 또는 None(미설정·백오프 중·생성 실패).
 
     URL이 바뀌면 재생성한다 — 테스트의 setenv, 운영의 엔드포인트 교체 모두 재기동 없이 반영.
+
+    ⚠️ URL 변경 감지가 백오프 체크보다 **먼저**다(Qodo #365): 순서를 바꾸면 장애 후
+    엔드포인트를 갈아끼워도 옛 대상에 걸린 백오프 30초가 새 대상까지 막는다 — 백오프는
+    "그 대상이 죽어 있다"는 지식이므로 대상이 바뀌면 무효가 맞다.
     """
-    global _redis_client, _redis_url_cached
+    global _redis_client, _redis_url_cached, _redis_down_until
     url = _redis_url()
     if not url:
         return None
+    if url != _redis_url_cached:
+        _redis_client = None
+        _redis_url_cached = url   # 생성 실패해도 유지 — 같은(잘못된) URL 재시도는 백오프를 탄다
+        _redis_down_until = 0.0
     if time.monotonic() < _redis_down_until:
         return None
-    if _redis_client is None or url != _redis_url_cached:
+    if _redis_client is None:
         try:
             _redis_client = _make_redis_client(url)
-            _redis_url_cached = url
         except Exception:  # noqa: BLE001 — 캐시는 정본이 아니다: 생성 실패는 miss로 산다
             _redis_client = None
             _mark_redis_down()
             return None
     return _redis_client
+
+
+def _loads(raw: str, r: Any, full_key: str) -> Any | None:
+    """Redis 값 JSON 디코드 — 실패도 miss로 산다(Qodo #365): fail-open은 데이터 오류에도 적용.
+
+    오염된 값(수동 조작·부분 기록 등)이 hot path에서 예외로 터지면 캐시가 성능 장치가
+    아니라 장애 지점이 된다. 문제 키는 지워서(best-effort) 반복 실패를 막는다 —
+    서버 자체는 건강하므로 백오프는 걸지 않는다(연결 오류와 구분).
+    """
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        with _lock:
+            _stats["redis_decode_error"] += 1
+        try:
+            r.delete(full_key)
+        except Exception:  # noqa: BLE001
+            _mark_redis_down()
+        return None
 
 
 def enabled() -> bool:
@@ -204,9 +231,10 @@ def get_embedding(key: str) -> list[float] | None:
         except Exception:  # noqa: BLE001
             _mark_redis_down()
             raw = None
-        with _lock:
-            _stats["embed_hit" if raw is not None else "embed_miss"] += 1
-        return json.loads(raw) if raw is not None else None
+        value = _loads(raw, r, _REDIS_NS_EMB + key) if raw is not None else None
+        with _lock:  # 디코드 **후** 집계 — 오염값이 hit로 세이면 적중률이 거짓말한다(Qodo #365)
+            _stats["embed_hit" if value is not None else "embed_miss"] += 1
+        return value
     if _redis_url():  # Redis 지정됐지만 백오프 중 — 인프로세스로 폴백하지 않는다(위 docstring)
         with _lock:
             _stats["embed_miss"] += 1
@@ -263,9 +291,10 @@ def get_search(key: str) -> list[dict] | None:
         except Exception:  # noqa: BLE001
             _mark_redis_down()
             raw = None
-        with _lock:
-            _stats["search_hit" if raw is not None else "search_miss"] += 1
-        return json.loads(raw) if raw is not None else None
+        value = _loads(raw, r, _REDIS_NS_SEARCH + key) if raw is not None else None
+        with _lock:  # 디코드 **후** 집계 — 위 get_embedding과 같은 이유
+            _stats["search_hit" if value is not None else "search_miss"] += 1
+        return value
     if _redis_url():
         with _lock:
             _stats["search_miss"] += 1
