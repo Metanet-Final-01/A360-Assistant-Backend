@@ -28,7 +28,7 @@ on:
         description: "Start backend container after EC2 bootstrap. Set false before DB role bootstrap."
         required: true
         type: boolean
-        default: false
+        default: true
   push:
     branches:
       - main
@@ -40,7 +40,6 @@ permissions:
 
 env:
   AWS_REGION: ap-northeast-2
-  STACK_NAME: a360-assistant-dev-backend
 
 jobs:
   build:
@@ -77,7 +76,9 @@ jobs:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
     runs-on: ubuntu-latest
-    environment: backend-deploy-dev
+    environment: backend-deploy-${{ inputs.environment }}
+    env:
+      STACK_NAME: a360-assistant-${{ inputs.environment }}-backend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -95,6 +96,26 @@ jobs:
             exit 1
           fi
 
+      - name: Validate OpenSearch host
+        env:
+          OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+        run: |
+          if [ -z "$OPENSEARCH_HOST" ]; then
+            echo "OPENSEARCH_HOST secret is required for deployed RAG search." >&2
+            exit 1
+          fi
+          case "$OPENSEARCH_HOST" in
+            http://*|https://*) ;;
+            *)
+              echo "OPENSEARCH_HOST must start with http:// or https://." >&2
+              exit 1
+              ;;
+          esac
+          if printf '%s' "$OPENSEARCH_HOST" | grep -q '[[:space:]]'; then
+            echo "OPENSEARCH_HOST must not contain whitespace." >&2
+            exit 1
+          fi
+
       - name: Deploy CloudFormation
         run: |
           aws cloudformation deploy \
@@ -108,6 +129,7 @@ jobs:
               OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
               VoyageApiKey="${{ secrets.VOYAGE_API_KEY }}" \
               JwtSecret="${{ secrets.JWT_SECRET }}" \
+              ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}" \
               GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
               OpsApiKey="${{ secrets.OPS_API_KEY }}" \
               AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \

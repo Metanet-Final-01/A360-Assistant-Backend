@@ -28,7 +28,11 @@
     "ParameterValue": "2"
   },
   {
-    "ParameterKey": "EnableOpenSearch",
-    "ParameterValue": "false"
+    "ParameterKey": "ExternalOpenSearchHost",
+    "ParameterValue": "https://your-opensearch.example.com"
+  },
+  {
+    "ParameterKey": "StartBackendContainer",
+    "ParameterValue": "true"
   }
 ]

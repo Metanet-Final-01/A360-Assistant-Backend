@@ -70,7 +70,8 @@ Parameters:
     Default: 8000
   ExternalOpenSearchHost:
     Type: String
-    Default: ""
+    AllowedPattern: "^https?://[^\\s]+$"
+    ConstraintDescription: ExternalOpenSearchHost must be a non-empty http(s) URL without whitespace.
   StartBackendContainer:
     Type: String
     Default: "true"
@@ -82,6 +83,7 @@ Parameters:
 
 Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+  StartsBackendContainer: !Equals [!Ref StartBackendContainer, "true"]
 
 Resources:
   AppSecret:
@@ -294,27 +296,9 @@ Resources:
               OBS_PASSWORD=$(jq -r '.password' /opt/a360/secrets/observability.json)
               RAG_USER=$(jq -r '.username' /opt/a360/secrets/rag.json)
               RAG_PASSWORD=$(jq -r '.password' /opt/a360/secrets/rag.json)
-              OPS_API_KEY=$(python3 - <<'PY'
-              import json
-              with open("/opt/a360/secrets/app.json", encoding="utf-8") as f:
-                  data = json.load(f)
-              print(data.get("OPS_API_KEY", ""))
-              PY
-              )
-              ASSURANCE_WRITER_TOKEN=$(python3 - <<'PY'
-              import json
-              with open("/opt/a360/secrets/app.json", encoding="utf-8") as f:
-                  data = json.load(f)
-              print(data.get("ASSURANCE_WRITER_TOKEN", ""))
-              PY
-              )
-              ASSURANCE_WRITER_REPOSITORY=$(python3 - <<'PY'
-              import json
-              with open("/opt/a360/secrets/app.json", encoding="utf-8") as f:
-                  data = json.load(f)
-              print(data.get("ASSURANCE_WRITER_REPOSITORY", ""))
-              PY
-              )
+              OPS_API_KEY=$(jq -r '.OPS_API_KEY // ""' /opt/a360/secrets/app.json)
+              ASSURANCE_WRITER_TOKEN=$(jq -r '.ASSURANCE_WRITER_TOKEN // ""' /opt/a360/secrets/app.json)
+              ASSURANCE_WRITER_REPOSITORY=$(jq -r '.ASSURANCE_WRITER_REPOSITORY // ""' /opt/a360/secrets/app.json)
 
               install -m 600 /dev/null /opt/a360/.env
               cat > /opt/a360/.env <<EOF
@@ -557,9 +541,12 @@ Resources:
           - ","
           - Fn::ImportValue:
               Fn::Sub: "${ProjectName}-${Environment}-PrivateAppSubnetIds"
-      TargetGroupARNs: [!Ref BackendTargetGroup]
-      HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
+      TargetGroupARNs: !If
+        - StartsBackendContainer
+        - [!Ref BackendTargetGroup]
+        - !Ref AWS::NoValue
+      HealthCheckType: !If [StartsBackendContainer, ELB, EC2]
+      HealthCheckGracePeriod: !If [StartsBackendContainer, 300, !Ref AWS::NoValue]
       LaunchTemplate:
         LaunchTemplateId: !Ref AppLaunchTemplate
         Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
