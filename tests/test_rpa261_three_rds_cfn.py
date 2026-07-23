@@ -237,9 +237,25 @@ def test_external_opensearch_host_and_credentials_must_be_selected_together():
     parameters = template["Parameters"]
     rules = template["Rules"]
 
-    assert parameters["ExternalOpenSearchHost"]["AllowedPattern"] == "^$|^https://[^@/?#]+$"
+    host_pattern = parameters["ExternalOpenSearchHost"]["AllowedPattern"]
+    secret_pattern = parameters["ExternalOpenSearchCredentialsSecretArn"]["AllowedPattern"]
+    assert re.fullmatch(host_pattern, "https://example.us-east-1.bonsaisearch.net")
+    assert re.fullmatch(host_pattern, "https://search.internal:443")
+    assert not re.fullmatch(host_pattern, "https://example.com/path")
+    assert not re.fullmatch(host_pattern, "https://bad host.example")
+
+    valid_secret_arn = (
+        "arn:aws:secretsmanager:us-east-1:123456789012:"
+        "secret:a360/opensearch-abc123"
+    )
     assert parameters["ExternalOpenSearchCredentialsSecretArn"]["Default"] == ""
-    assert "secretsmanager" in parameters["ExternalOpenSearchCredentialsSecretArn"][
-        "AllowedPattern"
-    ]
+    assert re.fullmatch(secret_pattern, valid_secret_arn)
+    assert not re.fullmatch(
+        secret_pattern,
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:*",
+    )
+    assert not re.fullmatch(
+        secret_pattern,
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:bad name",
+    )
     assert len(rules["ExternalOpenSearchConfiguration"]["Assertions"]) == 2

@@ -193,7 +193,7 @@ Parameters:
   ExternalOpenSearchHost:
     Type: String
     Default: ""
-    AllowedPattern: "^$|^https://[^@/?#]+$"
+    AllowedPattern: "^$|^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?$"
     Description: >-
       Host-only HTTPS endpoint for an existing external OpenSearch service such as Bonsai.
       Do not include username, password, query, fragment, or path in this value.
@@ -201,7 +201,7 @@ Parameters:
   ExternalOpenSearchCredentialsSecretArn:
     Type: String
     Default: ""
-    AllowedPattern: "^$|^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$"
+    AllowedPattern: "^$|^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$"
     Description: >-
       Secrets Manager ARN containing username and password for ExternalOpenSearchHost.
       It must be set together with ExternalOpenSearchHost. Cross-region ARNs are read from
