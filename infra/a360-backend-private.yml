@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "A360 backend AWS deployment - public ALB, private EC2 ASG, private PostgreSQL pgvector-ready RDS, optional private OpenSearch"
+Description: "A360 backend AWS deployment - public ALB, private EC2 ASG, separated service/observability/RAG PostgreSQL RDS, optional managed/container/external OpenSearch"
 
 Parameters:
   ProjectName:
@@ -120,10 +120,35 @@ Parameters:
     Default: a360
     AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{1,30}$"
 
+  ObservabilityDatabaseName:
+    Type: String
+    Default: a360_observability
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{1,30}$"
+
+  RagDatabaseName:
+    Type: String
+    Default: a360_rag
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{1,30}$"
+
+  DatabaseEngineVersion:
+    Type: String
+    Default: "18.4"
+    AllowedValues: ["18.4"]
+    Description: "Pinned to the version verified as orderable for db.t4g.micro in ap-northeast-2."
+
+  SeparatedDatabaseCutoverEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Two-phase safety gate. false provisions separated RDS and secrets but keeps the existing
+      service DB runtime connection. Set true only after roles, restore, grants, and validation finish.
+
   DatabaseInstanceClass:
     Type: String
     Default: db.t4g.micro
-    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium, db.t3.micro, db.t3.small, db.t3.medium]
+    AllowedValues: [db.t4g.micro]
+    Description: "Initial RDS class fixed by the v4 migration agreement. Change only through reviewed infrastructure work."
 
   DatabaseAllocatedStorage:
     Type: Number
@@ -165,12 +190,56 @@ Parameters:
       the instance's RAM/CPU (bump InstanceType if using this) and loses its data if the
       instance is replaced (no managed backups/patching either).
 
+  ExternalOpenSearchHost:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://[^@/]+(?:/.*)?$"
+    Description: >-
+      Host-only HTTPS endpoint for an existing external OpenSearch service such as Bonsai.
+      Do not include username or password in this value.
+
+  ExternalOpenSearchCredentialsSecretArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Secrets Manager ARN containing username and password for ExternalOpenSearchHost.
+      It must be set together with ExternalOpenSearchHost.
+
+  BackofficeOpsSecurityGroupId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^sg-[0-9a-fA-F]+$"
+    Description: "Optional Backoffice Ops security group allowed to read the observability RDS."
+
+  RagIngestSecurityGroupId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^sg-[0-9a-fA-F]+$"
+    Description: "Optional approved RAG ingest worker security group allowed to write the RAG RDS."
+
+Rules:
+  ExternalOpenSearchConfiguration:
+    Assertions:
+      - Assert: !Equals
+          - !Equals [!Ref ExternalOpenSearchHost, ""]
+          - !Equals [!Ref ExternalOpenSearchCredentialsSecretArn, ""]
+        AssertDescription: "ExternalOpenSearchHost and ExternalOpenSearchCredentialsSecretArn must be set together."
+      - Assert: !Or
+          - !Equals [!Ref ExternalOpenSearchHost, ""]
+          - !Equals [!Ref EnableOpenSearch, "false"]
+        AssertDescription: "External OpenSearch cannot be combined with a managed or container OpenSearch resource."
+
 Conditions:
   HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
   CreateOpenSearch: !Equals [!Ref EnableOpenSearch, "true"]
   UseManagedOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "managed"]]
   UseContainerOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "container"]]
+  UseExternalOpenSearch: !Not [!Equals [!Ref ExternalOpenSearchHost, ""]]
+  HasExternalOpenSearchCredentials: !Not [!Equals [!Ref ExternalOpenSearchCredentialsSecretArn, ""]]
+  HasBackofficeOpsSecurityGroup: !Not [!Equals [!Ref BackofficeOpsSecurityGroupId, ""]]
+  HasRagIngestSecurityGroup: !Not [!Equals [!Ref RagIngestSecurityGroupId, ""]]
+  UseSeparatedDatabaseRuntime: !Equals [!Ref SeparatedDatabaseCutoverEnabled, "true"]
   IsPublicLite: !Equals [!Ref NetworkMode, "public-lite"]
   NeedsNat: !Not [!Condition IsPublicLite]
 
@@ -411,7 +480,7 @@ Resources:
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Private PostgreSQL security group
+      GroupDescription: Private service PostgreSQL security group
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - Description: App to PostgreSQL
@@ -424,7 +493,65 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-db-sg"
+          Value: !Sub "${ProjectName}-${Environment}-service-db-sg"
+
+  ObservabilityDatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private observability PostgreSQL security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: Backend to observability PostgreSQL
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-observability-db-sg"
+
+  ObservabilityDatabaseBackofficeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasBackofficeOpsSecurityGroup
+    Properties:
+      Description: Backoffice Ops read-only access to observability PostgreSQL
+      GroupId: !Ref ObservabilityDatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref BackofficeOpsSecurityGroupId
+
+  RagDatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private RAG PostgreSQL security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: Backend runtime read access to RAG PostgreSQL
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-rag-db-sg"
+
+  RagDatabaseIngestIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasRagIngestSecurityGroup
+    Properties:
+      Description: Approved RAG ingest worker write access to RAG PostgreSQL
+      GroupId: !Ref RagDatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref RagIngestSecurityGroupId
 
   OpenSearchSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -447,6 +574,8 @@ Resources:
 
   DatabaseSecret:
     Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Name: !Sub "${ProjectName}/${Environment}/postgres"
       GenerateSecretString:
@@ -459,6 +588,103 @@ Resources:
           Value: !Ref ProjectName
         - Key: Environment
           Value: !Ref Environment
+        - Key: Role
+          Value: provisioning-only
+
+  ObservabilityDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${ProjectName}/${Environment}/postgres-observability-master"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"a360_observability_admin"}'
+        GenerateStringKey: password
+        ExcludeCharacters: '"@/\'
+        PasswordLength: 32
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Role
+          Value: provisioning-only
+
+  RagDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${ProjectName}/${Environment}/postgres-rag-master"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"a360_rag_admin"}'
+        GenerateStringKey: password
+        ExcludeCharacters: '"@/\'
+        PasswordLength: 32
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Role
+          Value: provisioning-only
+
+  ServiceAppDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${ProjectName}/${Environment}/postgres-service-app"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"service_app"}'
+        GenerateStringKey: password
+        ExcludeCharacters: '"@/\'
+        PasswordLength: 32
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Role
+          Value: runtime
+
+  ObservabilityWriterDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${ProjectName}/${Environment}/postgres-observability-writer"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"observability_writer"}'
+        GenerateStringKey: password
+        ExcludeCharacters: '"@/\'
+        PasswordLength: 32
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Role
+          Value: runtime
+
+  RagRuntimeDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub "${ProjectName}/${Environment}/postgres-rag-runtime"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"rag_runtime"}'
+        GenerateStringKey: password
+        ExcludeCharacters: '"@/\'
+        PasswordLength: 32
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Role
+          Value: runtime
 
   AppSecret:
     Type: AWS::SecretsManager::Secret
@@ -536,6 +762,39 @@ Resources:
         - Key: Name
           Value: !Sub "${ProjectName}-${Environment}-db-subnet-group"
 
+  ServiceDatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub "${ProjectName}-${Environment} service PostgreSQL 18 TLS policy"
+      Family: postgres18
+      Parameters:
+        rds.force_ssl: "1"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-service-pg18"
+
+  ObservabilityDatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub "${ProjectName}-${Environment} observability PostgreSQL 18 TLS policy"
+      Family: postgres18
+      Parameters:
+        rds.force_ssl: "1"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-observability-pg18"
+
+  RagDatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub "${ProjectName}-${Environment} RAG PostgreSQL 18 TLS policy"
+      Family: postgres18
+      Parameters:
+        rds.force_ssl: "1"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-rag-pg18"
+
   Database:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Snapshot
@@ -543,6 +802,7 @@ Resources:
     Properties:
       DBInstanceIdentifier: !Sub "${ProjectName}-${Environment}-postgres"
       Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
       DBInstanceClass: !Ref DatabaseInstanceClass
       AllocatedStorage: !Ref DatabaseAllocatedStorage
       StorageType: gp3
@@ -551,15 +811,76 @@ Resources:
       MasterUsername: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}"
       MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}"
       DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref ServiceDatabaseParameterGroup
       VPCSecurityGroups:
         - !Ref DatabaseSecurityGroup
       PubliclyAccessible: false
+      MultiAZ: false
       BackupRetentionPeriod: 7
-      DeletionProtection: false
+      DeletionProtection: true
       AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
       Tags:
         - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-postgres"
+          Value: !Sub "${ProjectName}-${Environment}-service-postgres"
+
+  ObservabilityDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-${Environment}-observability-postgres"
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AllocatedStorage: !Ref DatabaseAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref ObservabilityDatabaseName
+      MasterUsername: !Sub "{{resolve:secretsmanager:${ObservabilityDatabaseSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${ObservabilityDatabaseSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref ObservabilityDatabaseParameterGroup
+      VPCSecurityGroups:
+        - !Ref ObservabilityDatabaseSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-observability-postgres"
+
+  RagDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-${Environment}-rag-postgres"
+      Engine: postgres
+      EngineVersion: !Ref DatabaseEngineVersion
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AllocatedStorage: !Ref DatabaseAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref RagDatabaseName
+      MasterUsername: !Sub "{{resolve:secretsmanager:${RagDatabaseSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${RagDatabaseSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref RagDatabaseParameterGroup
+      VPCSecurityGroups:
+        - !Ref RagDatabaseSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${Environment}-rag-postgres"
 
   OpenSearchDomain:
     Type: AWS::OpenSearchService::Domain
@@ -623,8 +944,23 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Ref DatabaseSecret
+                  - !If
+                    - UseSeparatedDatabaseRuntime
+                    - !Ref ServiceAppDatabaseSecret
+                    - !Ref DatabaseSecret
+                  - !If
+                    - UseSeparatedDatabaseRuntime
+                    - !Ref ObservabilityWriterDatabaseSecret
+                    - !Ref AWS::NoValue
+                  - !If
+                    - UseSeparatedDatabaseRuntime
+                    - !Ref RagRuntimeDatabaseSecret
+                    - !Ref AWS::NoValue
                   - !Ref AppSecret
+                  - !If
+                    - HasExternalOpenSearchCredentials
+                    - !Ref ExternalOpenSearchCredentialsSecretArn
+                    - !Ref AWS::NoValue
               - Effect: Allow
                 Action:
                   - s3:GetObject
@@ -818,10 +1154,16 @@ Resources:
 
               mkdir -p /opt/a360
 
-              export DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DatabaseSecret} --query SecretString --output text)"
               export APP_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${AppSecret} --query SecretString --output text)"
-              DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["username"])')
-              DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["password"])')
+              ${DatabaseRuntimeBootstrapBlock}
+              OPENSEARCH_USERNAME=""
+              OPENSEARCH_PASSWORD=""
+              EXTERNAL_OPENSEARCH_SECRET_ARN="${ExternalOpenSearchCredentialsSecretArn}"
+              if [ -n "$EXTERNAL_OPENSEARCH_SECRET_ARN" ]; then
+                export OPENSEARCH_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id "$EXTERNAL_OPENSEARCH_SECRET_ARN" --query SecretString --output text)"
+                OPENSEARCH_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["OPENSEARCH_SECRET_JSON"])["username"])')
+                OPENSEARCH_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["OPENSEARCH_SECRET_JSON"])["password"])')
+              fi
               OPENAI_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENAI_API_KEY", ""))')
               GITHUB_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("GITHUB_TOKEN", ""))')
               VOYAGE_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("VOYAGE_API_KEY", ""))')
@@ -847,8 +1189,9 @@ Resources:
               DATABASE_HOST=${Database.Endpoint.Address}
               DATABASE_PORT=${Database.Endpoint.Port}
               DATABASE_NAME=${DatabaseName}
-              DATABASE_USERNAME=$DB_USERNAME
-              DATABASE_PASSWORD=$DB_PASSWORD
+              DATABASE_USERNAME=$SERVICE_DB_USERNAME
+              DATABASE_PASSWORD=$SERVICE_DB_PASSWORD
+              ${SeparatedDatabaseEnvBlock}
               OPENAI_API_KEY=$OPENAI_API_KEY
               VOYAGE_API_KEY=$VOYAGE_API_KEY
               JWT_SECRET=$JWT_SECRET
@@ -861,6 +1204,8 @@ Resources:
               # 오해만 만든다(fake로 바꿔도 아무 일도 안 일어난다).
               # 검색기 모듈 app/services/agent_retriever.py 자체는 살아 있다 — 이름만 비슷.
               OPENSEARCH_HOST=${OpenSearchHost}
+              OPENSEARCH_USERNAME=$OPENSEARCH_USERNAME
+              OPENSEARCH_PASSWORD=$OPENSEARCH_PASSWORD
               PDFBOX_JAR_PATH=/opt/pdfbox/pdfbox-app.jar
               EOF
 
@@ -889,10 +1234,43 @@ Resources:
                 --stack ${AWS::StackName} \
                 --resource AppAutoScalingGroup \
                 --region ${AWS::Region}
-            - OpenSearchHost: !If
-                - UseManagedOpenSearch
-                - !Sub "https://${OpenSearchDomain.DomainEndpoint}"
-                - !If [UseContainerOpenSearch, "http://opensearch:9200", ""]
+            - DatabaseRuntimeBootstrapBlock: !If
+                - UseSeparatedDatabaseRuntime
+                - !Sub |
+                    export SERVICE_DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${ServiceAppDatabaseSecret} --query SecretString --output text)"
+                    export OBSERVABILITY_DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${ObservabilityWriterDatabaseSecret} --query SecretString --output text)"
+                    export RAG_DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${RagRuntimeDatabaseSecret} --query SecretString --output text)"
+                    SERVICE_DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["username"])')
+                    SERVICE_DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["password"])')
+                    export OBSERVABILITY_DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["OBSERVABILITY_DB_SECRET_JSON"])["username"])')
+                    export OBSERVABILITY_DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["OBSERVABILITY_DB_SECRET_JSON"])["password"])')
+                    export RAG_DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["RAG_DB_SECRET_JSON"])["username"])')
+                    export RAG_DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["RAG_DB_SECRET_JSON"])["password"])')
+                    export OBSERVABILITY_DB_HOST="${ObservabilityDatabase.Endpoint.Address}"
+                    export OBSERVABILITY_DB_PORT="${ObservabilityDatabase.Endpoint.Port}"
+                    export OBSERVABILITY_DB_NAME="${ObservabilityDatabaseName}"
+                    export RAG_DB_HOST="${RagDatabase.Endpoint.Address}"
+                    export RAG_DB_PORT="${RagDatabase.Endpoint.Port}"
+                    export RAG_DB_NAME="${RagDatabaseName}"
+                    OBSERVABILITY_DATABASE_URL=$(python3 -c 'import os; from urllib.parse import quote; print("postgresql+psycopg://{}:{}@{}:{}/{}?sslmode=require".format(quote(os.environ["OBSERVABILITY_DB_USERNAME"], safe=""), quote(os.environ["OBSERVABILITY_DB_PASSWORD"], safe=""), os.environ["OBSERVABILITY_DB_HOST"], os.environ["OBSERVABILITY_DB_PORT"], os.environ["OBSERVABILITY_DB_NAME"]))')
+                    RAG_DATABASE_URL=$(python3 -c 'import os; from urllib.parse import quote; print("postgresql://{}:{}@{}:{}/{}?sslmode=require".format(quote(os.environ["RAG_DB_USERNAME"], safe=""), quote(os.environ["RAG_DB_PASSWORD"], safe=""), os.environ["RAG_DB_HOST"], os.environ["RAG_DB_PORT"], os.environ["RAG_DB_NAME"]))')
+                - !Sub |
+                    export SERVICE_DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DatabaseSecret} --query SecretString --output text)"
+                    SERVICE_DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["username"])')
+                    SERVICE_DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["SERVICE_DB_SECRET_JSON"])["password"])')
+              SeparatedDatabaseEnvBlock: !If
+                - UseSeparatedDatabaseRuntime
+                - |
+                    OBSERVABILITY_DATABASE_URL=$OBSERVABILITY_DATABASE_URL
+                    RAG_DATABASE_URL=$RAG_DATABASE_URL
+                - "# Separated database runtime cutover is staged but not enabled."
+              OpenSearchHost: !If
+                - UseExternalOpenSearch
+                - !Ref ExternalOpenSearchHost
+                - !If
+                  - UseManagedOpenSearch
+                  - !Sub "https://${OpenSearchDomain.DomainEndpoint}"
+                  - !If [UseContainerOpenSearch, "http://opensearch:9200", ""]
               # 명시적 \n 문자열로 조립한다 — YAML 블록 스칼라(|)의 공통 들여쓰기 제거 규칙과
               # 겹치면 결과 docker-compose.yml의 들여쓰기가 미묘하게 어긋나기 쉬워서, 각 줄의
               # 절대 들여쓰기를 여기서 명시적으로 고정해 둔다.
@@ -958,12 +1336,40 @@ Outputs:
     Value: !Sub "https://${ApplicationLoadBalancer.DNSName}"
 
   DatabaseEndpoint:
-    Description: Private PostgreSQL endpoint
+    Description: Private service PostgreSQL endpoint
     Value: !GetAtt Database.Endpoint.Address
 
   DatabaseSecretArn:
-    Description: Secrets Manager ARN containing DB credentials
+    Description: Provisioning-only service DB master credentials; never inject into an application
     Value: !Ref DatabaseSecret
+
+  ServiceAppDatabaseSecretArn:
+    Description: Runtime service_app credentials for the Backend
+    Value: !Ref ServiceAppDatabaseSecret
+
+  ObservabilityDatabaseEndpoint:
+    Description: Private observability PostgreSQL endpoint
+    Value: !GetAtt ObservabilityDatabase.Endpoint.Address
+
+  ObservabilityDatabaseSecretArn:
+    Description: Provisioning-only observability DB master credentials
+    Value: !Ref ObservabilityDatabaseSecret
+
+  ObservabilityWriterDatabaseSecretArn:
+    Description: Runtime observability_writer credentials for the Backend
+    Value: !Ref ObservabilityWriterDatabaseSecret
+
+  RagDatabaseEndpoint:
+    Description: Private RAG PostgreSQL endpoint
+    Value: !GetAtt RagDatabase.Endpoint.Address
+
+  RagDatabaseSecretArn:
+    Description: Provisioning-only RAG DB master credentials
+    Value: !Ref RagDatabaseSecret
+
+  RagRuntimeDatabaseSecretArn:
+    Description: Read-only rag_runtime credentials for the Backend
+    Value: !Ref RagRuntimeDatabaseSecret
 
   DocumentBucketName:
     Description: S3 bucket for source and processed documents
@@ -973,6 +1379,16 @@ Outputs:
     Condition: UseManagedOpenSearch
     Description: Private OpenSearch endpoint
     Value: !Sub "https://${OpenSearchDomain.DomainEndpoint}"
+
+  EffectiveOpenSearchEndpoint:
+    Description: Effective managed, container, or external OpenSearch endpoint configured for Backend
+    Value: !If
+      - UseExternalOpenSearch
+      - !Ref ExternalOpenSearchHost
+      - !If
+        - UseManagedOpenSearch
+        - !Sub "https://${OpenSearchDomain.DomainEndpoint}"
+        - !If [UseContainerOpenSearch, "http://opensearch:9200", ""]
 
   SsmSessionHint:
     Description: Use SSM Session Manager to access private EC2 instances
