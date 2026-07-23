@@ -272,7 +272,9 @@ def compute_health() -> dict:
         "status": status,
         "checks": checks,
         # 관측 DB가 명시적으로 구성됐는지. False면 위 체크는 fail이며 서비스 DB를 대신 보지 않는다.
-        "observability_shared": bool(os.getenv("OBSERVABILITY_DATABASE_URL")),
+        "observability_shared": bool(
+            (os.getenv("OBSERVABILITY_DATABASE_URL") or "").strip()
+        ),
         # BM25 색인에 문서가 있나 (RPA-249) — 도달성이 ok여도 색인이 비면 검색은 dense-only
         # 반쪽이다. 도달 실패면 None(알 수 없음). status 판정에는 넣지 않는다.
         "opensearch_indexed": os_indexed,

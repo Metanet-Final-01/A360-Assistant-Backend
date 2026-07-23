@@ -277,6 +277,7 @@ def check_budget(subject: Subject, now: datetime | None = None) -> BudgetVerdict
         ObservabilityUnavailableError,
         observability_sessionmaker,
     )
+    from sqlalchemy.exc import SQLAlchemyError
 
     try:
         with observability_sessionmaker()() as s:
@@ -289,10 +290,10 @@ def check_budget(subject: Subject, now: datetime | None = None) -> BudgetVerdict
                         spent_usd=round(spent, 6), limit_usd=limit,
                         resets_at=_period_end(period, start).isoformat(),
                     )
-    except ObservabilityUnavailableError:
-        # 관측 설정 누락이 업무 API를 500으로 만들지는 않는다. 헬스는 degraded, 관리자 조회는
+    except (ObservabilityUnavailableError, SQLAlchemyError):
+        # 관측 설정 누락·DB 장애가 업무 API를 500으로 만들지는 않는다. 헬스는 degraded, 관리자 조회는
         # 503으로 드러나므로 운영자가 원인을 볼 수 있고 서비스 DB로 조용히 우회하지 않는다.
-        logger.warning("관측 DB 미설정으로 예산 판정을 건너뜁니다")
+        logger.warning("관측 DB 장애 또는 미설정으로 예산 판정을 건너뜁니다", exc_info=True)
     return BudgetVerdict(exceeded=False)
 
 
