@@ -681,8 +681,11 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in user_data
     assert "OPENSEARCH_HOST=${ExternalOpenSearchHost}" in user_data
     assert "python3" not in user_data
+    assert "dnf update -y" not in user_data
+    assert "tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log" in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
+    assert user_data.index("cfn-signal --success false") < user_data.index("dnf install -y")
     env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
     env_write = user_data.index("cat > /opt/a360/.env <<EOF")
     assert env_mode < env_write
@@ -725,6 +728,7 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     assert "jq -r '.OPS_API_KEY // \"\"'" in user_data
     assert "OPS_API_KEY=$OPS_API_KEY" in user_data
     assert "python3" not in user_data
+    assert "dnf update -y" not in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
 

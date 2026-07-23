@@ -274,9 +274,10 @@ Resources:
             - |
               #!/bin/bash -eu
               set -o pipefail
-              dnf update -y
-              dnf install -y docker awscli jq curl aws-cfn-bootstrap postgresql15
               trap '/opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region}' ERR
+              exec > >(tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log) 2>&1
+              echo "[a360-bootstrap] starting user-data"
+              dnf install -y docker awscli jq curl aws-cfn-bootstrap postgresql15
               systemctl enable --now docker
 
               mkdir -p /opt/a360/secrets
