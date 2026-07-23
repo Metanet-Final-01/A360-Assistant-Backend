@@ -12,14 +12,6 @@ on:
         required: true
         type: boolean
         default: false
-      network_mode:
-        description: "private (NAT Gateway, ~$32-45/mo fixed) or public-lite (no NAT, cheaper short test deploys)"
-        required: true
-        type: choice
-        options:
-          - private
-          - public-lite
-        default: private
       instance_type:
         description: "EC2 instance type for the app Auto Scaling Group"
         required: true
@@ -32,6 +24,11 @@ on:
         description: "Max app instance count"
         required: true
         default: "2"
+      start_backend_container:
+        description: "Start backend container after EC2 bootstrap. Set false before DB role bootstrap."
+        required: true
+        type: boolean
+        default: true
   push:
     branches:
       - main
@@ -43,7 +40,6 @@ permissions:
 
 env:
   AWS_REGION: ap-northeast-2
-  STACK_NAME: a360-assistant-dev
 
 jobs:
   build:
@@ -80,7 +76,9 @@ jobs:
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
     runs-on: ubuntu-latest
-    environment: change-assurance-writer
+    environment: backend-deploy-${{ inputs.environment }}
+    env:
+      STACK_NAME: a360-assistant-${{ inputs.environment }}-backend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -98,6 +96,19 @@ jobs:
             exit 1
           fi
 
+      - name: Validate OpenSearch host
+        env:
+          OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+        run: |
+          if [ -z "$OPENSEARCH_HOST" ]; then
+            echo "OPENSEARCH_HOST secret is required for deployed RAG search." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$OPENSEARCH_HOST" | grep -Eq '^https?://[^[:space:]]+$'; then
+            echo "OPENSEARCH_HOST must be a non-empty http(s) URL without whitespace." >&2
+            exit 1
+          fi
+
       - name: Deploy CloudFormation
         run: |
           aws cloudformation deploy \
@@ -111,13 +122,12 @@ jobs:
               OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
               VoyageApiKey="${{ secrets.VOYAGE_API_KEY }}" \
               JwtSecret="${{ secrets.JWT_SECRET }}" \
+              ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}" \
               GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
               OpsApiKey="${{ secrets.OPS_API_KEY }}" \
               AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
               AssuranceWriterRepository="${{ github.repository }}" \
-              EnableOpenSearch="${{ vars.ENABLE_OPENSEARCH || 'false' }}" \
-              OpenSearchMode="${{ vars.OPENSEARCH_MODE || 'managed' }}" \
-              NetworkMode="${{ inputs.network_mode || 'private' }}" \
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
-              MaxCapacity="${{ inputs.max_capacity || '2' }}"
+              MaxCapacity="${{ inputs.max_capacity || '2' }}" \
+              StartBackendContainer="${{ inputs.start_backend_container }}"

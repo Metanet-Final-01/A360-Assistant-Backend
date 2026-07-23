@@ -16,10 +16,6 @@
     "ParameterValue": "http://localhost:5173,http://127.0.0.1:5173,https://your-vue-domain.example.com"
   },
   {
-    "ParameterKey": "NetworkMode",
-    "ParameterValue": "public-lite"
-  },
-  {
     "ParameterKey": "InstanceType",
     "ParameterValue": "t3.small"
   },
@@ -32,15 +28,11 @@
     "ParameterValue": "1"
   },
   {
-    "ParameterKey": "DatabaseInstanceClass",
-    "ParameterValue": "db.t4g.micro"
+    "ParameterKey": "ExternalOpenSearchHost",
+    "ParameterValue": "https://your-opensearch.example.com"
   },
   {
-    "ParameterKey": "DatabaseAllocatedStorage",
-    "ParameterValue": "20"
-  },
-  {
-    "ParameterKey": "EnableOpenSearch",
-    "ParameterValue": "false"
+    "ParameterKey": "StartBackendContainer",
+    "ParameterValue": "true"
   }
 ]

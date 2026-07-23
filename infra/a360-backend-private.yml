@@ -1,469 +1,96 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "A360 backend AWS deployment - public ALB, private EC2 ASG, private PostgreSQL pgvector-ready RDS, optional private OpenSearch"
+Description: A360 Backend application stack - public ALB and private EC2 ASG using shared infrastructure exports.
 
 Parameters:
   ProjectName:
     Type: String
     Default: a360-assistant
-    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9-]{2,30}$"
-
   Environment:
     Type: String
     Default: dev
     AllowedValues: [dev, staging, prod]
-
   ContainerImage:
     Type: String
-    Description: "Backend Docker image URI. Example: ghcr.io/org/repo/backend:sha"
-
+    Description: Backend Docker image URI. Use a Git commit SHA tag.
   FrontendOrigins:
     Type: String
     Default: "http://localhost:5173,http://127.0.0.1:5173"
-    Description: "Comma separated Vue frontend origins for CORS. Replace this with the deployed Vue URL for AWS."
-
-  VpcCidr:
-    Type: String
-    Default: 10.60.0.0/16
-
-  PublicSubnet1Cidr:
-    Type: String
-    Default: 10.60.0.0/24
-
-  PublicSubnet2Cidr:
-    Type: String
-    Default: 10.60.1.0/24
-
-  PrivateAppSubnet1Cidr:
-    Type: String
-    Default: 10.60.10.0/24
-
-  PrivateAppSubnet2Cidr:
-    Type: String
-    Default: 10.60.11.0/24
-
-  PrivateDataSubnet1Cidr:
-    Type: String
-    Default: 10.60.20.0/24
-
-  PrivateDataSubnet2Cidr:
-    Type: String
-    Default: 10.60.21.0/24
-
-  NetworkMode:
-    Type: String
-    Default: private
-    AllowedValues: [private, public-lite]
-    Description: >-
-      private (default): app instances in private subnets behind a NAT Gateway (~$32-45/mo fixed cost).
-      public-lite: app instances in public subnets (still only reachable via the ALB security group),
-      no NAT Gateway — cheaper for short-lived test deployments.
-
   InstanceType:
     Type: String
     Default: t3.medium
     AllowedValues: [t3.small, t3.medium, t3.large, t3.xlarge]
-
   DesiredCapacity:
     Type: Number
     Default: 1
     MinValue: 1
     MaxValue: 4
-
   MaxCapacity:
     Type: Number
     Default: 2
     MinValue: 1
     MaxValue: 6
-
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-
-  KeyPairName:
-    Type: String
-    Default: ""
-    Description: "Optional EC2 key pair. Leave blank and use SSM Session Manager."
-
   CertificateArn:
     Type: String
     Default: ""
-    Description: "Optional ACM certificate ARN for HTTPS listener."
-
   GithubToken:
     Type: String
     Default: ""
     NoEcho: true
-    Description: "Optional GitHub token for pulling private GHCR images."
-
+  OpenAiApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+  VoyageApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+  JwtSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
   OpsApiKey:
     Type: String
     Default: ""
     NoEcho: true
     AllowedPattern: "^$|^[A-Za-z0-9_-]{32,128}$"
-    Description: "Dedicated machine credential for Backoffice access to admin APIs."
-
   AssuranceWriterToken:
     Type: String
     Default: ""
     NoEcho: true
     AllowedPattern: "^$|^[A-Za-z0-9_-]{32,128}$"
-    Description: "Dedicated bearer token for the protected Change Assurance writer."
-
   AssuranceWriterRepository:
     Type: String
-    Default: "Metanet-Final-01/A360-Assistant-Backend"
+    Default: Metanet-Final-01/A360-Assistant-Backend
     AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
-    Description: "Single GitHub repository authorized to publish Change Assurance records."
-
-  DatabaseName:
-    Type: String
-    Default: a360
-    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{1,30}$"
-
-  DatabaseInstanceClass:
-    Type: String
-    Default: db.t4g.micro
-    AllowedValues: [db.t4g.micro, db.t4g.small, db.t4g.medium, db.t3.micro, db.t3.small, db.t3.medium]
-
-  DatabaseAllocatedStorage:
+  BackendPort:
     Type: Number
-    Default: 20
-    MinValue: 20
-    MaxValue: 200
-
-  OpenAiApiKey:
+    Default: 8000
+  ExternalOpenSearchHost:
     Type: String
-    Default: ""
     NoEcho: true
-
-  VoyageApiKey:
+    AllowedPattern: "^https?://[^\\s]+$"
+    ConstraintDescription: ExternalOpenSearchHost must be a non-empty http(s) URL without whitespace.
+  StartBackendContainer:
     Type: String
-    Default: ""
-    NoEcho: true
-    Description: "Optional — enables Voyage reranking. Hybrid search still works without it (falls back to RRF order, no rerank)."
-
-  JwtSecret:
-    Type: String
-    Default: ""
-    NoEcho: true
-    Description: "Auth token signing secret. Leave blank only for throwaway test stacks — the app falls back to a well-known insecure dev secret if unset."
-
-  EnableOpenSearch:
-    Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
-
-  OpenSearchMode:
-    Type: String
-    Default: managed
-    AllowedValues: [managed, container]
-    Description: >-
-      Only matters when EnableOpenSearch=true. managed (default): AWS::OpenSearchService::Domain,
-      t3.small.search always-on (~$26-36/mo fixed, separate from the app instance).
-      container: run OpenSearch as a plain container alongside the backend on the same EC2
-      instance (same image as local docker-compose) — no extra AWS resource/cost, but shares
-      the instance's RAM/CPU (bump InstanceType if using this) and loses its data if the
-      instance is replaced (no managed backups/patching either).
+    Description: Set false for the first deployment when DB roles still need manual bootstrap from the EC2 host.
+  LogRetentionDays:
+    Type: Number
+    Default: 14
 
 Conditions:
-  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
-  CreateOpenSearch: !Equals [!Ref EnableOpenSearch, "true"]
-  UseManagedOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "managed"]]
-  UseContainerOpenSearch: !And [!Condition CreateOpenSearch, !Equals [!Ref OpenSearchMode, "container"]]
-  IsPublicLite: !Equals [!Ref NetworkMode, "public-lite"]
-  NeedsNat: !Not [!Condition IsPublicLite]
+  StartsBackendContainer: !Equals [!Ref StartBackendContainer, "true"]
 
 Resources:
-  Vpc:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock: !Ref VpcCidr
-      EnableDnsHostnames: true
-      EnableDnsSupport: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-vpc"
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: ManagedBy
-          Value: cloudformation
-
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-igw"
-
-  VpcGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      VpcId: !Ref Vpc
-      InternetGatewayId: !Ref InternetGateway
-
-  PublicSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      CidrBlock: !Ref PublicSubnet1Cidr
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-public-a"
-
-  PublicSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [1, !GetAZs ""]
-      CidrBlock: !Ref PublicSubnet2Cidr
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-public-b"
-
-  PrivateAppSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      CidrBlock: !Ref PrivateAppSubnet1Cidr
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-private-app-a"
-
-  PrivateAppSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [1, !GetAZs ""]
-      CidrBlock: !Ref PrivateAppSubnet2Cidr
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-private-app-b"
-
-  PrivateDataSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      CidrBlock: !Ref PrivateDataSubnet1Cidr
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-private-data-a"
-
-  PrivateDataSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [1, !GetAZs ""]
-      CidrBlock: !Ref PrivateDataSubnet2Cidr
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-private-data-b"
-
-  PublicRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-public-rt"
-
-  PublicDefaultRoute:
-    Type: AWS::EC2::Route
-    DependsOn: VpcGatewayAttachment
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-
-  PublicSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnet1
-      RouteTableId: !Ref PublicRouteTable
-
-  PublicSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnet2
-      RouteTableId: !Ref PublicRouteTable
-
-  NatEip:
-    Type: AWS::EC2::EIP
-    Condition: NeedsNat
-    DependsOn: VpcGatewayAttachment
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-nat-eip"
-
-  NatGateway:
-    Type: AWS::EC2::NatGateway
-    Condition: NeedsNat
-    Properties:
-      AllocationId: !GetAtt NatEip.AllocationId
-      SubnetId: !Ref PublicSubnet1
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-nat"
-
-  PrivateRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-private-rt"
-
-  PrivateDefaultRoute:
-    Type: AWS::EC2::Route
-    Condition: NeedsNat
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway
-
-  PrivateAppSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PrivateAppSubnet1
-      RouteTableId: !Ref PrivateRouteTable
-
-  PrivateAppSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PrivateAppSubnet2
-      RouteTableId: !Ref PrivateRouteTable
-
-  PrivateDataSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PrivateDataSubnet1
-      RouteTableId: !Ref PrivateRouteTable
-
-  PrivateDataSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PrivateDataSubnet2
-      RouteTableId: !Ref PrivateRouteTable
-
-  S3Endpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      RouteTableIds:
-        - !Ref PrivateRouteTable
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
-      VpcEndpointType: Gateway
-      VpcId: !Ref Vpc
-
-  AlbSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Public ALB security group
-      VpcId: !Ref Vpc
-      SecurityGroupIngress:
-        - Description: HTTP
-          IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-        - Description: HTTPS
-          IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-alb-sg"
-
-  AppSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Private app instances security group
-      VpcId: !Ref Vpc
-      SecurityGroupIngress:
-        - Description: ALB to FastAPI
-          IpProtocol: tcp
-          FromPort: 8000
-          ToPort: 8000
-          SourceSecurityGroupId: !Ref AlbSecurityGroup
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-app-sg"
-
-  DatabaseSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Private PostgreSQL security group
-      VpcId: !Ref Vpc
-      SecurityGroupIngress:
-        - Description: App to PostgreSQL
-          IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          SourceSecurityGroupId: !Ref AppSecurityGroup
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-db-sg"
-
-  OpenSearchSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Condition: UseManagedOpenSearch
-    Properties:
-      GroupDescription: Private OpenSearch security group
-      VpcId: !Ref Vpc
-      SecurityGroupIngress:
-        - Description: App to OpenSearch HTTPS
-          IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          SourceSecurityGroupId: !Ref AppSecurityGroup
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-opensearch-sg"
-
-  DatabaseSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Sub "${ProjectName}/${Environment}/postgres"
-      GenerateSecretString:
-        SecretStringTemplate: '{"username":"a360_admin"}'
-        GenerateStringKey: password
-        ExcludeCharacters: '"@/\'
-        PasswordLength: 32
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
-
   AppSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub "${ProjectName}/${Environment}/app"
+      Name: !Sub "${ProjectName}/${Environment}/backend-app"
       SecretString: !Sub |
         {
           "OPENAI_API_KEY": "${OpenAiApiKey}",
@@ -474,132 +101,81 @@ Resources:
           "ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}",
           "ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"
         }
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
 
-  DocumentBucket:
-    Type: AWS::S3::Bucket
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: transition-documents
-            Status: Enabled
-            Transitions:
-              - StorageClass: STANDARD_IA
-                TransitionInDays: 60
-            ExpirationInDays: 365
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-documents"
+      GroupDescription: Public Backend ALB security group
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
 
-  LogsBucket:
-    Type: AWS::S3::Bucket
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: expire-logs
-            Status: Enabled
-            ExpirationInDays: 180
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-logs"
+      GroupDescription: Backend EC2 security group
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref BackendPort
+          ToPort: !Ref BackendPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
 
-  DatabaseSubnetGroup:
-    Type: AWS::RDS::DBSubnetGroup
+  BackendToServiceRdsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      DBSubnetGroupDescription: Private subnets for PostgreSQL
-      SubnetIds:
-        - !Ref PrivateDataSubnet1
-        - !Ref PrivateDataSubnet2
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-db-subnet-group"
+      GroupId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-ServiceDbSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
 
-  Database:
-    Type: AWS::RDS::DBInstance
-    DeletionPolicy: Snapshot
-    UpdateReplacePolicy: Snapshot
+  BackendToObservabilityRdsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      DBInstanceIdentifier: !Sub "${ProjectName}-${Environment}-postgres"
-      Engine: postgres
-      DBInstanceClass: !Ref DatabaseInstanceClass
-      AllocatedStorage: !Ref DatabaseAllocatedStorage
-      StorageType: gp3
-      StorageEncrypted: true
-      DBName: !Ref DatabaseName
-      MasterUsername: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}"
-      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}"
-      DBSubnetGroupName: !Ref DatabaseSubnetGroup
-      VPCSecurityGroups:
-        - !Ref DatabaseSecurityGroup
-      PubliclyAccessible: false
-      BackupRetentionPeriod: 7
-      DeletionProtection: false
-      AutoMinorVersionUpgrade: true
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-postgres"
+      GroupId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-ObservabilityDbSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
 
-  OpenSearchDomain:
-    Type: AWS::OpenSearchService::Domain
-    Condition: UseManagedOpenSearch
+  BackendToRagRdsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      DomainName: !Sub "${ProjectName}-${Environment}-search"
-      EngineVersion: OpenSearch_2.13
-      ClusterConfig:
-        InstanceType: t3.small.search
-        InstanceCount: 1
-        ZoneAwarenessEnabled: false
-      EBSOptions:
-        EBSEnabled: true
-        VolumeSize: 20
-        VolumeType: gp3
-      EncryptionAtRestOptions:
-        Enabled: true
-      NodeToNodeEncryptionOptions:
-        Enabled: true
-      DomainEndpointOptions:
-        EnforceHTTPS: true
-      VPCOptions:
-        SubnetIds:
-          - !Ref PrivateDataSubnet1
-        SecurityGroupIds:
-          - !Ref OpenSearchSecurityGroup
-      AccessPolicies:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              AWS: "*"
-            Action: "es:ESHttp*"
-            Resource: !Sub "arn:${AWS::Partition}:es:${AWS::Region}:${AWS::AccountId}:domain/${ProjectName}-${Environment}-search/*"
+      GroupId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-RagDbSecurityGroupId"
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
 
-  AppUserDataLogGroup:
+  BackendLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/${ProjectName}/${Environment}/user-data"
-      RetentionInDays: 14
+      LogGroupName: !Sub "/a360/${Environment}/backend"
+      RetentionInDays: !Ref LogRetentionDays
 
   AppInstanceRole:
     Type: AWS::IAM::Role
@@ -613,18 +189,42 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
       Policies:
-        - PolicyName: app-runtime-access
+        - PolicyName: backend-runtime-access
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "${BackendLogGroup.Arn}:*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:SignalResource
+                Resource: !Ref AWS::StackId
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                Resource: "*"
+              - Effect: Allow
+                Action:
                   - secretsmanager:GetSecretValue
                 Resource:
-                  - !Ref DatabaseSecret
                   - !Ref AppSecret
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-ServiceRdsSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-ObservabilityRdsSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-RagRdsSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-ServiceAppSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-ObservabilityWriterSecretArn"
+                  - Fn::ImportValue:
+                      Fn::Sub: "${ProjectName}-${Environment}-RagRuntimeSecretArn"
               - Effect: Allow
                 Action:
                   - s3:GetObject
@@ -632,50 +232,177 @@ Resources:
                   - s3:DeleteObject
                   - s3:ListBucket
                 Resource:
-                  - !GetAtt DocumentBucket.Arn
-                  - !Sub "${DocumentBucket.Arn}/*"
-                  - !GetAtt LogsBucket.Arn
-                  - !Sub "${LogsBucket.Arn}/*"
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-app-role"
+                  - Fn::Sub:
+                      - "arn:${AWS::Partition}:s3:::${BucketName}"
+                      - BucketName:
+                          Fn::ImportValue:
+                            Fn::Sub: "${ProjectName}-${Environment}-ArtifactBucketName"
+                  - Fn::Sub:
+                      - "arn:${AWS::Partition}:s3:::${BucketName}/*"
+                      - BucketName:
+                          Fn::ImportValue:
+                            Fn::Sub: "${ProjectName}-${Environment}-ArtifactBucketName"
 
   AppInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      Roles:
-        - !Ref AppInstanceRole
+      Roles: [!Ref AppInstanceRole]
+
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt AppInstanceProfile.Arn
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: false
+            Groups: [!Ref AppSecurityGroup]
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 40
+              VolumeType: gp3
+              Encrypted: true
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash -eu
+              set -o pipefail
+              dnf update -y
+              dnf install -y docker awscli jq curl aws-cfn-bootstrap postgresql15
+              trap '/opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region}' ERR
+              systemctl enable --now docker
+
+              mkdir -p /opt/a360/secrets
+              chmod 700 /opt/a360/secrets
+              aws secretsmanager get-secret-value --secret-id '${AppSecret}' --query SecretString --output text > /opt/a360/secrets/app.json
+              aws secretsmanager get-secret-value --secret-id '${ServiceAppSecretArn}' --query SecretString --output text > /opt/a360/secrets/service.json
+              aws secretsmanager get-secret-value --secret-id '${ObservabilityWriterSecretArn}' --query SecretString --output text > /opt/a360/secrets/observability.json
+              aws secretsmanager get-secret-value --secret-id '${RagRuntimeSecretArn}' --query SecretString --output text > /opt/a360/secrets/rag.json
+
+              GITHUB_TOKEN=$(jq -r '.GITHUB_TOKEN // ""' /opt/a360/secrets/app.json)
+              if [ -n "$GITHUB_TOKEN" ]; then
+                echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin
+              fi
+
+              SERVICE_USER=$(jq -r '.username' /opt/a360/secrets/service.json)
+              SERVICE_PASSWORD=$(jq -r '.password' /opt/a360/secrets/service.json)
+              OBS_USER=$(jq -r '.username' /opt/a360/secrets/observability.json)
+              OBS_PASSWORD=$(jq -r '.password' /opt/a360/secrets/observability.json)
+              RAG_USER=$(jq -r '.username' /opt/a360/secrets/rag.json)
+              RAG_PASSWORD=$(jq -r '.password' /opt/a360/secrets/rag.json)
+              OPS_API_KEY=$(jq -r '.OPS_API_KEY // ""' /opt/a360/secrets/app.json)
+              ASSURANCE_WRITER_TOKEN=$(jq -r '.ASSURANCE_WRITER_TOKEN // ""' /opt/a360/secrets/app.json)
+              ASSURANCE_WRITER_REPOSITORY=$(jq -r '.ASSURANCE_WRITER_REPOSITORY // ""' /opt/a360/secrets/app.json)
+
+              install -m 600 /dev/null /opt/a360/.env
+              cat > /opt/a360/.env <<EOF
+              APP_ENV=${Environment}
+              FRONTEND_ORIGINS=${FrontendOrigins}
+              AWS_REGION=${AWS::Region}
+              DOCUMENT_BUCKET=${ArtifactBucketName}
+              DATABASE_HOST=${ServiceDbEndpoint}
+              DATABASE_PORT=5432
+              DATABASE_NAME=${ServiceDbName}
+              DATABASE_USERNAME=$SERVICE_USER
+              DATABASE_PASSWORD=$SERVICE_PASSWORD
+              OBSERVABILITY_DATABASE_URL=postgresql://$OBS_USER:$OBS_PASSWORD@${ObservabilityDbEndpoint}:5432/${ObservabilityDbName}?sslmode=require
+              RAG_DATABASE_URL=postgresql://$RAG_USER:$RAG_PASSWORD@${RagDbEndpoint}:5432/${RagDbName}?sslmode=require
+              OPENSEARCH_HOST=${ExternalOpenSearchHost}
+              OPS_API_KEY=$OPS_API_KEY
+              ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
+              ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
+              EOF
+              jq -r 'to_entries[] | select((.key == "OPS_API_KEY" or .key == "ASSURANCE_WRITER_TOKEN" or .key == "ASSURANCE_WRITER_REPOSITORY") | not) | "\(.key)=\(.value)"' /opt/a360/secrets/app.json >> /opt/a360/.env
+
+              if [ "${StartBackendContainer}" != "true" ]; then
+                echo "StartBackendContainer=false; leaving EC2 ready for DB bootstrap through SSM."
+                /opt/aws/bin/cfn-signal --success true \
+                  --stack ${AWS::StackName} \
+                  --resource AppAutoScalingGroup \
+                  --region ${AWS::Region}
+                exit 0
+              fi
+
+              docker rm -f a360-backend || true
+              docker run -d --restart unless-stopped --name a360-backend \
+                -p ${BackendPort}:${BackendPort} \
+                --env-file /opt/a360/.env \
+                --log-driver awslogs --log-opt awslogs-region=${AWS::Region} --log-opt awslogs-group=${BackendLogGroup} \
+                ${ContainerImage}
+
+              for attempt in $(seq 1 60); do
+                if curl -fsS --max-time 5 "http://localhost:${BackendPort}/health/live" >/dev/null; then
+                  /opt/aws/bin/cfn-signal --success true \
+                    --stack ${AWS::StackName} \
+                    --resource AppAutoScalingGroup \
+                    --region ${AWS::Region}
+                  exit 0
+                fi
+                sleep 5
+              done
+              exit 1
+            - ArtifactBucketName:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-ArtifactBucketName"
+              ServiceDbEndpoint:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-ServiceDbEndpoint"
+              ServiceDbName:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-ServiceDbName"
+              ObservabilityDbEndpoint:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-ObservabilityDbEndpoint"
+              ObservabilityDbName:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-ObservabilityDbName"
+              RagDbEndpoint:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-RagDbEndpoint"
+              RagDbName:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-RagDbName"
+              ServiceAppSecretArn:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-ServiceAppSecretArn"
+              ObservabilityWriterSecretArn:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-ObservabilityWriterSecretArn"
+              RagRuntimeSecretArn:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-RagRuntimeSecretArn"
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Scheme: internet-facing
       Type: application
-      SecurityGroups:
-        - !Ref AlbSecurityGroup
+      SecurityGroups: [!Ref AlbSecurityGroup]
       Subnets:
-        - !Ref PublicSubnet1
-        - !Ref PublicSubnet2
+        Fn::Split:
+          - ","
+          - Fn::ImportValue:
+              Fn::Sub: "${ProjectName}-${Environment}-PublicSubnetIds"
       LoadBalancerAttributes:
-        # CloudFront의 OriginReadTimeout(60초)보다 짧으면 ALB가 먼저 끊어서 같은 증상이
-        # 재발한다 — 여유를 두고 그보다 길게(RAG 챗봇 스트림 감안).
         - Key: idle_timeout.timeout_seconds
           Value: "120"
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-alb"
 
   BackendTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      VpcId: !Ref Vpc
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-VpcId"
       Protocol: HTTP
-      Port: 8000
+      Port: !Ref BackendPort
       TargetType: instance
-      HealthCheckEnabled: true
-      # /health/live — 인스턴스-로컬 얕은 체크 (RPA-222). 이전 /api/health는 상태코드
-      # 매핑이 없어 unhealthy에도 200이었고, 깊은 /health는 4.6초(타임아웃 5초)인 데다
-      # 공유 의존성 장애 시 ASG(HealthCheckType: ELB)가 전 플릿을 교체해 버린다.
       HealthCheckPath: /health/live
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5
@@ -683,9 +410,6 @@ Resources:
       UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: "200"
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-backend-tg"
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -696,6 +420,48 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref BackendTargetGroup
+
+  HttpChangeReceiptRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/internal/assurance/change-receipts]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  HttpInternalBlockRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/internal/*]
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: forbidden
+
+  HttpAdminBlockRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/admin/*]
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: forbidden
 
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -710,203 +476,57 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref BackendTargetGroup
 
-  AppCloudFrontDistribution:
-    Type: AWS::CloudFront::Distribution
+  HttpsChangeReceiptRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
     Properties:
-      DistributionConfig:
-        Enabled: true
-        Comment: !Sub "${ProjectName}-${Environment} backend HTTPS proxy"
-        PriceClass: PriceClass_100
-        HttpVersion: http2
-        Origins:
-          - Id: backend-alb
-            DomainName: !GetAtt ApplicationLoadBalancer.DNSName
-            CustomOriginConfig:
-              OriginProtocolPolicy: http-only
-              HTTPPort: 80
-              OriginSSLProtocols:
-                - TLSv1.2
-              # 기본값 30초는 RAG 챗봇 스트림(임베딩+검색+rerank+LLM, Voyage 재시도 시 30초+)에
-              # 너무 짧아서 CloudFront가 스트림 도중 끊어버린다(클라이언트엔 HTTP/2 프로토콜
-              # 에러로 보임). CloudFront가 허용하는 최댓값(60초)으로 올린다.
-              OriginReadTimeout: 60
-              OriginKeepaliveTimeout: 60
-        DefaultCacheBehavior:
-          TargetOriginId: backend-alb
-          ViewerProtocolPolicy: https-only
-          AllowedMethods:
-            - GET
-            - HEAD
-            - OPTIONS
-            - PUT
-            - POST
-            - PATCH
-            - DELETE
-          CachedMethods:
-            - GET
-            - HEAD
-          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-cf"
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/internal/assurance/change-receipts]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
 
-  AppLaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
-    Metadata:
-      AWS::CloudFormation::Init: {}
+  HttpsInternalBlockRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
     Properties:
-      LaunchTemplateName: !Sub "${ProjectName}-${Environment}-app"
-      LaunchTemplateData:
-        ImageId: !Ref LatestAmiId
-        InstanceType: !Ref InstanceType
-        IamInstanceProfile:
-          Arn: !GetAtt AppInstanceProfile.Arn
-        KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref AWS::NoValue]
-        NetworkInterfaces:
-          - DeviceIndex: 0
-            AssociatePublicIpAddress: !If [IsPublicLite, true, false]
-            Groups:
-              - !Ref AppSecurityGroup
-        BlockDeviceMappings:
-          - DeviceName: /dev/xvda
-            Ebs:
-              VolumeSize: 40
-              VolumeType: gp3
-              Encrypted: true
-              DeleteOnTermination: true
-        UserData:
-          Fn::Base64: !Sub
-            - |
-              #!/bin/bash -eu
-              exec > /var/log/user-data.log 2>&1
+      ListenerArn: !Ref HttpsListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/internal/*]
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: forbidden
 
-              dnf install -y amazon-cloudwatch-agent
-              mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
-              cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWEOF'
-              {
-                "agent": { "run_as_user": "root", "force_flush_interval": 5 },
-                "logs": {
-                  "logs_collected": {
-                    "files": {
-                      "collect_list": [
-                        {
-                          "file_path": "/var/log/user-data.log",
-                          "log_group_name": "${AppUserDataLogGroup}",
-                          "log_stream_name": "{instance_id}",
-                          "retention_in_days": 14
-                        }
-                      ]
-                    }
-                  }
-                }
-              }
-              CWEOF
-              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-                -a fetch-config -m ec2 \
-                -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
-
-              dnf update -y
-              dnf install -y docker git python3 python3-pip awscli aws-cfn-bootstrap || dnf install -y docker git python3 python3-pip awscli
-              systemctl enable docker
-              systemctl start docker
-
-              mkdir -p /usr/local/lib/docker/cli-plugins
-              curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
-                -o /usr/local/lib/docker/cli-plugins/docker-compose
-              chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-
-              mkdir -p /opt/a360
-
-              export DB_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${DatabaseSecret} --query SecretString --output text)"
-              export APP_SECRET_JSON="$(aws secretsmanager get-secret-value --region ${AWS::Region} --secret-id ${AppSecret} --query SecretString --output text)"
-              DB_USERNAME=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["username"])')
-              DB_PASSWORD=$(python3 -c 'import json, os; print(json.loads(os.environ["DB_SECRET_JSON"])["password"])')
-              OPENAI_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPENAI_API_KEY", ""))')
-              GITHUB_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("GITHUB_TOKEN", ""))')
-              VOYAGE_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("VOYAGE_API_KEY", ""))')
-              JWT_SECRET=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("JWT_SECRET", ""))')
-              OPS_API_KEY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("OPS_API_KEY", ""))')
-              ASSURANCE_WRITER_TOKEN=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_TOKEN", ""))')
-              ASSURANCE_WRITER_REPOSITORY=$(python3 -c 'import json, os; print(json.loads(os.environ["APP_SECRET_JSON"]).get("ASSURANCE_WRITER_REPOSITORY", ""))')
-
-              if [ -n "$GITHUB_TOKEN" ]; then
-                echo "$GITHUB_TOKEN" | docker login ghcr.io -u token --password-stdin
-              fi
-
-              install -m 600 /dev/null /opt/a360/.env
-              cat > /opt/a360/.env <<EOF
-              APP_ENV=${Environment}
-              FRONTEND_ORIGINS=${FrontendOrigins}
-              AWS_REGION=${AWS::Region}
-              DOCUMENT_BUCKET=${DocumentBucket}
-              # LOGS_BUCKET 제거 (RPA-189) — 앱 코드가 읽는 곳이 0곳이다.
-              # ⚠️ LogsBucket **리소스와 IAM 권한은 유지**한다(S3 버킷 삭제는 파괴적이고,
-              #    S3 로그 업로드를 붙일 여지가 있다). 지금 지우는 건 '설정돼 있으니
-              #    동작하겠지'라는 오해를 만드는 env 주입뿐이다.
-              DATABASE_HOST=${Database.Endpoint.Address}
-              DATABASE_PORT=${Database.Endpoint.Port}
-              DATABASE_NAME=${DatabaseName}
-              DATABASE_USERNAME=$DB_USERNAME
-              DATABASE_PASSWORD=$DB_PASSWORD
-              OPENAI_API_KEY=$OPENAI_API_KEY
-              VOYAGE_API_KEY=$VOYAGE_API_KEY
-              JWT_SECRET=$JWT_SECRET
-              OPS_API_KEY=$OPS_API_KEY
-              ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
-              ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
-              EMBEDDING_PROVIDER=openai
-              # AGENT_RETRIEVER 제거 (RPA-189) — RPA-69가 fake 검색기 분기를 없애면서
-              # 코드가 이 값을 읽지 않게 됐다. 남겨두면 '하이브리드가 켜져 있구나'라는
-              # 오해만 만든다(fake로 바꿔도 아무 일도 안 일어난다).
-              # 검색기 모듈 app/services/agent_retriever.py 자체는 살아 있다 — 이름만 비슷.
-              OPENSEARCH_HOST=${OpenSearchHost}
-              PDFBOX_JAR_PATH=/opt/pdfbox/pdfbox-app.jar
-              EOF
-
-              cat > /opt/a360/docker-compose.yml <<EOF
-              services:
-                backend:
-                  image: ${ContainerImage}
-                  container_name: a360-backend
-                  restart: unless-stopped
-                  env_file: .env
-                  ports:
-                    - "8000:8000"
-                  healthcheck:
-                    test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/health/live', timeout=3)\nPY"]
-                    interval: 30s
-                    timeout: 5s
-                    retries: 3
-              ${OpenSearchComposeBlock}
-              EOF
-
-              cd /opt/a360
-              docker compose pull
-              docker compose up -d
-
-              /opt/aws/bin/cfn-signal -e 0 \
-                --stack ${AWS::StackName} \
-                --resource AppAutoScalingGroup \
-                --region ${AWS::Region}
-            - OpenSearchHost: !If
-                - UseManagedOpenSearch
-                - !Sub "https://${OpenSearchDomain.DomainEndpoint}"
-                - !If [UseContainerOpenSearch, "http://opensearch:9200", ""]
-              # 명시적 \n 문자열로 조립한다 — YAML 블록 스칼라(|)의 공통 들여쓰기 제거 규칙과
-              # 겹치면 결과 docker-compose.yml의 들여쓰기가 미묘하게 어긋나기 쉬워서, 각 줄의
-              # 절대 들여쓰기를 여기서 명시적으로 고정해 둔다.
-              OpenSearchComposeBlock: !If
-                - UseContainerOpenSearch
-                - "  opensearch:\n    image: opensearchproject/opensearch:2.13.0\n    container_name: a360-opensearch\n    restart: unless-stopped\n    environment:\n      discovery.type: single-node\n      plugins.security.disabled: \"true\"\n      OPENSEARCH_JAVA_OPTS: \"-Xms512m -Xmx512m\"\n      OPENSEARCH_INITIAL_ADMIN_PASSWORD: \"A360-container-Dev1!\"\n    volumes:\n      - opensearch-data:/usr/share/opensearch/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -sf http://localhost:9200/_cluster/health || exit 1\"]\n      interval: 10s\n      timeout: 5s\n      retries: 10\n\nvolumes:\n  opensearch-data:"
-                - ""
+  HttpsAdminBlockRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 30
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/admin/*]
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: forbidden
 
   AppAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     CreationPolicy:
       ResourceSignal:
         Count: !Ref DesiredCapacity
-        Timeout: PT30M
+        Timeout: PT15M
     UpdatePolicy:
       AutoScalingRollingUpdate:
         MinInstancesInService: 1
@@ -914,23 +534,26 @@ Resources:
         PauseTime: PT15M
         WaitOnResourceSignals: true
     Properties:
-      MinSize: "1"
+      MinSize: 1
       DesiredCapacity: !Ref DesiredCapacity
       MaxSize: !Ref MaxCapacity
-      VPCZoneIdentifier: !If
-        - IsPublicLite
-        - [!Ref PublicSubnet1, !Ref PublicSubnet2]
-        - [!Ref PrivateAppSubnet1, !Ref PrivateAppSubnet2]
-      TargetGroupARNs:
-        - !Ref BackendTargetGroup
-      HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
+      VPCZoneIdentifier:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue:
+              Fn::Sub: "${ProjectName}-${Environment}-PrivateAppSubnetIds"
+      TargetGroupARNs: !If
+        - StartsBackendContainer
+        - [!Ref BackendTargetGroup]
+        - !Ref AWS::NoValue
+      HealthCheckType: !If [StartsBackendContainer, ELB, EC2]
+      HealthCheckGracePeriod: !If [StartsBackendContainer, 300, !Ref AWS::NoValue]
       LaunchTemplate:
         LaunchTemplateId: !Ref AppLaunchTemplate
         Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
       Tags:
         - Key: Name
-          Value: !Sub "${ProjectName}-${Environment}-app"
+          Value: !Sub "${ProjectName}-${Environment}-backend"
           PropagateAtLaunch: true
         - Key: Project
           Value: !Ref ProjectName
@@ -941,39 +564,13 @@ Resources:
 
 Outputs:
   AlbDnsName:
-    Description: Public ALB DNS name for backend API
     Value: !GetAtt ApplicationLoadBalancer.DNSName
-
   BackendHttpUrl:
-    Description: Backend HTTP URL
     Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
-
-  BackendCloudFrontUrl:
-    Description: Backend HTTPS URL via CloudFront (use this from the Vercel frontend)
-    Value: !Sub "https://${AppCloudFrontDistribution.DomainName}"
-
   BackendHttpsUrl:
     Condition: HasCertificate
-    Description: Backend HTTPS URL
     Value: !Sub "https://${ApplicationLoadBalancer.DNSName}"
-
-  DatabaseEndpoint:
-    Description: Private PostgreSQL endpoint
-    Value: !GetAtt Database.Endpoint.Address
-
-  DatabaseSecretArn:
-    Description: Secrets Manager ARN containing DB credentials
-    Value: !Ref DatabaseSecret
-
-  DocumentBucketName:
-    Description: S3 bucket for source and processed documents
-    Value: !Ref DocumentBucket
-
-  OpenSearchEndpoint:
-    Condition: UseManagedOpenSearch
-    Description: Private OpenSearch endpoint
-    Value: !Sub "https://${OpenSearchDomain.DomainEndpoint}"
-
-  SsmSessionHint:
-    Description: Use SSM Session Manager to access private EC2 instances
-    Value: !Sub "aws ssm start-session --target <instance-id> --region ${AWS::Region}"
+  BackendSecurityGroupId:
+    Value: !Ref AppSecurityGroup
+    Export:
+      Name: !Sub "${ProjectName}-${Environment}-BackendSecurityGroupId"

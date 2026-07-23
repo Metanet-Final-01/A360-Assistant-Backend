@@ -645,30 +645,42 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
         for step in deploy_job["steps"]
         if step.get("name") == "Deploy CloudFormation"
     )
+    opensearch_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Validate OpenSearch host"
+    )
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
+    opensearch_parameter = template["Parameters"]["ExternalOpenSearchHost"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
         "LaunchTemplateData"
     ]["UserData"]["Fn::Base64"][0]
 
     assert "ASSURANCE_WRITER_TOKEN" not in str(build_job)
-    assert deploy_job["environment"] == "change-assurance-writer"
+    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment }}"
     assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in deploy_uses
     assert (
         "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
         in deploy_uses
     )
+    assert deploy_job["env"]["STACK_NAME"] == "a360-assistant-${{ inputs.environment }}-backend"
     assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
+    assert 'ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}"' in deploy_script
+    assert opensearch_step["env"]["OPENSEARCH_HOST"] == "${{ secrets.OPENSEARCH_HOST }}"
+    assert "^https?://[^[:space:]]+$" in opensearch_step["run"]
 
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
+    assert opensearch_parameter["NoEcho"] is True
+    assert opensearch_parameter["AllowedPattern"] == "^https?://[^\\s]+$"
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
-    assert 'get("ASSURANCE_WRITER_TOKEN", "")' in user_data
-    assert 'get("ASSURANCE_WRITER_REPOSITORY", "")' in user_data
+    assert "jq -r '.ASSURANCE_WRITER_TOKEN // \"\"'" in user_data
+    assert "jq -r '.ASSURANCE_WRITER_REPOSITORY // \"\"'" in user_data
     assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data
     assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in user_data
+    assert "OPENSEARCH_HOST=${ExternalOpenSearchHost}" in user_data
+    assert "python3" not in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
     env_mode = user_data.index("install -m 600 /dev/null /opt/a360/.env")
@@ -701,7 +713,7 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     ]["UserData"]["Fn::Base64"][0]
 
     assert "OPS_API_KEY" not in str(build_job)
-    assert deploy_job["environment"] == "change-assurance-writer"
+    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment }}"
     assert validate_step["env"]["OPS_API_KEY"] == "${{ secrets.OPS_API_KEY }}"
     assert '[ -z "$OPS_API_KEY" ]' in validate_step["run"]
     assert "exit 1" in validate_step["run"]
@@ -710,7 +722,37 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
     assert '"OPS_API_KEY": "${OpsApiKey}"' in app_secret
-    assert 'get("OPS_API_KEY", "")' in user_data
+    assert "jq -r '.OPS_API_KEY // \"\"'" in user_data
     assert "OPS_API_KEY=$OPS_API_KEY" in user_data
+    assert "python3" not in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
+
+
+def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    )
+    template = yaml.load(
+        (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
+        Loader=_CloudFormationLoader,
+    )
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    asg_properties = template["Resources"]["AppAutoScalingGroup"]["Properties"]
+
+    assert inputs["start_backend_container"]["default"] is True
+    assert template["Conditions"]["StartsBackendContainer"] == [
+        "StartBackendContainer",
+        "true",
+    ]
+    assert asg_properties["TargetGroupARNs"] == [
+        "StartsBackendContainer",
+        ["BackendTargetGroup"],
+        "AWS::NoValue",
+    ]
+    assert asg_properties["HealthCheckType"] == ["StartsBackendContainer", "ELB", "EC2"]
+    assert asg_properties["HealthCheckGracePeriod"] == [
+        "StartsBackendContainer",
+        300,
+        "AWS::NoValue",
+    ]
