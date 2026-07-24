@@ -243,7 +243,10 @@ def _safe_err(exc: Exception) -> str:
     REDIS_URL의 비밀번호가 오류 문자열에 실려 나올 수 있다(SLACK 웹훅 유출 선례, PR#263·#288
     에서 타입 중심으로 줄였던 이유). 절충: 메시지를 포함하되 URL의 password 부분을 지운다.
     """
-    msg = f"{type(exc).__name__}: {exc}"[:300]
+    # ⚠️ 마스킹이 절단보다 **먼저**다 (Qodo #380 2차): 순서가 반대면 비밀번호가 300자
+    #    경계에 걸쳤을 때 잘린 조각이 replace에 안 걸려 부분 유출된다 — 자른 뒤에는
+    #    "전체 비밀번호"가 존재하지 않으므로 마스킹이 원리적으로 불가능하다.
+    msg = f"{type(exc).__name__}: {exc}"
     url = _redis_url()
     if url:
         try:
@@ -254,7 +257,7 @@ def _safe_err(exc: Exception) -> str:
                 msg = msg.replace(password, "***")
         except ValueError:
             pass
-    return msg
+    return msg[:300]
 
 
 def _control_call(op_name: str, fn) -> Any:

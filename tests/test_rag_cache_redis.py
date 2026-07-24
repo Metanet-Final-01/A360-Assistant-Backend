@@ -384,6 +384,29 @@ def test_control_error_message_masks_url_password(monkeypatch):
     assert secret not in msg and "***" in msg                 # 크레덴셜은 마스킹
 
 
+def test_password_at_truncation_boundary_never_leaks(monkeypatch):
+    """마스킹은 절단(300자)보다 먼저여야 한다 (Qodo #380 2차) — 순서가 반대면 경계에 걸친
+    비밀번호의 앞부분 조각이 마스킹을 피해 그대로 나간다."""
+    secret = "boundarysecretpw"
+    # 예외 메시지의 290자 지점에서 비밀번호가 시작되게 구성 — 절단(300자) 경계에 걸친다
+    filler = "x" * (290 - len("ConnectionError: "))
+
+    def _raising_factory(url, **kw):
+        raise ConnectionError(f"{filler}{secret} rest of message")
+
+    monkeypatch.setenv("RAG_CACHE_ENABLED", "true")
+    monkeypatch.setenv("REDIS_URL", f"redis://user:{secret}@dead:6379/0")
+    monkeypatch.setattr(rag_cache, "_make_redis_client", _raising_factory)
+    monkeypatch.setattr(rag_cache, "_CONTROL_RETRY_BASE_SEC", 0.01)
+
+    with pytest.raises(rag_cache.CacheInvalidationError) as e:
+        rag_cache.publish_generation()
+    msg = str(e.value)
+    assert secret not in msg
+    # 부분 조각도 안 된다 — 절단이 먼저면 secret[:10] 같은 앞조각이 남는다
+    assert secret[:8] not in msg
+
+
 def test_memory_backend_when_url_unset(monkeypatch):
     monkeypatch.setenv("RAG_CACHE_ENABLED", "true")
     monkeypatch.setenv("REDIS_URL", "")
