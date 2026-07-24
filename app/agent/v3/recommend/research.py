@@ -174,20 +174,22 @@ def _whole_catalog_dossier(ctx) -> dict:
     통째로 부풀어 지연·비용이 폭증하고 컨텍스트 한도에 걸린다(Qodo 리뷰). 안전 상한을 두되
     **잘렸다는 사실을 조용히 넘기지 않는다**: 잘린 액션은 composer가 영영 못 쓰므로,
     사용자가 그 사실을 알아야 카탈로그를 추려 다시 줄 수 있다.
-    """
-    actions: list[tuple[str, str]] = []
-    blocks: list[str] = []
-    total = 0
-    for spec_dict in ctx.catalog.iter_action_schemas():
-        pkg, act = spec_dict.get("package"), spec_dict.get("action")
-        if not pkg or not act:
-            continue
-        total += 1
-        if len(actions) >= _MAX_USER_MENU_ACTIONS:
-            continue
-        actions.append((pkg, act))
-        blocks.append(_menu_block(pkg, act, spec_dict))
 
+    카탈로그 전체를 한 번 훑고 슬라이스한다. 상한 뒤로 순회를 끊으면 몇 개가 잘렸는지 셀 수
+    없어 "조용히 자르지 않는다"는 목적이 깨진다 — 그리고 이 카탈로그는 LLM 구조화 출력에서
+    나와 출력 토큰 한도가 곧 크기 상한이라(현실적으로 수백 개) 순회 비용은 같은 턴의 LLM
+    호출보다 몇 자릿수 아래다. 비싼 쪽(_menu_block 문자열 조립)만 상한 안에서 돈다.
+    """
+    rows = [
+        (s.get("package"), s.get("action"), s)
+        for s in ctx.catalog.iter_action_schemas()
+        if s.get("package") and s.get("action")
+    ]
+    selected = rows[:_MAX_USER_MENU_ACTIONS]
+    actions = [(pkg, act) for pkg, act, _ in selected]
+    blocks = [_menu_block(pkg, act, spec_dict) for pkg, act, spec_dict in selected]
+
+    total = len(rows)
     dropped = total - len(actions)
     if dropped:
         logger.warning(
