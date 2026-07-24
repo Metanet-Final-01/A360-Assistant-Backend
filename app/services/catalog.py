@@ -29,11 +29,17 @@ def _param_names(spec: dict) -> tuple | None:
 
     논리 중복 판정의 기준이다(RPA-287). 파라미터 '집합'만 보는 이유는 검수 R2/R3가 이름
     존재 여부로 판정하기 때문이다 — 라벨·설명이 달라도 이름이 같으면 검수 결과는 같다.
+
+    이름을 str로 강제한다: schema는 수집 파이프라인(LLM 보강 포함)이 만든 외부 데이터라
+    name이 문자열이 아닐 수 있는데, 그러면 sorted()가 TypeError로 죽고 **카탈로그 적재
+    전체가 무너진다**(모든 액션이 '카탈로그에 없음'이 돼 R1이 전부 환각으로 오판). 이 모듈이
+    이미 지키는 '한 행의 비정상 데이터가 전체 적재를 깨뜨리지 않는다'는 원칙과 같은 취지다.
+    지문은 비교용이라 문자열화해도 판정력이 유지된다(다른 값은 다른 문자열이 된다).
     """
     if spec.get("params_unknown"):
         return None
     return tuple(sorted(
-        p["name"] for p in (spec.get("parameters") or [])
+        str(p["name"]) for p in (spec.get("parameters") or [])
         if isinstance(p, dict) and p.get("name")
     ))
 

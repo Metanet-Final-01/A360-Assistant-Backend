@@ -468,3 +468,28 @@ def test_warning_names_the_actually_adopted_source(monkeypatch, caplog):
     msg = next(r.getMessage() for r in caplog.records if "논리 중복" in r.getMessage())
     assert "doc-real" in msg      # 실제 채택된 출처를 지목한다
     assert "doc-other" in msg     # 충돌 상대도 함께 남긴다
+
+
+def test_non_string_param_name_does_not_break_the_whole_load(monkeypatch):
+    """schema는 수집(LLM 보강 포함)이 만든 외부 데이터라 name이 문자열이 아닐 수 있다.
+    한 행의 이상값이 sorted()를 TypeError로 죽이면 카탈로그 전체가 적재 실패하고,
+    그러면 모든 액션이 '카탈로그에 없음'이 돼 R1이 전부 환각으로 오판한다(Qodo)."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}, {"name": 1}]),
+        _schema_row("Email", "Send", "doc-b", [{"name": "to"}]),
+    ]
+    index = _catalog_with(rows, monkeypatch)._load()
+    # 이상 행도 살아남고, 무관한 다른 액션이 함께 유실되지 않는다
+    assert ("Excel advanced", "Open") in index
+    assert ("Email", "Send") in index
+
+
+def test_mixed_type_param_names_still_compare(monkeypatch, caplog):
+    """문자열화해도 판정력은 유지된다 — 다른 값은 다른 지문이라 중복이 잡힌다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": 1}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": 2}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert any("논리 중복" in r.getMessage() for r in caplog.records)
