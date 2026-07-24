@@ -442,6 +442,14 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         os_count = opensearch_client.bulk_index(os_client, documents)
         print(f"OpenSearch 색인 완료: {os_count}개")
 
+    # 검색 결과 캐시 무효화 (RPA-274) — REDIS_URL이 있으면 서버 프로세스의 공유 캐시가
+    # 실제로 비워져 "적재했는데 옛 결과가 나온다" 창이 사라진다. 미설정이면 이 프로세스의
+    # 로컬 캐시만 비워지므로 사실상 no-op(서버는 TTL로 수렴 — RPA-211 때와 동일).
+    from app.services import rag_cache
+
+    busted = rag_cache.bust_search()
+    print(f"검색 결과 캐시 무효화: {busted}건 (backend={rag_cache.stats()['backend']})")
+
 
 def cmd_eda(args: argparse.Namespace) -> None:
     from .build.eda import compute_length_stats, print_report

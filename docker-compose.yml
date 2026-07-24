@@ -50,6 +50,23 @@ services:
       timeout: 5s
       retries: 10
 
+  # RAG 캐시 공유 백엔드 (RPA-274, opt-in) — 앱은 REDIS_URL이 설정된 경우에만 이걸 본다.
+  # 미설정이면 인프로세스 캐시로 동작하므로 이 서비스가 안 떠도 아무것도 저하되지 않는다
+  # (fail-open). 로컬에서 Redis 경로를 써보려면: .env에 REDIS_URL=redis://localhost:6379/0
+  redis:
+    image: redis:7-alpine
+    container_name: a360-redis
+    # 캐시 전용이라 지속화(AOF/RDB) 불필요 — 재시작하면 비는 게 정상이고 그래도 동작한다.
+    # maxmemory: TTL만으로도 상한이 잡히지만, 이상 폭주 시 OOM 대신 LRU 퇴출로 저하되게 한다.
+    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # 완전 로컬 검색 모드용(opt-in) — 기본 `docker compose up`에선 안 뜬다. 공유 데모는 Bonsai를
   # 쓰므로 이 서비스가 필요 없고, 예전엔 이게 안 떠 있는데 backend가 여길 가리켜 BM25가 죽었다(RPA-160).
   # 로컬 검색을 쓰려면: `docker compose --profile local-opensearch up` + .env OPENSEARCH_HOST를 로컬로.
