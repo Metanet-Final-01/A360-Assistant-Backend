@@ -11,6 +11,24 @@ markers = [
 [tool.coverage.run]
 source = ["app"]
 branch = true
+# 측정 스코프 = **지원하는 런타임 서버 코드** (RPA-272). 숫자를 올리려고 아래에 테스트를
+# 쓰면 mock이 mock을 검증하는 유지비만 남는다 — 그래서 분모에서 뺀다.
+# ⚠️ agent v2(폴백 기본)·v3(운영 기본)는 라이브 경로이므로 제외하지 **않는다** — 그쪽 갭은
+#    Agent 담당과 협의해 실제 테스트로 채운다(RPA-272 본문 참고).
+omit = [
+    # 오프라인 수집 CLI — 사람이 `python -m app.rag.pipeline ...`로 돌리는 도구.
+    # 요청 경로가 import하지 않으며, 외부 API(Fluid Topics·GitHub·Control Room) 의존이라
+    # 테스트하면 mock 검증이 된다.
+    "app/rag/pipeline.py",
+    "app/rag/sources/*",
+    "app/rag/build/*",
+    "app/rag/scripts/*",
+    # 동결 레거시 벤더링 사본. ⚠️ 정확히는: registry가 자동 발견해 agent_version="v1"로
+    # **선택은 여전히 가능**하다(Qodo #361 지적). 그럼에도 빼는 근거는 "실행 불가"가 아니라
+    # "동결·비지원"이다 — 수정될 일이 없는 코드의 커버리지는 행동을 바꾸지 않는다.
+    # v1을 레지스트리에서 내리는 결정은 Agent 담당 소유라 별도 논의(운영 기본은 v3, 폴백은 v2).
+    "app/agent/v1/*",
+]
 
 [tool.coverage.report]
 show_missing = true

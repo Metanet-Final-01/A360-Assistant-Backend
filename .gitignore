@@ -68,3 +68,7 @@ app/rag/_investigation_notes/
 # Change Assurance deterministic fixture outputs
 /.rpa180-test/
 /.artifacts/change-assurance/
+
+# RDS 이전 로컬 작업 문서 — 정본은 GitHub 위키(RDS-이전-계약·의사결정-YYYY-MM-DD).
+# 레포엔 커밋하지 않는다(승민님 지시).
+/docs/rds-migration/
