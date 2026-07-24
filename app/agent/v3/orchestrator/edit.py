@@ -92,21 +92,46 @@ def _canon_actions(actions: list) -> list:
     ]
 
 
+def _assumptions_of(flow: dict) -> list:
+    """흐름도에 동봉된 스펙 전제(spec.assumptions). 없으면 빈 목록 (RPA-282)."""
+    spec = flow.get("spec")
+    return (spec.get("assumptions") or []) if isinstance(spec, dict) else []
+
+
+def _canon_steps(flow: dict) -> list:
+    """액션 트리 + 단계 메타의 비교용 정규형 — '실행되는 것'이 바뀌었는지의 기준."""
+    return [
+        {"id": s.get("step_id"), "l": s.get("label"), "actions": _canon_actions(s.get("actions") or [])}
+        for s in (flow.get("steps") or [])
+    ]
+
+
 def _is_noop_edit(out_flow: dict, in_flow: dict) -> bool:
     """수정 결과가 입력 흐름도와 실질적으로 동일한지 — 연산이 순효과 0인 경우까지 잡는다.
 
     단계 메타(step_id/label)·액션 트리(정규형)에 더해 흐름도 수준 notes/variables까지 본다 —
     set_flow만으로 메모·변수를 바꾸는 편집은 액션 트리가 그대로라, notes/variables를 빼면
-    항상 무변경으로 오판돼 실패 경로로 저하된다."""
-    def canon(flow: dict) -> list:
-        return [
-            {"id": s.get("step_id"), "l": s.get("label"), "actions": _canon_actions(s.get("actions") or [])}
-            for s in (flow.get("steps") or [])
-        ]
+    항상 무변경으로 오판돼 실패 경로로 저하된다. 스펙 전제(spec.assumptions)도 같은 이유로
+    본다 — "대상 OS를 macOS로" 같은 전제 교체는 액션이 그대로여도 실변경이고, 이걸 무변경으로
+    저하시키면 사용자가 확정한 제약이 통째로 유실된다 (RPA-282)."""
     return (
-        canon(out_flow) == canon(in_flow)
+        _canon_steps(out_flow) == _canon_steps(in_flow)
         and out_flow.get("notes") == in_flow.get("notes")
         and out_flow.get("variables") == in_flow.get("variables")
+        and _assumptions_of(out_flow) == _assumptions_of(in_flow)
+    )
+
+
+def _is_premise_only_edit(out_flow: dict, in_flow: dict) -> bool:
+    """전제만 바뀌고 실행되는 것(액션 트리)은 그대로인가 (RPA-282).
+
+    이 경우를 성공으로만 보고하면 가짜 성공이 된다 — "맥OS로 바꿔줘"에 전제 한 줄만 갈아
+    끼우고 Windows 전용 액션을 그대로 둔 채 "요청하신 대로 수정했어요"가 나가기 때문이다.
+    호출 측이 이 신호로 답변에 정직한 단서를 덧붙인다.
+    """
+    return (
+        _assumptions_of(out_flow) != _assumptions_of(in_flow)
+        and _canon_steps(out_flow) == _canon_steps(in_flow)
     )
 
 
@@ -167,11 +192,31 @@ def _restore_user_values(result_flow: dict, applied_flow: dict) -> None:
         restore(s.get("step_id"), s.get("actions") or [], defaultdict(int))
 
 
+def _assumptions_block(flow: dict) -> str:
+    """현재 흐름도의 전제(spec.assumptions)를 프롬프트 블록으로 렌더한다 (RPA-282).
+
+    전제가 안 보이면 편집 LLM은 "이 봇이 Windows 기준으로 설계됐다"는 걸 모른 채
+    "맥OS로 바꿔줘"를 받는다 — 무엇을 바꿔야 하는지 판단할 근거가 없다. 전제 없으면
+    빈 문자열(프롬프트 불변).
+    """
+    spec = flow.get("spec")
+    items = (spec or {}).get("assumptions") if isinstance(spec, dict) else None
+    if not items:
+        return ""
+    lines = "\n".join(f"- {a}" for a in items)
+    return (
+        "[현재 흐름도의 전제 — 이 흐름도가 어떤 가정 위에 설계됐는지]\n"
+        f"{lines}\n"
+        "전제 자체를 바꾸는 요청이면 set_flow의 assumptions로 이 목록을 갱신하라.\n\n"
+    )
+
+
 def _build_messages(state: TurnState, outline: str, label_hint: str = "") -> list:
-    """현재 흐름도 구조(노드 id 포함)·압축·이력·수정 요청을 담은 edit 프롬프트 메시지를 만든다."""
+    """현재 흐름도 구조(노드 id 포함)·전제·압축·이력·수정 요청을 담은 edit 프롬프트를 만든다."""
     user_content = (
         f"[현재 흐름도 구조 — 대괄호 안이 각 액션의 참조 id]\n{outline}\n\n"
         f"{label_hint}"
+        f"{_assumptions_block(state.get('recommendation') or {})}"
         f"[이전 대화 압축 요약]\n{render_compact(state.get('compact'))}\n\n"
         f"[대화 이력]\n{render_history(state.get('history'))}\n\n"
         f"[수정 요청]\n{state.get('message', '')}"
@@ -359,6 +404,14 @@ async def edit_node(state: TurnState) -> dict:
     # 라이브 렌더: 검수·교정 반영한 최종본을 "완료" 프레임으로 흘려보낸다(done 직전).
     emit_flow_frame(result["flow"], result["violations"], "완료")
     answer = ops.answer or (ops.change_summary or "요청하신 대로 흐름도를 수정했어요.")
+    # 전제만 갈아끼우고 액션은 그대로인 편집은 '가짜 성공'이 되기 쉽다 — 무엇이 안 바뀌었는지
+    # 사용자가 알아야 스스로 판단할 수 있다 (RPA-282). 전제 갱신 자체는 유효하므로 저하시키지
+    # 않고 단서만 덧붙인다.
+    if _is_premise_only_edit(result["flow"], base):
+        answer += (
+            " 다만 전제만 갱신했고 액션 구성은 그대로예요 — 바꿔야 할 액션을 특정하지 "
+            "못했거나 카탈로그에 해당 정보가 없었어요. 특정 단계를 짚어주시면 그 부분을 고쳐볼게요."
+        )
     if result["violations"]:
         answer += f" (검수에서 해소하지 못한 위반 {len(result['violations'])}건이 있어요.)"
     return {

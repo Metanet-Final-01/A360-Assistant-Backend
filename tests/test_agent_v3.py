@@ -724,3 +724,65 @@ def test_qa_needs_evidence_predicate():
     assert not _needs_evidence("안녕하세요")
     assert not _needs_evidence("고마워, 잘 만들어졌네")
     assert not _needs_evidence("이 단계는 왜 있는 거야?")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 흐름도 전제(spec.assumptions) 갱신 — 대화로 실행 환경을 바꾸는 경로 (RPA-282)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WIN_ASSUME = ["실행 환경: Windows 러너 (명시 없어 가정)", "시트는 첫 번째 시트"]
+_MAC_ASSUME = ["실행 환경: macOS 러너 (사용자 명시)", "시트는 첫 번째 시트"]
+
+
+def _flow_with_spec(assumptions):
+    flow = _three_action_flow()
+    flow["spec"] = {"goal": "테스트", "assumptions": list(assumptions)}
+    return flow
+
+
+def test_set_flow_replaces_spec_assumptions():
+    """전제는 흐름도가 아니라 동봉된 채점 기준(spec)에 쓰인다 — 다음 턴이 그걸 다시 읽는다."""
+    flow = _flow_with_spec(_WIN_ASSUME)
+    op = edit_ops.EditOp(op="set_flow", assumptions=_MAC_ASSUME)
+    applied, errors = edit_ops.apply_edit_ops(flow, [op])
+    assert applied == 1 and not errors
+    assert flow["spec"]["assumptions"] == _MAC_ASSUME
+    assert flow["spec"]["goal"] == "테스트"  # 스펙의 나머지는 보존
+    # 통째 교체다 — 옛 전제가 남아 대상 OS가 둘로 보이면 안 된다
+    assert "Windows 러너" not in " ".join(flow["spec"]["assumptions"])
+
+
+def test_set_flow_creates_spec_when_absent():
+    """spec이 없는 흐름도(구버전·타 솔루션)에도 전제를 남길 수 있다."""
+    flow = _three_action_flow()
+    applied, _ = edit_ops.apply_edit_ops(
+        flow, [edit_ops.EditOp(op="set_flow", assumptions=_MAC_ASSUME)]
+    )
+    assert applied == 1
+    assert flow["spec"]["assumptions"] == _MAC_ASSUME
+
+
+def test_assumptions_only_edit_is_not_treated_as_noop():
+    """전제 교체는 액션이 그대로여도 실변경 — 무변경으로 저하시키면 확정 제약이 유실된다."""
+    from app.agent.v3.orchestrator.edit import _is_noop_edit
+
+    before, after = _flow_with_spec(_WIN_ASSUME), _flow_with_spec(_MAC_ASSUME)
+    assert not _is_noop_edit(after, before)
+    # 진짜 무변경은 여전히 무변경
+    assert _is_noop_edit(_flow_with_spec(_WIN_ASSUME), _flow_with_spec(_WIN_ASSUME))
+
+
+def test_premise_only_edit_is_detected():
+    """전제만 갈고 액션은 그대로면 '가짜 성공' 후보 — 호출 측이 정직한 단서를 붙일 신호."""
+    from app.agent.v3.orchestrator.edit import _is_premise_only_edit
+
+    before, after = _flow_with_spec(_WIN_ASSUME), _flow_with_spec(_MAC_ASSUME)
+    assert _is_premise_only_edit(after, before)
+
+    # 액션까지 실제로 바뀌었으면 가짜 성공이 아니다
+    ported = _flow_with_spec(_MAC_ASSUME)
+    ported["steps"][0]["actions"][0]["package"] = "Apple Mail"
+    assert not _is_premise_only_edit(ported, before)
+
+    # 전제가 안 바뀌었으면 이 신호와 무관하다
+    assert not _is_premise_only_edit(_flow_with_spec(_WIN_ASSUME), before)
