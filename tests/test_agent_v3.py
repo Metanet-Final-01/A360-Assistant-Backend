@@ -786,3 +786,32 @@ def test_premise_only_edit_is_detected():
 
     # 전제가 안 바뀌었으면 이 신호와 무관하다
     assert not _is_premise_only_edit(_flow_with_spec(_WIN_ASSUME), before)
+
+
+def test_set_flow_normalizes_none_spec(monkeypatch):
+    """Recommendation.spec 기본값이 None이라 model_dump()는 spec 키를 None으로 담는다 —
+    setdefault로는 못 고쳐 전제가 유실되고 연산이 '실패'로 기록됐다 (Qodo 리뷰)."""
+    from app.schemas import Recommendation
+
+    flow = Recommendation(steps=[]).model_dump()
+    assert flow["spec"] is None  # 전제 조건: 키는 있고 값이 None
+
+    applied, errors = edit_ops.apply_edit_ops(
+        flow, [edit_ops.EditOp(op="set_flow", assumptions=_MAC_ASSUME)]
+    )
+    assert applied == 1 and not errors
+    assert flow["spec"]["assumptions"] == _MAC_ASSUME
+
+
+def test_premise_only_edit_requires_notes_and_variables_unchanged():
+    """notes/variables까지 바뀌었으면 '전제만 갱신했다'는 안내가 실제 변경을 누락한다."""
+    from app.agent.v3.orchestrator.edit import _is_premise_only_edit
+
+    before = _flow_with_spec(_WIN_ASSUME)
+    with_notes = _flow_with_spec(_MAC_ASSUME)
+    with_notes["notes"] = "새 메모"
+    assert not _is_premise_only_edit(with_notes, before)
+
+    with_vars = _flow_with_spec(_MAC_ASSUME)
+    with_vars["variables"] = [{"name": "nCount", "type": "NUMBER"}]
+    assert not _is_premise_only_edit(with_vars, before)

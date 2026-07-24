@@ -350,11 +350,16 @@ def _apply_set_flow(flow: dict, op: EditOp) -> bool:
         # 전제는 흐름도가 아니라 채점 기준(FlowSpec)에 산다 — recommend가 flow["spec"]으로
         # 동봉해 두고(graph.py finalize), 이후 턴의 재채점·재생성이 그걸 다시 읽는다.
         # 여기서 갱신해야 "대상 OS를 바꿔 달라"는 요청이 다음 턴까지 살아남는다 (RPA-282).
-        # spec이 없는 흐름도(구버전·타 솔루션)도 있어 setdefault로 만든다.
-        spec = flow.setdefault("spec", {})
-        if isinstance(spec, dict):
-            spec["assumptions"] = op.assumptions
-            changed = True
+        #
+        # setdefault를 쓰면 안 된다: Recommendation.spec의 기본값이 None이라 model_dump()를
+        # 거친 흐름도는 spec 키가 **None 값으로 존재**하고, setdefault는 키가 있으면 값을
+        # 바꾸지 않는다. 그러면 전제가 조용히 유실될 뿐 아니라 changed가 False로 남아 연산이
+        # '적용 실패'로 기록돼 사용자에게 "반영하지 못했어요"가 나간다.
+        spec = flow.get("spec")
+        if not isinstance(spec, dict):  # None·구버전 잔재·타입 슬립을 모두 정규화
+            flow["spec"] = spec = {}
+        spec["assumptions"] = op.assumptions
+        changed = True
     return changed
 
 

@@ -123,15 +123,20 @@ def _is_noop_edit(out_flow: dict, in_flow: dict) -> bool:
 
 
 def _is_premise_only_edit(out_flow: dict, in_flow: dict) -> bool:
-    """전제만 바뀌고 실행되는 것(액션 트리)은 그대로인가 (RPA-282).
+    """전제 말고는 아무것도 안 바뀌었는가 (RPA-282).
 
     이 경우를 성공으로만 보고하면 가짜 성공이 된다 — "맥OS로 바꿔줘"에 전제 한 줄만 갈아
     끼우고 Windows 전용 액션을 그대로 둔 채 "요청하신 대로 수정했어요"가 나가기 때문이다.
     호출 측이 이 신호로 답변에 정직한 단서를 덧붙인다.
+
+    액션 트리뿐 아니라 notes/variables까지 같은지 본다 — 이것들이 함께 바뀌었다면 "전제만
+    갱신했다"는 안내가 실제 변경을 누락해 오히려 오도한다(Qodo 리뷰).
     """
     return (
         _assumptions_of(out_flow) != _assumptions_of(in_flow)
         and _canon_steps(out_flow) == _canon_steps(in_flow)
+        and out_flow.get("notes") == in_flow.get("notes")
+        and out_flow.get("variables") == in_flow.get("variables")
     )
 
 

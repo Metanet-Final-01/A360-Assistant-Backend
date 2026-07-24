@@ -24,7 +24,8 @@
 - set_params: 기존 액션의 파라미터를 name 기준으로 병합/치환한다(나머지 파라미터는 보존).
     { "op":"set_params", "target":"n2", "parameters":[ {"name":"to","value":"a@b.com","value_source":"llm"} ] }
 - update: 액션의 package/action/label을 바꾼다. { "op":"update", "target":"n2", "label":"새 라벨" }
-- set_flow: 흐름도 수준 값. { "op":"set_flow", "notes":"...", "variables":[...], "assumptions":["..."] }
+- set_flow: 흐름도 수준 값. 바꿀 필드만 넣는다.
+    { "op":"set_flow", "notes":"메모", "variables":[{"name":"nCount","type":"NUMBER"}], "assumptions":["실행 환경: macOS 러너"] }
     assumptions는 [현재 흐름도의 전제] 목록을 **통째로 교체**한다(병합 아님) — 바꿀 항목만
     고치고 나머지는 원래 문구 그대로 다시 실어라.
 
