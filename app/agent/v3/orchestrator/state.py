@@ -56,4 +56,7 @@ class TurnState(TypedDict, total=False):
     recommendation_out: dict | None  # 이번 턴에 만든/수정한 흐름도
     change_summary: str | None
     compact_out: dict | None
+    # 대화에서 타 솔루션 카탈로그가 확인되면 그 이름 — 백엔드가 세션 solution 확정에 쓴다
+    # (RPA-285 2단계). 감지 없으면 부재.
+    detected_solution: str | None
     violations: list[dict]  # 검수 후에도 남은 위반 (프론트 경고 표시용)

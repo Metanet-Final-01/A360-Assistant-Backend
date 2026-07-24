@@ -11,23 +11,28 @@ import logging
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 
-from ..retrieval import get_retriever
-from ..verify.catalog import get_catalog
-
 logger = logging.getLogger(__name__)
 
 _SEARCH_LIMIT = 5
 
 
-def build_kb_tools(sources_sink: list[dict], source_types: list[str] | None = None):
-    """KB 툴 2개를 만든다. 검색 히트 원본은 sources_sink에 누적된다.
+def build_kb_tools(sources_sink: list[dict], ctx=None, source_types: list[str] | None = None):
+    """KB 툴을 만든다. 검색 히트 원본은 sources_sink에 누적된다.
 
     source_types를 주면 search_kb가 그 소스 타입만 검색한다 — recommend(에이전트 흐름도
     생성)는 액션 후보만 필요하므로 ["action_schema", "bot_example"]로 좁혀 문서 페이지·
     패키지 개요 오염을 막는다. qa는 문서까지 봐야 하므로 None(전체)로 둔다.
+
+    ctx(CatalogContext)가 어휘 출처를 나른다(RPA-285). 검색기가 없는 경로(사용자 제공
+    카탈로그)에서는 **search_kb를 아예 만들지 않는다** — 검색할 KB가 없는데 툴을 쥐여주면
+    LLM이 빈 결과를 받고 "카탈로그에 없다"로 오판한다. 스펙 조회만 남긴다.
+    ctx 미지정은 a360 기본 — 기존 호출부 호환.
     """
-    retriever = get_retriever()
-    catalog = get_catalog()
+    from ..catalog_context import a360_context
+
+    ctx = ctx or a360_context()
+    retriever = ctx.retriever
+    catalog = ctx.catalog
 
     @tool
     def search_kb(query: str) -> str:
@@ -65,7 +70,7 @@ def build_kb_tools(sources_sink: list[dict], source_types: list[str] | None = No
             )
         return json.dumps(spec, ensure_ascii=False)
 
-    return [search_kb, get_action_schema]
+    return [search_kb, get_action_schema] if ctx.searchable else [get_action_schema]
 
 
 def tool_calls_data(tool_calls: list[dict]) -> dict:

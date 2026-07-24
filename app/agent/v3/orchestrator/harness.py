@@ -13,7 +13,7 @@ v2와의 차이:
 - confidence: RAG 단일 산식 → 증거 합성(grounding × evidence × agreement × semantic).
   R3는 감점하지 않는다 — 질문 카드가 붙은 R3는 결함이 아니라 입력 대기다(관찰 3).
 
-catalog는 CatalogLookup 프로토콜이면 무엇이든 된다: a360은 get_catalog(),
+catalog는 CatalogLookup 프로토콜이면 무엇이든 된다: 호출부가 CatalogContext로 주입하며,
 타 솔루션은 채팅에서 추출한 UserCatalog — 같은 checker가 양쪽을 검수한다.
 """
 

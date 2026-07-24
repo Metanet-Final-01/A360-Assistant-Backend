@@ -31,9 +31,8 @@ from app.core.llm import UsageCallbackHandler
 from .. import config
 from ..recommend.graph import _coerce_flow
 from ..recommend.stream import emit, emit_flow_frame
-from ..verify.catalog import get_catalog
 from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
-from .generate import UserCatalog, extract_user_catalog
+from .generate import resolve_catalog_context
 from .harness import attach_confidence, verify_and_repair
 from .render import render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
@@ -256,9 +255,12 @@ async def edit_node(state: TurnState) -> dict:
     반환: {turn_type, recommendation_out?, change_summary?, violations, answer, sources}.
     """
     emit({"event": "stage", "stage": "refining", "message": "흐름도 수정 중"})
-    is_a360 = (state.get("solution") or "a360") == "a360"
+    # 어휘 출처를 정한다 — a360 카탈로그 또는 대화에서 추출한 사용자 카탈로그 (RPA-285).
+    # 카탈로그를 못 찾으면(None) 검수 기준이 없으니 검수를 생략하고 편집만 적용한다.
+    ctx = await resolve_catalog_context(state)
+    is_a360 = ctx is not None and ctx.is_a360
     sink: list[dict] = []
-    tools = build_kb_tools(sink) if is_a360 else []
+    tools = build_kb_tools(sink, ctx) if ctx is not None else []
     llm = _make_llm()
     runnable = llm.bind_tools(tools) if tools else llm
 
@@ -338,17 +340,10 @@ async def edit_node(state: TurnState) -> dict:
 
     # 라이브 렌더: 적용된 수정안을 즉시 프레임으로 흘려보낸다(추천 흐름도 상세 패널이 트리로 표시).
     emit_flow_frame(flow, None, "수정안 구성")
-    if is_a360:
-        result = verify_and_repair(flow, get_catalog())
+    if ctx is not None:
+        result = verify_and_repair(flow, ctx.catalog)
     else:
-        # 타 솔루션: generate와 동일하게 대화(메시지+이력+compact.verbatim)에서 UserCatalog를
-        # 재추출해 검수한다. 카탈로그를 못 찾으면 검수 기준이 없어 생략한다.
-        extraction = extract_user_catalog(state)
-        if extraction.actions:
-            specs = [a.as_spec() for a in extraction.actions]
-            result = verify_and_repair(flow, UserCatalog(specs))
-        else:
-            result = {"flow": flow, "violations": [], "repaired": False}
+        result = {"flow": flow, "violations": [], "repaired": False}
 
     # 교정이 위반 단계를 재생성하며 바꿨을 수 있는 사용자 지정 값(value_source="user")을 복원한다.
     _restore_user_values(result["flow"], flow)

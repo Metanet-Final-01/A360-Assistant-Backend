@@ -18,8 +18,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ..orchestrator.jsonio import chat_json
-from ..retrieval import get_retriever
-from ..verify.catalog import get_catalog
 from ..verify.checker import derive_session_registry
 from .stream import emit
 
@@ -145,15 +143,61 @@ def _expand_queries(spec: dict) -> list[_ResearchUnit]:
     ]
 
 
-async def build_dossier(spec: dict, sink: list[dict]) -> dict:
+def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
+    params = ", ".join(
+        f"{p['name']}({p.get('type')}{', 필수' if p.get('required') else ''})"
+        for p in spec_dict.get("parameters", [])
+    )
+    rt = spec_dict.get("return_type")
+    # 스펙 미상(params_unknown 행)을 '없음'으로 표기하면 파라미터가 정말 없는 액션과
+    # 구분이 안 돼 composer가 스펙 확인을 건너뛴다 — '미상'으로 구분 표기한다.
+    unknown = spec_dict.get("parameters") is None
+    return (
+        f"- {pkg}/{act} «{spec_dict.get('label') or act}»"
+        + (f" → 리턴 {rt}" if rt else "")
+        + f"\n    파라미터: {params or ('미상 — get_action_schema로 확인' if unknown else '없음')}"
+    )
+
+
+def _whole_catalog_dossier(ctx) -> dict:
+    """검색기가 없는 경로(사용자 제공 카탈로그)의 Dossier — 전량이 곧 메뉴다 (RPA-285).
+
+    어휘가 수십 개 규모라 검색으로 좁힐 이유가 없고, 좁히면 오히려 사용자가 준 액션이
+    메뉴에서 누락돼 composer가 "카탈로그에 없다"고 오판한다. 상한(_MAX_MENU_ACTIONS)도
+    두지 않는다 — 사용자가 준 어휘를 임의로 잘라내면 그 액션은 영영 못 쓰인다.
+    """
+    actions: list[tuple[str, str]] = []
+    blocks: list[str] = []
+    for spec_dict in ctx.catalog.iter_action_schemas():
+        pkg, act = spec_dict.get("package"), spec_dict.get("action")
+        if not pkg or not act:
+            continue
+        actions.append((pkg, act))
+        blocks.append(_menu_block(pkg, act, spec_dict))
+    emit({"event": "stage", "stage": "searching",
+          "message": f"제공된 카탈로그 {len(actions)}개 액션을 전부 후보로 사용"})
+    return {
+        "menu": "\n".join(blocks) or "(제공된 액션 없음)",
+        "actions": actions,
+        "background": "",
+    }
+
+
+async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     """Capability Dossier를 만든다: {menu: str, actions: [(pkg, act)], background: str}.
 
     - 기능 단위별 이중 질의 병렬 검색(action_schema/bot_example) → (pkg, act) 후보 집계
     - 상위 후보의 카탈로그 스펙 프리페치 → 파라미터까지 담긴 액션 메뉴 텍스트
     - 배경 지식: 목표 문장으로 doc_page 1회 검색 (전체 문서 적재 가정 — 없으면 빈 결과)
+
+    ctx(CatalogContext)가 어휘 출처를 나른다 — 검색기가 없으면 카탈로그 전량을 메뉴로
+    쓴다(사용자 제공 카탈로그 경로).
     """
-    retriever = get_retriever()
-    catalog = get_catalog()
+    if not ctx.searchable:
+        return _whole_catalog_dossier(ctx)
+
+    retriever = ctx.retriever
+    catalog = ctx.catalog
     units = _expand_queries(spec)
 
     queries: list[str] = []
@@ -186,21 +230,6 @@ async def build_dossier(spec: dict, sink: list[dict]) -> dict:
                 key = (pkg, act)
                 best[key] = max(best.get(key, 0.0), h.get("score") or 0.0)
     ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_MENU_ACTIONS]
-
-    def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
-        params = ", ".join(
-            f"{p['name']}({p.get('type')}{', 필수' if p.get('required') else ''})"
-            for p in spec_dict.get("parameters", [])
-        )
-        rt = spec_dict.get("return_type")
-        # 스펙 미상(params_unknown 행)을 '없음'으로 표기하면 파라미터가 정말 없는 액션과
-        # 구분이 안 돼 composer가 스펙 확인을 건너뛴다 — '미상'으로 구분 표기한다.
-        unknown = spec_dict.get("parameters") is None
-        return (
-            f"- {pkg}/{act} «{spec_dict.get('label') or act}»"
-            + (f" → 리턴 {rt}" if rt else "")
-            + f"\n    파라미터: {params or ('미상 — get_action_schema로 확인' if unknown else '없음')}"
-        )
 
     blocks: list[str] = []
     menu_actions: list[tuple[str, str]] = []
