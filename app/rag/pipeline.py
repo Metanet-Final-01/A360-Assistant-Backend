@@ -420,35 +420,72 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             on_progress=lambda done, total: print(f"  {done}/{total}"),
         )
 
-    conn = db.connect()
-    try:
-        db.ensure_schema(conn)
-        if args.clean:
-            print("--clean: 기존 rag_documents 전체 삭제")
-            db.clear_all(conn)
-        count = db.upsert_documents(conn, documents, embeddings)
-        print(f"pgvector 적재 완료: {count}개")
-    finally:
-        conn.close()
-
-    if not args.skip_opensearch:
-        from .store import opensearch_client
-
-        os_client = opensearch_client.connect()
-        if args.clean:
-            print("--clean: 기존 OpenSearch 색인 삭제")
-            opensearch_client.delete_index(os_client)
-        opensearch_client.ensure_index(os_client)
-        os_count = opensearch_client.bulk_index(os_client, documents)
-        print(f"OpenSearch 색인 완료: {os_count}개")
-
-    # 검색 결과 캐시 무효화 (RPA-274) — REDIS_URL이 있으면 서버 프로세스의 공유 캐시가
-    # 실제로 비워져 "적재했는데 옛 결과가 나온다" 창이 사라진다. 미설정이면 이 프로세스의
-    # 로컬 캐시만 비워지므로 사실상 no-op(서버는 TTL로 수렴 — RPA-211 때와 동일).
+    # ── 캐시 무효화 프로토콜 (RPA-274) ────────────────────────────────────────
+    # ① pending 마커(스토어 변경 **전**) → ② PG → ③ OpenSearch(+refresh) → ④ 세대 공개.
+    # 마커가 있는 동안 서버의 put_search가 저장을 건너뛰므로, 중간 실패(부분 코퍼스)의
+    # 검색 결과가 TTL 동안 캐싱되지 않는다. 세대 공개(INCR)는 모든 스토어 반영이 끝난
+    # 뒤에만 — 요청은 키 생성 시점의 세대로 get/put을 끝까지 하므로, 적재와 겹친 구 요청의
+    # 늦은 SET은 구 세대에 격리된다(SCAN+DELETE의 재-SET 레이스 제거).
+    # control path 실패는 조용히 넘기지 않는다 — 여기서의 "무효화 실패"는 성능 문제가
+    # 아니라 "적재는 됐는데 캐시는 구 코퍼스"라는 정합성 사고다. non-zero exit로 알린다.
     from app.services import rag_cache
+    from app.services.rag_cache import CacheInvalidationError
 
-    busted = rag_cache.bust_search()
-    print(f"검색 결과 캐시 무효화: {busted}건 (backend={rag_cache.stats()['backend']})")
+    if rag_cache.stats()["backend"] == "memory":
+        print("⚠️ REDIS_URL 미설정 — 서버 캐시는 TTL로만 수렴한다(RPA-211 한계 그대로)")
+
+    try:
+        rag_cache.mark_ingest_pending()
+    except CacheInvalidationError as exc:
+        # 아직 아무것도 안 만졌다 — 여기서 멈추는 게 가장 싸다
+        sys.exit(f"적재 중단: 캐시 pending 마커 설정 실패 ({exc}). Redis 상태 확인 후 재실행하세요.")
+
+    ingest_ok = False
+    try:
+        conn = db.connect()
+        try:
+            db.ensure_schema(conn)
+            if args.clean:
+                print("--clean: 기존 rag_documents 전체 삭제")
+                db.clear_all(conn)
+            count = db.upsert_documents(conn, documents, embeddings)
+            print(f"pgvector 적재 완료: {count}개")
+        finally:
+            conn.close()
+
+        if not args.skip_opensearch:
+            from .store import opensearch_client
+
+            os_client = opensearch_client.connect()
+            if args.clean:
+                print("--clean: 기존 OpenSearch 색인 삭제")
+                opensearch_client.delete_index(os_client)
+            opensearch_client.ensure_index(os_client)
+            os_count = opensearch_client.bulk_index(os_client, documents)
+            # refresh가 끝나야 bulk 문서가 검색에 보인다 — 세대 공개는 그 뒤여야 한다.
+            opensearch_client.refresh_index(os_client)
+            print(f"OpenSearch 색인·refresh 완료: {os_count}개")
+        ingest_ok = True
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 부분 적재 상태를 성공처럼 끝내면 안 된다
+        sys.exit(
+            f"적재 실패: {type(exc).__name__}: {exc}\n"
+            f"pending 마커가 남아 만료 전까지 새 검색 결과는 캐싱되지 않습니다 — "
+            f"원인 해결 후 ingest를 재실행하세요(성공해야 마커가 풀립니다)."
+        )
+
+    if ingest_ok:
+        try:
+            gen = rag_cache.publish_generation()
+        except CacheInvalidationError as exc:
+            sys.exit(
+                f"적재는 완료됐지만 캐시 세대 공개 실패: {exc}\n"
+                f"서버 캐시가 구 코퍼스 세대로 남아 있을 수 있습니다(pending 마커가 신규 캐싱은 "
+                f"차단 중). Redis 복구 후 ingest를 재실행하거나 세대를 수동 INCR 하세요."
+            )
+        removed = rag_cache.cleanup_old_generations()  # 하이진 — 실패해도 정합성과 무관
+        print(f"캐시 세대 공개: g{gen} (구 세대 키 정리 {removed}건, backend={rag_cache.stats()['backend']})")
 
 
 def cmd_eda(args: argparse.Namespace) -> None:

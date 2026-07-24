@@ -162,14 +162,18 @@ def test_empty_result_is_not_cached():
 
 # --- 무효화 ---
 
-def test_bust_search_keeps_embeddings():
-    """적재 후 검색 결과는 낡지만 **질의 임베딩은 그대로 유효하다**(문서와 무관)."""
+def test_publish_generation_keeps_embeddings():
+    """적재 후 검색 결과는 낡지만 **질의 임베딩은 그대로 유효하다**(문서와 무관).
+
+    RPA-274: 무효화는 삭제(bust_search)가 아니라 **세대 전환**이다 — 새 요청이 만드는
+    키의 세대가 바뀌어 구 결과가 안 보이게 된다. 임베딩 키는 세대 무관이라 살아남는다.
+    """
     ek = rag_cache.embedding_key("q", "voyage-3", 1024)
     rag_cache.put_embedding(ek, [0.1, 0.2])
     rag_cache.put_search(_key(), [{"id": "a", "bm25_available": True}])
 
-    assert rag_cache.bust_search() == 1
-    assert rag_cache.get_search(_key()) is None
+    assert rag_cache.publish_generation() >= 1
+    assert rag_cache.get_search(_key()) is None        # _key()가 새 세대를 캡처한다
     assert rag_cache.get_embedding(ek) == [0.1, 0.2]   # 임베딩은 살아 있어야 한다
 
 

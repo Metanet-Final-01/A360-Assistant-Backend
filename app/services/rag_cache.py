@@ -22,69 +22,121 @@
 ## 🔴 캐시는 투명해야 한다
 
 같은 입력이면 **바이트 단위로 같은 결과**여야 한다. 다르면 캐싱이 아니라 동작 변경이다.
-그래서 키가 **결과를 좌우하는 모든 입력**을 포함한다 — 특히 검색 파라미터는 RPA-149로
-런타임에 바뀌므로(백오피스 슬라이더), 키에 없으면 "튜닝했는데 안 먹는다"가 된다.
+- 키가 결과를 좌우하는 **모든** 입력을 포함한다(질의·k·파라미터 5종·모델).
+- 값은 strict JSON(allow_nan=False) + **라운드트립 동일성 검사** — json.dumps가 값을
+  조용히 바꾸는 경우(tuple→list, int 키→str)도 위반이므로 저장을 포기한다.
+- 읽기도 문법(JSON)만이 아니라 **계약(타입·형태)**까지 검증한다 — 통과 못 하면
+  그 키를 지우고 miss로 산다.
 가드가 읽는 것 == 동작이 읽는 것(CONVENTIONS §9).
 
-## 백엔드 (RPA-274)
+## 무효화는 삭제가 아니라 세대(generation) 전환이다 (RPA-274)
 
-`REDIS_URL` 미설정(기본) = 기존 인프로세스 TTLCache 그대로. 설정하면 **공유 Redis**가
-백엔드가 되어 인프로세스의 한계 세 가지가 풀린다:
-  ① ingest(별도 프로세스)가 `bust_search()`로 캐시를 실제로 무효화할 수 있다
-  ② 인스턴스 2대가 캐시를 공유한다 — 한 대의 miss가 다른 대의 hit
-  ③ 재배포에도 캐시가 살아남는다 (배포 직후 콜드 스타트 제거)
+SCAN+DELETE 방식은 레이스가 있다: 요청 A가 구 코퍼스로 검색하는 **도중** ingest가
+삭제를 끝내면, A가 늦게 끝나며 구 결과를 다시 SET한다 — 무효화가 조용히 되돌아간다.
+그래서 검색 키에 **코퍼스 세대**를 리터럴 세그먼트로 넣는다:
 
-- **fail-open**: Redis 접속 실패는 miss로 동작하고(짧은 타임아웃 + 30초 백오프),
-  검색은 캐시 없이 계속된다. 캐시는 정본이 아니다.
-- Redis가 설정돼 있으면 인프로세스로 **폴백하지 않는다** — 두 백엔드가 서로 다른
-  내용을 들면(한쪽만 bust되는 등) "같은 입력=같은 출력" 불변식이 깨진다.
-- 값은 strict JSON — 직렬화 불가면 저장을 건너뛴다(불변식이 적중률보다 우선).
-- TTL 기본은 백엔드와 무관하게 1시간이다. Redis + ingest bust가 배선된 배포에서만
-  `RAG_CACHE_TTL_SECONDS=86400`으로 **명시적으로** 올릴 것(적중률 실측 13%→24%) —
-  REDIS_URL 유무로 TTL이 암묵 변경되면 "설정 안 바꿨는데 낡음 창이 24배"가 된다.
+    a360:{env}:rag:v{schema}:search:g{gen}:{digest}
 
-## ⚠️ 남은 한계 (정직하게)
+- 요청은 **키를 만드는 순간** 세대를 한 번 캡처하고, get/compute/put 전 구간에서 같은
+  키 문자열을 쓴다(호출부는 키를 불투명하게 취급). 늦게 끝난 구 요청의 SET은 구 세대
+  키에만 저장돼 새 세대 독자에게 보이지 않는다.
+- ingest 성공 시 세대 키를 INCR — 원자적 전환. **구 세대 삭제는 정합성 조건이 아니다**
+  (TTL이 치우고, cleanup_old_generations()는 하이진일 뿐).
+- 임베딩 층은 세대 무관(질의→벡터는 코퍼스에 안 의존) — 세대 세그먼트 없음.
+- 세대를 못 읽으면(장애) 그 요청은 캐싱 자체를 건너뛴다 — 모르는 세대에 저장하는 것보다
+  안전하다.
 
-- 인프로세스 모드(REDIS_URL 미설정)는 여전히: ingest가 무효화 못 함(→TTL 1시간 유지),
-  단일 워커 전제, 재기동 시 전멸. 이 모드의 한계는 RPA-211 때와 동일하다.
-- hit/miss 카운터(stats)는 Redis 모드에서도 **프로세스별**이다 — 전역 적중률은
-  인스턴스별 stats를 합산해서 봐야 한다.
+## hot path와 control path는 실패 정책이 다르다
+
+- **hot path**(get/put, 검색 경로): fail-open. 짧은 타임아웃 + 백오프(서킷) — 죽은
+  Redis를 반복 대기하지 않고 miss로 산다. 캐시는 정본이 아니다.
+- **control path**(ingest의 mark_ingest_pending/publish_generation): fail-closed.
+  hot path 서킷과 **무관하게**(별도 클라이언트) 유한 재시도 후 CacheInvalidationError를
+  던진다 — "무효화했다고 믿었는데 안 됐다"가 0건 성공으로 숨으면 안 된다. pipeline이
+  non-zero exit로 운영자에게 알린다.
+
+## 부분 적재는 pending 마커가 막는다
+
+ingest는 스토어를 만지기 **전에** pending 마커를 세운다. 마커가 있는 동안 put_search는
+저장을 건너뛴다(사유 "ingest_pending") — PG만 성공하고 OpenSearch가 실패한 부분 코퍼스
+결과가 TTL 동안 캐싱되는 것을 막는다. 성공 publish가 마커를 지운다. 실패하면 마커가
+남아(만료 한도 RAG_CACHE_PENDING_TTL_SECONDS) 재실행 전까지 새 캐싱을 차단한다.
+⚠️ 남은 한계: 마커 만료 후에도 부분 상태가 방치돼 있으면 캐싱이 재개된다 — 마커는
+시간 한도가 있는 안전장치이지 blue-green publish가 아니다(그건 범위 밖, RPA-274 본문).
+
+## 백엔드
+
+`REDIS_URL` 미설정(기본) = 인프로세스 TTLCache(RPA-211 그대로 — 세대 전환은 프로세스
+로컬로만 동작하고, ingest 별도 프로세스와 단일 워커 한계는 그때와 동일). 설정 시 공유
+Redis: ① ingest 즉시 무효화 ② 인스턴스 간 공유 ③ 재배포 생존.
+- Redis 지정 시 인프로세스로 폴백하지 않는다 — 두 백엔드가 갈라지면 한쪽만 무효화되는
+  순간 투명성 불변식이 깨진다.
+- TTL 기본은 1시간. Redis + ingest 배선이 확인된 배포에서만 86400으로 명시적으로 올릴
+  것(적중률 실측 13%→24%) — REDIS_URL 유무로 TTL이 암묵 변경되면 안 된다.
+- hit/miss 카운터는 Redis 모드에서도 프로세스별이다(전역은 인스턴스 합산으로).
 """
 
 import hashlib
 import json
+import logging
+import math
 import os
+import random
 import threading
 import time
 from typing import Any
 
 from cachetools import TTLCache
 
-_DEFAULT_TTL_SEC = 3600      # 1시간 — 적재 후 낡는 창을 짧게 (적중률 13% 수준)
-_DEFAULT_MAXSIZE = 2048
+logger = logging.getLogger(__name__)
 
-_lock = threading.Lock()     # TTLCache는 스레드 안전하지 않다. 동기 라우트는 워커 스레드풀에서 돈다
+_DEFAULT_TTL_SEC = 3600          # 1시간 — 적재 후 낡는 창을 짧게 (적중률 13% 수준)
+_DEFAULT_MAXSIZE = 2048
+_DEFAULT_PENDING_TTL_SEC = 21600  # 6시간 — 실패한 ingest의 캐싱 차단 한도(재실행 유예)
+
+# 캐시 값 직렬화 계약 버전 — 값의 형태(필드·타입)가 바뀌면 올린다. 롤링 배포 중 신·구
+# 코드가 같은 Redis를 봐도 서로의 값을 읽지 않게 네임스페이스를 가른다.
+_SCHEMA_VERSION = 1
+
+# 검색 결과 캐시 값의 최소 계약 — services/rag.py가 저장 직전 보장하는 필드들.
+# 여기 없는 값이 오면 "유효한 JSON이지만 우리 값이 아니다" → 지우고 miss (계약 위반 metric).
+_SEARCH_REQUIRED_FIELDS = frozenset({"id", "content", "score"})
+
+_lock = threading.Lock()         # _stats·인프로세스 TTLCache 보호
 _embedding_cache: TTLCache | None = None
 _search_cache: TTLCache | None = None
+_local_generation = 0            # 인프로세스 모드의 코퍼스 세대 (publish_generation이 올림)
 
 # 관측용 카운터 — "적중률이 왜 낮은가"에 답하려면 건너뛴 이유까지 세야 한다
 _stats = {"embed_hit": 0, "embed_miss": 0, "search_hit": 0, "search_miss": 0,
           "skip_degraded": 0, "skip_empty": 0, "skip_unserializable": 0,
-          "redis_error": 0, "redis_decode_error": 0}
+          "skip_ingest_pending": 0, "skip_no_generation": 0,
+          "redis_error": 0, "redis_decode_error": 0, "redis_contract_error": 0}
 
-# ── Redis 백엔드 (RPA-274) ───────────────────────────────────────────────────
 
-_REDIS_NS_EMB = "rag:emb:"
-_REDIS_NS_SEARCH = "rag:search:"
-# 캐시 조회가 검색 hot path에 있다 — Redis가 죽었을 때 매 검색이 타임아웃을 기다리면
-# 캐시가 성능 장치가 아니라 지연 장치가 된다. 실패 시 이 시간 동안 시도 자체를 끊는다.
-_REDIS_DOWN_BACKOFF_SEC = 30.0
-# 같은 VPC/로컬 전제의 캐시 조회다 — 0.5초에 못 받으면 캐시로서 의미가 없다(miss가 낫다)
-_REDIS_TIMEOUT_SEC = 0.5
+class CacheInvalidationError(RuntimeError):
+    """control path(ingest 무효화·세대 전환) 실패 — 호출부가 non-zero exit로 알려야 한다."""
 
+
+# ── Redis 클라이언트·서킷 상태 (RPA-274) ────────────────────────────────────
+# ⚠️ 아래 4개 전역은 반드시 _state_lock 아래에서만 읽고 쓴다 — 스레드풀(동기 라우트)과
+#    async 경로가 동시에 접근한다. 클라이언트 교체·서킷 판정이 원자적이어야
+#    "옛 클라이언트의 실패가 새 URL의 서킷을 여는" 경합이 안 생긴다.
+
+_state_lock = threading.Lock()
 _redis_client: Any = None
 _redis_url_cached: str | None = None
-_redis_down_until = 0.0
+_redis_down_until = 0.0          # 서킷: 이 시각 전에는 hot path가 Redis를 시도하지 않는다
+
+# hot path 파라미터 — 캐시 조회가 검색 경로에 있으므로 실패는 빨라야 한다
+_REDIS_TIMEOUT_SEC = 0.5         # 같은 VPC/로컬 전제 — 0.5초에 못 받으면 miss가 낫다
+_REDIS_DOWN_BACKOFF_SEC = 30.0   # 서킷 유지 시간(지터 ±20% 적용)
+_REDIS_PROBE_WINDOW_SEC = 2.0    # half-open: 만료 후 한 스레드만 프로브, 나머지는 이 창 동안 대기
+
+# control path 파라미터 — 정확성이 걸린 경로라 조금 더 기다리고, 유한 재시도 후 실패를 던진다
+_CONTROL_TIMEOUT_SEC = 2.0
+_CONTROL_ATTEMPTS = 3
+_CONTROL_RETRY_BASE_SEC = 0.5    # 0.5 → 1.0 → 2.0
 
 
 def _redis_url() -> str:
@@ -92,72 +144,127 @@ def _redis_url() -> str:
     return os.getenv("REDIS_URL", "").strip()
 
 
-def _make_redis_client(url: str) -> Any:
+def _make_redis_client(url: str, *, timeout: float = _REDIS_TIMEOUT_SEC) -> Any:
     """redis.Redis 생성 — 테스트가 fakeredis로 갈아끼우는 팩토리(검색기 팩토리 선례)."""
     import redis  # noqa: PLC0415 — 지연 import: 인프로세스 모드는 redis 패키지를 안 탄다
 
     return redis.Redis.from_url(
         url,
-        socket_connect_timeout=_REDIS_TIMEOUT_SEC,
-        socket_timeout=_REDIS_TIMEOUT_SEC,
+        socket_connect_timeout=timeout,
+        socket_timeout=timeout,
         decode_responses=True,
     )
 
 
-def _mark_redis_down() -> None:
-    global _redis_down_until
-    with _lock:
-        _stats["redis_error"] += 1
-    _redis_down_until = time.monotonic() + _REDIS_DOWN_BACKOFF_SEC
+def _hot_client() -> Any | None:
+    """hot path용 클라이언트 스냅샷, 또는 None(미설정·서킷 열림·생성 실패).
 
-
-def _redis() -> Any | None:
-    """활성 Redis 클라이언트, 또는 None(미설정·백오프 중·생성 실패).
-
-    URL이 바뀌면 재생성한다 — 테스트의 setenv, 운영의 엔드포인트 교체 모두 재기동 없이 반영.
-
-    ⚠️ URL 변경 감지가 백오프 체크보다 **먼저**다(Qodo #365): 순서를 바꾸면 장애 후
-    엔드포인트를 갈아끼워도 옛 대상에 걸린 백오프 30초가 새 대상까지 막는다 — 백오프는
-    "그 대상이 죽어 있다"는 지식이므로 대상이 바뀌면 무효가 맞다.
+    - URL 변경 감지가 서킷 체크보다 먼저다: 서킷은 "그 대상이 죽어 있다"는 지식이므로
+      대상이 바뀌면 무효다(Qodo #365). 교체 시 이전 클라이언트는 close(연결 풀 정리).
+    - half-open: 서킷 만료 후 **한 스레드만** 프로브한다 — 만료 순간 스레드 전부가
+      죽었을 수 있는 Redis로 몰리면 타임아웃 폭주가 재발한다. 프로브 창(2초) 동안
+      나머지는 계속 miss, 프로브가 성공하면 _note_redis_ok가 서킷을 닫는다.
     """
     global _redis_client, _redis_url_cached, _redis_down_until
     url = _redis_url()
     if not url:
         return None
-    if url != _redis_url_cached:
-        _redis_client = None
-        _redis_url_cached = url   # 생성 실패해도 유지 — 같은(잘못된) URL 재시도는 백오프를 탄다
-        _redis_down_until = 0.0
-    if time.monotonic() < _redis_down_until:
-        return None
-    if _redis_client is None:
-        try:
-            _redis_client = _make_redis_client(url)
-        except Exception:  # noqa: BLE001 — 캐시는 정본이 아니다: 생성 실패는 miss로 산다
+    old_client = None
+    with _state_lock:
+        if url != _redis_url_cached:
+            old_client = _redis_client
             _redis_client = None
-            _mark_redis_down()
-            return None
-    return _redis_client
-
-
-def _loads(raw: str, r: Any, full_key: str) -> Any | None:
-    """Redis 값 JSON 디코드 — 실패도 miss로 산다(Qodo #365): fail-open은 데이터 오류에도 적용.
-
-    오염된 값(수동 조작·부분 기록 등)이 hot path에서 예외로 터지면 캐시가 성능 장치가
-    아니라 장애 지점이 된다. 문제 키는 지워서(best-effort) 반복 실패를 막는다 —
-    서버 자체는 건강하므로 백오프는 걸지 않는다(연결 오류와 구분).
-    """
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        with _lock:
-            _stats["redis_decode_error"] += 1
+            _redis_url_cached = url   # 생성 실패해도 유지 — 같은(잘못된) URL 재시도는 서킷을 탄다
+            _redis_down_until = 0.0
+        now = time.monotonic()
+        if now < _redis_down_until:
+            client = None
+        else:
+            if _redis_down_until:  # 서킷이 열려 있었다 → 이 스레드가 프로브 슬롯을 잡는다
+                _redis_down_until = now + _REDIS_PROBE_WINDOW_SEC
+            if _redis_client is None:
+                try:
+                    _redis_client = _make_redis_client(url)
+                except Exception:  # noqa: BLE001 — 캐시는 정본이 아니다: 생성 실패는 miss로 산다
+                    _redis_client = None
+                    _open_circuit_locked()
+            client = _redis_client
+    if old_client is not None:
         try:
-            r.delete(full_key)
+            old_client.close()
         except Exception:  # noqa: BLE001
-            _mark_redis_down()
-        return None
+            pass
+    return client
 
+
+def _open_circuit_locked() -> None:
+    """서킷 열기 — _state_lock 아래에서만 부른다. 지터로 만료 동시 폭주를 흩는다."""
+    global _redis_down_until
+    _redis_down_until = time.monotonic() + _REDIS_DOWN_BACKOFF_SEC * random.uniform(0.8, 1.2)
+    with _lock:
+        _stats["redis_error"] += 1
+
+
+def _mark_redis_down(client: Any) -> None:
+    """hot path 연산 실패 → 서킷 열기. **그 클라이언트가 아직 현역일 때만** —
+    URL이 이미 교체됐다면 옛 대상의 실패가 새 대상의 서킷을 열면 안 된다."""
+    with _state_lock:
+        if client is _redis_client:
+            _open_circuit_locked()
+        else:
+            with _lock:
+                _stats["redis_error"] += 1
+
+
+def _note_redis_ok(client: Any) -> None:
+    """연산 성공 → (그 클라이언트가 현역이면) 서킷·프로브 창을 닫는다."""
+    global _redis_down_until
+    with _state_lock:
+        if client is _redis_client and _redis_down_until:
+            _redis_down_until = 0.0
+
+
+def _control_client() -> Any:
+    """control path 전용 클라이언트 — hot path 서킷과 **무관**하게 새로 만든다.
+
+    서킷은 hot path의 지연 방어일 뿐, ingest의 무효화가 그것 때문에 조용히 건너뛰면
+    "적재했는데 캐시는 구 세대"가 성공 로그 뒤에 숨는다. 여기 실패는 위로 던진다.
+    """
+    url = _redis_url()
+    if not url:
+        raise CacheInvalidationError("REDIS_URL이 비어 있다 — control path를 부르면 안 되는 상태")
+    return _make_redis_client(url, timeout=_CONTROL_TIMEOUT_SEC)
+
+
+def _control_call(op_name: str, fn) -> Any:
+    """유한 재시도(0.5s→1s→2s) 후 실패면 CacheInvalidationError. 성공/실패 모두 로그."""
+    last_exc: Exception | None = None
+    for attempt in range(1, _CONTROL_ATTEMPTS + 1):
+        try:
+            client = _control_client()
+            try:
+                result = fn(client)
+            finally:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return result
+        except CacheInvalidationError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning("rag_cache control '%s' 시도 %d/%d 실패: %s",
+                           op_name, attempt, _CONTROL_ATTEMPTS, type(exc).__name__)
+            if attempt < _CONTROL_ATTEMPTS:
+                time.sleep(_CONTROL_RETRY_BASE_SEC * (2 ** (attempt - 1)))
+    raise CacheInvalidationError(
+        f"rag_cache control '{op_name}' {_CONTROL_ATTEMPTS}회 실패 "
+        f"(마지막: {type(last_exc).__name__}) — 캐시 세대가 코퍼스와 어긋났을 수 있다"
+    ) from last_exc
+
+
+# ── 설정·키 구성 ─────────────────────────────────────────────────────────────
 
 def enabled() -> bool:
     """미설정=비활성. 켜지 않은 배포의 기존 동작을 바꾸지 않는다(데모 중 즉시 원복 가능)."""
@@ -171,6 +278,13 @@ def _ttl() -> int:
         return _DEFAULT_TTL_SEC
 
 
+def _pending_ttl() -> int:
+    try:
+        return max(int(os.getenv("RAG_CACHE_PENDING_TTL_SECONDS", _DEFAULT_PENDING_TTL_SEC)), 60)
+    except ValueError:
+        return _DEFAULT_PENDING_TTL_SEC
+
+
 def _maxsize() -> int:
     try:
         return max(int(os.getenv("RAG_CACHE_MAXSIZE", _DEFAULT_MAXSIZE)), 1)
@@ -178,15 +292,43 @@ def _maxsize() -> int:
         return _DEFAULT_MAXSIZE
 
 
-def _get(which: str) -> TTLCache:
-    global _embedding_cache, _search_cache
-    if which == "embed":
-        if _embedding_cache is None:
-            _embedding_cache = TTLCache(maxsize=_maxsize(), ttl=_ttl())
-        return _embedding_cache
-    if _search_cache is None:
-        _search_cache = TTLCache(maxsize=_maxsize(), ttl=_ttl())
-    return _search_cache
+def _ns() -> str:
+    """네임스페이스 루트 — 환경(dev/staging/prod 공유 Redis 혼입 방지)과 값 스키마 버전
+    (롤링 배포 중 신·구 코드 혼입 방지)을 리터럴 세그먼트로 박는다."""
+    env = os.getenv("APP_ENV", "development").strip() or "development"
+    return f"a360:{env}:rag:v{_SCHEMA_VERSION}"
+
+
+def _gen_key() -> str:
+    return f"{_ns()}:gen"
+
+
+def _pending_key() -> str:
+    return f"{_ns()}:ingest_pending"
+
+
+def _current_generation() -> int | None:
+    """현재 코퍼스 세대. Redis 모드에서 못 읽으면 None — 그 요청은 캐싱을 건너뛴다."""
+    if not _redis_url():
+        return _local_generation
+    r = _hot_client()
+    if r is None:
+        return None
+    try:
+        raw = r.get(_gen_key())
+        _note_redis_ok(r)
+    except Exception:  # noqa: BLE001
+        _mark_redis_down(r)
+        return None
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        # 세대 키가 오염됐다 — 임의 해석은 위험하므로 이 요청은 캐싱 스킵
+        with _lock:
+            _stats["redis_contract_error"] += 1
+        return None
 
 
 def _norm(query: str) -> str:
@@ -210,35 +352,112 @@ def _digest(*parts: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+# ── 값 검증 (쓰기: strict 직렬화 / 읽기: 계약 검증) ─────────────────────────
+
+def _dump_transparent(value: Any) -> str | None:
+    """strict JSON 직렬화 + 라운드트립 동일성 확인. 어긋나면 None(저장 포기).
+
+    - allow_nan=False: NaN/Infinity는 유효 JSON이 아니고, 통과시키면 읽는 쪽 파서에
+      따라 값이 달라진다.
+    - 라운드트립 비교: json.dumps는 tuple→list, int 키→str처럼 **예외 없이 값을 바꾸는**
+      경우가 있다 — "같은 입력=같은 출력" 위반이므로 적중률보다 투명성을 지킨다.
+    """
+    try:
+        payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        return None
+    if json.loads(payload) != value:
+        return None
+    return payload
+
+
+def _valid_embedding(value: Any, expected_dim: int | None) -> bool:
+    """임베딩 계약: 비어 있지 않은 list[유한 수치], (알면) 기대 차원 일치."""
+    if not isinstance(value, list) or not value:
+        return False
+    if expected_dim is not None and len(value) != expected_dim:
+        return False
+    for x in value:
+        # bool은 int의 서브클래스 — 벡터 성분으로는 계약 위반이다
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+            return False
+    return True
+
+
+def _valid_search(value: Any) -> bool:
+    """검색 결과 계약: 비어 있지 않은 list[dict], 각 항목에 최소 필드(id·content·score)."""
+    if not isinstance(value, list) or not value:
+        return False
+    return all(isinstance(r, dict) and _SEARCH_REQUIRED_FIELDS <= r.keys() for r in value)
+
+
+def _load_validated(raw: str, r: Any, full_key: str, validator) -> Any | None:
+    """Redis 값 디코드 + 계약 검증 — 실패는 전부 miss로 산다(fail-open은 데이터 오류에도).
+
+    문법 오류(JSON 아님)와 계약 오류(유효 JSON이지만 타입·형태가 우리 값이 아님)를
+    별도 카운터로 가른다 — 전자는 오염/부분 기록, 후자는 스키마 드리프트 신호라 대응이
+    다르다. 어느 쪽이든 키를 지워(best-effort) 반복 실패를 막는다. 서버 자체는 건강하므로
+    서킷은 열지 않는다.
+    """
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        with _lock:
+            _stats["redis_decode_error"] += 1
+        _evict(r, full_key)
+        return None
+    if not validator(value):
+        with _lock:
+            _stats["redis_contract_error"] += 1
+        _evict(r, full_key)
+        return None
+    return value
+
+
+def _evict(r: Any, full_key: str) -> None:
+    try:
+        r.delete(full_key)
+    except Exception:  # noqa: BLE001
+        _mark_redis_down(r)
+
+
 # ── 질의 임베딩 층 ───────────────────────────────────────────────────────────
 
 def embedding_key(query: str, model: str, dim: int | None) -> str:
-    """모델·차원이 키에 들어간다 — 모델을 갈면 자동으로 다른 키가 되어 옛 벡터를 안 쓴다."""
-    return _digest("emb", model, dim, _norm(query))
+    """모델·차원이 키에 들어간다 — 모델을 갈면 자동으로 다른 키가 되어 옛 벡터를 안 쓴다.
+
+    임베딩은 코퍼스와 무관하므로 **세대 세그먼트가 없다**(ingest가 무효화하지 않는 층).
+    반환 키는 불투명 문자열이다 — 호출부는 그대로 get/put에 넘긴다.
+    """
+    d = _digest("emb", model, dim, _norm(query))
+    return f"{_ns()}:emb:{d}"
 
 
-def get_embedding(key: str) -> list[float] | None:
-    """복사본을 돌려준다 — 호출부가 벡터를 변형해도 캐시 원본이 오염되면 안 된다(#290 리뷰).
+def get_embedding(key: str, *, expected_dim: int | None = None) -> list[float] | None:
+    """복사본/새 객체를 돌려준다 — 호출부가 벡터를 변형해도 캐시 원본이 오염되면 안 된다
+    (#290 리뷰; Redis 경로는 json.loads가 매번 새 객체라 내재).
 
-    (Redis 경로는 json.loads가 매번 새 객체를 만들므로 복사가 내재돼 있다.)
+    expected_dim을 주면 값의 차원까지 검증한다(키의 dim과 값의 실제 길이는 다른 명제다 —
+    잘못 기록된 값이 파이프라인 깊숙이 들어가기 전에 여기서 걸러진다).
     """
     if not enabled():
         return None
-    r = _redis()
-    if r is not None:
-        try:
-            raw = r.get(_REDIS_NS_EMB + key)
-        except Exception:  # noqa: BLE001
-            _mark_redis_down()
-            raw = None
-        value = _loads(raw, r, _REDIS_NS_EMB + key) if raw is not None else None
-        with _lock:  # 디코드 **후** 집계 — 오염값이 hit로 세이면 적중률이 거짓말한다(Qodo #365)
+    if _redis_url():
+        r = _hot_client()
+        value = None
+        if r is not None:
+            try:
+                raw = r.get(key)
+                _note_redis_ok(r)
+            except Exception:  # noqa: BLE001
+                _mark_redis_down(r)
+                raw = None
+            if raw is not None:
+                value = _load_validated(raw, r, key,
+                                        lambda v: _valid_embedding(v, expected_dim))
+        with _lock:  # 디코드·검증 **후** 집계 — 오염값이 hit로 세이면 적중률이 거짓말한다
             _stats["embed_hit" if value is not None else "embed_miss"] += 1
         return value
-    if _redis_url():  # Redis 지정됐지만 백오프 중 — 인프로세스로 폴백하지 않는다(위 docstring)
-        with _lock:
-            _stats["embed_miss"] += 1
-        return None
     with _lock:
         v = _get("embed").get(key)
         _stats["embed_hit" if v is not None else "embed_miss"] += 1
@@ -248,14 +467,20 @@ def get_embedding(key: str) -> list[float] | None:
 def put_embedding(key: str, vector: list[float]) -> None:
     if not enabled() or not vector:
         return
-    r = _redis()
-    if r is not None:
-        try:
-            r.set(_REDIS_NS_EMB + key, json.dumps(vector), ex=_ttl())
-        except Exception:  # noqa: BLE001
-            _mark_redis_down()
-        return
     if _redis_url():
+        payload = _dump_transparent(vector)
+        if payload is None:
+            with _lock:
+                _stats["skip_unserializable"] += 1
+            return
+        r = _hot_client()
+        if r is None:
+            return
+        try:
+            r.set(key, payload, ex=_ttl())
+            _note_redis_ok(r)
+        except Exception:  # noqa: BLE001
+            _mark_redis_down(r)
         return
     with _lock:
         _get("embed")[key] = list(vector)   # 저장도 복사본으로 — 호출부가 나중에 바꿔도 무관하게
@@ -265,12 +490,17 @@ def put_embedding(key: str, vector: list[float]) -> None:
 
 def search_key(query: str, k: int, source_types: tuple[str, ...] | None, params: Any,
                embed_model: str, rerank_model: str) -> str:
-    """결과를 좌우하는 **모든** 입력을 넣는다.
+    """결과를 좌우하는 **모든** 입력 + **현재 코퍼스 세대**로 키를 만든다.
 
     파라미터 5종은 RPA-149로 런타임에 바뀐다 — 키에 넣으면 변경 즉시 다른 키가 되므로
     별도 무효화 없이도 "튜닝이 바로 먹는다". 무효화보다 키 포함이 실수에 강하다.
+
+    🔴 세대는 **여기서 한 번** 캡처된다. 호출부(services/rag.py)가 이 키로 get→계산→put을
+    끝까지 진행하므로, 도중에 ingest가 세대를 올려도 이 요청의 put은 구 세대 키로 간다 —
+    늦은 SET이 새 세대 독자에게 보이지 않는 것이 무효화의 정합성 조건이다(SCAN+DELETE의
+    레이스를 이렇게 없앤다). 세대를 못 읽으면 'nogen' 키가 되고 get/put이 캐싱을 건너뛴다.
     """
-    return _digest(
+    d = _digest(
         "search", _norm(query), k, tuple(source_types or ()),
         getattr(params, "candidate_pool_size", None),
         getattr(params, "rerank_candidates", None),
@@ -279,26 +509,38 @@ def search_key(query: str, k: int, source_types: tuple[str, ...] | None, params:
         getattr(params, "bm25_weight", None),
         embed_model, rerank_model,
     )
+    gen = _current_generation()
+    seg = f"g{gen}" if gen is not None else "nogen"
+    return f"{_ns()}:search:{seg}:{d}"
+
+
+def _is_nogen(key: str) -> bool:
+    return ":search:nogen:" in key
 
 
 def get_search(key: str) -> list[dict] | None:
     if not enabled():
         return None
-    r = _redis()
-    if r is not None:
-        try:
-            raw = r.get(_REDIS_NS_SEARCH + key)
-        except Exception:  # noqa: BLE001
-            _mark_redis_down()
-            raw = None
-        value = _loads(raw, r, _REDIS_NS_SEARCH + key) if raw is not None else None
-        with _lock:  # 디코드 **후** 집계 — 위 get_embedding과 같은 이유
+    if _redis_url():
+        value = None
+        if _is_nogen(key):
+            with _lock:
+                _stats["skip_no_generation"] += 1
+                _stats["search_miss"] += 1
+            return None
+        r = _hot_client()
+        if r is not None:
+            try:
+                raw = r.get(key)
+                _note_redis_ok(r)
+            except Exception:  # noqa: BLE001
+                _mark_redis_down(r)
+                raw = None
+            if raw is not None:
+                value = _load_validated(raw, r, key, _valid_search)
+        with _lock:  # 디코드·검증 **후** 집계 — get_embedding과 같은 이유
             _stats["search_hit" if value is not None else "search_miss"] += 1
         return value
-    if _redis_url():
-        with _lock:
-            _stats["search_miss"] += 1
-        return None
     with _lock:
         v = _get("search").get(key)
         _stats["search_hit" if v is not None else "search_miss"] += 1
@@ -318,6 +560,9 @@ def put_search(key: str, results: list[dict]) -> str | None:
     ⚠️ 저하는 **명시적 `False`일 때만**이다. `mode="vector"`는 BM25를 아예 부르지 않아
     필드가 없고(정상 캐싱 대상), `None`은 "해당 없음"이다 — 관측의 `_bm25_health`가 쓰는
     3상태 규약과 같은 해석을 여기서도 쓴다. 한 필드를 두 곳이 다르게 읽으면 그게 다음 버그다.
+
+    Redis 모드 추가 스킵: ingest pending 마커(부분 적재 결과의 장기 캐싱 방지),
+    nogen 키(세대 미상), 직렬화 투명성 위반.
     """
     if not enabled():
         return None
@@ -329,73 +574,159 @@ def put_search(key: str, results: list[dict]) -> str | None:
         with _lock:
             _stats["skip_degraded"] += 1
         return "degraded"
-    r = _redis()
-    if r is not None:
-        # strict JSON — 직렬화가 값을 바꾸면(예: datetime→str) "같은 입력=같은 출력"이 깨진다.
-        # 못 담는 값이면 캐싱을 포기한다(불변식 > 적중률). 사유는 호출부가 관측에 남긴다.
-        try:
-            payload = json.dumps(results, ensure_ascii=False)
-        except (TypeError, ValueError):
+    if _redis_url():
+        if _is_nogen(key):
+            with _lock:
+                _stats["skip_no_generation"] += 1
+            return "generation_unavailable"
+        payload = _dump_transparent(results)
+        if payload is None:
             with _lock:
                 _stats["skip_unserializable"] += 1
             return "unserializable"
+        r = _hot_client()
+        if r is None:
+            return None
         try:
-            r.set(_REDIS_NS_SEARCH + key, payload, ex=_ttl())
+            # pending 마커 확인 → SET. 마커 확인에 실패하면 "적재 중이 아님"을 증명할 수
+            # 없으므로 저장하지 않는다(보수적 fail-open — miss일 뿐 오답은 아니다).
+            if r.exists(_pending_key()):
+                _note_redis_ok(r)
+                with _lock:
+                    _stats["skip_ingest_pending"] += 1
+                return "ingest_pending"
+            r.set(key, payload, ex=_ttl())
+            _note_redis_ok(r)
         except Exception:  # noqa: BLE001
-            _mark_redis_down()
-        return None
-    if _redis_url():
+            _mark_redis_down(r)
         return None
     with _lock:
         _get("search")[key] = [dict(r_) for r_ in results]
     return None
 
 
-# ── 무효화·관측 ──────────────────────────────────────────────────────────────
+def _get(which: str) -> TTLCache:
+    global _embedding_cache, _search_cache
+    if which == "embed":
+        if _embedding_cache is None:
+            _embedding_cache = TTLCache(maxsize=_maxsize(), ttl=_ttl())
+        return _embedding_cache
+    if _search_cache is None:
+        _search_cache = TTLCache(maxsize=_maxsize(), ttl=_ttl())
+    return _search_cache
 
-def bust_search() -> int:
-    """검색 결과 캐시를 비운다(적재 후 등). 임베딩은 코퍼스와 무관하므로 유지한다.
 
-    Redis 모드에서는 크로스 프로세스로 동작한다 — `pipeline ingest`(별도 프로세스)가
-    적재 직후 불러 "적재했는데 옛 결과가 나온다" 창을 없앤다(RPA-274). enabled()와
-    무관하게 시도한다: ingest 프로세스에는 서버의 캐시 토글이 없을 수 있다.
+# ── control path: ingest 무효화 프로토콜 (RPA-274) ──────────────────────────
+# 순서: mark_ingest_pending() → 스토어 변경(PG→OpenSearch→refresh) → publish_generation()
+# 실패 시 CacheInvalidationError — pipeline이 non-zero exit로 운영자에게 알린다.
+
+def mark_ingest_pending() -> None:
+    """적재 시작 마커 — 스토어를 만지기 **전에** 부른다.
+
+    마커가 있는 동안 put_search가 저장을 건너뛰므로, 부분 적재 상태(PG만 성공 등)의
+    검색 결과가 TTL 동안 캐싱되는 것을 막는다. 만료(_pending_ttl)는 실패한 ingest가
+    영원히 캐싱을 죽이지 않게 하는 한도다 — 그 안에 재실행하는 것이 운영 계약.
+
+    인프로세스 모드: no-op — ingest는 별도 프로세스라 서버의 로컬 캐시에 손댈 방법이
+    없다(RPA-211 한계 그대로, TTL이 방어).
     """
-    n = 0
-    r = _redis()
-    if r is not None:
-        try:
-            batch: list[str] = []
-            for k in r.scan_iter(match=_REDIS_NS_SEARCH + "*", count=500):
-                batch.append(k)
-                if len(batch) >= 500:
-                    n += r.delete(*batch)
-                    batch = []
-            if batch:
-                n += r.delete(*batch)
-        except Exception:  # noqa: BLE001
-            _mark_redis_down()
-    # 로컬 캐시도 함께 비운다 — 백엔드 전환 직후 남아 있을 수 있는 잔재까지 정리
-    with _lock:
-        c = _get("search")
-        n += len(c)
-        c.clear()
-    return n
+    if not _redis_url():
+        return
+    _control_call("mark_ingest_pending",
+                  lambda c: c.set(_pending_key(), str(int(time.time())), ex=_pending_ttl()))
+    logger.info("rag_cache: ingest pending 마커 설정 (한도 %ds)", _pending_ttl())
 
+
+def publish_generation() -> int:
+    """새 코퍼스 세대를 원자적으로 공개하고(INCR) pending 마커를 지운다.
+
+    ingest가 **모든 스토어 반영(refresh 포함)을 끝낸 뒤에만** 불러야 한다. INCR가
+    성공하면 새 세대는 공개된 것 — 마커 삭제 실패는 경고로 낮춘다(마커는 만료로도
+    풀리고, 남아 있는 동안 캐싱이 안 될 뿐 오답은 없다).
+
+    인프로세스 모드: 로컬 세대만 올린다(이 프로세스 한정 — ingest CLI에선 사실상 no-op).
+    """
+    global _local_generation
+    if not _redis_url():
+        with _lock:
+            _local_generation += 1
+            gen = _local_generation
+        _clear_local_search()  # 로컬 모드는 세대 전환+즉시 비움이 같은 뜻(메모리도 회수)
+        return gen
+    gen = int(_control_call("publish_generation", lambda c: c.incr(_gen_key())))
+    try:
+        _control_call("clear_ingest_pending", lambda c: c.delete(_pending_key()))
+    except CacheInvalidationError:
+        logger.warning("rag_cache: pending 마커 삭제 실패 — 만료(%ds)까지 신규 캐싱이 멈춘다 "
+                       "(세대 전환 자체는 g%d로 완료)", _pending_ttl(), gen)
+    return gen
+
+
+def cleanup_old_generations() -> int:
+    """구 세대 검색 키 정리 — **정합성 조건이 아니라 하이진**이다(TTL이 어차피 치운다).
+
+    UNLINK(논블로킹)를 쓰고, 실패해도 조용히 0을 돌려준다 — 이게 실패한다고 ingest를
+    실패시키면 안 된다(publish는 이미 끝났고 정합성은 세대 키가 보장한다).
+    """
+    if not _redis_url():
+        return 0
+    gen = _current_generation()
+    if gen is None:
+        return 0
+    prefix = f"{_ns()}:search:g"
+    current_seg = f"{prefix}{gen}:"
+    removed = 0
+    r = _hot_client()
+    if r is None:
+        return 0
+    try:
+        batch: list[str] = []
+        for k in r.scan_iter(match=prefix + "*", count=500):
+            if not k.startswith(current_seg):
+                batch.append(k)
+            if len(batch) >= 500:
+                removed += _unlink(r, batch)
+                batch = []
+        if batch:
+            removed += _unlink(r, batch)
+        _note_redis_ok(r)
+    except Exception:  # noqa: BLE001
+        _mark_redis_down(r)
+    return removed
+
+
+def _unlink(r: Any, keys: list[str]) -> int:
+    try:
+        return int(r.unlink(*keys))
+    except Exception:  # noqa: BLE001 — 구버전 서버 등 unlink 미지원이면 delete로
+        return int(r.delete(*keys))
+
+
+def _clear_local_search() -> None:
+    global _search_cache
+    with _lock:
+        _search_cache = None
+
+
+# ── 테스트·관측 ──────────────────────────────────────────────────────────────
 
 def bust_all() -> None:
-    r = _redis()
-    if r is not None:
-        try:
-            for ns in (_REDIS_NS_EMB, _REDIS_NS_SEARCH):
-                batch = list(r.scan_iter(match=ns + "*", count=500))
+    """전체 초기화 — 테스트 픽스처용. Redis 모드에선 우리 네임스페이스만 지운다(best-effort)."""
+    global _embedding_cache, _search_cache, _local_generation
+    if _redis_url():
+        r = _hot_client()
+        if r is not None:
+            try:
+                batch = list(r.scan_iter(match=_ns() + ":*", count=500))
                 if batch:
                     r.delete(*batch)
-        except Exception:  # noqa: BLE001
-            _mark_redis_down()
-    global _embedding_cache, _search_cache
+                _note_redis_ok(r)
+            except Exception:  # noqa: BLE001
+                _mark_redis_down(r)
     with _lock:
         _embedding_cache = None
         _search_cache = None
+        _local_generation = 0
         for k in _stats:
             _stats[k] = 0
 
@@ -404,6 +735,8 @@ def stats() -> dict:
     """적중·미스·건너뜀 카운터. 건너뛴 사유를 함께 봐야 '적중률이 왜 낮은가'에 답할 수 있다.
 
     Redis 모드에서도 카운터는 프로세스별이다(전역 적중률은 인스턴스 합산으로 볼 것).
+    backend는 **설정된 저장소**이고, 지금 실제로 붙을 수 있는지는 redis_circuit_open이
+    말한다 — "URL이 있다"와 "쓸 수 있다"는 다른 명제다.
     """
     with _lock:
         s = dict(_stats)
@@ -412,5 +745,10 @@ def stats() -> dict:
         s[f"{layer}_hit_rate"] = round(hit / (hit + miss), 3) if (hit + miss) else None
     s["enabled"] = enabled()
     s["ttl_seconds"] = _ttl()
-    s["backend"] = "redis" if _redis_url() else "memory"
+    configured = bool(_redis_url())
+    s["backend"] = "redis" if configured else "memory"
+    with _state_lock:
+        s["redis_configured"] = configured
+        s["redis_circuit_open"] = bool(configured and time.monotonic() < _redis_down_until)
+    s["generation"] = _current_generation()
     return s
