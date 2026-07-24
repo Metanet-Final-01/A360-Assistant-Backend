@@ -353,3 +353,77 @@ def test_load_applies_db_timeouts(monkeypatch):
     BackendCatalog().get_action_schema("x", "y")
     assert captured["connect_timeout"] == cat_mod._CATALOG_DB_TIMEOUT_SEC
     assert any("statement_timeout" in s for s in captured["statements"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 적재 순서 결정성 + 논리 중복 관측 (RPA-287)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _schema_row(pkg, act, parent_id, params):
+    """(pkg, act, metadata, parent_id) 4튜플 — 현행 쿼리가 돌려주는 행 모양."""
+    return (pkg, act, {"schema": {"name": act, "parameters": params}}, parent_id)
+
+
+def test_load_adopts_first_row_in_sorted_order(monkeypatch):
+    """정렬은 SQL이 하지만, 채택 규칙이 '첫 행'임을 고정한다 — 뒤 행이 덮어쓰면 안 된다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": "완전히_다른_파라미터"}]),
+    ]
+    cat = _catalog_with(rows, monkeypatch)
+    assert cat.get_action_schema("Excel advanced", "Open")["parameters"] == [{"name": "session"}]
+
+
+def test_load_query_orders_deterministically(monkeypatch):
+    """ORDER BY가 없으면 어느 행이 채택될지가 DB 반환 순서에 달린다 — 쿼리에 고정돼야 한다."""
+    seen = {}
+
+    class _CapturingCursor(_FakeCursor):
+        def execute(self, sql):
+            if "rag_documents" in sql:
+                seen["sql"] = " ".join(sql.split())
+
+    class _CapturingConn(_FakeConn):
+        def cursor(self):
+            return _CapturingCursor(self._rows)
+
+    from app.rag.store import db
+    monkeypatch.setattr(db, "connect", lambda **kw: _CapturingConn([]))
+    BackendCatalog()._load()
+
+    sql = seen["sql"]
+    assert "ORDER BY package_name, action_name, parent_id, chunk_index, id" in sql
+    # parent_id가 chunk_index보다 앞 — 같은 문서의 청크가 흩어지지 않게
+    assert sql.index("parent_id, chunk_index") > 0
+
+
+def test_logical_duplicate_is_warned(monkeypatch, caplog):
+    """같은 (pkg, act)에 출처 문서가 둘 — 조용히 버리지 않고 경고로 남긴다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": "other"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("논리 중복" in m and "Excel advanced" in m for m in msgs)
+    # 어느 문서들이 충돌했는지 실어야 수집 쪽에서 추적할 수 있다
+    assert any("doc-a" in m and "doc-b" in m for m in msgs)
+
+
+def test_same_document_chunks_are_silent(monkeypatch, caplog):
+    """같은 문서의 청킹 복수 행은 정상 — 경고를 내면 로그가 소음으로 덮인다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert not any("논리 중복" in r.getMessage() for r in caplog.records)
+
+
+def test_three_column_rows_still_load(monkeypatch):
+    """parent_id 없는 3튜플(구 스텁·구 호출부)도 깨지지 않는다 — 하위호환."""
+    rows = [("Excel advanced", "Open", {"schema": {"name": "Open", "parameters": [{"name": "session"}]}})]
+    cat = _catalog_with(rows, monkeypatch)
+    assert cat.get_action_schema("Excel advanced", "Open")["parameters"] == [{"name": "session"}]

@@ -133,23 +133,43 @@ class BackendCatalog:
         try:
             with conn.cursor() as cur:
                 cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
+                # ORDER BY 없이는 (pkg, act) 중복 시 어느 행을 채택할지가 DB 반환 순서에
+                # 달려 빌드·프로세스마다 스펙이 흔들린다 — 재현 가능한 순서로 고정한다.
+                # parent_id를 chunk_index보다 앞에 두어 같은 문서의 청크가 붙어 있게 한다.
                 cur.execute(
                     """
-                    SELECT package_name, action_name, metadata
+                    SELECT package_name, action_name, metadata, parent_id
                     FROM rag_documents
                     WHERE source_type = 'action_schema'
                       AND package_name IS NOT NULL
                       AND action_name IS NOT NULL
+                    ORDER BY package_name, action_name, parent_id, chunk_index, id
                     """
                 )
                 rows = cur.fetchall()
         finally:
             conn.close()
 
-        for package_name, action_name, metadata in rows:
+        # (pkg, act)당 처음 만난 parent_id. 같은 키에 다른 parent_id가 오면 청킹이 아니라
+        # 서로 다른 문서가 같은 액션 이름으로 정규화된 '논리 중복'이다(수집 쪽 M4).
+        first_parent: dict[tuple[str, str], str | None] = {}
+        conflicts: dict[tuple[str, str], set[str]] = {}
+
+        for row in rows:
+            # 컬럼 수에 관대하게 언팩 — parent_id 없이 3튜플을 주는 기존 스텁/구 호출부와 호환.
+            package_name, action_name, metadata = row[0], row[1], row[2]
+            parent_id = row[3] if len(row) > 3 else None
             key = (package_name, action_name)
+            if key in first_parent:
+                if parent_id != first_parent[key]:
+                    # 같은 (pkg, act)인데 출처 문서가 다르다 → 파라미터 집합이 다를 수 있다.
+                    conflicts.setdefault(key, {str(first_parent[key])}).add(str(parent_id))
+            else:
+                first_parent[key] = parent_id
             if key in index and not index[key].get("params_unknown"):
-                # 청킹으로 (pkg, act)당 여러 행이 있을 수 있으나 metadata.schema는 동일 — 첫 행이면 충분.
+                # 정렬 순서상 첫 행을 채택한다. 대다수는 같은 문서의 청킹 복수 행이라
+                # metadata.schema가 동일하지만, 위 논리 중복은 schema가 서로 달라 뒤 행이
+                # 버려진다 — 조용히 넘기지 않고 적재 끝에서 경고로 남긴다.
                 continue
             if isinstance(metadata, str):  # jsonb는 dict로 오지만 드라이버 차이에 방어적으로
                 try:
@@ -177,6 +197,17 @@ class BackendCatalog:
                 spec["params_unknown"] = True
             index[key] = spec
 
+        for (package_name, action_name), parents in sorted(conflicts.items()):
+            # 채택 행이 바뀌면 검수(R2/R3)가 실존 파라미터를 '스펙에 없음'으로 오판할 수
+            # 있다 — 수집 쪽에서 이름 정규화를 고칠 때까지 발현 여부를 로그로 관측한다.
+            logger.warning(
+                "카탈로그 논리 중복 — (%s, %s)에 출처 문서 %d개(parent_id=%s). "
+                "정렬 순서상 첫 문서만 채택하므로 나머지 파라미터는 누락된다",
+                package_name,
+                action_name,
+                len(parents),
+                sorted(parents),
+            )
         logger.info("BackendCatalog 적재 완료: 액션 스펙 %d개", len(index))
         return index
 
