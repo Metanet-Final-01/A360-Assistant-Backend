@@ -15,6 +15,7 @@
 """
 
 import time
+import uuid
 
 import fakeredis
 import pytest
@@ -366,8 +367,10 @@ def test_cache_off_never_touches_redis_even_with_url(monkeypatch):
 
 def test_control_error_message_masks_url_password(monkeypatch):
     """control 실패 메시지는 원인 구분이 되도록 예외 메시지를 포함하되(Qodo #380),
-    REDIS_URL의 비밀번호는 마스킹돼야 한다 — 오류 문자열로 크레덴셜이 새는 선례 방지."""
-    secret = "supersecretpw"
+    REDIS_URL의 비밀번호는 마스킹돼야 한다 — 오류 문자열로 크레덴셜이 새는 선례 방지.
+
+    비밀번호는 런타임 생성(하드코딩 리터럴은 시크릿 스캐너 규칙 위반 — Qodo 3차)."""
+    secret = "pw-" + uuid.uuid4().hex[:12]
 
     def _raising_factory(url, **kw):
         raise ConnectionError(f"AUTH failed connecting with password {secret} to host")
@@ -387,7 +390,7 @@ def test_control_error_message_masks_url_password(monkeypatch):
 def test_password_at_truncation_boundary_never_leaks(monkeypatch):
     """마스킹은 절단(300자)보다 먼저여야 한다 (Qodo #380 2차) — 순서가 반대면 경계에 걸친
     비밀번호의 앞부분 조각이 마스킹을 피해 그대로 나간다."""
-    secret = "boundarysecretpw"
+    secret = "pw-" + uuid.uuid4().hex[:12]
     # 예외 메시지의 290자 지점에서 비밀번호가 시작되게 구성 — 절단(300자) 경계에 걸친다
     filler = "x" * (290 - len("ConnectionError: "))
 
@@ -405,6 +408,50 @@ def test_password_at_truncation_boundary_never_leaks(monkeypatch):
     assert secret not in msg
     # 부분 조각도 안 된다 — 절단이 먼저면 secret[:10] 같은 앞조각이 남는다
     assert secret[:8] not in msg
+
+
+def test_masks_percent_encoded_and_decoded_password_forms(monkeypatch):
+    """마스킹은 현재 URL 비밀번호의 **디코드형과 원문(퍼센트 인코딩)형 둘 다** 지워야 한다
+    (Qodo #380 3차) — redis-py 오류는 디코드형을, 원문 URL 포함 오류는 인코딩형을 싣는다."""
+    raw_secret = f"p%40ss-{uuid.uuid4().hex[:8]}"       # %40 = '@'의 인코딩
+    decoded_secret = raw_secret.replace("%40", "@")
+    url = f"redis://user:{raw_secret}@dead:6379/0"
+
+    def _raising_factory(u, **kw):
+        raise ConnectionError(f"auth failed: url={url} decoded={decoded_secret}")
+
+    monkeypatch.setenv("RAG_CACHE_ENABLED", "true")
+    monkeypatch.setenv("REDIS_URL", url)
+    monkeypatch.setattr(rag_cache, "_make_redis_client", _raising_factory)
+    monkeypatch.setattr(rag_cache, "_CONTROL_RETRY_BASE_SEC", 0.01)
+
+    with pytest.raises(rag_cache.CacheInvalidationError) as e:
+        rag_cache.publish_generation()
+    msg = str(e.value)
+    assert raw_secret not in msg and decoded_secret not in msg
+    assert "***" in msg
+
+
+def test_masks_rotated_credentials_appearing_as_url(monkeypatch):
+    """현재 설정과 **다른** URL의 크레덴셜(회전 전 값 등)도 URL 형태로 메시지에 실리면
+    일반 패턴이 마스킹해야 한다 (Qodo #380 3차) — 리터럴 replace만으로는 못 가리는 표면."""
+    old_secret = "old-" + uuid.uuid4().hex[:10]
+
+    def _raising_factory(u, **kw):
+        raise ConnectionError(
+            f"failover from redis://user:{old_secret}@old-host:6379/0 refused"
+        )
+
+    monkeypatch.setenv("RAG_CACHE_ENABLED", "true")
+    monkeypatch.setenv("REDIS_URL", "redis://user:current-pw@new-host:6379/0")
+    monkeypatch.setattr(rag_cache, "_make_redis_client", _raising_factory)
+    monkeypatch.setattr(rag_cache, "_CONTROL_RETRY_BASE_SEC", 0.01)
+
+    with pytest.raises(rag_cache.CacheInvalidationError) as e:
+        rag_cache.publish_generation()
+    msg = str(e.value)
+    assert old_secret not in msg
+    assert "old-host" in msg                            # 호스트는 남는다 — 원인 추적용
 
 
 def test_memory_backend_when_url_unset(monkeypatch):

@@ -82,6 +82,7 @@ import logging
 import math
 import os
 import random
+import re
 import threading
 import time
 from typing import Any
@@ -236,27 +237,52 @@ def _control_client() -> Any:
     return _make_redis_client(url, timeout=_CONTROL_TIMEOUT_SEC)
 
 
+# 메시지 안의 **어떤** URL이든 userinfo 비밀번호를 지우는 일반 패턴 — 현재 REDIS_URL과
+# 무관하게(회전된 옛 크레덴셜, 다른 인코딩 표현) URL 형태로 나타나면 걸린다 (Qodo #380 3차).
+_URL_CRED_RE = re.compile(r"(://[^/@\s:]+:)[^@\s]+(@)")
+
+
 def _safe_err(exc: Exception) -> str:
     """예외를 운영자용 문자열로 — **URL 크레덴셜은 마스킹**한다 (Qodo #380).
 
     타입만 남기면(기존) 인증 실패·DNS·타임아웃이 구분이 안 되고, 메시지를 통째로 남기면
     REDIS_URL의 비밀번호가 오류 문자열에 실려 나올 수 있다(SLACK 웹훅 유출 선례, PR#263·#288
-    에서 타입 중심으로 줄였던 이유). 절충: 메시지를 포함하되 URL의 password 부분을 지운다.
+    에서 타입 중심으로 줄였던 이유). 절충: 메시지를 포함하되 크레덴셜을 지운다. 3겹:
+
+    ① 일반 URL userinfo 패턴 — 현재 설정과 무관한 URL(회전 전 크레덴셜 포함)도 URL 형태면 마스킹
+    ② 현재 URL 비밀번호의 **디코드형**(urlsplit이 %XX를 푼 값 — redis-py 오류가 이 형태를 실음)
+    ③ 현재 URL 비밀번호의 **원문형**(퍼센트 인코딩 그대로 — 원문 URL이 통째로 실리는 경우)
+
+    한계(정직하게): 회전된 **옛** 비밀번호가 URL 문맥 없이 단독 문자열로 실리는 경우는 못
+    가린다 — 그 값을 알 방법이 없다. ①이 URL 형태는 덮으므로 실질 표면은 그 좁은 틈뿐이다.
+
+    ⚠️ 마스킹이 절단(300자)보다 **먼저**다 (Qodo #380 2차): 순서가 반대면 경계에 걸친
+       비밀번호의 잘린 조각이 replace에 안 걸린다 — 자른 뒤에는 "전체 비밀번호"가 존재하지
+       않으므로 마스킹이 원리적으로 불가능하다.
     """
-    # ⚠️ 마스킹이 절단보다 **먼저**다 (Qodo #380 2차): 순서가 반대면 비밀번호가 300자
-    #    경계에 걸쳤을 때 잘린 조각이 replace에 안 걸려 부분 유출된다 — 자른 뒤에는
-    #    "전체 비밀번호"가 존재하지 않으므로 마스킹이 원리적으로 불가능하다.
     msg = f"{type(exc).__name__}: {exc}"
+    msg = _URL_CRED_RE.sub(r"\1***\2", msg)
     url = _redis_url()
     if url:
+        candidates: set[str] = set()
         try:
-            from urllib.parse import urlsplit  # noqa: PLC0415
+            from urllib.parse import unquote, urlsplit  # noqa: PLC0415
 
-            password = urlsplit(url).password
-            if password:
-                msg = msg.replace(password, "***")
+            # ⚠️ urlsplit().password는 퍼센트 인코딩을 **풀지 않은 원문**이다 — 디코드형은
+            #    redis-py가 unquote한 값으로 오류에 실리므로 둘 다 후보에 넣는다.
+            raw_pw = urlsplit(url).password
+            if raw_pw:
+                candidates.add(raw_pw)
+                candidates.add(unquote(raw_pw))
         except ValueError:
             pass
+        if "://" in url and "@" in url:
+            userinfo = url.split("://", 1)[1].rsplit("@", 1)[0]
+            if ":" in userinfo:
+                candidates.add(userinfo.split(":", 1)[1])
+        for secret in candidates:
+            if secret:
+                msg = msg.replace(secret, "***")
     return msg[:300]
 
 
