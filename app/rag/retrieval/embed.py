@@ -291,7 +291,7 @@ def embed_query(text: str) -> list[float]:
     from app.services import rag_cache
 
     key = rag_cache.embedding_key(text, config.EMBEDDING_MODEL, config.EMBEDDING_DIM)
-    cached = rag_cache.get_embedding(key)
+    cached = rag_cache.get_embedding(key, expected_dim=config.EMBEDDING_DIM)
     if cached is not None:
         return cached
 
@@ -348,7 +348,7 @@ async def embed_query_async(text: str, client: httpx.AsyncClient | None = None) 
     from app.services import rag_cache
 
     key = rag_cache.embedding_key(text, config.EMBEDDING_MODEL, config.EMBEDDING_DIM)
-    cached = rag_cache.get_embedding(key)
+    cached = rag_cache.get_embedding(key, expected_dim=config.EMBEDDING_DIM)
     if cached is not None:
         return cached
 

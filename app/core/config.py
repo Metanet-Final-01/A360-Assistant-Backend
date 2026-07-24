@@ -140,6 +140,8 @@ REGISTRY: dict[str, EnvSpec] = {
     "RAG_CACHE_MAXSIZE": EnvSpec("2048", cast=int, group="rag", doc="검색 캐시 항목 상한(인프로세스 전용)"),
     "REDIS_URL": EnvSpec("", group="rag", secret=True, dynamic=True,
                          doc="RAG 캐시 공유 백엔드 (RPA-274). 미설정=인프로세스. URL에 비밀번호가 실릴 수 있어 secret"),
+    "RAG_CACHE_PENDING_TTL_SECONDS": EnvSpec("21600", cast=int, group="rag",
+        doc="실패한 ingest의 캐싱 차단 한도(초) — pending 마커 만료 (RPA-274). 그 안에 재실행이 운영 계약"),
     "GITHUB_TOKEN": EnvSpec(None, group="rag", secret=True, doc="패키지 JAR 수집용 GitHub 토큰"),
     "CR_URL": EnvSpec("", group="rag", doc="Control Room URL (패키지 수집)"),
     "CR_USERNAME": EnvSpec("", group="rag", doc="Control Room 사용자"),

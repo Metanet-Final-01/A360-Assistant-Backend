@@ -23,6 +23,11 @@ services:
       #    config가 localhost:9200으로 폴백해 BM25가 또 조용히 죽는다(CodeRabbit #226). 그래서
       #    여기서 .env 값을 required 치환으로 명시 — 없으면 `docker compose up`이 즉시 실패한다.
       OPENSEARCH_HOST: ${OPENSEARCH_HOST:?.env에 OPENSEARCH_HOST(공유 Bonsai URL)를 설정하세요}
+      # RAG 캐시 Redis (RPA-274): .env의 REDIS_URL은 호스트 관점(localhost)이라 컨테이너
+      # 안에서는 backend 자신을 가리킨다 — 설정돼 있으면 compose 서비스 DNS로 재작성한다
+      # (미설정이면 빈 값 그대로 = 인프로세스 캐시). 컨테이너가 외부 Redis(ElastiCache 등)를
+      # 직접 봐야 하는 예외만 CONTAINER_REDIS_URL로 명시한다.
+      REDIS_URL: ${CONTAINER_REDIS_URL:-${REDIS_URL:+redis://redis:6379/0}}
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
@@ -50,19 +55,26 @@ services:
       timeout: 5s
       retries: 10
 
-  # RAG 캐시 공유 백엔드 (RPA-274, opt-in) — 앱은 REDIS_URL이 설정된 경우에만 이걸 본다.
-  # 미설정이면 인프로세스 캐시로 동작하므로 이 서비스가 안 떠도 아무것도 저하되지 않는다
-  # (fail-open). 로컬에서 Redis 경로를 써보려면: .env에 REDIS_URL=redis://localhost:6379/0
+  # RAG 캐시 공유 백엔드 (RPA-274) — **opt-in profile**: 기본 `docker compose up`에선 안 뜬다.
+  # 켜려면: `docker compose --profile redis up -d redis` + .env에 REDIS_URL=redis://localhost:6379/0
+  # 앱은 REDIS_URL이 설정된 경우에만 이걸 보고, 미설정·미기동이면 인프로세스 캐시로
+  # 동작한다(fail-open) — opensearch 프로파일과 같은 관례.
+  #
+  # 이미지: Valkey(BSD-3-Clause) — Redis 7.4+는 RSALv2/SSPLv1 듀얼 라이선스로 전환됐고,
+  # 운영 후보가 ElastiCache **Valkey**라 로컬도 같은 엔진으로 맞춘다(단가도 Valkey가 쌈).
+  # 태그+digest 고정: floating tag(redis:7-alpine)는 어느 날 다른 바이너리가 된다.
   redis:
-    image: redis:7-alpine
+    image: valkey/valkey:8.1.3-alpine@sha256:d827e7f7552cdee40cc7482dbae9da020f42bc47669af6f71182a4ef76a22773
     container_name: a360-redis
+    profiles: ["redis"]
     # 캐시 전용이라 지속화(AOF/RDB) 불필요 — 재시작하면 비는 게 정상이고 그래도 동작한다.
     # maxmemory: TTL만으로도 상한이 잡히지만, 이상 폭주 시 OOM 대신 LRU 퇴출로 저하되게 한다.
-    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: valkey-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      # 호스트 바인딩은 루프백만 — LAN에 무인증 캐시를 여는 실수 방지.
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
