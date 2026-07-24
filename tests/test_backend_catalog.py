@@ -427,3 +427,44 @@ def test_three_column_rows_still_load(monkeypatch):
     rows = [("Excel advanced", "Open", {"schema": {"name": "Open", "parameters": [{"name": "session"}]}})]
     cat = _catalog_with(rows, monkeypatch)
     assert cat.get_action_schema("Excel advanced", "Open")["parameters"] == [{"name": "session"}]
+
+
+def test_logical_duplicate_detected_even_when_parent_id_is_null(monkeypatch, caplog):
+    """parent_id는 나중에 추가된 nullable 컬럼이라 레거시 행이 전부 NULL이다 — 그걸 판정
+    기준으로 삼으면 서로 다른 문서도 None == None으로 같아 보여 관측이 무력화된다(Qodo)."""
+    rows = [
+        _schema_row("Excel advanced", "Open", None, [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", None, [{"name": "완전히_다른_파라미터"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert any("논리 중복" in r.getMessage() for r in caplog.records)
+
+
+def test_same_params_from_different_documents_is_silent(monkeypatch, caplog):
+    """출처가 둘이어도 파라미터 집합이 같으면 검수 결과가 달라지지 않는다 — 무해하므로 침묵."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": "session"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert not any("논리 중복" in r.getMessage() for r in caplog.records)
+
+
+def test_warning_names_the_actually_adopted_source(monkeypatch, caplog):
+    """첫 행이 스펙 미상이면 뒤 행이 채택된다 — 경고가 '첫 문서 채택'이라고 단정하면
+    실제 채택 출처와 어긋나 수집 디버깅을 오도한다(Qodo)."""
+    rows = [
+        ("Excel advanced", "Open", {"schema": None}, "doc-unknown"),      # 스펙 미상 → 채택 안 됨
+        _schema_row("Excel advanced", "Open", "doc-real", [{"name": "session"}]),   # 실제 채택
+        _schema_row("Excel advanced", "Open", "doc-other", [{"name": "다름"}]),      # 버려짐
+    ]
+    cat = _catalog_with(rows, monkeypatch)
+    with caplog.at_level("WARNING"):
+        index = cat._load()
+
+    assert index[("Excel advanced", "Open")]["parameters"] == [{"name": "session"}]
+    msg = next(r.getMessage() for r in caplog.records if "논리 중복" in r.getMessage())
+    assert "doc-real" in msg      # 실제 채택된 출처를 지목한다
+    assert "doc-other" in msg     # 충돌 상대도 함께 남긴다
