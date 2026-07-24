@@ -645,6 +645,9 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
         for step in deploy_job["steps"]
         if step.get("name") == "Deploy CloudFormation"
     )
+    deploy_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Deploy CloudFormation"
+    )
     opensearch_step = next(
         step for step in deploy_job["steps"] if step.get("name") == "Validate OpenSearch host"
     )
@@ -653,6 +656,8 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     )
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
     opensearch_parameter = template["Parameters"]["ExternalOpenSearchHost"]
+    opensearch_username_parameter = template["Parameters"]["OpenSearchUsername"]
+    opensearch_password_parameter = template["Parameters"]["OpenSearchPassword"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
         "LaunchTemplateData"
@@ -670,18 +675,41 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert validate_step["env"]["GHCR_READ_TOKEN"] == "${{ secrets.GHCR_READ_TOKEN }}"
     assert '[ -z "$ASSURANCE_WRITER_TOKEN" ]' in validate_step["run"]
     assert '[ -z "$GHCR_READ_TOKEN" ]' in validate_step["run"]
-    assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
+    deploy_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Deploy CloudFormation"
+    )
+    assert deploy_step["env"]["OPENSEARCH_USERNAME"] == "${{ secrets.OPENSEARCH_USERNAME }}"
+    assert deploy_step["env"]["OPENSEARCH_PASSWORD"] == "${{ secrets.OPENSEARCH_PASSWORD }}"
+    assert 'AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN"' in deploy_script
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
-    assert 'ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}"' in deploy_script
+    assert 'ExternalOpenSearchHost="$OPENSEARCH_HOST"' in deploy_script
+    assert 'OpenSearchUsername="$OPENSEARCH_USERNAME"' in deploy_script
+    assert 'OpenSearchPassword="$OPENSEARCH_PASSWORD"' in deploy_script
+    assert '${{ secrets.OPENSEARCH_USERNAME }}' not in deploy_script
+    assert '${{ secrets.OPENSEARCH_PASSWORD }}' not in deploy_script
     assert opensearch_step["env"]["OPENSEARCH_HOST"] == "${{ secrets.OPENSEARCH_HOST }}"
+    assert opensearch_step["env"]["OPENSEARCH_USERNAME"] == "${{ secrets.OPENSEARCH_USERNAME }}"
+    assert opensearch_step["env"]["OPENSEARCH_PASSWORD"] == "${{ secrets.OPENSEARCH_PASSWORD }}"
     assert "^https?://[^[:space:]]+$" in opensearch_step["run"]
+    assert "OPENSEARCH_USERNAME must not contain whitespace." in opensearch_step["run"]
+    assert "OPENSEARCH_USERNAME must not contain double quotes or backslashes." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD must not contain double quotes or backslashes." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD must not contain newlines." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD is required when OPENSEARCH_USERNAME is set." in opensearch_step["run"]
+    assert "OPENSEARCH_USERNAME is required when OPENSEARCH_PASSWORD is set." in opensearch_step["run"]
 
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
     assert opensearch_parameter["NoEcho"] is True
     assert opensearch_parameter["AllowedPattern"] == "^https?://[^\\s]+$"
+    assert opensearch_username_parameter["NoEcho"] is True
+    assert opensearch_username_parameter["AllowedPattern"] == "^$|^[^\"\\\\\\s]+$"
+    assert opensearch_password_parameter["NoEcho"] is True
+    assert opensearch_password_parameter["AllowedPattern"] == "^$|^[^\"\\\\\\r\\n]+$"
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
+    assert '"OPENSEARCH_USERNAME": "${OpenSearchUsername}"' in app_secret
+    assert '"OPENSEARCH_PASSWORD": "${OpenSearchPassword}"' in app_secret
     assert "GithubUsername" not in template["Parameters"]
     assert "GITHUB_USERNAME" not in app_secret
     assert "GITHUB_USERNAME" not in user_data
@@ -731,6 +759,9 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
         for step in deploy_job["steps"]
         if step.get("name") == "Deploy CloudFormation"
     )
+    deploy_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Deploy CloudFormation"
+    )
     token_parameter = template["Parameters"]["OpsApiKey"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
@@ -743,7 +774,9 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     assert '[ -z "$OPS_API_KEY" ]' in validate_step["run"]
     assert "exit 1" in validate_step["run"]
     assert "secrets.OPS_API_KEY" not in validate_step["run"]
-    assert 'OpsApiKey="${{ secrets.OPS_API_KEY }}"' in deploy_script
+    assert deploy_step["env"]["OPS_API_KEY"] == "${{ secrets.OPS_API_KEY }}"
+    assert 'OpsApiKey="$OPS_API_KEY"' in deploy_script
+    assert '${{ secrets.OPS_API_KEY }}' not in deploy_script
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
     assert '"OPS_API_KEY": "${OpsApiKey}"' in app_secret
