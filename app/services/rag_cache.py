@@ -236,6 +236,27 @@ def _control_client() -> Any:
     return _make_redis_client(url, timeout=_CONTROL_TIMEOUT_SEC)
 
 
+def _safe_err(exc: Exception) -> str:
+    """예외를 운영자용 문자열로 — **URL 크레덴셜은 마스킹**한다 (Qodo #380).
+
+    타입만 남기면(기존) 인증 실패·DNS·타임아웃이 구분이 안 되고, 메시지를 통째로 남기면
+    REDIS_URL의 비밀번호가 오류 문자열에 실려 나올 수 있다(SLACK 웹훅 유출 선례, PR#263·#288
+    에서 타입 중심으로 줄였던 이유). 절충: 메시지를 포함하되 URL의 password 부분을 지운다.
+    """
+    msg = f"{type(exc).__name__}: {exc}"[:300]
+    url = _redis_url()
+    if url:
+        try:
+            from urllib.parse import urlsplit  # noqa: PLC0415
+
+            password = urlsplit(url).password
+            if password:
+                msg = msg.replace(password, "***")
+        except ValueError:
+            pass
+    return msg
+
+
 def _control_call(op_name: str, fn) -> Any:
     """유한 재시도(0.5s→1s→2s) 후 실패면 CacheInvalidationError. 성공/실패 모두 로그."""
     last_exc: Exception | None = None
@@ -255,12 +276,12 @@ def _control_call(op_name: str, fn) -> Any:
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             logger.warning("rag_cache control '%s' 시도 %d/%d 실패: %s",
-                           op_name, attempt, _CONTROL_ATTEMPTS, type(exc).__name__)
+                           op_name, attempt, _CONTROL_ATTEMPTS, _safe_err(exc))
             if attempt < _CONTROL_ATTEMPTS:
                 time.sleep(_CONTROL_RETRY_BASE_SEC * (2 ** (attempt - 1)))
     raise CacheInvalidationError(
         f"rag_cache control '{op_name}' {_CONTROL_ATTEMPTS}회 실패 "
-        f"(마지막: {type(last_exc).__name__}) — 캐시 세대가 코퍼스와 어긋났을 수 있다"
+        f"(마지막: {_safe_err(last_exc)}) — 캐시 세대가 코퍼스와 어긋났을 수 있다"
     ) from last_exc
 
 
@@ -509,6 +530,12 @@ def search_key(query: str, k: int, source_types: tuple[str, ...] | None, params:
         getattr(params, "bm25_weight", None),
         embed_model, rerank_model,
     )
+    # 캐시 OFF면 세대 조회(=Redis GET)를 하지 않는다 (Qodo #380): 호출부(rag.py)는 키를
+    # 무조건 만들므로, 여기서 I/O를 타면 REDIS_URL만 설정된 캐시-off 배포의 검색이
+    # Redis 지연·장애의 영향을 받는다 — "끄면 기존 동작 그대로" 계약 위반이다.
+    # 키 세그먼트는 뭐가 되든 무관하다(get/put이 enabled()에서 이미 no-op).
+    if not enabled():
+        return f"{_ns()}:search:off:{d}"
     gen = _current_generation()
     seg = f"g{gen}" if gen is not None else "nogen"
     return f"{_ns()}:search:{seg}:{d}"

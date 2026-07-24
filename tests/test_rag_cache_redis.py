@@ -336,6 +336,54 @@ def test_stats_distinguishes_configured_and_circuit(fake_redis, monkeypatch):
 
 # ── 인프로세스 모드 회귀 ─────────────────────────────────────────────────────
 
+def test_cache_off_never_touches_redis_even_with_url(monkeypatch):
+    """캐시 OFF + REDIS_URL 설정 조합에서 검색 경로가 Redis에 **한 번도** 안 닿아야 한다
+    (Qodo #380). 호출부(rag.py)는 키를 무조건 만들므로 search_key의 세대 조회가 I/O면
+    '끄면 기존 동작 그대로' 계약이 깨진다 — 팩토리 호출 0회가 그 증명이다."""
+    calls = {"n": 0}
+
+    def _counting_factory(url, **kw):
+        calls["n"] += 1
+        return fakeredis.FakeRedis(decode_responses=True)
+
+    monkeypatch.setenv("RAG_CACHE_ENABLED", "")           # OFF (미설정과 동일)
+    monkeypatch.setenv("REDIS_URL", "redis://set-but-off:6379/0")
+    monkeypatch.setattr(rag_cache, "_make_redis_client", _counting_factory)
+    monkeypatch.setattr(rag_cache, "_redis_client", None)
+    monkeypatch.setattr(rag_cache, "_redis_url_cached", None)
+    monkeypatch.setattr(rag_cache, "_redis_down_until", 0.0)
+
+    sk = rag_cache.search_key("q", 5, None, _Params(), "e", "r")
+    assert rag_cache.get_search(sk) is None
+    assert rag_cache.put_search(sk, [{"id": 1, "content": "c", "score": 0.5}]) is None
+    ek = rag_cache.embedding_key("q", "m", 8)
+    assert rag_cache.get_embedding(ek) is None
+    rag_cache.put_embedding(ek, [1.0])
+
+    assert calls["n"] == 0                                 # 클라이언트 생성조차 없어야 한다
+    assert ":search:off:" in sk                            # 세대 대신 고정 세그먼트
+
+
+def test_control_error_message_masks_url_password(monkeypatch):
+    """control 실패 메시지는 원인 구분이 되도록 예외 메시지를 포함하되(Qodo #380),
+    REDIS_URL의 비밀번호는 마스킹돼야 한다 — 오류 문자열로 크레덴셜이 새는 선례 방지."""
+    secret = "supersecretpw"
+
+    def _raising_factory(url, **kw):
+        raise ConnectionError(f"AUTH failed connecting with password {secret} to host")
+
+    monkeypatch.setenv("RAG_CACHE_ENABLED", "true")
+    monkeypatch.setenv("REDIS_URL", f"redis://user:{secret}@dead:6379/0")
+    monkeypatch.setattr(rag_cache, "_make_redis_client", _raising_factory)
+    monkeypatch.setattr(rag_cache, "_CONTROL_RETRY_BASE_SEC", 0.01)
+
+    with pytest.raises(rag_cache.CacheInvalidationError) as e:
+        rag_cache.publish_generation()
+    msg = str(e.value)
+    assert "ConnectionError" in msg and "AUTH failed" in msg  # 원인 구분 가능
+    assert secret not in msg and "***" in msg                 # 크레덴셜은 마스킹
+
+
 def test_memory_backend_when_url_unset(monkeypatch):
     monkeypatch.setenv("RAG_CACHE_ENABLED", "true")
     monkeypatch.setenv("REDIS_URL", "")
