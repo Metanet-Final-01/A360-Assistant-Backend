@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -113,6 +114,40 @@ def get_session(
 ) -> dict:
     """세션 상세(메타)."""
     return _session_out(_owned_session_or_404(session_id, db, user))
+
+
+# 세션이 가질 수 있는 solution 값의 상한 — 자유 문자열을 그대로 받으면 컬럼(String(50))을
+# 넘기거나 오타가 세션에 굳어 흐름도 생성 경로가 통째로 갈린다. 길이·문자만 좁게 검증한다
+# (알려진 목록으로 제한하지는 않는다 — 새 솔루션을 코드 배포 없이 받을 수 있어야 한다).
+_SOLUTION_RE = re.compile(r"^[a-z0-9][a-z0-9 ._-]{0,48}$")
+
+
+class SessionPatch(BaseModel):
+    """세션 부분 수정 — 지금은 solution만."""
+
+    solution: str
+
+
+@router.patch("/{session_id}")
+def patch_session(
+    session_id: str,
+    payload: SessionPatch,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """세션의 solution을 바꾼다 (RPA-285).
+
+    타 솔루션 모드는 대화에서 카탈로그가 확인되면 **자동으로** 확정된다. 자동 확정은
+    마찰이 없는 대신 오탐 가능성이 있어, 사용자가 스스로 되돌릴 수단이 반드시 있어야 한다
+    — 이 엔드포인트가 그 수단이다("a360"으로 PATCH하면 원복). 프론트 대응은 RPA-286.
+    """
+    session = _owned_session_or_404(session_id, db, user)  # 소유권 검사
+    solution = (payload.solution or "").strip().lower()
+    if not _SOLUTION_RE.match(solution):
+        raise HTTPException(status_code=422, detail="solution 형식이 올바르지 않습니다")
+    session.solution = solution
+    db.commit()
+    return _session_out(session)
 
 
 @router.delete("/{session_id}", status_code=204)
@@ -493,6 +528,7 @@ def _get_agent_turn():
           "updated_recommendation": {...} | None,   # type=="recommendation"
           "change_summary": str | None,             # type=="recommendation"
           "compact": {...} | None,                  # type=="compact" (고정 섹션 JSON)
+          "detected_solution": str | None,          # 타 솔루션 카탈로그 감지 시 (RPA-285)
       }
     agent가 stream_agent_turn을 export하는 순간 이 라우트는 코드 변경 없이 활성화된다.
     """
@@ -669,6 +705,32 @@ def _validate_compact_payload(cp) -> None:
             raise ValueError("compact verbatim 항목은 {kind, content} 객체여야 합니다")
 
 
+def _apply_detected_solution(session_id: uuid.UUID, detected: str) -> str | None:
+    """감지된 솔루션을 세션에 확정한다. 실제로 바꿨으면 그 값, 아니면 None (RPA-285).
+
+    이미 a360이 아닌 세션은 건드리지 않는다 — 사용자가 PATCH로 정했거나 이전 턴에 확정된
+    값이 감지 결과보다 우선한다(오탐이 사용자 선택을 덮어쓰면 되돌려도 다시 뒤집힌다).
+    실패는 삼킨다: solution 확정은 부가 기능이라 이것 때문에 턴 산출을 잃으면 안 된다.
+    """
+    from app.db import SessionLocal
+
+    if not _SOLUTION_RE.match(detected):
+        logger.warning("감지된 solution 형식이 올바르지 않아 무시합니다: %r", detected[:60])
+        return None
+    try:
+        with SessionLocal() as db:
+            session = db.get(models.AnalysisSession, session_id)
+            if session is None or session.solution != "a360":
+                return None
+            session.solution = detected
+            db.commit()
+            logger.info("세션 %s solution 확정: %s", session_id, detected)
+            return detected
+    except Exception:  # noqa: BLE001 — 확정 실패가 턴 저장을 깨뜨리지 않게
+        logger.exception("세션 solution 확정 실패 (무시)")
+        return None
+
+
 def _save_compact(session_id: uuid.UUID, payload: dict) -> str:
     """대화 압축본을 session_compacts에 저장한다 (append-only — 최신 행이 다음 턴에 주입된다)."""
     from app.db import SessionLocal
@@ -755,6 +817,16 @@ def _persist_turn_result(
         "sources": result.get("sources") or [],
         "session_id": str(session_id),
     }
+
+    # 세션 solution 자동 확정 (RPA-285) — 에이전트가 대화에서 타 솔루션 카탈로그를 확인하면
+    # 그 신호를 올린다. 세션 시작 시점에 "어떤 RPA 쓰세요?"를 묻지 않아 마찰이 없는 대신,
+    # 오탐 시 사용자가 PATCH /api/sessions/{id}로 되돌릴 수 있어야 한다(프론트는 RPA-286).
+    # 이미 a360이 아닌 세션은 건드리지 않는다 — 사용자가 명시적으로 정한 값이 이긴다.
+    detected = result.get("detected_solution")
+    if detected:
+        applied = _apply_detected_solution(session_id, detected)
+        if applied:
+            out["solution"] = applied
 
     # 분석본 — non-null이면 저장 (type 무관). 저장할 파싱 완료 문서가 없으면 계약 위반.
     new_analysis_id = None

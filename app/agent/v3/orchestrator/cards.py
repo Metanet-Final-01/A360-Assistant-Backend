@@ -271,7 +271,6 @@ async def fill_cards_node(state: dict) -> dict:
     구조 변경이 필요할 수 있어 edit 노드에 합성 메시지로 위임한다.
     반환은 다른 브랜치 노드와 같은 계약(turn_type 등) — 실행 사실이 type을 찍는다.
     """
-    from ..verify.catalog import get_catalog
     from .harness import collect_violations
     from .state import TYPE_ANSWER, TYPE_RECOMMENDATION
 
@@ -317,7 +316,12 @@ async def fill_cards_node(state: dict) -> dict:
     # L0/L1 재검증(무료) — 값이 채워지며 R3가 줄어드는 것을 확인하고 잔여 위반을 갱신한다.
     # confidence 전면 재산정은 하지 않는다: RAG sink가 없는 경로라 재산정하면 근거 점수가
     # 리셋된다. R3는 원래 감점 대상이 아니므로 카드 채움이 액션 confidence를 바꾸지 않는다.
-    violations = collect_violations(flow, get_catalog())
+    # 세션 어휘로 재검증한다 — 타 솔루션 세션에서 A360 카탈로그로 검수하면 사용자가 준
+    # 액션이 전부 R1 위반으로 찍힌다 (RPA-285). 카탈로그를 못 찾으면 검수를 생략한다.
+    from .generate import resolve_catalog_context
+
+    ctx = await resolve_catalog_context(state)
+    violations = collect_violations(flow, ctx.catalog) if ctx is not None else []
 
     resolved = sum(1 for c in flow.get("needs_input") or [] if c.get("resolved"))
     total = len(flow.get("needs_input") or [])

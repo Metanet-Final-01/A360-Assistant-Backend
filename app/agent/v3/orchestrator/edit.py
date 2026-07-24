@@ -31,9 +31,8 @@ from app.core.llm import UsageCallbackHandler
 from .. import config
 from ..recommend.graph import _coerce_flow
 from ..recommend.stream import emit, emit_flow_frame
-from ..verify.catalog import get_catalog
 from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
-from .generate import UserCatalog, extract_user_catalog
+from .generate import resolve_catalog_context
 from .harness import attach_confidence, verify_and_repair
 from .render import render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
@@ -306,9 +305,12 @@ async def edit_node(state: TurnState) -> dict:
     반환: {turn_type, recommendation_out?, change_summary?, violations, answer, sources}.
     """
     emit({"event": "stage", "stage": "refining", "message": "흐름도 수정 중"})
-    is_a360 = (state.get("solution") or "a360") == "a360"
+    # 어휘 출처를 정한다 — a360 카탈로그 또는 대화에서 추출한 사용자 카탈로그 (RPA-285).
+    # 카탈로그를 못 찾으면(None) 검수 기준이 없으니 검수를 생략하고 편집만 적용한다.
+    ctx = await resolve_catalog_context(state)
+    is_a360 = ctx is not None and ctx.is_a360
     sink: list[dict] = []
-    tools = build_kb_tools(sink) if is_a360 else []
+    tools = build_kb_tools(sink, ctx) if ctx is not None else []
     llm = _make_llm()
     runnable = llm.bind_tools(tools) if tools else llm
 
@@ -388,17 +390,12 @@ async def edit_node(state: TurnState) -> dict:
 
     # 라이브 렌더: 적용된 수정안을 즉시 프레임으로 흘려보낸다(추천 흐름도 상세 패널이 트리로 표시).
     emit_flow_frame(flow, None, "수정안 구성")
-    if is_a360:
-        result = verify_and_repair(flow, get_catalog())
+    if ctx is not None:
+        result = verify_and_repair(flow, ctx.catalog)
     else:
-        # 타 솔루션: generate와 동일하게 대화(메시지+이력+compact.verbatim)에서 UserCatalog를
-        # 재추출해 검수한다. 카탈로그를 못 찾으면 검수 기준이 없어 생략한다.
-        extraction = extract_user_catalog(state)
-        if extraction.actions:
-            specs = [a.as_spec() for a in extraction.actions]
-            result = verify_and_repair(flow, UserCatalog(specs))
-        else:
-            result = {"flow": flow, "violations": [], "repaired": False}
+        # 타 솔루션 세션인데 대화에서 카탈로그를 못 찾았다 — 검수 기준이 없어 생략한다
+        # (A360 카탈로그로 검수하면 사용자가 준 액션이 전부 R1 위반으로 찍힌다).
+        result = {"flow": flow, "violations": [], "repaired": False}
 
     # 교정이 위반 단계를 재생성하며 바꿨을 수 있는 사용자 지정 값(value_source="user")을 복원한다.
     _restore_user_values(result["flow"], flow)
@@ -409,6 +406,17 @@ async def edit_node(state: TurnState) -> dict:
     # 라이브 렌더: 검수·교정 반영한 최종본을 "완료" 프레임으로 흘려보낸다(done 직전).
     emit_flow_frame(result["flow"], result["violations"], "완료")
     answer = ops.answer or (ops.change_summary or "요청하신 대로 흐름도를 수정했어요.")
+    # 아래 두 단서는 서로 독립이다(RPA-285 미검수 · RPA-282 전제만 갱신) — 둘 다 참이면
+    # 둘 다 덧붙는다. 각각 다른 상황을 알리므로 하나로 합치지 않는다.
+    if ctx is None:
+        # 검수를 아예 못 돌린 채 violations=[]로 내보내면 사용자는 '검수 통과'로 읽는다 —
+        # 이 PR이 없애려던 조용한 오답과 같은 부류다(Qodo 리뷰). 미검수임을 밝힌다.
+        logger.info("카탈로그 부재 — 검수 생략 상태로 수정안 반환")
+        answer += (
+            " 다만 사용 중인 솔루션의 액션 카탈로그를 찾지 못해 **이번 수정은 검수하지 "
+            "않았어요** — 액션 표기나 파라미터가 실제와 맞는지 확인이 필요합니다. "
+            "카탈로그를 알려주시면 검수까지 해드릴게요."
+        )
     # 전제만 갈아끼우고 액션은 그대로인 편집은 '가짜 성공'이 되기 쉽다 — 무엇이 안 바뀌었는지
     # 사용자가 알아야 스스로 판단할 수 있다 (RPA-282). 전제 갱신 자체는 유효하므로 저하시키지
     # 않고 단서만 덧붙인다.
