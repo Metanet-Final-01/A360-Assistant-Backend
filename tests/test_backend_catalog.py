@@ -353,3 +353,143 @@ def test_load_applies_db_timeouts(monkeypatch):
     BackendCatalog().get_action_schema("x", "y")
     assert captured["connect_timeout"] == cat_mod._CATALOG_DB_TIMEOUT_SEC
     assert any("statement_timeout" in s for s in captured["statements"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 적재 순서 결정성 + 논리 중복 관측 (RPA-287)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _schema_row(pkg, act, parent_id, params):
+    """(pkg, act, metadata, parent_id) 4튜플 — 현행 쿼리가 돌려주는 행 모양."""
+    return (pkg, act, {"schema": {"name": act, "parameters": params}}, parent_id)
+
+
+def test_load_adopts_first_row_in_sorted_order(monkeypatch):
+    """정렬은 SQL이 하지만, 채택 규칙이 '첫 행'임을 고정한다 — 뒤 행이 덮어쓰면 안 된다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": "완전히_다른_파라미터"}]),
+    ]
+    cat = _catalog_with(rows, monkeypatch)
+    assert cat.get_action_schema("Excel advanced", "Open")["parameters"] == [{"name": "session"}]
+
+
+def test_load_query_orders_deterministically(monkeypatch):
+    """ORDER BY가 없으면 어느 행이 채택될지가 DB 반환 순서에 달린다 — 쿼리에 고정돼야 한다."""
+    seen = {}
+
+    class _CapturingCursor(_FakeCursor):
+        def execute(self, sql):
+            if "rag_documents" in sql:
+                seen["sql"] = " ".join(sql.split())
+
+    class _CapturingConn(_FakeConn):
+        def cursor(self):
+            return _CapturingCursor(self._rows)
+
+    from app.rag.store import db
+    monkeypatch.setattr(db, "connect", lambda **kw: _CapturingConn([]))
+    BackendCatalog()._load()
+
+    sql = seen["sql"]
+    assert "ORDER BY package_name, action_name, parent_id, chunk_index, id" in sql
+    # parent_id가 chunk_index보다 앞 — 같은 문서의 청크가 흩어지지 않게
+    assert sql.index("parent_id, chunk_index") > 0
+
+
+def test_logical_duplicate_is_warned(monkeypatch, caplog):
+    """같은 (pkg, act)에 출처 문서가 둘 — 조용히 버리지 않고 경고로 남긴다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": "other"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("논리 중복" in m and "Excel advanced" in m for m in msgs)
+    # 어느 문서들이 충돌했는지 실어야 수집 쪽에서 추적할 수 있다
+    assert any("doc-a" in m and "doc-b" in m for m in msgs)
+
+
+def test_same_document_chunks_are_silent(monkeypatch, caplog):
+    """같은 문서의 청킹 복수 행은 정상 — 경고를 내면 로그가 소음으로 덮인다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert not any("논리 중복" in r.getMessage() for r in caplog.records)
+
+
+def test_three_column_rows_still_load(monkeypatch):
+    """parent_id 없는 3튜플(구 스텁·구 호출부)도 깨지지 않는다 — 하위호환."""
+    rows = [("Excel advanced", "Open", {"schema": {"name": "Open", "parameters": [{"name": "session"}]}})]
+    cat = _catalog_with(rows, monkeypatch)
+    assert cat.get_action_schema("Excel advanced", "Open")["parameters"] == [{"name": "session"}]
+
+
+def test_logical_duplicate_detected_even_when_parent_id_is_null(monkeypatch, caplog):
+    """parent_id는 나중에 추가된 nullable 컬럼이라 레거시 행이 전부 NULL이다 — 그걸 판정
+    기준으로 삼으면 서로 다른 문서도 None == None으로 같아 보여 관측이 무력화된다(Qodo)."""
+    rows = [
+        _schema_row("Excel advanced", "Open", None, [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", None, [{"name": "완전히_다른_파라미터"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert any("논리 중복" in r.getMessage() for r in caplog.records)
+
+
+def test_same_params_from_different_documents_is_silent(monkeypatch, caplog):
+    """출처가 둘이어도 파라미터 집합이 같으면 검수 결과가 달라지지 않는다 — 무해하므로 침묵."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": "session"}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert not any("논리 중복" in r.getMessage() for r in caplog.records)
+
+
+def test_warning_names_the_actually_adopted_source(monkeypatch, caplog):
+    """첫 행이 스펙 미상이면 뒤 행이 채택된다 — 경고가 '첫 문서 채택'이라고 단정하면
+    실제 채택 출처와 어긋나 수집 디버깅을 오도한다(Qodo)."""
+    rows = [
+        ("Excel advanced", "Open", {"schema": None}, "doc-unknown"),      # 스펙 미상 → 채택 안 됨
+        _schema_row("Excel advanced", "Open", "doc-real", [{"name": "session"}]),   # 실제 채택
+        _schema_row("Excel advanced", "Open", "doc-other", [{"name": "다름"}]),      # 버려짐
+    ]
+    cat = _catalog_with(rows, monkeypatch)
+    with caplog.at_level("WARNING"):
+        index = cat._load()
+
+    assert index[("Excel advanced", "Open")]["parameters"] == [{"name": "session"}]
+    msg = next(r.getMessage() for r in caplog.records if "논리 중복" in r.getMessage())
+    assert "doc-real" in msg      # 실제 채택된 출처를 지목한다
+    assert "doc-other" in msg     # 충돌 상대도 함께 남긴다
+
+
+def test_non_string_param_name_does_not_break_the_whole_load(monkeypatch):
+    """schema는 수집(LLM 보강 포함)이 만든 외부 데이터라 name이 문자열이 아닐 수 있다.
+    한 행의 이상값이 sorted()를 TypeError로 죽이면 카탈로그 전체가 적재 실패하고,
+    그러면 모든 액션이 '카탈로그에 없음'이 돼 R1이 전부 환각으로 오판한다(Qodo)."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": "session"}, {"name": 1}]),
+        _schema_row("Email", "Send", "doc-b", [{"name": "to"}]),
+    ]
+    index = _catalog_with(rows, monkeypatch)._load()
+    # 이상 행도 살아남고, 무관한 다른 액션이 함께 유실되지 않는다
+    assert ("Excel advanced", "Open") in index
+    assert ("Email", "Send") in index
+
+
+def test_mixed_type_param_names_still_compare(monkeypatch, caplog):
+    """문자열화해도 판정력은 유지된다 — 다른 값은 다른 지문이라 중복이 잡힌다."""
+    rows = [
+        _schema_row("Excel advanced", "Open", "doc-a", [{"name": 1}]),
+        _schema_row("Excel advanced", "Open", "doc-b", [{"name": 2}]),
+    ]
+    with caplog.at_level("WARNING"):
+        _catalog_with(rows, monkeypatch)._load()
+    assert any("논리 중복" in r.getMessage() for r in caplog.records)

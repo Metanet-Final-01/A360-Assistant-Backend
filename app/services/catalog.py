@@ -23,6 +23,26 @@ import time
 
 logger = logging.getLogger(__name__)
 
+
+def _param_names(spec: dict) -> tuple | None:
+    """스펙의 파라미터 이름 집합 (정렬된 튜플). 스펙 미상이면 None — 비교 대상에서 뺀다.
+
+    논리 중복 판정의 기준이다(RPA-287). 파라미터 '집합'만 보는 이유는 검수 R2/R3가 이름
+    존재 여부로 판정하기 때문이다 — 라벨·설명이 달라도 이름이 같으면 검수 결과는 같다.
+
+    이름을 str로 강제한다: schema는 수집 파이프라인(LLM 보강 포함)이 만든 외부 데이터라
+    name이 문자열이 아닐 수 있는데, 그러면 sorted()가 TypeError로 죽고 **카탈로그 적재
+    전체가 무너진다**(모든 액션이 '카탈로그에 없음'이 돼 R1이 전부 환각으로 오판). 이 모듈이
+    이미 지키는 '한 행의 비정상 데이터가 전체 적재를 깨뜨리지 않는다'는 원칙과 같은 취지다.
+    지문은 비교용이라 문자열화해도 판정력이 유지된다(다른 값은 다른 문자열이 된다).
+    """
+    if spec.get("params_unknown"):
+        return None
+    return tuple(sorted(
+        str(p["name"]) for p in (spec.get("parameters") or [])
+        if isinstance(p, dict) and p.get("name")
+    ))
+
 # 인메모리 카탈로그 캐시의 재적재 주기 (RPA-225).
 # 왜 필요한가: 이 캐시는 최초 1회 적재 후 갱신 경로가 없어, 적재(ingest)로 액션이
 # 추가돼도 이미 떠 있는 프로세스는 **영원히** 옛 카탈로그를 봤다. 다중 인스턴스(ASG)면
@@ -133,24 +153,41 @@ class BackendCatalog:
         try:
             with conn.cursor() as cur:
                 cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
+                # ORDER BY 없이는 (pkg, act) 중복 시 어느 행을 채택할지가 DB 반환 순서에
+                # 달려 빌드·프로세스마다 스펙이 흔들린다 — 재현 가능한 순서로 고정한다.
+                # parent_id를 chunk_index보다 앞에 두어 같은 문서의 청크가 붙어 있게 한다.
                 cur.execute(
                     """
-                    SELECT package_name, action_name, metadata
+                    SELECT package_name, action_name, metadata, parent_id
                     FROM rag_documents
                     WHERE source_type = 'action_schema'
                       AND package_name IS NOT NULL
                       AND action_name IS NOT NULL
+                    ORDER BY package_name, action_name, parent_id, chunk_index, id
                     """
                 )
                 rows = cur.fetchall()
         finally:
             conn.close()
 
-        for package_name, action_name, metadata in rows:
+        # 논리 중복 관측 — 같은 (pkg, act)에 **파라미터 집합이 서로 다른** 행이 있는가.
+        #
+        # 판정 기준을 parent_id(출처 문서)가 아니라 파라미터 집합으로 둔다. parent_id는
+        # 나중에 추가된 nullable 컬럼이라 레거시 행이 전부 NULL이고, 그러면 서로 다른
+        # 문서도 None == None으로 같아 보여 관측이 조용히 무력화된다(Qodo 리뷰).
+        # 게다가 우리가 실제로 걱정하는 피해는 '출처가 둘'이 아니라 '채택 행에 따라
+        # 파라미터가 달라져 검수 R2/R3가 오판하는 것'이라, 파라미터 집합이 더 정확한 신호다
+        # (출처가 둘이어도 파라미터가 같으면 무해하다). parent_id는 추적 정보로만 싣는다.
+        adopted_parent: dict[tuple[str, str], str | None] = {}
+        adopted_params: dict[tuple[str, str], tuple | None] = {}
+        conflicts: dict[tuple[str, str], dict] = {}
+
+        for row in rows:
+            # 컬럼 수에 관대하게 언팩 — parent_id 없이 3튜플을 주는 기존 스텁/구 호출부와 호환.
+            package_name, action_name, metadata = row[0], row[1], row[2]
+            parent_id = row[3] if len(row) > 3 else None
             key = (package_name, action_name)
-            if key in index and not index[key].get("params_unknown"):
-                # 청킹으로 (pkg, act)당 여러 행이 있을 수 있으나 metadata.schema는 동일 — 첫 행이면 충분.
-                continue
+
             if isinstance(metadata, str):  # jsonb는 dict로 오지만 드라이버 차이에 방어적으로
                 try:
                     metadata = json.loads(metadata)
@@ -159,24 +196,53 @@ class BackendCatalog:
             # 최상위가 dict가 아니면(배열·문자열·깨진 JSON) schema 없음으로 처리 — 한 행의
             # 비정상 metadata가 전체 적재를 AttributeError로 무너뜨리지 않게 한다.
             schema = metadata.get("schema") if isinstance(metadata, dict) else None
-            if not isinstance(schema, dict):
+            if isinstance(schema, dict):
+                # package/action을 상위 키로 부여해 문서화된 스펙 형태와 맞춘다
+                # (schema에는 두 키가 없으므로 덮어쓰지 않는다).
+                spec = {"package": package_name, "action": action_name, **schema}
+                if spec.get("parameters") is None:
+                    # v2 보강은 '파라미터 미상'을 schema.parameters=None으로 기록한다 — 키를
+                    # 제거해 schema 없는 행과 같은 params_unknown 형태로 정규화한다. None인 채로
+                    # 흘리면 v1/v2 검수의 spec.get("parameters", [])가 None을 받아 순회에서 깨진다.
+                    spec.pop("parameters", None)
+                    spec["params_unknown"] = True
+            else:
                 # schema 없는 행도 어휘로는 실존한다(v2 문서 카탈로그의 보강 미도달 행 —
                 # --enrich 생략 빌드면 액션의 ~92%). parameters 키를 아예 두지 않아
                 # 소비처(.get("parameters"))가 '스펙 미상'(None)을 '파라미터 없음'([])과
-                # 구분하게 한다. 같은 키의 schema 보유 행이 나중에 오면 위에서 덮어쓴다.
-                index.setdefault(key, {"package": package_name, "action": action_name, "params_unknown": True})
-                continue
-            # package/action을 상위 키로 부여해 문서화된 스펙 형태와 맞춘다
-            # (schema에는 두 키가 없으므로 덮어쓰지 않는다).
-            spec = {"package": package_name, "action": action_name, **schema}
-            if spec.get("parameters") is None:
-                # v2 보강은 '파라미터 미상'을 schema.parameters=None으로 기록한다 — 키를
-                # 제거해 schema 없는 행과 같은 params_unknown 형태로 정규화한다. None인 채로
-                # 흘리면 v1/v2 검수의 spec.get("parameters", [])가 None을 받아 순회에서 깨진다.
-                spec.pop("parameters", None)
-                spec["params_unknown"] = True
-            index[key] = spec
+                # 구분하게 한다.
+                spec = {"package": package_name, "action": action_name, "params_unknown": True}
 
+            params = _param_names(spec)
+            # 채택 규칙: 스펙 미상 자리에는 나중에 온 실스펙이 들어온다. 이미 실스펙이 있으면
+            # 정렬 순서상 앞선 그 행을 유지한다.
+            existing = index.get(key)
+            if existing is None or existing.get("params_unknown"):
+                index[key] = spec
+                adopted_parent[key], adopted_params[key] = parent_id, params
+                continue
+
+            # 버려지는 행이다. 파라미터 집합이 채택본과 다르면 그 차이가 곧 검수 오판의 씨앗이다.
+            if params is not None and adopted_params.get(key) is not None and params != adopted_params[key]:
+                c = conflicts.setdefault(key, {"sources": set(), "param_sets": set()})
+                c["sources"].update({str(adopted_parent.get(key)), str(parent_id)})
+                c["param_sets"].update({adopted_params[key], params})
+
+        for (package_name, action_name), c in sorted(conflicts.items()):
+            # 채택 행이 바뀌면 검수(R2/R3)가 실존 파라미터를 '스펙에 없음'으로 오판할 수
+            # 있다 — 수집 쪽에서 이름 정규화를 고칠 때까지 발현 여부를 로그로 관측한다.
+            # 실제로 채택된 출처를 함께 남긴다(어느 행이 이겼는지 모르면 추적이 안 된다).
+            logger.warning(
+                "카탈로그 논리 중복 — (%s, %s)에 파라미터 집합이 다른 행이 %d종. "
+                "채택: parent_id=%s (파라미터 %d개). 관련 출처: %s. "
+                "나머지 행의 파라미터는 인덱스에 없어 검수가 오판할 수 있다",
+                package_name,
+                action_name,
+                len(c["param_sets"]),
+                adopted_parent.get((package_name, action_name)),
+                len(adopted_params.get((package_name, action_name)) or ()),
+                sorted(c["sources"]),
+            )
         logger.info("BackendCatalog 적재 완료: 액션 스펙 %d개", len(index))
         return index
 
