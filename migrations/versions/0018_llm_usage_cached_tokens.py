@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """llm_usage.cached_tokens — 프롬프트 캐시 적중분 기록 (RPA-199)
 
-비용 계산이 실청구와 4.7배 어긋난 주원인: 캐시된 입력(정가의 10%)을 전액으로 계산했다.
+비용 계산이 실청구와 어긋난(계정 합산 실측 1.21배; 초기 기록 "4.7배"는 한 계정만 본
+오측정 — RPA-273 정정) 주원인: 캐시된 입력(정가의 10%)을 전액으로 계산했다.
 OpenAI 응답의 usage.prompt_tokens_details.cached_tokens를 받아 기록하고, 비용식이
 (input−cached)×정가 + cached×캐시단가로 갈라 계산한다.
 
