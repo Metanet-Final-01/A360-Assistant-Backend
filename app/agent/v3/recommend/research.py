@@ -30,6 +30,10 @@ ACTION_SOURCE_TYPES = ["action_schema", "bot_example"]
 _SEARCH_LIMIT = 5
 _MAX_UNITS = 8           # 기능 단위 상한 — 질의 폭주 방지
 _MAX_MENU_ACTIONS = 14   # Dossier 액션 메뉴 상한 (스펙 포함이라 토큰 비용이 큼)
+# 사용자 제공 카탈로그의 메뉴 상한 — 검색으로 좁힐 수 없어 전량을 싣지만, 프롬프트가
+# 무한정 커지는 것은 막는다. 검색 경로보다 훨씬 넉넉하다(실제 카탈로그는 보통 수십 개라
+# 이 값에 닿지 않고, 닿으면 잘린 사실을 프롬프트·로그·진행 메시지 셋 다에 남긴다).
+_MAX_USER_MENU_ACTIONS = 200
 _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
 
 
@@ -163,23 +167,46 @@ def _whole_catalog_dossier(ctx) -> dict:
     """검색기가 없는 경로(사용자 제공 카탈로그)의 Dossier — 전량이 곧 메뉴다 (RPA-285).
 
     어휘가 수십 개 규모라 검색으로 좁힐 이유가 없고, 좁히면 오히려 사용자가 준 액션이
-    메뉴에서 누락돼 composer가 "카탈로그에 없다"고 오판한다. 상한(_MAX_MENU_ACTIONS)도
-    두지 않는다 — 사용자가 준 어휘를 임의로 잘라내면 그 액션은 영영 못 쓰인다.
+    메뉴에서 누락돼 composer가 "카탈로그에 없다"고 오판한다. 그래서 검색 경로의 상한
+    (_MAX_MENU_ACTIONS=14)은 여기 적용하지 않는다.
+
+    다만 무제한은 아니다 — 사용자가 수천 개짜리 카탈로그를 붙여넣으면 시스템 프롬프트가
+    통째로 부풀어 지연·비용이 폭증하고 컨텍스트 한도에 걸린다(Qodo 리뷰). 안전 상한을 두되
+    **잘렸다는 사실을 조용히 넘기지 않는다**: 잘린 액션은 composer가 영영 못 쓰므로,
+    사용자가 그 사실을 알아야 카탈로그를 추려 다시 줄 수 있다.
     """
     actions: list[tuple[str, str]] = []
     blocks: list[str] = []
+    total = 0
     for spec_dict in ctx.catalog.iter_action_schemas():
         pkg, act = spec_dict.get("package"), spec_dict.get("action")
         if not pkg or not act:
             continue
+        total += 1
+        if len(actions) >= _MAX_USER_MENU_ACTIONS:
+            continue
         actions.append((pkg, act))
         blocks.append(_menu_block(pkg, act, spec_dict))
-    emit({"event": "stage", "stage": "searching",
-          "message": f"제공된 카탈로그 {len(actions)}개 액션을 전부 후보로 사용"})
+
+    dropped = total - len(actions)
+    if dropped:
+        logger.warning(
+            "사용자 카탈로그가 상한을 초과 — %d개 중 %d개만 메뉴에 실었다(나머지 %d개는 사용 불가)",
+            total, len(actions), dropped,
+        )
+        blocks.append(
+            f"\n[주의] 제공된 카탈로그가 커서 앞의 {len(actions)}개만 실었다. "
+            f"{dropped}개는 이번 설계에 쓸 수 없으니, 필요한 액션이 빠졌다면 answer에서 알려라."
+        )
+    message = f"제공된 카탈로그 {len(actions)}개 액션을 후보로 사용"
+    if dropped:
+        message += f" (상한 초과로 {dropped}개 제외)"
+    emit({"event": "stage", "stage": "searching", "message": message})
     return {
         "menu": "\n".join(blocks) or "(제공된 액션 없음)",
         "actions": actions,
         "background": "",
+        "dropped": dropped,
     }
 
 

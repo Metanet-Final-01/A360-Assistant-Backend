@@ -343,6 +343,8 @@ async def edit_node(state: TurnState) -> dict:
     if ctx is not None:
         result = verify_and_repair(flow, ctx.catalog)
     else:
+        # 타 솔루션 세션인데 대화에서 카탈로그를 못 찾았다 — 검수 기준이 없어 생략한다
+        # (A360 카탈로그로 검수하면 사용자가 준 액션이 전부 R1 위반으로 찍힌다).
         result = {"flow": flow, "violations": [], "repaired": False}
 
     # 교정이 위반 단계를 재생성하며 바꿨을 수 있는 사용자 지정 값(value_source="user")을 복원한다.
@@ -354,6 +356,15 @@ async def edit_node(state: TurnState) -> dict:
     # 라이브 렌더: 검수·교정 반영한 최종본을 "완료" 프레임으로 흘려보낸다(done 직전).
     emit_flow_frame(result["flow"], result["violations"], "완료")
     answer = ops.answer or (ops.change_summary or "요청하신 대로 흐름도를 수정했어요.")
+    if ctx is None:
+        # 검수를 아예 못 돌린 채 violations=[]로 내보내면 사용자는 '검수 통과'로 읽는다 —
+        # 이 PR이 없애려던 조용한 오답과 같은 부류다(Qodo 리뷰). 미검수임을 밝힌다.
+        logger.info("카탈로그 부재 — 검수 생략 상태로 수정안 반환")
+        answer += (
+            " 다만 사용 중인 솔루션의 액션 카탈로그를 찾지 못해 **이번 수정은 검수하지 "
+            "않았어요** — 액션 표기나 파라미터가 실제와 맞는지 확인이 필요합니다. "
+            "카탈로그를 알려주시면 검수까지 해드릴게요."
+        )
     if result["violations"]:
         answer += f" (검수에서 해소하지 못한 위반 {len(result['violations'])}건이 있어요.)"
     return {

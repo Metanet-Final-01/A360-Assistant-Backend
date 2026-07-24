@@ -199,3 +199,30 @@ def test_both_paths_reach_the_same_entry_point(monkeypatch, solution):
         {"solution": solution, "message": "만들어줘", "analysis": {"steps": []}}
     ))
     assert calls == [solution]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Qodo 리뷰 반영 (RPA-285)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_user_menu_is_capped_and_says_so():
+    """상한은 두되 조용히 자르지 않는다 — 잘린 액션은 composer가 영영 못 쓴다."""
+    from app.agent.v3.recommend import research as research_mod
+
+    many = [
+        UserCatalogAction(package="Big", action=f"Act{i}")
+        for i in range(research_mod._MAX_USER_MENU_ACTIONS + 25)
+    ]
+    ctx = user_catalog_context(UserCatalog([a.as_spec() for a in many]), "uipath")
+    dossier = asyncio.run(build_dossier({"goal": "g"}, [], ctx))
+
+    assert len(dossier["actions"]) == research_mod._MAX_USER_MENU_ACTIONS
+    assert dossier["dropped"] == 25
+    assert "주의" in dossier["menu"] and "25" in dossier["menu"]  # 프롬프트에도 잘림을 알린다
+
+
+def test_small_user_catalog_is_not_capped():
+    """일반적인 규모(수십 개)는 그대로 전량 실린다 — 상한은 병적 입력 방어용이다."""
+    dossier = asyncio.run(build_dossier({"goal": "g"}, [], _user_ctx()))
+    assert dossier["dropped"] == 0
+    assert "주의" not in dossier["menu"]
