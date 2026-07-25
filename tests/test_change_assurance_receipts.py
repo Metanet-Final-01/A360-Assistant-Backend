@@ -734,7 +734,7 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
         user_data_mapping["RedisUrl"]["Fn::ImportValue"]["Fn::Sub"]
         == "${ProjectName}-${Environment}-RedisUrl"
     )
-    assert template["Parameters"]["RagCacheEnabled"]["Default"] == "false"
+    assert template["Parameters"]["RagCacheEnabled"]["Default"] == "true"
     assert template["Parameters"]["RagCacheEnabled"]["AllowedValues"] == ["true", "false"]
     assert template["Parameters"]["RagCacheTtlSeconds"]["Default"] == 3600
     assert "RagCacheEnabled=\"${{ inputs.rag_cache_enabled }}\"" in deploy_script
