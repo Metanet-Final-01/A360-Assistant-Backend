@@ -16,18 +16,39 @@
 
 ```bash
 cd A360-Assistant-Backend
-PYTHONUTF8=1 DATABASE_PORT=5432 .venv/Scripts/python.exe -m scripts.goldset_eval.run_eval \
+PYTHONUTF8=1 \
+RAG_DATABASE_URL="postgresql://a360_admin:a360_local_password@localhost:5433/a360" \
+OPENSEARCH_HOST="http://localhost:9201" OPENSEARCH_USERNAME="" OPENSEARCH_PASSWORD="" \
+.venv/Scripts/python.exe -m scripts.goldset_eval.run_eval \
   --goldset "C:\...\final-etc-files\골드셋" \
   --out     "C:\...\final-etc-files\골드셋\평가결과" \
-  [--cases 1,6,8] [--tag baseline-v3] [--timeout 900]
+  [--cases 1,6,8] [--tag baseline-v3] [--timeout 900] [--parallel 3]
 
 # 런 비교 (A=기준, B=개선 후)
 python -m scripts.goldset_eval.compare_runs <run_dir_A> <run_dir_B>
+
+# 골드셋을 손댔으면 누출 검사 (업무정의서에 구현 어휘가 새지 않았는지)
+python -m scripts.goldset_eval.leak_check
 ```
 
-전제: docker compose 기동(postgres 5432·OpenSearch 9200에 KB 적재), `.env`의
-OPENAI_API_KEY. `.env`의 `DATABASE_PORT=5433`은 백엔드 리포 compose 기준이라
-final-etc-files compose(5432 매핑)를 쓸 때는 위처럼 env로 덮어쓴다.
+> ⚠️ **`RAG_DATABASE_URL`과 `OPENSEARCH_HOST`를 반드시 덮어쓸 것.** 안 덮으면 `.env` 값이
+> 그대로 먹혀 **운영 Neon DB와 운영 Bonsai OpenSearch에 붙는다.** 평가는 LLM 호출이 많고
+> 카탈로그를 전량 읽으므로 운영에 부하를 준다.
+>
+> **`DATABASE_PORT`로는 안 된다** — RAG 카탈로그는 `app/rag/config.py::database_dsn()`이
+> `RAG_DATABASE_URL`만 읽는다(서비스 DB와의 격리를 보장하려는 설계). `DATABASE_PORT`는
+> 앱 DB용이라 카탈로그 경로에 아무 효과가 없다.
+
+전제: docker compose 기동 + `.env`의 `OPENAI_API_KEY`.
+
+**로컬 컨테이너 짝을 맞출 것** — postgres와 OpenSearch는 같은 세대끼리 써야 한다.
+
+| postgres | OpenSearch | 카탈로그 세대 | 액션 수 |
+|---|---|---|---|
+| `a360-postgres-new` :5433 | :9201 | `llm_agent` (현행 서비스) | 1,200 |
+| `a360-postgres` :5432 | :9200 | `docs_rule` (구세대) | 1,272 |
+
+엇갈려 쓰면 pgvector와 BM25가 서로 다른 코퍼스를 봐서 RRF 융합이 조용히 망가진다.
 
 ## 표기 문제 — 왜 정규화 매처가 필요한가
 
