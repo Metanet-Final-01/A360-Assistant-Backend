@@ -113,6 +113,10 @@ class FakeRetriever:
 
     source_types는 실제 검색기 계약(Retriever Protocol)에 있는 인자라 시그니처만 받는다 —
     스텁 문서엔 source_type 구분이 없어 필터링은 하지 않는다(v3 research가 넘겨도 안전).
+
+    ⚠️ **v1~v3 전용으로 남긴다.** 필터링을 안 하므로 채널 격리(v4)를 검증할 수 없다 —
+    채널을 아무리 잘게 나눠도 이 스텁 위에서는 전부 통과하는 **거짓 초록**이 된다.
+    채널을 보는 테스트는 아래 `ChannelAwareFakeRetriever`를 쓴다.
     """
 
     def search(self, query: str, limit: int = 4, source_types: list[str] | None = None) -> list[dict]:
@@ -126,6 +130,114 @@ class FakeRetriever:
             record["score"] = round(matched / len(doc["keywords"]), 4)
             scored.append(record)
         scored.sort(key=lambda d: d["score"], reverse=True)
+        return scored[:limit]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 채널 인식 검색기 스텁 (v4 — 단계별 검색 채널)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# source_type이 실제로 갈리는 픽스처. 세 채널(action_schema / package_overview / doc_page)에
+# **같은 업무 어휘**로 걸리는 행을 일부러 함께 둔다 — 필터가 없으면 한 질의가 세 채널 문서를
+# 모두 물어오므로, 채널이 실제로 격리되는지가 여기서만 드러난다.
+#
+# package/action 표기는 _FAKE_ACTIONS(FakeCatalog)와 맞춘다 — research가 검색 히트를
+# 카탈로그로 재조회해 메뉴를 만들기 때문에, 어긋나면 후보가 조용히 전부 탈락한다.
+_FAKE_CHANNEL_DOCS: list[dict] = [
+    # --- action_schema 채널 ---
+    {"id": "cs-excel-open", "source_type": "action_schema",
+     "package_name": "Excel_MS", "action_name": "OpenSpreadsheet",
+     "title": "Excel_MS / OpenSpreadsheet — 통합 문서 열기", "url": None,
+     "content": "파일 경로와 열기 모드를 받아 통합 문서를 연다.",
+     "keywords": ["엑셀", "excel", "통합 문서", "연다", "열기"]},
+    {"id": "cs-excel-write", "source_type": "action_schema",
+     "package_name": "Excel_MS", "action_name": "writeDataTableToWorksheet",
+     "title": "Excel_MS / writeDataTableToWorksheet — 데이터 테이블 쓰기", "url": None,
+     "content": "데이터 테이블을 시작 셀부터 기록한다.",
+     "keywords": ["엑셀", "기록", "쓴다", "데이터 테이블"]},
+    {"id": "cs-email-send", "source_type": "action_schema",
+     "package_name": "Email", "action_name": "sendMail",
+     "title": "Email / sendMail — 메일 보내기", "url": None,
+     "content": "받는 사람·제목·본문을 지정해 메일을 발송한다.",
+     "keywords": ["메일", "발송", "email", "보낸다"]},
+    {"id": "cs-web-open", "source_type": "action_schema",
+     "package_name": "WebAutomation", "action_name": "openpage",
+     "title": "WebAutomation / openpage — 페이지 열기", "url": None,
+     "content": "세션에서 URL을 연다.",
+     "keywords": ["브라우저", "사이트", "url", "웹"]},
+    # 구제 재질의(rescue_suffix="액션") 전용 — plain 질의로는 절대 안 걸리고, 채널이
+    # 0건일 때 붙이는 접미사가 있어야만 잡힌다. 구제 경로가 죽으면 이 행이 사라진다.
+    {"id": "cs-rescue-only", "source_type": "action_schema",
+     "package_name": "String", "action_name": "assign",
+     "title": "String / assign — 값 지정", "url": None,
+     "content": "변수에 값을 지정한다.",
+     "keywords": ["액션"]},
+    # --- package_overview 채널 (업무 분해) ---
+    {"id": "cs-pkg-excel", "source_type": "package_overview",
+     "package_name": "Excel_MS", "action_name": None,
+     "title": "Excel_MS 패키지", "url": None,
+     "content": "스프레드시트를 열고 셀을 읽고 쓰는 패키지.",
+     "keywords": ["엑셀", "excel", "패키지"]},
+    {"id": "cs-pkg-email", "source_type": "package_overview",
+     "package_name": "Email", "action_name": None,
+     "title": "Email 패키지", "url": None,
+     "content": "메일 연결·발송·수신 패키지.",
+     "keywords": ["메일", "email", "패키지"]},
+    # 질의 정형(query_suffix) 전용 — 원문 질의로는 절대 안 걸린다. 실측에서 이 채널이
+    # 26질의 중 21건 0건이었다가 접미사를 붙이자 살아난 현상의 축소판이다.
+    {"id": "cs-pkg-shaped-only", "source_type": "package_overview",
+     "package_name": "Sa_Ledger", "action_name": None,
+     "title": "Sa_Ledger 패키지", "url": None,
+     "content": "원장 조회 패키지.",
+     "keywords": ["어떤 패키지 액션"]},
+    # --- doc_page 채널 (파라미터) ---
+    # 실제 적재와 같이 package_name·action_name이 비어 있다 — 액션을 필터로 지목할 수 없고
+    # 질의어(표기+라벨)로만 집힌다는 사실을 스텁도 그대로 반영한다.
+    {"id": "cs-doc-open", "source_type": "doc_page",
+     "package_name": "", "action_name": "",
+     "title": "Open action / 열기 작업 사용", "url": None,
+     "content": "filePath에 절대 경로를, openMode에 '읽기 전용 모드'를 지정한다.",
+     "keywords": ["openspreadsheet", "파라미터"]},
+    {"id": "cs-doc-send", "source_type": "doc_page",
+     "package_name": "", "action_name": "",
+     "title": "Using Send action / 보내기 작업", "url": None,
+     "content": "to·subject·message는 필수이고 sendVia로 전송 경로를 고른다.",
+     "keywords": ["sendmail", "파라미터"]},
+    {"id": "cs-doc-goal", "source_type": "doc_page",
+     "package_name": "", "action_name": "",
+     "title": "업무 자동화 개요 문서", "url": None,
+     "content": "엑셀 데이터를 읽어 메일로 보내는 전형적인 흐름을 설명한다.",
+     "keywords": ["엑셀", "메일"]},
+]
+
+
+class ChannelAwareFakeRetriever:
+    """source_types를 **실제로 거르는** 스텁 검색기 (v4 채널 격리 테스트 전용).
+
+    왜 새로 만들었나: 기존 `FakeRetriever`는 source_types를 시그니처로만 받고 무시한다.
+    그 위에서는 채널을 잘못 배선해도(예: 액션 채널에 doc_page가 섞여도) 테스트가 전부
+    초록이라 격리가 검증되지 않는다 — 정확히 `bot_example`이 v1~v3 내내 안 들킨 방식이다.
+
+    실검색과 다른 점을 하나 남긴다: 여기서는 필터가 **검색 전에** 걸리지만
+    (`app/services/rag.py`는 후단 필터다) 스텁은 코퍼스가 10행이라 어차피 굶지 않는다.
+    후단 필터 굶주림 자체는 채널 통계(`channels.channel_stats`)로 관측한다.
+    """
+
+    def search(self, query: str, limit: int = 4, source_types: list[str] | None = None) -> list[dict]:
+        q = query.lower()
+        allowed = set(source_types) if source_types else None
+        scored = []
+        for doc in _FAKE_CHANNEL_DOCS:
+            if allowed is not None and doc["source_type"] not in allowed:
+                continue
+            matched = sum(1 for kw in doc["keywords"] if kw in q)
+            if matched == 0:
+                continue
+            record = {k: v for k, v in doc.items() if k != "keywords"}
+            record["score"] = round(matched / len(doc["keywords"]), 4)
+            scored.append(record)
+        # 동점은 픽스처 순서로 — 순위 병합 테스트가 결정론이어야 한다.
+        scored.sort(key=lambda d: -d["score"])
         return scored[:limit]
 
 

@@ -539,8 +539,13 @@ def put_embedding(key: str, vector: list[float]) -> None:
 # ── 검색 결과 층 ─────────────────────────────────────────────────────────────
 
 def search_key(query: str, k: int, source_types: tuple[str, ...] | None, params: Any,
-               embed_model: str, rerank_model: str) -> str:
+               embed_model: str, rerank_model: str, pushdown: bool = False) -> str:
     """결과를 좌우하는 **모든** 입력 + **현재 코퍼스 세대**로 키를 만든다.
+
+    pushdown(RPA-298)은 같은 (query, k, source_types)로 다른 결과를 내는 **검색 방식**이라
+    키를 갈라야 한다. 다이제스트의 첫 세그먼트만 바꾸는 이유: 기본 경로(pushdown=False)의
+    입력 튜플이 한 글자도 안 달라져 **기존 키가 그대로 재현된다** — 인자를 하나 더
+    붙였으면 배포 순간 전체 캐시가 미스로 돌아섰을 것이다.
 
     파라미터 5종은 RPA-149로 런타임에 바뀐다 — 키에 넣으면 변경 즉시 다른 키가 되므로
     별도 무효화 없이도 "튜닝이 바로 먹는다". 무효화보다 키 포함이 실수에 강하다.
@@ -551,7 +556,7 @@ def search_key(query: str, k: int, source_types: tuple[str, ...] | None, params:
     레이스를 이렇게 없앤다). 세대를 못 읽으면 'nogen' 키가 되고 get/put이 캐싱을 건너뛴다.
     """
     d = _digest(
-        "search", _norm(query), k, tuple(source_types or ()),
+        "search_pd" if pushdown else "search", _norm(query), k, tuple(source_types or ()),
         getattr(params, "candidate_pool_size", None),
         getattr(params, "rerank_candidates", None),
         getattr(params, "rrf_k", None),

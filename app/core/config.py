@@ -99,6 +99,12 @@ REGISTRY: dict[str, EnvSpec] = {
         doc="OpenAI API 키. ⚠️ Windows Machine env가 .env를 가리는 함정 이력 있음"),
     "OPENAI_MODEL": EnvSpec("gpt-5.4-mini", group="llm", doc="기본 LLM 모델"),
     "MAX_LLM_CONCURRENCY": EnvSpec("3", cast=int, group="llm", doc="에이전트 LLM 동시 호출 상한"),
+    # 검색은 LLM 상한과 다른 자원에 부딪힌다 — rag/store/db.py 동기 풀 max_size=20과
+    # Voyage 임베딩·리랭커 레이트 리밋이다(검색 1건 = 임베딩 1 + 리랭크 1, 실측 1.4초).
+    # 단계별 검색 채널(RPA-298)이 팬아웃을 곱하므로 별도 상한을 둔다. 기본 8 = 커넥션
+    # 8/20 + 리랭커 동시 8로, 둘 다 상한 아래에 머문다.
+    "MAX_SEARCH_CONCURRENCY": EnvSpec("8", cast=int, group="llm",
+        doc="에이전트 KB 검색 동시 실행 상한 (agent/knowledge/channels.search_gate)"),
     "LLM_TIMEOUT_SECONDS": EnvSpec("180.0", cast=float, group="llm",
         doc="LLM 호출 전체 타임아웃(초) (RPA-202)"),
     "LLM_CONNECT_TIMEOUT_SECONDS": EnvSpec("5.0", cast=float, group="llm", doc="LLM 연결 타임아웃(초)"),

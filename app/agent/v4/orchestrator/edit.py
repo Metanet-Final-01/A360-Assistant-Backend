@@ -26,6 +26,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
+from app.agent.knowledge import channels
 from app.core.llm import UsageCallbackHandler
 
 from .. import config
@@ -351,7 +352,11 @@ async def edit_node(state: TurnState) -> dict:
     ctx = await resolve_catalog_context(state)
     is_a360 = ctx is not None and ctx.is_a360
     sink: list[dict] = []
-    tools = build_kb_tools(sink, ctx) if ctx is not None else []
+    # 편집도 **생성 경로**다 — 액션 어휘를 찾는 자리이므로 compose와 같은 채널을 본다.
+    # 채널 없이 부르면 qa 분기로 떨어져 전체 코퍼스를 검색하는데, doc_page가 91%라
+    # 랭킹이 문서로 덮이고 액션 스펙이 상위에서 밀려난다(실측: 필터 없는 상위 5건 중
+    # action_schema가 0건인 질의 5/12).
+    tools = build_kb_tools(sink, ctx, channel=channels.ACTION) if ctx is not None else []
     llm = _make_llm()
     runnable = llm.bind_tools(tools) if tools else llm
 

@@ -36,6 +36,8 @@ import json
 import re
 from dataclasses import dataclass
 
+from app.agent.knowledge import channels
+
 from .retrieval import Retriever, get_retriever
 from .verify.catalog import CatalogLookup, get_catalog
 
@@ -61,9 +63,12 @@ _STRENGTH_NAME_ONLY = 0.6
 # 다만 실제로 맞은 액션보다는 아래에 놓여 메뉴 상한에서 먼저 밀린다.
 _NO_MATCH_FACTOR = 0.5
 
-# 액션 후보를 찾는 검색인지 판정 — 배경 문서(doc_page) 검색에 커스텀 액션을 끼워 넣으면
-# 배경 지식 자리를 액션이 잡아먹는다.
-_ACTION_SOURCE_TYPES = frozenset({"action_schema", "bot_example"})
+# 액션 후보를 찾는 검색인지 판정 — 배경 문서(doc_page)·패키지 개요(package_overview)
+# 검색에 커스텀 액션을 끼워 넣으면 그 채널의 자리를 액션이 잡아먹는다.
+# 채널 정의는 knowledge.channels 하나뿐이다 (RPA-298) — 여기 목록을 따로 들고 있으면
+# 채널이 바뀔 때 오버레이만 옛 정의로 남아 조용히 어긋난다. 이전 정의에 있던
+# `bot_example`은 DB 적재 0건이라 제거됐다.
+_ACTION_SOURCE_TYPES = frozenset(channels.ACTION.source_types)
 
 # 표기 분해용: CamelCase 조각·숫자·한글 덩어리. "ReadRange" → {read, range}.
 _TOKEN_RE = re.compile(r"[A-Za-z][a-z0-9]+|[A-Za-z]{2,}|[0-9]{2,}|[가-힣]{2,}")

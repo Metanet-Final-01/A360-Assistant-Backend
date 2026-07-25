@@ -17,9 +17,11 @@ def _hit(doc_id):
 
 def test_sync_bm25_failure_logs_and_degrades(monkeypatch, caplog):
     monkeypatch.setattr(hs, "embed_query", lambda q: [0.1, 0.2])
-    monkeypatch.setattr(hs.db, "search", lambda conn, emb, limit: [_hit("a"), _hit("b")])
+    # source_types는 push-down(RPA-298)이 추가한 인자 — 저하 경로에서도 전달되므로 받아야 한다.
+    monkeypatch.setattr(hs.db, "search",
+                        lambda conn, emb, limit, source_types=None: [_hit("a"), _hit("b")])
 
-    def _boom(client, query, size):
+    def _boom(client, query, size, source_types=None):
         raise RuntimeError("connection refused to opensearch")
 
     monkeypatch.setattr(hs.opensearch_client, "keyword_search", _boom)
@@ -37,10 +39,10 @@ def test_async_bm25_failure_logs_and_degrades(monkeypatch, caplog):
     async def _emb(q, client=None):
         return [0.1, 0.2]
 
-    async def _vsearch(conn, emb, limit):
+    async def _vsearch(conn, emb, limit, source_types=None):
         return [_hit("a"), _hit("b")]
 
-    async def _boom(client, query, size):
+    async def _boom(client, query, size, source_types=None):
         raise RuntimeError("connection refused to opensearch")
 
     monkeypatch.setattr(hs, "embed_query_async", _emb)

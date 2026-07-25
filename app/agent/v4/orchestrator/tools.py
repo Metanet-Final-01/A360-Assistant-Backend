@@ -11,17 +11,36 @@ import logging
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 
+from app.agent.knowledge import channels
+
 logger = logging.getLogger(__name__)
 
+# 채널이 지정되지 않은 검색(qa — 문서까지 봐야 하는 단계)의 건수.
 _SEARCH_LIMIT = 5
 
 
-def build_kb_tools(sources_sink: list[dict], ctx=None, source_types: list[str] | None = None):
+def build_kb_tools(
+    sources_sink: list[dict],
+    ctx=None,
+    source_types: list[str] | None = None,
+    channel: channels.SearchChannel | None = None,
+):
     """KB 툴을 만든다. 검색 히트 원본은 sources_sink에 누적된다.
 
-    source_types를 주면 search_kb가 그 소스 타입만 검색한다 — recommend(에이전트 흐름도
-    생성)는 액션 후보만 필요하므로 ["action_schema", "bot_example"]로 좁혀 문서 페이지·
-    패키지 개요 오염을 막는다. qa는 문서까지 봐야 하므로 None(전체)로 둔다.
+    검색 범위는 **채널**로 정한다 (RPA-298 — 정의는 `knowledge/channels.py` 하나뿐).
+    생성 계열(compose escape hatch·edit)은 액션 어휘를 찾는 자리라 `channels.ACTION`
+    (action_schema)이고, qa는 문서까지 봐야 하므로 채널 없이(전체) 검색한다.
+
+    `source_types`는 레거시 인자다 — `recommend/graph.py`가 아직 자기 상수
+    `SEARCH_SOURCE_TYPES`를 넘긴다. 넘어오면 `channel_for_source_types`가 채널로 접어
+    dossier와 같은 채널을 보게 만든다. 이 접기가 없으면 dossier는 action_schema만, 툴은
+    적재 0건인 bot_example까지 포함한 옛 목록을 보는 어긋남이 남는다.
+
+    🔴 **접기에 실패해도 필터를 버리지 않는다.** 채널에 안 맞는 목록(예: 채널을 가로지르는
+    ["action_schema","doc_page"])이 오면 목록 그대로 검색한다. 예전엔 None으로 떨어뜨려
+    전체 코퍼스를 검색했는데, 그건 "좁은 필터"가 "필터 없음"으로 **강등**되는 것이라
+    v3보다 나쁘다 — doc_page가 91%라 랭킹이 문서로 덮인다. 필터 없음은 호출부가
+    source_types를 **아예 안 넘겼을 때만**(qa) 성립한다.
 
     ctx(CatalogContext)가 어휘 출처를 나른다(RPA-285). 검색기가 없는 경로(사용자 제공
     카탈로그)에서는 **search_kb를 아예 만들지 않는다** — 검색할 KB가 없는데 툴을 쥐여주면
@@ -33,15 +52,23 @@ def build_kb_tools(sources_sink: list[dict], ctx=None, source_types: list[str] |
     ctx = ctx or a360_context()
     retriever = ctx.retriever
     catalog = ctx.catalog
+    channel = channel or channels.channel_for_source_types(source_types)
+    # 채널로 안 접힌 목록은 **그대로** 필터로 쓴다 (None이 되면 전체 검색으로 강등된다).
+    fallback_types = None if channel is not None else (list(source_types) if source_types else None)
 
     @tool
     def search_kb(query: str) -> str:
-        """A360 지식베이스(패키지·액션·문서·봇 예제)를 의미 검색한다.
+        """A360 지식베이스(패키지·액션·문서)를 의미 검색한다.
 
         A360 패키지/액션의 존재·용도·사용법 등 사실 확인이 필요할 때 쓴다.
         결과는 JSON 배열(제목·패키지·액션·본문·점수)이다.
         """
-        hits = retriever.search(query, limit=_SEARCH_LIMIT, source_types=source_types)
+        if channel is not None:
+            # 채널 경로는 구제 재질의·굶주림 집계를 함께 태운다 — dossier가 타는 것과
+            # **같은 함수**여야 두 경로의 결과가 벌어지지 않는다.
+            hits = channels.search_channel(retriever, channel, query)
+        else:
+            hits = retriever.search(query, limit=_SEARCH_LIMIT, source_types=fallback_types)
         sources_sink.extend(hits)
         return json.dumps(
             [

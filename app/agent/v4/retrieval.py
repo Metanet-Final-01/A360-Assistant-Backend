@@ -35,10 +35,15 @@ def _make_retriever() -> Retriever:
     지연 임포트 — 검색기를 실제로 쓸 때만 백엔드 서비스(→ pgvector·OpenSearch)에
     의존하게 한다. get_retriever가 이 모듈 전역을 호출하므로, 사용처의 from-import
     참조를 건드리지 않고 이 함수만 갈아끼우면 된다.
+
+    🔴 pushdown=True가 v4와 v1~v3를 가르는 유일한 지점이다 (RPA-298). v4는 검색을
+    단계별 채널로 쪼개는데(app/agent/knowledge/channels.py), 후단 필터 위에서는
+    코퍼스 비중이 작은 채널이 rerank_candidates 창에서 굶어 채널 분리 자체가 무의미해진다.
+    v1~v3의 retrieval.py는 인자 없이 불러 후단 필터 그대로다 — 비교 기준선이 보존된다.
     """
     from app.services.agent_retriever import get_hybrid_retriever
 
-    return get_hybrid_retriever()
+    return get_hybrid_retriever(pushdown=True)
 
 
 def get_retriever() -> Retriever:

@@ -23,12 +23,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from ..orchestrator.jsonio import chat_json
+from app.agent.knowledge import channels
 from app.agent.knowledge.derive import derive_structural_actions
-from app.agent.knowledge.examples import (
-    render_examples_block,
-    select_examples,
-    selection_trace,
-)
 from app.agent.knowledge.examples import (
     render_examples_block,
     select_examples,
@@ -43,16 +39,22 @@ logger = logging.getLogger(__name__)
 _PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "research_queries.md").read_text(encoding="utf-8")
 _OPS_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "operation_units.md").read_text(encoding="utf-8")
 
-# recommend 검색은 액션 후보 메뉴용 — 문서 페이지 오염 방지 (v2 계약 유지).
-ACTION_SOURCE_TYPES = ["action_schema", "bot_example"]
-_SEARCH_LIMIT = 5
+# 검색 채널은 `app.agent.knowledge.channels` 하나에서만 정의된다 (RPA-298).
+# v3까지는 같은 목록이 이 파일(`ACTION_SOURCE_TYPES`)과 `recommend/graph.py`
+# (`SEARCH_SOURCE_TYPES`)에 **따로** 있어 한쪽만 고치면 dossier와 compose 툴이 서로 다른
+# 채널을 보게 됐다(에러 없이 품질만 갈리는 어긋남). 그 상수는 v4에서 폐기한다.
 _MAX_UNITS = 8           # 기능 단위 상한 — 질의 폭주 방지
-_MAX_MENU_ACTIONS = 14   # Dossier 액션 메뉴 상한 (스펙 포함이라 토큰 비용이 큼)
+_MAX_MENU_ACTIONS = channels.ACTION.quota  # Dossier 액션 메뉴 상한 (스펙 포함이라 토큰 비용이 큼)
 # 사용자 제공 카탈로그의 메뉴 상한 — 검색으로 좁힐 수 없어 전량을 싣지만, 프롬프트가
 # 무한정 커지는 것은 막는다. 검색 경로보다 훨씬 넉넉하다(실제 카탈로그는 보통 수십 개라
 # 이 값에 닿지 않고, 닿으면 잘린 사실을 프롬프트·로그·진행 메시지 셋 다에 남긴다).
 _MAX_USER_MENU_ACTIONS = 200
-_DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
+# 파라미터 채널에 문서를 찾아 줄 액션 수 — 메뉴 상위 N개만. 전량(14개)에 던지면 검색
+# 팬아웃이 두 배가 되는데, 문서가 실제로 필요한 것은 composer가 파라미터를 채워야 하는
+# 상위 액션들이다. 나머지는 escape hatch 툴콜로 필요할 때 각자 찾는다.
+_PARAM_DOC_ACTIONS = 6
+# 업무 분해 채널에 던질 요구 문장 수 — 목표 1건 + 요구 상위 N건.
+_DECOMPOSE_QUERIES = 3
 # 조작 단위 상한 — 봇 수준 완성도(정답 봇 70액션)를 노리므로 요구 수의 3~5배를 담을 만큼
 # 넉넉해야 한다. 다만 여기가 터지면 compose 프롬프트가 통째로 조작 목록에 잠식된다.
 _MAX_OPERATIONS = 40
@@ -65,9 +67,8 @@ _INLINE_OPERATIONS_IN_MENU = True
 # 프롬프트에 실을 용례 수 — 2건이면 조합 패턴을 보여주기 충분하다. 늘리면 컨텍스트를
 # 잡아먹으면서 모델이 예제를 그대로 베끼는 쪽으로 기운다.
 _MAX_EXAMPLES = 2
-# 프롬프트에 실을 용례 수 — 2건이면 조합 패턴을 보여주기 충분하고, 늘리면 컨텍스트를
-# 잡아먹으면서 모델이 예제를 그대로 베끼는 쪽으로 기운다.
-_MAX_EXAMPLES = 2
+# 배경 지식 발췌 길이(문자) — 액션당 문서 조각이 여러 개 실리므로 v3의 200자를 유지한다.
+_BG_SNIPPET = 200
 
 
 # 제어 흐름 구조 액션 폴백 — 요구사항 문장에는 이런 액션이 명시되지 않아 검색 질의가
@@ -225,13 +226,18 @@ def render_operations_block(operations: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def plan_operations(spec: dict) -> list[dict]:
+def plan_operations(spec: dict, packages: str = "") -> list[dict]:
     """액션을 고르기 **전에** 조작 단위만 확정한다 (LLM 1회 — 설계 Phase 3).
 
     왜 별도 호출인가: 지금 compose 호출 하나가 mini 모델에게 업무 분해 + 액션 선택 +
     파라미터 + 구조 + 스키마 준수를 동시에 요구한다. 다섯 과업을 한 컨텍스트에 얹으면 전부
     중간 품질이 된다(설계 §3.1 원인 B). 분해는 어휘를 몰라도 답할 수 있는 질문이라 떼어낼
     수 있고, 떼어내면 compose는 '확정된 단위'를 어휘로 옮기는 일만 한다.
+
+    `packages`는 **업무 분해 채널**(package_overview)이 실어 주는 패키지 지형이다 —
+    액션 어휘가 아니라 "이 업무가 어떤 제품·시스템 영역에 걸치나"만 알려준다. 분해 단계에
+    액션 스펙을 주면 모델이 어휘를 먼저 고르고 분해를 거기 맞추는데(단계 격리가 무너진다),
+    개요만 주면 "메일함·엑셀·웹 세 영역이구나" 수준의 힌트로만 쓴다.
 
     실패는 강등이다 — 조작 단위 없이도 파이프라인은 예전 그대로 돈다.
     """
@@ -242,11 +248,15 @@ def plan_operations(spec: dict) -> list[dict]:
     req_lines = "\n".join(
         f"- [{r.get('req_id')}] ({r.get('priority', 'must')}) {r.get('text', '')}" for r in reqs
     )
+    pkg_block = (
+        f"\n\n[관련 있어 보이는 패키지 — 참고용. 액션 어휘가 아니라 영역 힌트다]\n{packages}"
+        if packages else ""
+    )
     try:
         plan = chat_json(
             [
                 {"role": "system", "content": _OPS_PROMPT},
-                {"role": "user", "content": f"[목표]\n{goal}\n\n[요구사항]\n{req_lines}"},
+                {"role": "user", "content": f"[목표]\n{goal}\n\n[요구사항]\n{req_lines}{pkg_block}"},
             ],
             purpose="recommend",
             model_cls=_OperationPlan,
@@ -364,16 +374,79 @@ def _whole_catalog_dossier(ctx) -> dict:
         # 파이프라인만 공유한다). 키는 항상 있어야 소비자가 get 없이 읽어도 안 깨진다.
         "operations": "",
         "operation_units": [],
+        # 업무 분해 채널도 이 경로에는 없다(A360 KB 전용). 키 계약만 지킨다.
+        "packages": "",
     }
+
+
+def _decompose_queries(spec: dict) -> list[str]:
+    """업무 분해 채널에 던질 질의 — 목표 + 요구 상위 몇 건 (LLM 없음, 질의 확장 **이전**).
+
+    분해 단계는 아직 조작 단위도 액션 어휘도 없다. 그래서 확장된 질의를 못 쓰고 원문을
+    그대로 쓴다 — 어차피 이 채널이 답할 질문은 "어떤 제품 영역인가"라 원문으로 충분하다.
+    """
+    out = [(spec.get("goal") or "").strip()]
+    out += [
+        (r.get("text") or "").strip()
+        for r in (spec.get("requirements") or [])[:_DECOMPOSE_QUERIES]
+    ]
+    return [q for q in out if q]
+
+
+def _one_line(text: str, limit: int) -> str:
+    """검색 본문을 '- 항목' 한 줄에 넣을 수 있게 공백을 접는다.
+
+    KB 본문에는 줄바꿈이 흔한데(실측: doc_page 발췌 200자에 개행 3~5개) 그대로 넣으면
+    한 항목이 여러 줄로 흩어져 프롬프트의 목록 구조가 무너진다 — 모델이 어디까지가 한
+    문서인지 못 읽는다.
+    """
+    return " ".join((text or "").split())[:limit]
+
+
+def _packages_block(hits: list[dict]) -> str:
+    """패키지 개요 히트를 분해 프롬프트용 한 줄씩으로 (액션 어휘는 싣지 않는다)."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for h in hits:
+        name = h.get("package_name") or h.get("title") or ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        lines.append(f"- {name}: {_one_line(h.get('content') or '', 120)}")
+    return "\n".join(lines)
+
+
+def _param_doc_queries(catalog, menu_actions: list[tuple[str, str]], goal: str) -> list[str]:
+    """파라미터 채널 질의 — 고른 액션의 **표기**로 그 액션 문서를 집는다.
+
+    `doc_page` 행은 package_name·action_name이 비어 있어(실측: 16,164행 전부) 필터로
+    액션을 지목할 수 없다. 대신 표기+라벨을 질의어에 넣으면 문서 제목("Get multiple cells
+    action / 여러 셀 가져오기 작업")과 정면으로 맞는다 — 실측 3개 액션 전부 1위가 정확히
+    그 액션 문서였다.
+
+    목표 문장 질의를 **맨 앞에 유지**하는 이유: v3까지 `background`를 채우던 유일한 통로가
+    그것이고, 액션이 하나도 안 뽑힌 턴에도 배경이 비지 않아야 한다(조용한 회귀 방지).
+    """
+    queries = [goal.strip()] if (goal or "").strip() else []
+    for pkg, act in menu_actions[:_PARAM_DOC_ACTIONS]:
+        spec_dict = catalog.get_action_schema(pkg, act) or {}
+        label = spec_dict.get("label") or ""
+        queries.append(f"{pkg} {act} {label} 파라미터".replace("  ", " ").strip())
+    return queries
 
 
 async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     """Capability Dossier를 만든다: {menu, actions, background, examples, operations, …}.
 
+    - **업무 분해 채널**(package_overview) → 패키지 지형만 뽑아 조작 단위 확정에 실어 준다
     - **조작 단위 확정**(plan_operations) — 액션 선택 전에 "몇 번의 조작인가"만 먼저 정한다
-    - 기능 단위별 이중 질의 병렬 검색(action_schema/bot_example) → (pkg, act) 후보 집계
+    - **액션 채널**(action_schema) — 기능 단위별 이중 질의 병렬 검색 → 순위 병합으로 후보 집계
     - 상위 후보의 카탈로그 스펙 프리페치 → 파라미터까지 담긴 액션 메뉴 텍스트
-    - 배경 지식: 목표 문장으로 doc_page 1회 검색 (전체 문서 적재 가정 — 없으면 빈 결과)
+    - **파라미터 채널**(doc_page) — 고른 액션의 표기로 그 액션 문서를 집어 `background`에
+    - 구조는 **검색 없음** — `structural_complement`가 카탈로그에서 결정론으로 유도한다
+
+    단계마다 채널이 다른 이유는 `knowledge/channels.py` 참조 — 요약하면 doc_page가 코퍼스의
+    91%라 한 검색에 섞으면 랭킹을 문서가 덮는다. 채널 정의는 그 모듈 하나에만 있다.
 
     ctx(CatalogContext)가 어휘 출처를 나른다 — 검색기가 없으면 카탈로그 전량을 메뉴로
     쓴다(사용자 제공 카탈로그 경로).
@@ -384,10 +457,18 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     retriever = ctx.retriever
     catalog = ctx.catalog
 
-    # [0] 조작 단위 확정 — 액션 선택 **전에**. 질의 확장보다 앞서므로 검색어도 이 분해를 탄다.
+    # [0] 업무 분해 채널 — 액션 어휘 이전에 "어떤 제품 영역인가"만 본다.
+    pkg_hits = channels.merge_by_rank(
+        await channels.gather_channel(retriever, channels.DECOMPOSE, _decompose_queries(spec)),
+        channels.DECOMPOSE,
+    )
+    sink.extend(pkg_hits)
+    packages = _packages_block(pkg_hits)
+
+    # [1] 조작 단위 확정 — 액션 선택 **전에**. 질의 확장보다 앞서므로 검색어도 이 분해를 탄다.
     # 두 호출 모두 동기 LLM이라 to_thread로 뺀다 — 여기서 이벤트 루프를 잡으면 같은 워커의
     # 다른 턴까지 멈춘다(호출을 하나 더 얹는 김에 기존 것도 함께 내보낸다).
-    operations = await asyncio.to_thread(plan_operations, spec)
+    operations = await asyncio.to_thread(plan_operations, spec, packages)
     if operations:
         emit({"event": "stage", "stage": "searching",
               "message": f"조작 단위 {len(operations)}개 확정 — 이 단위로 어휘를 찾는다"})
@@ -404,35 +485,26 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
           "message": f"액션 카탈로그 조사 중 ({len(units)}개 기능, 질의 {len(queries)}건)",
           "data": {"queries": [q[:80] for q in queries]}})
 
-    async def _search(q: str, source_types: list[str] | None, limit: int) -> list[dict]:
-        try:
-            return await asyncio.to_thread(retriever.search, q, limit=limit, source_types=source_types)
-        except Exception as e:  # noqa: BLE001 — 검색 한 건 실패가 조사 전체를 막지 않게
-            logger.warning("research 검색 실패(%r): %s", q[:50], e)
-            return []
-
-    results = await asyncio.gather(*(_search(q, ACTION_SOURCE_TYPES, _SEARCH_LIMIT) for q in queries))
-    bg_hits = await _search(spec.get("goal") or "", ["doc_page"], _DOC_BG_LIMIT) if spec.get("goal") else []
-
-    # (pkg, act)별 최고 점수 집계 — RRF/rerank 점수 내림차순 상위만 메뉴에 올린다.
-    best: dict[tuple[str, str], float] = {}
+    # [2] 액션 채널 — 질의별 결과를 **따로** 받아 순위로 병합한다. 점수로 합치지 않는 이유는
+    # merge_by_rank 참조(리랭커가 한 질의만 폴백해도 그 질의 후보가 통째로 밀려난다).
+    results = await channels.gather_channel(retriever, channels.ACTION, queries)
     for hits in results:
         sink.extend(hits)
-        for h in hits:
-            pkg, act = h.get("package_name"), h.get("action_name")
-            if pkg and act:
-                key = (pkg, act)
-                best[key] = max(best.get(key, 0.0), h.get("score") or 0.0)
-    ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_MENU_ACTIONS]
+    ranked = channels.merge_by_rank(results, channels.ACTION)
 
     blocks: list[str] = []
     menu_actions: list[tuple[str, str]] = []
-    for (pkg, act), score in ranked:
+    for hit in ranked:
+        pkg, act = hit.get("package_name"), hit.get("action_name")
+        if not (pkg and act) or (pkg, act) in menu_actions:
+            continue
         spec_dict = catalog.get_action_schema(pkg, act)
         if spec_dict is None:
             continue
         menu_actions.append((pkg, act))
         blocks.append(_menu_block(pkg, act, spec_dict))
+        if len(menu_actions) >= _MAX_MENU_ACTIONS:
+            break
 
     # 결정론 보완: 세션 여닫기 + 제어 흐름 구조 액션 — 검색이 못 뽑는 필수 어휘 (실측 보강).
     extra_blocks: list[str] = []
@@ -446,8 +518,24 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
         blocks.append("\n[구조·세션 액션 — 자동 보완: 반복·분기·예외 처리와 세션 여닫기는 반드시 이 표기를 사용]")
         blocks.extend(extra_blocks)
 
+    # [3] 파라미터 채널 — 이제 액션이 정해졌으니 **그 액션의 문서**를 집는다. v3는 목표
+    # 문장 1질의로 doc_page 3건을 뽑는 게 전부였는데, 그렇게 나온 문서는 "이 액션의
+    # 파라미터를 어떻게 채우나"에 답하지 못했다(목표어와 액션 문서는 어휘가 다르다).
+    # 목표 질의는 맨 앞에 남아 있어 액션이 0개인 턴에도 background가 비지 않는다.
+    bg_hits = channels.merge_by_rank(
+        await channels.gather_channel(
+            retriever, channels.PARAM_DOC,
+            _param_doc_queries(catalog, menu_actions, spec.get("goal") or ""),
+        ),
+        channels.PARAM_DOC,
+        # ⚠️ 제목으로 접으면 안 된다. doc_page는 제목이 문서 단위가 아니라 **청크 공유 키**라
+        # (16,164행 / 제목 6,111개 — 60%가 2행 이상), 제목 dedup은 같은 문서의 서로 다른
+        # 조각을 지운다. 파라미터 표가 든 조각이 버려질 수 있어 이 채널의 존재 이유를 깎는다.
+        # id로 접으면 진짜 중복(같은 질의 재등장)만 걸러진다 — merge_by_rank의 기본 키다.
+    )
     background = "\n".join(
-        f"- {h.get('title')}: {(h.get('content') or '')[:200]}" for h in bg_hits
+        f"- {_one_line(h.get('title') or '', 80)}: {_one_line(h.get('content') or '', _BG_SNIPPET)}"
+        for h in bg_hits
     )
     if bg_hits:
         sink.extend(bg_hits)
@@ -465,7 +553,8 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
 
     emit({"event": "stage", "stage": "searching",
           "message": f"조사 완료 — 액션 후보 {len(menu_actions)}개 확보 "
-                     f"(구조·세션 보완 {len(extra_blocks)}개 · 용례 {len(picked)}건 포함)"})
+                     f"(구조·세션 보완 {len(extra_blocks)}개 · 용례 {len(picked)}건 · "
+                     f"문서 {len(bg_hits)}건 포함)"})
 
     ops_block = render_operations_block(operations)
     menu = "\n".join(blocks) or "(조사된 액션 없음 — 도구로 직접 검색 필요)"
@@ -484,4 +573,7 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
         "example_ids": selection_trace(picked),
         "operations": ops_block,
         "operation_units": operations,
+        # 업무 분해 채널이 본 패키지 지형. graph는 아직 안 읽지만(그 파일은 다른 작업이
+        # 잡고 있다) dossier 계약에 실어 둔다 — 소비 배선은 graph 쪽 후속.
+        "packages": packages,
     }

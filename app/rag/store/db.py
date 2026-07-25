@@ -200,21 +200,62 @@ _SEARCH_SQL = """
     LIMIT %s
 """
 
+# source_type을 검색에 **내려보내는** 변형 (RPA-298 push-down). 별도 상수로 둔 이유:
+# 기본 경로 SQL이 한 글자도 안 바뀐다는 것이 문자열 비교로 증명돼야 한다 — 조건부로
+# WHERE절을 이어붙이면 공백 하나 차이로도 쿼리 플랜·캐시가 달라질 수 있다.
+_SEARCH_SQL_FILTERED = """
+    SELECT id, source_type, package_name, action_name, title, url, content,
+           parent_id, chunk_index,
+           1 - (embedding <=> %s::vector) AS score
+    FROM rag_documents
+    WHERE embedding IS NOT NULL
+      AND source_type = ANY(%s)
+    ORDER BY embedding <=> %s::vector
+    LIMIT %s
+"""
 
-@log_call("vector_search", capture_args=("limit",), capture_result=lambda r: {"count": len(r)})
-def search(conn: psycopg.Connection, query_embedding: list[float], limit: int = 5) -> list[dict]:
+
+def _search_plan(vector: str, limit: int, source_types) -> tuple[str, tuple]:
+    """(SQL, 파라미터)를 고른다 — source_types가 비면 기본 경로와 완전히 동일하다.
+
+    ⚠️ 필터를 걸면 pgvector가 ORDER BY 인덱스 스캔 뒤에 조건을 적용하므로, 희소한
+    source_type은 LIMIT를 못 채울 수 있다(정확도가 아니라 재현율 문제). 그래도
+    후단 필터보다 낫다 — 후단은 rerank_candidates(20)로 이미 좁혀진 창에서 걸러
+    코퍼스 비중이 작은 타입이 아예 0건이 됐다.
+    """
+    if not source_types:
+        return _SEARCH_SQL, (vector, vector, limit)
+    return _SEARCH_SQL_FILTERED, (vector, list(source_types), vector, limit)
+
+
+@log_call(
+    "vector_search", capture_args=("limit", "source_types"),
+    capture_result=lambda r: {"count": len(r)},
+)
+def search(
+    conn: psycopg.Connection, query_embedding: list[float], limit: int = 5,
+    source_types: list[str] | None = None,
+) -> list[dict]:
     vector = "[" + ",".join(f"{x:.7f}" for x in query_embedding) + "]"
+    sql, args = _search_plan(vector, limit, source_types)
     with conn.cursor() as cur:
-        cur.execute(_SEARCH_SQL, (vector, vector, limit))
+        cur.execute(sql, args)
         columns = [d.name for d in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
-@log_call("vector_search", capture_args=("limit",), capture_result=lambda r: {"count": len(r)})
-async def search_async(conn: psycopg.AsyncConnection, query_embedding: list[float], limit: int = 5) -> list[dict]:
+@log_call(
+    "vector_search", capture_args=("limit", "source_types"),
+    capture_result=lambda r: {"count": len(r)},
+)
+async def search_async(
+    conn: psycopg.AsyncConnection, query_embedding: list[float], limit: int = 5,
+    source_types: list[str] | None = None,
+) -> list[dict]:
     vector = "[" + ",".join(f"{x:.7f}" for x in query_embedding) + "]"
+    sql, args = _search_plan(vector, limit, source_types)
     async with conn.cursor() as cur:
-        await cur.execute(_SEARCH_SQL, (vector, vector, limit))
+        await cur.execute(sql, args)
         columns = [d.name for d in cur.description]
         rows = await cur.fetchall()
         return [dict(zip(columns, row)) for row in rows]
