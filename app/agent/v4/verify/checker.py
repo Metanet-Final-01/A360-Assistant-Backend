@@ -336,12 +336,36 @@ def derive_session_registry(catalog=None) -> knowledge_derive.SessionRegistry:
     )
 
 
-def _is_session_param(name: object) -> bool:
-    """세션 이름을 담는 파라미터인지 — 표기 세대에 무관하게 판정한다.
+def _is_session_param(param: object) -> bool:
+    """세션 이름을 담는 파라미터인지 판정한다. **타입이 있으면 타입이 1순위** (RPA-298).
 
-    구 JAR "session"/"sessionName"(SESSION_PARAM_NAMES)과 v2 문서 라벨 "Session name"을
-    모두 잡도록 정규화 부분 일치("session" 포함)로 본다.
+    이름 부분 일치("session" 포함)만 보면 세션 이름이 **아닌** 파라미터가 걸린다. 카탈로그
+    실측 21건:
+
+        Session Token (CREDENTIAL)   ← 비밀값
+        Session type (SELECT)        ← enum 선택지
+        Session variable (VARIABLE)
+        Run bot runner session on Control Room (BOOLEAN)   ← 플래그
+
+    이걸 세션 이름으로 읽으면 BOOLEAN·CREDENTIAL 값이 세션 키가 되어 R7/R8 추적이 어긋난다.
+
+    ⚠️ **현재 호출 경로에서는 아직 이 개선이 발동하지 않는다.** 흐름도의 `ActionParameter`
+    스키마가 `{name, label, value, value_source}`라 `type`을 안 싣기 때문이다(카탈로그 스펙에만
+    있다). 그래서 지금은 이름 폴백으로 떨어져 v3와 동일하게 동작한다 — 회귀는 없지만 위 21건도
+    아직 안 고쳐진다.
+
+    제대로 고치려면 `_session_name`이 카탈로그 스펙을 조회해 SESSION 타입 파라미터의 name을
+    알아낸 뒤 흐름도에서 그 이름의 값을 읽어야 한다. `run_session_checks`에 catalog를 흘려야
+    해서 별도 작업으로 남긴다. 이 함수는 타입이 실리는 순간 자동으로 옳게 동작한다.
     """
+    if isinstance(param, str):
+        return "session" in param.replace(" ", "").lower()
+    if not isinstance(param, dict):
+        return False
+    ptype = str(param.get("type") or "").strip().upper()
+    if ptype:
+        return ptype == "SESSION"
+    name = param.get("name")
     return isinstance(name, str) and "session" in name.replace(" ", "").lower()
 
 
@@ -351,7 +375,7 @@ def _session_name(action: dict) -> str | None:
     'Default'도 유효한 세션 이름이다 — A360에서 Default 세션도 명시적으로 열어야 한다.
     """
     for p in action.get("parameters", []):
-        if _is_session_param(p.get("name")):
+        if _is_session_param(p):
             value = p.get("value")
             if isinstance(value, str) and value.strip():
                 return value.strip()
