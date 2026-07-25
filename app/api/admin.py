@@ -33,9 +33,6 @@ from app.services.assurance_evidence import receipt_integrity
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-
 def _service_key_ok(request: Request) -> bool:
     """X-API-Key가 OPS_API_KEY와 일치하나 — 머신(M2M) 신원. 사람 로그인 재사용을 대체한다.
 
@@ -67,6 +64,15 @@ def require_admin(
     raise HTTPException(
         403, detail={"code": "FORBIDDEN", "message": "관리자만 접근할 수 있습니다."}
     )
+
+
+# Router-level dependencies run before endpoint parameter dependencies. This keeps
+# authentication ahead of observability DB connection attempts for every admin route.
+router = APIRouter(
+    prefix="/api/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _parse_since(value: str) -> datetime:
