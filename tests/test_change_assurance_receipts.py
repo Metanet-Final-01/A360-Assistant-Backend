@@ -662,6 +662,9 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
         "LaunchTemplateData"
     ]["UserData"]["Fn::Base64"][0]
+    user_data_mapping = template["Resources"]["AppLaunchTemplate"]["Properties"][
+        "LaunchTemplateData"
+    ]["UserData"]["Fn::Base64"][1]
 
     assert "ASSURANCE_WRITER_TOKEN" not in str(build_job)
     assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment }}"
@@ -719,6 +722,13 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "jq -r '.ASSURANCE_WRITER_REPOSITORY // \"\"'" in user_data
     assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data
     assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in user_data
+    assert "REDIS_URL=${RedisUrl}" in user_data
+    assert "<<'EOF_REDIS'" in user_data
+    assert user_data.index("<<'EOF_REDIS'") < user_data.index("REDIS_URL=${RedisUrl}")
+    assert (
+        user_data_mapping["RedisUrl"]["Fn::ImportValue"]["Fn::Sub"]
+        == "${ProjectName}-${Environment}-RedisUrl"
+    )
     assert "OPENSEARCH_HOST=${ExternalOpenSearchHost}" in user_data
     assert "python3" not in user_data
     assert "dnf update -y" not in user_data

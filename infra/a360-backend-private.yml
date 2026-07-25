@@ -356,6 +356,9 @@ Resources:
               ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
               ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
               EOF
+              cat >> /opt/a360/.env <<'EOF_REDIS'
+              REDIS_URL=${RedisUrl}
+              EOF_REDIS
               jq -r 'to_entries[] | select((.key == "OPS_API_KEY" or .key == "ASSURANCE_WRITER_TOKEN" or .key == "ASSURANCE_WRITER_REPOSITORY") | not) | "\(.key)=\(.value)"' /opt/a360/secrets/app.json >> /opt/a360/.env
 
               docker rm -f a360-backend || true
@@ -407,6 +410,9 @@ Resources:
               RagRuntimeSecretArn:
                 Fn::ImportValue:
                   Fn::Sub: "${ProjectName}-${Environment}-RagRuntimeSecretArn"
+              RedisUrl:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-RedisUrl"
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
