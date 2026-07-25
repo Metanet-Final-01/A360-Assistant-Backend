@@ -87,7 +87,7 @@ Parameters:
     ConstraintDescription: OpenSearchPassword must not contain double quotes, backslashes, or newlines.
   RagCacheEnabled:
     Type: String
-    Default: "true"
+    Default: "false"
     AllowedValues: ["true", "false"]
   RagCacheTtlSeconds:
     Type: Number
