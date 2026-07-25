@@ -38,6 +38,11 @@ docs/aws-backend-deployment.md
 # RAG ingest artifacts (crawled docs, parsed schemas, embeddings input)
 data/
 tmp/
+# 예외: 에이전트 few-shot 자산은 **커밋 대상**이다 (RPA-298).
+# `data/`가 이름이 data인 모든 디렉터리를 잡아 이 산출물이 조용히 빠진다 —
+# 런타임이 이 파일만 읽으므로(DB 조회 0회) 빠지면 용례 슬롯이 다시 비어 버린다.
+!app/agent/knowledge/examples/data/
+!app/agent/knowledge/examples/data/*.json
 
 # RAG 검색/리랭커 파이프라인 로그 (JSON Lines, 날짜별)
 app/rag/logs/

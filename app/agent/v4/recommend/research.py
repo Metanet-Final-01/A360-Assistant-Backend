@@ -19,6 +19,16 @@ from pydantic import BaseModel, Field
 
 from ..orchestrator.jsonio import chat_json
 from app.agent.knowledge.derive import derive_structural_actions
+from app.agent.knowledge.examples import (
+    render_examples_block,
+    select_examples,
+    selection_trace,
+)
+from app.agent.knowledge.examples import (
+    render_examples_block,
+    select_examples,
+    selection_trace,
+)
 
 from ..verify.checker import derive_session_registry
 from .stream import emit
@@ -37,6 +47,12 @@ _MAX_MENU_ACTIONS = 14   # Dossier 액션 메뉴 상한 (스펙 포함이라 토
 # 이 값에 닿지 않고, 닿으면 잘린 사실을 프롬프트·로그·진행 메시지 셋 다에 남긴다).
 _MAX_USER_MENU_ACTIONS = 200
 _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
+# 프롬프트에 실을 용례 수 — 2건이면 조합 패턴을 보여주기 충분하다. 늘리면 컨텍스트를
+# 잡아먹으면서 모델이 예제를 그대로 베끼는 쪽으로 기운다.
+_MAX_EXAMPLES = 2
+# 프롬프트에 실을 용례 수 — 2건이면 조합 패턴을 보여주기 충분하고, 늘리면 컨텍스트를
+# 잡아먹으면서 모델이 예제를 그대로 베끼는 쪽으로 기운다.
+_MAX_EXAMPLES = 2
 
 
 # 제어 흐름 구조 액션 폴백 — 요구사항 문장에는 이런 액션이 명시되지 않아 검색 질의가
@@ -218,6 +234,10 @@ def _whole_catalog_dossier(ctx) -> dict:
         "actions": actions,
         "background": "",
         "dropped": dropped,
+        # 용례는 A360 공식 문서 유래라 타 솔루션 카탈로그 경로에는 싣지 않는다 —
+        # 다른 제품의 흐름에 A360 액션 조합을 보여주면 폐쇄 어휘를 깨는 유도가 된다.
+        "examples": "",
+        "example_ids": [],
     }
 
 
@@ -296,10 +316,24 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     if bg_hits:
         sink.extend(bg_hits)
 
+    # 용례 — 어휘가 아니라 **조합 패턴**을 나른다. 검색 0회(커밋된 자산 직독)이고
+    # 홀드아웃은 기본 제외다(select_examples의 include_holdout 기본 False가 유출 방지 계약).
+    picked = select_examples(
+        spec.get("goal") or "",
+        hint_packages={pkg for pkg, _ in menu_actions},
+        limit=_MAX_EXAMPLES,
+    )
+    examples = render_examples_block(picked)
+    if picked:
+        logger.info("용례 주입 %d건: %s", len(picked), selection_trace(picked))
+
     emit({"event": "stage", "stage": "searching",
-          "message": f"조사 완료 — 액션 후보 {len(menu_actions)}개 확보 (구조·세션 보완 {len(extra_blocks)}개 포함)"})
+          "message": f"조사 완료 — 액션 후보 {len(menu_actions)}개 확보 "
+                     f"(구조·세션 보완 {len(extra_blocks)}개 · 용례 {len(picked)}건 포함)"})
     return {
         "menu": "\n".join(blocks) or "(조사된 액션 없음 — 도구로 직접 검색 필요)",
         "actions": menu_actions,
         "background": background,
+        "examples": examples,
+        "example_ids": selection_trace(picked),
     }

@@ -1,0 +1,3505 @@
+{
+  "schema_version": 1,
+  "source": "docs.automationanywhere.com — Build automations > Task Bots > Examples of building automations",
+  "generated_from": {
+    "locale": "en-US",
+    "doc_count": 34
+  },
+  "examples": [
+    {
+      "doc_id": "ba52d0fc82c4de9e",
+      "title": "Build a Bot Insight dashboard bot",
+      "title_ko": "Bot Insight 대시보드 bot 작성",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/create-a-dashboard-bot",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "web",
+      "task_summary": "In this example, you build a bot that retrieves data from a website to create visualizations in Bot Insight .",
+      "packages": [
+        "Analyze",
+        "Browser",
+        "CSV/TXT",
+        "Data Table",
+        "Loop",
+        "Recorder",
+        "String"
+      ],
+      "steps": [
+        {
+          "package": "Browser",
+          "action": "Open",
+          "intent": "Open a browser window to the web page from which you want to extract the table.",
+          "params": [
+            [
+              "URL",
+              "https://www.statista.com/statistics/183483/ranking-of-languages-spoken-at-home-in-the-us-in-2008/"
+            ]
+          ]
+        },
+        {
+          "package": "Recorder",
+          "action": "Capture",
+          "intent": "",
+          "params": [
+            [
+              "Window",
+              "the Languages spoken in the United States 2018 | Statista window from the drop-down list. If the win…"
+            ]
+          ]
+        },
+        {
+          "package": "Data Table",
+          "action": "Write to file",
+          "intent": "Specify the file in which to save the data.",
+          "params": [
+            [
+              "Data table name",
+              "tLanguages"
+            ]
+          ]
+        },
+        {
+          "package": "CSV/TXT",
+          "action": "Open",
+          "intent": "Specify the file that holds the extracted data.",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "Iterate though each row of the file.",
+          "params": []
+        },
+        {
+          "package": "Analyze",
+          "action": "Open",
+          "intent": "Specify the data to populate the Bot Insight dashboard.",
+          "params": []
+        },
+        {
+          "package": "String",
+          "action": "Assign",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "String",
+          "action": "Replace",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "String",
+          "action": "To number",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Analyze",
+          "action": "Close",
+          "intent": "",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "91ff074701d1aae0",
+      "title": "Build automation using JSON actions",
+      "title_ko": "JSON을 사용해 자동화 만들기 작업",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/build-a-bot-using-json-actions",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "json",
+      "task_summary": "In this example, we create a Task Bot using JSON actions to perform operations on the JSON data.",
+      "packages": [
+        "Dictionary",
+        "JSON utilities",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "Dictionary",
+          "action": "Put",
+          "intent": "Create a SampleString and a SampleNumber variable.",
+          "params": [
+            [
+              "Key",
+              "tags"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Convert Dictionary to JSON",
+          "intent": "",
+          "params": [
+            [
+              "Save the outcome to a variable",
+              "vJson"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Start session",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Add node value",
+          "intent": "To create a JSON session, from JSON object session, select Local session and enter Default as the session name.",
+          "params": [
+            [
+              "JSON node path",
+              "$$"
+            ],
+            [
+              "Key name",
+              "address"
+            ],
+            [
+              "Value type",
+              "Dictionary variable"
+            ],
+            [
+              "Value",
+              "Dictionary tab and enter the following values:"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Get node value",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Update node value",
+          "intent": "",
+          "params": [
+            [
+              "JSON node path",
+              "tags"
+            ],
+            [
+              "Value type",
+              "String variable"
+            ],
+            [
+              "Value",
+              "Running"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Update node value",
+          "intent": "",
+          "params": [
+            [
+              "JSON node path",
+              "LastName"
+            ],
+            [
+              "Value type",
+              "String variable"
+            ],
+            [
+              "Value",
+              "Wade"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Get node value",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Convert JSON to Dictionary",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Dictionary",
+          "action": "Get",
+          "intent": "",
+          "params": [
+            [
+              "Key",
+              "address"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "JSON utilities",
+          "action": "End session",
+          "intent": "",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "e0c2bc70e9fe8764",
+      "title": "Common automation tasks and examples",
+      "title_ko": "일반적인 자동화 태스크 및 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/common-automaiton-tasks-examples",
+      "kind": "excluded",
+      "kind_reason": "Procedure 섹션 없음 — 다른 예제로 가는 링크 목록(인덱스 페이지)",
+      "domain": "",
+      "task_summary": "This document lists common automation tasks and examples for the tasks.",
+      "packages": [],
+      "steps": [],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "f3608db66df97c3a",
+      "title": "Create dictionary type variables",
+      "title_ko": "사전 유형 변수 생성",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-dictionary-variable-example",
+      "kind": "variable_syntax",
+      "kind_reason": "액션 블록 0건 — Variables 패널의 변수 생성/구문 튜토리얼",
+      "domain": "",
+      "task_summary": "Use Automation 360 to create dictionary type variables using different dictionary subtypes and key value type parameters.",
+      "packages": [],
+      "steps": [],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "ed5a97c0221600ee",
+      "title": "Example of entering data into a webform from a spreadsheet",
+      "title_ko": "스프레드시트에서 웹 양식에 데이터를 입력하는 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/enter-data-into-webform-from-file",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "web",
+      "task_summary": "Build a bot that reads multiple rows of data from an XLSX sheet and enters it into a web form. Use actions from the Excel advanced , Loop , and Recorder packages to build the bot.",
+      "packages": [
+        "Browser",
+        "Excel advanced",
+        "Loop",
+        "Recorder"
+      ],
+      "steps": [
+        {
+          "package": "Excel advanced",
+          "action": "Open",
+          "intent": "Open the Excel file.",
+          "params": []
+        },
+        {
+          "package": "Browser",
+          "action": "Open",
+          "intent": "Launch the website.",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Get multiple cells",
+          "intent": "Retrieve the worksheet values and store them in a Table variable.",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "Instruct the bot to process the data row by row.",
+          "params": []
+        },
+        {
+          "package": "Recorder",
+          "action": "Capture",
+          "intent": "Map the first column header to the web form textbox.",
+          "params": []
+        },
+        {
+          "package": "Recorder",
+          "action": "Capture",
+          "intent": "Capture the Submit button.",
+          "params": []
+        },
+        {
+          "package": "Recorder",
+          "action": "Click",
+          "intent": "Insert the Window variable generated by the Recorder.",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": true,
+      "holdout_reason": "골드셋 13(Invoicely)과 해법 골격 동일(스프레드시트 행 루프 → 웹폼 입력 → 제출) — 패턴 유출",
+      "related_goldset": [
+        "03",
+        "04",
+        "13"
+      ]
+    },
+    {
+      "doc_id": "7325ad85878c461b",
+      "title": "Example of migrating data from Excel to a database",
+      "title_ko": "Excel에서 데이터베이스로 데이터를 마이그레이션하는 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-example-migrate-data-from-excel-to-database",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "database",
+      "task_summary": "In this example, you build a bot to transfer values from an Excel spreadsheet to a database using actions from the Database , Excel advanced , and Loop packages .",
+      "packages": [
+        "Database",
+        "Excel advanced",
+        "Loop"
+      ],
+      "steps": [
+        {
+          "package": "Excel advanced",
+          "action": "Open",
+          "intent": "Open the spreadsheet",
+          "params": []
+        },
+        {
+          "package": "Database",
+          "action": "Connect",
+          "intent": "Connect to the database",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "Insert the Excel values into the database, row by row",
+          "params": []
+        },
+        {
+          "package": "Database",
+          "action": "Insert/Update/Delete",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Database",
+          "action": "Disconnect",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Close action in Excel advanced package",
+          "intent": "",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "13a4d6ddaece0575",
+      "title": "Example of passing a value between bots",
+      "title_ko": "Bot 간 값 전달의 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-cloud-dictionary",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "orchestration",
+      "task_summary": "Learn how to pass a value from one Task Bot to another by using a dictionary variable.",
+      "packages": [
+        "Message Box",
+        "Prompt",
+        "String",
+        "Task Bot"
+      ],
+      "steps": [
+        {
+          "package": "String",
+          "action": "Assign",
+          "intent": "Create a variable named sMySong .",
+          "params": [
+            [
+              "Destination string variable",
+              "sMySong to store the new string"
+            ]
+          ]
+        },
+        {
+          "package": "Prompt",
+          "action": "For value action in Prompt",
+          "intent": "Create a variable named sMySong .",
+          "params": [
+            [
+              "Prompt window caption",
+              "Favorite Song"
+            ],
+            [
+              "Prompt message",
+              "Type the title of your favorite song"
+            ],
+            [
+              "Assign the value to a variable",
+              "sMySong"
+            ]
+          ]
+        },
+        {
+          "package": "Task Bot",
+          "action": "Run",
+          "intent": "",
+          "params": [
+            [
+              "Task Bot to run",
+              "Control Room and then click Choose"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message box window title",
+              "Automation Anywhere Enterprise Client"
+            ],
+            [
+              "Message to display",
+              "$dOutput{sMySong}$ . The name of the output variable that the child bot uses is used as the key for…"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "37beff8af1bbdbe2",
+      "title": "Example of reading data from a spreadsheet",
+      "title_ko": "스프레드시트의 데이터 읽기 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-read-data-from-spreadsheet",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "excel",
+      "task_summary": "Build a bot that reads data from one Excel worksheet and writes it to another worksheet.",
+      "packages": [
+        "Excel advanced",
+        "If",
+        "Loop",
+        "Number"
+      ],
+      "steps": [
+        {
+          "package": "Excel advanced",
+          "action": "Open",
+          "intent": "To read data from the spreadsheet that contains the list of orders, open the Excel sheet.",
+          "params": [
+            [
+              "File",
+              "the sample Excel file you downloaded"
+            ],
+            [
+              "Sheet contains a header",
+              "on"
+            ],
+            [
+              "Specific sheet name",
+              "order_list"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Create workbook",
+          "intent": "For the list of priority orders, create a new spreadsheet.",
+          "params": [
+            [
+              "File path",
+              "a file path for the new file. For example, C:\\\\bots\\priority-orders.xlsx"
+            ],
+            [
+              "Sheet name",
+              "priority orders"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Get multiple cells",
+          "intent": "Copy the header from the source spreadsheet to the new spreadsheet.",
+          "params": [
+            [
+              "Select range of cells to be returned",
+              "Specific rows , and then enter 1 in both the From row and to row fields"
+            ],
+            [
+              "Session name",
+              "orderlist"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Write from data table",
+          "intent": "Write the copied header to the new sheet.",
+          "params": [
+            [
+              "Data table variable",
+              "HeaderData"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Go to cell",
+          "intent": "Before you write the data to the new spreadsheet, make sure that the A2 cell is selected on the new worksheet. To do so",
+          "params": [
+            [
+              "Specific cell",
+              "A2"
+            ],
+            [
+              "Session name",
+              "prioritylist"
+            ]
+          ]
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "Loop through the list of orders in the source spreadsheet.",
+          "params": [
+            [
+              "Iterator",
+              "For each row in worksheet for Excel advanced"
+            ]
+          ]
+        },
+        {
+          "package": "If",
+          "action": "If",
+          "intent": "",
+          "params": [
+            [
+              "Condition",
+              "String condition"
+            ],
+            [
+              "Operator",
+              "Equal to(=)"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Set cell",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "",
+          "params": [
+            [
+              "Iterator",
+              "For each value in record"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Set cell",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "prioritylist"
+            ]
+          ]
+        },
+        {
+          "package": "Number",
+          "action": "Increment",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Number",
+          "action": "Decrement",
+          "intent": "Reset the recordValueCounter variable to zero.",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Go to cell",
+          "intent": "Move the cursor to the next row before the next iteration.",
+          "params": [
+            [
+              "Session name",
+              "prioritylist"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "prioritylist"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "42b30467e1abc43c",
+      "title": "Example of transferring data from CSV file to Excel worksheet",
+      "title_ko": "CSV 파일에서 Excel 워크시트로 데이터를 전송하는 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-ex-trf-data-fr-txt-file-to-excel-work",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "excel",
+      "task_summary": "Build a bot that reads data from a CSV file and updates the data in an Excel worksheet, using actions from the CSV/TXT , Excel advanced , IF/ELSE , and Loop packages .",
+      "packages": [
+        "CSV/TXT",
+        "Excel advanced",
+        "If",
+        "Loop"
+      ],
+      "steps": [
+        {
+          "package": "CSV/TXT",
+          "action": "Open",
+          "intent": "Open the NewProductNames.csv file that you just created.",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Open",
+          "intent": "Open the ProductInventory.xlsx file that you just created.",
+          "params": [
+            [
+              "Session name",
+              "session 2"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "session 2"
+            ]
+          ]
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "If",
+          "action": "If",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Set cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "session 2"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "session 2"
+            ]
+          ]
+        },
+        {
+          "package": "If",
+          "action": "Else",
+          "intent": "Insert an alternative to the If action : if the item numbers are not the same, the bot continues to the next row in NewProductNames.csv .",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Continue",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Close action in Excel advanced package",
+          "intent": "Close the files.",
+          "params": [
+            [
+              "Session name",
+              "session 2"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [
+        "CSV/TXT > Close"
+      ],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "527b5f0333972abc",
+      "title": "Example of updating default package version across bots",
+      "title_ko": "여러 Bot에서 기본 패키지 버전 업데이트 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/using-update-bot-package-version",
+      "kind": "excluded",
+      "kind_reason": "액션 블록 0건 — Control Room 관리(Administration) 절차, 봇 흐름 아님",
+      "domain": "",
+      "task_summary": "This example shows how to perform a bulk update of multiple bots in the Control Room repository and use the default version of the Excel advanced and Message Box packages .",
+      "packages": [],
+      "steps": [],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "f1b4324aa1c608bc",
+      "title": "Example of using Create Folder action from Google Drive package",
+      "title_ko": "Google Drive 패키지에서 폴더 만들기 작업 사용 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-google-drive-create-folder-action",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "spreadsheet_cloud",
+      "task_summary": "Build a bot that creates a folder in Google Drive.",
+      "packages": [
+        "Datetime",
+        "Google Drive",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "Datetime",
+          "action": "To string",
+          "intent": "To change the default bot storage location, click Choose and follow the prompts.",
+          "params": [
+            [
+              "Source date and time variable",
+              "Variable , and enter $System:Date$ . You can use the System: Date variable to get the current date"
+            ],
+            [
+              "Date time format",
+              "Custom format , and enter dd-MM-yyyy"
+            ],
+            [
+              "Assign the output to a variable",
+              "(x) and create a string variable named currentDate"
+            ]
+          ]
+        },
+        {
+          "package": "Google Drive",
+          "action": "Create folder",
+          "intent": "Create a folder.",
+          "params": [
+            [
+              "Username",
+              "the email ID in Insecure string"
+            ],
+            [
+              "Parent folder",
+              "the path to the parent folder where the new folder must be created. For example, aa-docs/monthly-rep…"
+            ],
+            [
+              "Folder name",
+              "$currentDate$-report"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "Display the folder ID.",
+          "params": [
+            [
+              "Message to display",
+              "$FolderID$"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [
+        "Google Drive > Connect"
+      ],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "66c13ead30ab2948",
+      "title": "Example of using Custom column option in Data Table package",
+      "title_ko": "데이터 테이블 패키지에서 사용자 지정 열 옵션을 사용하는 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-datatable-package",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "excel",
+      "task_summary": "In this example, you will build a bot to read a CSV file, assign it to a data table variable, and then modify the table by adding a new column. Use the Custom column option in the Data Table package to insert columns at a specified index.",
+      "packages": [
+        "CSV/TXT",
+        "Data Table",
+        "Delay",
+        "Excel advanced"
+      ],
+      "steps": [
+        {
+          "package": "CSV/TXT",
+          "action": "Open",
+          "intent": "Open and read data from the CSV file.",
+          "params": [
+            [
+              "Contains header",
+              "on"
+            ],
+            [
+              "Delimiter",
+              "the Comma check box"
+            ]
+          ]
+        },
+        {
+          "package": "CSV/TXT",
+          "action": "Read",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Session 1"
+            ]
+          ]
+        },
+        {
+          "package": "Data Table",
+          "action": "Insert column",
+          "intent": "Insert a new column of data type String to the existing table.",
+          "params": [
+            [
+              "Destination table",
+              "the variable TableFromCSV"
+            ],
+            [
+              "Insert column at index",
+              "last index"
+            ],
+            [
+              "Insert column",
+              "Custom column"
+            ],
+            [
+              "Column name",
+              "Address"
+            ],
+            [
+              "Column type",
+              "the data type as String"
+            ],
+            [
+              "Default value",
+              "Bangalore"
+            ]
+          ]
+        },
+        {
+          "package": "Data Table",
+          "action": "Write to file",
+          "intent": "Write the new data to the CSV file.",
+          "params": [
+            [
+              "Data table name",
+              "TableFromCSV variable"
+            ],
+            [
+              "Enter file name",
+              "the CSV file that you have saved on your desktop"
+            ],
+            [
+              "When writing",
+              "the Overwrite existing file option"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Open",
+          "intent": "Open the CSV file to view the updated data.",
+          "params": [
+            [
+              "Sheet contains a header",
+              "on"
+            ]
+          ]
+        },
+        {
+          "package": "Delay",
+          "action": "Delay",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Close action in Excel advanced package",
+          "intent": "Close the CSV file.",
+          "params": []
+        },
+        {
+          "package": "Data Table",
+          "action": "Insert column",
+          "intent": "Insert a new column of data type DateTime to the existing table.",
+          "params": [
+            [
+              "Destination table",
+              "the variable TableFromCSV"
+            ],
+            [
+              "Insert column at index",
+              "specific index and specify the index in the text field"
+            ],
+            [
+              "Insert column",
+              "Custom column"
+            ],
+            [
+              "Column name",
+              "Date of joining"
+            ]
+          ]
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Open",
+          "intent": "Open the CSV file to view the updated data.",
+          "params": [
+            [
+              "Sheet contains a header",
+              "on"
+            ]
+          ]
+        },
+        {
+          "package": "Delay",
+          "action": "Delay",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Close action in Excel advanced package",
+          "intent": "Close the CSV file.",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [
+        "CSV/TXT > Close"
+      ],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "402a496412f8ead1",
+      "title": "Example of using Custom selection option in Log variables to file action",
+      "title_ko": "변수 기록의 사용자 지정 선택 옵션을 파일 작업에 사용하는 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/using-log-variables-to-file",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "logging",
+      "task_summary": "In this example, you will use the Custom selection option to log user-defined variables to an existing log file and then modify the values of the variables and log the appended data into a file.",
+      "packages": [
+        "Boolean",
+        "Logging",
+        "Number",
+        "String"
+      ],
+      "steps": [
+        {
+          "package": "Logging",
+          "action": "Log variables to file",
+          "intent": "Create the following user-defined variables using the Create variable (+) icon at the top of the Variables menu.",
+          "params": [
+            [
+              "Output file path",
+              "the file location. For example, D:\\userdefined path\\weather_forecast-data.txt"
+            ],
+            [
+              "When logging",
+              "Overwrite existing log file option"
+            ],
+            [
+              "Variables to log",
+              "the Custom selection option and select all variables as follows:"
+            ]
+          ]
+        },
+        {
+          "package": "String",
+          "action": "Uppercase",
+          "intent": "",
+          "params": [
+            [
+              "Source string",
+              "Day_1 to insert the variable"
+            ],
+            [
+              "Assign the output to variable",
+              "the Day_1 variable from the drop-down"
+            ]
+          ]
+        },
+        {
+          "package": "Number",
+          "action": "Increment",
+          "intent": "",
+          "params": [
+            [
+              "Enter number",
+              "Temperature_Tues to insert the variable"
+            ],
+            [
+              "Enter increment value",
+              "15"
+            ],
+            [
+              "Assign the output to variable",
+              "Temperature_Tues variable from the drop-down"
+            ]
+          ]
+        },
+        {
+          "package": "Boolean",
+          "action": "Invert",
+          "intent": "",
+          "params": [
+            [
+              "Assign the output to",
+              "the Chances_of_rain_Wed variable from the drop-down"
+            ]
+          ]
+        },
+        {
+          "package": "Logging",
+          "action": "Log variables to file",
+          "intent": "",
+          "params": [
+            [
+              "Output file path",
+              "the file location. For example, D:\\userdefined path\\weather_forecast-data.txt"
+            ],
+            [
+              "When logging",
+              "Append to existing log file option"
+            ],
+            [
+              "Append timestamp",
+              "on"
+            ],
+            [
+              "Variables to log",
+              "the Custom selection option and select all variables as previously shown in Step 3c"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "6b855fdb120f7f85",
+      "title": "Example of using Find file/folder action from Google Drive package",
+      "title_ko": "작업 Google Drive에서 폴더 만들기 패키지의 사용 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-finding-files-folders-google-drive",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "spreadsheet_cloud",
+      "task_summary": "Build a bot that searches Google Drive for a file and creates the file if it is not found in the specified path.",
+      "packages": [
+        "CSV/TXT",
+        "Error handler",
+        "Google Drive",
+        "Google Sheets",
+        "JSON utilities"
+      ],
+      "steps": [
+        {
+          "package": "CSV/TXT",
+          "action": "Open",
+          "intent": "Open the CSV file that contains data you wan to copy to a Google Sheet.",
+          "params": []
+        },
+        {
+          "package": "CSV/TXT",
+          "action": "Read",
+          "intent": "Read data from CSV and store it in a data table variable.",
+          "params": [
+            [
+              "Session name",
+              "csvsession"
+            ]
+          ]
+        },
+        {
+          "package": "Error handler",
+          "action": "Try",
+          "intent": "Connect to Google Sheets.",
+          "params": []
+        },
+        {
+          "package": "Google Drive",
+          "action": "Find file/folder",
+          "intent": "Check for existence using Find file/folder action with Try and Catch actions .",
+          "params": []
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Create workbook",
+          "intent": "If the file does not exist, create the file.",
+          "params": [
+            [
+              "Username",
+              "Insecure string and enter the email ID associated with the OAuth connection"
+            ],
+            [
+              "Session name",
+              "gsheetsession"
+            ],
+            [
+              "Workbook name",
+              "contacts"
+            ],
+            [
+              "File path",
+              "From my shared location , and enter the parent folder path. For example, in this sample in scenario,…"
+            ]
+          ]
+        },
+        {
+          "package": "Google Drive",
+          "action": "Find file/folder",
+          "intent": "",
+          "params": [
+            [
+              "Username",
+              "Insecure string and enter the email ID associated with the OAuth connection"
+            ],
+            [
+              "Source folder path",
+              "the source folder. For example, the sample bot in this example looks for the file in the aa-docs/spr…"
+            ],
+            [
+              "Match type",
+              "Exactly matches"
+            ],
+            [
+              "File/Folder name",
+              "contacts"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Start session",
+          "intent": "Parse the JSON string associated with the File1 key.",
+          "params": [
+            [
+              "Data Source",
+              "Text and enter $FileFolderDictionary{File1}$"
+            ],
+            [
+              "JSON object session",
+              "Local session and enter jsonsession"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "End session",
+          "intent": "End the JSON session.",
+          "params": [
+            [
+              "Session name",
+              "jsonsession"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Open spreadsheet",
+          "intent": "With the retrieved file ID, open the spreadsheet created in Google Drive.",
+          "params": [
+            [
+              "Username",
+              "Insecure string and enter the email ID associated with the OAuth connection"
+            ],
+            [
+              "Session name",
+              "gsheetsession"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Write from data table",
+          "intent": "Write the data table variable to the Google sheet.",
+          "params": [
+            [
+              "Session name",
+              "gsheetsession"
+            ],
+            [
+              "Data table variable",
+              "TableFromCSV"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Disconnect",
+          "intent": "Disconnect Google Drive and Google Sheets.",
+          "params": [
+            [
+              "Username",
+              "Insecure string and enter the email ID associated with the OAuth connection"
+            ],
+            [
+              "Session name",
+              "gsheetsession"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [
+        "CSV/TXT > Close",
+        "Google Drive > Connect",
+        "Google Drive > Disconnect",
+        "Google Sheets > Connect"
+      ],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": [
+        "01"
+      ]
+    },
+    {
+      "doc_id": "df7fa67d4688549b",
+      "title": "Example of using Get structure command from SAP BAPI package",
+      "title_ko": "SAP BAPI에서 구조 가져오기 명령을 사용하는 예 패키지",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-use-sap-bapi-to-input-structure",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "sap",
+      "task_summary": "Using the SAP BAPI package , build a bot that inputs a structure to get data.",
+      "packages": [
+        "Data Table",
+        "SAP BAPI"
+      ],
+      "steps": [
+        {
+          "package": "SAP BAPI",
+          "action": "Connect",
+          "intent": "Create a Task Bot named SAP-BAPI-FlightListReport .",
+          "params": [
+            [
+              "JCo: SAP Java Connector package",
+              "the path to the Java connector .jar file"
+            ],
+            [
+              "JCo DLL/DYLIB dependency",
+              "the path to the dynamic library file. .dll for Windows automation and .dylib for automation"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Create function",
+          "intent": "",
+          "params": [
+            [
+              "Function alias name",
+              "getFlightListByAirline"
+            ],
+            [
+              "BAPI name",
+              "BAPI_FLIGHT_GETLIST"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Set field value",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get structure",
+          "intent": "",
+          "params": [
+            [
+              "Structure name",
+              "DESTINATION_FROM"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Set field value",
+          "intent": "",
+          "params": [
+            [
+              "Structure alias",
+              "destinationFrom"
+            ],
+            [
+              "Field name",
+              "AIRPORTID"
+            ],
+            [
+              "Field Value",
+              "FCO"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Set field value",
+          "intent": "",
+          "params": [
+            [
+              "Structure alias",
+              "destinationFrom"
+            ],
+            [
+              "Field name",
+              "CITY"
+            ],
+            [
+              "Field Value",
+              "ROME"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Run function",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get table",
+          "intent": "",
+          "params": [
+            [
+              "Table name",
+              "the FLIGHT_LIST tab"
+            ]
+          ]
+        },
+        {
+          "package": "Data Table",
+          "action": "Write to file",
+          "intent": "",
+          "params": [
+            [
+              "Data table name",
+              "tblFlightList"
+            ],
+            [
+              "Enter file name",
+              "the path to the CSV file to which you want to write the data"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "17d6e97ebebaa2d2",
+      "title": "Example of using Go to Cell action from Google Sheets package",
+      "title_ko": "작업 Google Sheets에서 셀 패키지으로 이동 사용 예시",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-use-go-to-cell-action-google-sheets",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "spreadsheet_cloud",
+      "task_summary": "Build a bot that loops through the records in a Google Sheet and creates a report based on the records.",
+      "packages": [
+        "Google Sheets",
+        "If",
+        "Loop",
+        "Number",
+        "String"
+      ],
+      "steps": [
+        {
+          "package": "Google Sheets",
+          "action": "Open spreadsheet",
+          "intent": "Open the spreadsheet that contains the inventory list.",
+          "params": [
+            [
+              "Username",
+              "Insecure string and enter the email ID associated with the OAuth connection"
+            ],
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Get multiple cells",
+          "intent": "Copy the inventory data to a Data table variable.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Close",
+          "intent": "Close the current Google Sheet.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Open spreadsheet",
+          "intent": "Open the Google Sheet where you want to copy information about the items that need to be restocked.",
+          "params": [
+            [
+              "Username",
+              "Insecure string and enter the email ID associated with the OAuth connection"
+            ],
+            [
+              "Session name",
+              "gsheet"
+            ],
+            [
+              "Specific sheet name",
+              "on"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ],
+            [
+              "Cell options",
+              "Specific cell and then enter A2 in Cell name"
+            ]
+          ]
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "Loop through the records in the data table variable.",
+          "params": []
+        },
+        {
+          "package": "String",
+          "action": "To number",
+          "intent": "",
+          "params": [
+            [
+              "Enter the string",
+              "$TableRow[4]$ to get the reorder threshold value for the current item"
+            ],
+            [
+              "Assign the output to variable",
+              "(x) and create a Number variable named ReorderThreshold"
+            ]
+          ]
+        },
+        {
+          "package": "String",
+          "action": "To number",
+          "intent": "",
+          "params": [
+            [
+              "Enter the string",
+              "$TableRow[3]$ to get the current stock value for the current item"
+            ],
+            [
+              "Assign the output to variable",
+              "(x) and create a Number variable named currentStock"
+            ]
+          ]
+        },
+        {
+          "package": "If",
+          "action": "If",
+          "intent": "",
+          "params": [
+            [
+              "Condition",
+              "Number > > Number condition"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Set cell",
+          "intent": "Copy the item ID to the restock sheet.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Go to cell",
+          "intent": "Move the cursor to the next column.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ],
+            [
+              "Cell options",
+              "One cell to the right"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Set cell",
+          "intent": "Copy the product name to the restock sheet.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Go to cell",
+          "intent": "Move the cursor to the next column.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ],
+            [
+              "Cell options",
+              "One cell to the right"
+            ]
+          ]
+        },
+        {
+          "package": "Number",
+          "action": "Decrement",
+          "intent": "Calculate the quantity needed for reordering the current item.",
+          "params": [
+            [
+              "Enter number",
+              "$ReorderThreshold$"
+            ],
+            [
+              "Enter decrement value",
+              "$currentStock$"
+            ],
+            [
+              "Assign the output to variable",
+              "(x) and create a Number variable named quantityToStock"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Set cell",
+          "intent": "Write the quantity to reorder in the Quantity to Restock column.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Go to cell",
+          "intent": "Move the cursor to the start of the current row.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ],
+            [
+              "Cell options",
+              "Beginning of the row"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ],
+            [
+              "Cell options",
+              "One cell below"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Close",
+          "intent": "Close the current Google Sheet.",
+          "params": [
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        },
+        {
+          "package": "Google Sheets",
+          "action": "Disconnect",
+          "intent": "Disconnect from Google Sheets.",
+          "params": [
+            [
+              "Username",
+              "Insecure string and enter the email ID associated with OAuth connection you have set up"
+            ],
+            [
+              "Session name",
+              "gsheet"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [
+        "Google Sheets > Connect"
+      ],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "fba79056a7e53f57",
+      "title": "Example of using Python script to join a list",
+      "title_ko": "Python 스크립트를 이용하여 목록을 연결하는 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-use-python-script-to-join-a-list",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "script",
+      "task_summary": "Build a bot that uses a Python function to print the message Go Be Great! , the Automation Anywhere version of Hello World . In this example, the bot combines a list of string values and prints them to a message box.",
+      "packages": [
+        "Message Box",
+        "Python Script"
+      ],
+      "steps": [
+        {
+          "package": "Python Script",
+          "action": "Open",
+          "intent": "Create a variable to hold the list values",
+          "params": []
+        },
+        {
+          "package": "Python Script",
+          "action": "Execute function",
+          "intent": "Copy and paste the following text into the Enter script here field.",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "Create the variable sOutput for the Assign the output to variable field.",
+          "params": [
+            [
+              "Message to display",
+              "and insert the variable sOutput"
+            ]
+          ]
+        },
+        {
+          "package": "Python Script",
+          "action": "Close",
+          "intent": "",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "43c9a4bcaa239ea2",
+      "title": "Example of using Run standard workflow from SAP BAPI package",
+      "title_ko": "SAP BAPI에서 표준 워크플로 실행을 사용하는 예 패키지",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-run-standard-workflow-sap-bapi",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "sap",
+      "task_summary": "Using the Run standard workflow action from the SAP BAPI package , build a bot that retrieves data from SAP systems.",
+      "packages": [
+        "Data Table",
+        "Dictionary",
+        "SAP BAPI"
+      ],
+      "steps": [
+        {
+          "package": "SAP BAPI",
+          "action": "Connect",
+          "intent": "Create a bot named SAP-BAPI-CheckFlightAvailability .",
+          "params": [
+            [
+              "JCo: SAP Java Connector package",
+              "the path to the Java connector .jar file"
+            ],
+            [
+              "JCo DLL/DYLIB dependency",
+              "the path to the dynamic library file. .dll for Windows automation and .dylib for automation"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Run standard workflow",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Dictionary",
+          "action": "Get",
+          "intent": "Convert the exported data to a table.",
+          "params": [
+            [
+              "Dictionary variable",
+              "ReturnStructure"
+            ],
+            [
+              "Key",
+              "AVAILABILITY"
+            ]
+          ]
+        },
+        {
+          "package": "Data Table",
+          "action": "Write to file",
+          "intent": "",
+          "params": [
+            [
+              "Data table name",
+              "Availability"
+            ],
+            [
+              "Enter file name",
+              "the path to the CSV file, to which you want to write the data"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "466571afe505f018",
+      "title": "Example of using Salesforce package and record variable",
+      "title_ko": "Salesforce 패키지 및 기록 변수 사용의 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-bot-salesforce-package-record-variable",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "datatable",
+      "task_summary": "Build a bot that queries Salesforce objects and writes data to a CSV file. The bot also uses a record variable to retrieve data from individual records fetched from Salesforce.",
+      "packages": [
+        "Data Table",
+        "Error handler",
+        "Loop",
+        "Message Box",
+        "Number",
+        "Record",
+        "Salesforce"
+      ],
+      "steps": [
+        {
+          "package": "Salesforce",
+          "action": "Authentication action in Salesforce package",
+          "intent": "",
+          "params": [
+            [
+              "Authentication Type",
+              "Control room OAuth connection"
+            ]
+          ]
+        },
+        {
+          "package": "Error handler",
+          "action": "Try",
+          "intent": "To check for authentication errors before executing other tasks, use the Try Catch actions .",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "the ErrorMessage variable and save the changes"
+            ]
+          ]
+        },
+        {
+          "package": "Salesforce",
+          "action": "Salesforce Execute SOQL",
+          "intent": "Query the Salesforce Opportunity object to fetch opportunities records with the Prospecting status .",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "Loop through the list of retrieved opportunities records.",
+          "params": [
+            [
+              "Iterator",
+              "For each item in the list"
+            ]
+          ]
+        },
+        {
+          "package": "Record",
+          "action": "Add column",
+          "intent": "Update the record variable with the Opportunity name from the current record.",
+          "params": [
+            [
+              "Source record variable",
+              "out_record_prospecting"
+            ],
+            [
+              "Column type",
+              "$dict_record_opportunity{Name}$"
+            ]
+          ]
+        },
+        {
+          "package": "Salesforce",
+          "action": "Salesforce Get record",
+          "intent": "The opportunities records retrieved from Salesforce contain only the account IDs and not account names. Retrieve the account name using the account ID for each record.",
+          "params": [
+            [
+              "Object name",
+              "Account"
+            ],
+            [
+              "Record ID",
+              "$dict_record_opportunity{AccountId}$"
+            ],
+            [
+              "Fields and data",
+              "List and click Add"
+            ]
+          ]
+        },
+        {
+          "package": "Record",
+          "action": "Add column",
+          "intent": "",
+          "params": [
+            [
+              "Source record variable",
+              "out_record_prospecting"
+            ],
+            [
+              "Column type",
+              "$AccountName$"
+            ]
+          ]
+        },
+        {
+          "package": "Record",
+          "action": "Add column",
+          "intent": "",
+          "params": [
+            [
+              "Source record variable",
+              "out_record_prospecting"
+            ],
+            [
+              "Column type",
+              "$dict_record_opportunity{Amount}$"
+            ]
+          ]
+        },
+        {
+          "package": "Record",
+          "action": "Add column",
+          "intent": "Update the record variable with CloseDate, StageName, and NextStep.",
+          "params": []
+        },
+        {
+          "package": "Record",
+          "action": "Add column",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Record",
+          "action": "Add column",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Data Table",
+          "action": "Insert row",
+          "intent": "To keep track of the iterations and use it as a row index number, create a Number variable named counter and set the default value to 0 .",
+          "params": [
+            [
+              "Data table name",
+              "(x) and create a Table variable named table_records"
+            ]
+          ]
+        },
+        {
+          "package": "Number",
+          "action": "Increment",
+          "intent": "Increment the counter variable by 1.",
+          "params": [
+            [
+              "Enter number",
+              "$counter$"
+            ],
+            [
+              "Enter increment value",
+              "1"
+            ],
+            [
+              "Assign the output to variable",
+              "counter"
+            ]
+          ]
+        },
+        {
+          "package": "Record",
+          "action": "Assign",
+          "intent": "Reset the out_record_prospecting record variable before the next iteration.",
+          "params": [
+            [
+              "Source record variable",
+              "record_empty"
+            ]
+          ]
+        },
+        {
+          "package": "Data Table",
+          "action": "Write to file",
+          "intent": "Write the retrieved opportunity records to a CSV file.",
+          "params": [
+            [
+              "Data table name",
+              "table_records"
+            ],
+            [
+              "Enter file name",
+              "the CSV file path. For example, C:\\bots\\opportunities.csv"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "63ee809ec90f8cfc",
+      "title": "Example of using To string action from Datetime package",
+      "title_ko": "작업 날짜 시간에서 문자열 패키지으로 이동 사용 예시",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-to-string-action-datetime",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "excel",
+      "task_summary": "Build a bot that compares the current date with the expiration dates of products.",
+      "packages": [
+        "Datetime",
+        "Excel basic",
+        "If",
+        "Loop",
+        "String"
+      ],
+      "steps": [
+        {
+          "package": "Datetime",
+          "action": "To string",
+          "intent": "To change the default bot storage location, click Choose and follow the prompts.",
+          "params": [
+            [
+              "Source date and time variable",
+              "Variable , and enter $System:Date$ . You can use the System: Date variable to get the current date"
+            ],
+            [
+              "Date time format",
+              "Custom format , and enter yyyy-MM-dd"
+            ],
+            [
+              "Assign the output to a variable",
+              "(x) and create a string variable named currentDate"
+            ]
+          ]
+        },
+        {
+          "package": "Excel basic",
+          "action": "Open",
+          "intent": "Open the spreadsheet with the sample inventory data.",
+          "params": [
+            [
+              "Sheet contains a header",
+              "on"
+            ],
+            [
+              "Specific sheet name",
+              "the sheet name. If you are using the sample spreadsheet downloaded from this page, specify inventory…"
+            ]
+          ]
+        },
+        {
+          "package": "Excel basic",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "Iterate through the rows in the spreadsheet and get the expiry date for each product.",
+          "params": []
+        },
+        {
+          "package": "String",
+          "action": "Compare",
+          "intent": "Compare each expiry date with the current date.",
+          "params": [
+            [
+              "Source string",
+              "$currentDate$"
+            ],
+            [
+              "Compare to string",
+              "$ExcelRow[2]$"
+            ],
+            [
+              "Assign the output to variable",
+              "(x) to create a Boolean variable named datesMatched"
+            ]
+          ]
+        },
+        {
+          "package": "If",
+          "action": "If",
+          "intent": "",
+          "params": [
+            [
+              "Condition",
+              "Boolean > Boolean condition"
+            ],
+            [
+              "Operator",
+              "Equals to(=)"
+            ]
+          ]
+        },
+        {
+          "package": "Excel basic",
+          "action": "Go to cell",
+          "intent": "If the dates match, move the cursor to the end of the current row.",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Excel basic",
+          "action": "Set cell",
+          "intent": "If the dates match, mark the product as expired.",
+          "params": [
+            [
+              "Value to set",
+              "Yes"
+            ],
+            [
+              "Session name or variable",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Excel basic",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Excel basic",
+          "action": "Go to cell",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Excel basic",
+          "action": "Close",
+          "intent": "Close the current spreadsheet.",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "dce7b7895010abdf",
+      "title": "Example of using a conditional statement",
+      "title_ko": "조건문 사용 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-perform-an-if-condition-based-on-cell-value",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "excel",
+      "task_summary": "In this example, you build a bot that prints a message based on whether a cell has a value or is empty. Use the actions from the Excel basic or Excel advanced , If , and Message Box packages .",
+      "packages": [
+        "Excel advanced",
+        "If",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "Excel advanced",
+          "action": "Open",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Excel advanced",
+          "action": "Get single cell",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "If",
+          "action": "If",
+          "intent": "",
+          "params": [
+            [
+              "Condition",
+              "String"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "Insert a Message box into the If container.",
+          "params": [
+            [
+              "Message to display",
+              "Cell is empty"
+            ]
+          ]
+        },
+        {
+          "package": "If",
+          "action": "Else",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "Cell is not empty"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "b00eff5fab7a3ed8",
+      "title": "Example of using a file variable",
+      "title_ko": "파일 변수 사용의 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-file-variable",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "csv",
+      "task_summary": "Learn to use file variables in bots. There can be instances where a bot needs to access a file multiple times based on the task it performs. You can store file references in file variables and use the file variables in bots instead of adding direct file paths.",
+      "packages": [
+        "CSV/TXT",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "CSV/TXT",
+          "action": "Open",
+          "intent": "Create a variable named varFile .",
+          "params": []
+        },
+        {
+          "package": "CSV/TXT",
+          "action": "Read",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "(x)"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "805dcd482189130e",
+      "title": "Example of using a file variable with streaming",
+      "title_ko": "파일 변수를 스트리밍 기능과 함께 사용하는 예시",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-file-stream",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "spreadsheet_cloud",
+      "task_summary": "The file variables support streaming of files directly from the data source to the automation. The file stream capability is available in file variables of both API Tasks and Task Bots .",
+      "packages": [
+        "Google Drive",
+        "Microsoft 365 OneDrive"
+      ],
+      "steps": [
+        {
+          "package": "Google Drive",
+          "action": "Assign file",
+          "intent": "Configure the Connect action as follows",
+          "params": []
+        },
+        {
+          "package": "Microsoft 365 OneDrive",
+          "action": "Connect",
+          "intent": "Configure the Assign File action as follows",
+          "params": []
+        },
+        {
+          "package": "Microsoft 365 OneDrive",
+          "action": "Upload file",
+          "intent": "Configure the Connect action as follows",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [
+        "Google Drive > Connect"
+      ],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "9cb38bea78885f5a",
+      "title": "Example of using multiple analyze actions in a task",
+      "title_ko": "태스크에서 다중 분석 작업 사용 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-multiple-analyze-actions",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "web",
+      "task_summary": "Build a bot that uses multiple Open and Close Analyze actions in a task to analyze and compare the sales data for each quarter of XYZ Company, and create visualizations in Bot Insight .",
+      "packages": [
+        "Analyze",
+        "CSV/TXT",
+        "Loop",
+        "Number",
+        "String"
+      ],
+      "steps": [
+        {
+          "package": "CSV/TXT",
+          "action": "Open",
+          "intent": "Open the XYZ sales data.csv file that you created.",
+          "params": []
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "",
+          "params": [
+            [
+              "Iterator",
+              "on"
+            ]
+          ]
+        },
+        {
+          "package": "Analyze",
+          "action": "Open",
+          "intent": "Specify the data to populate on the Bot Insight business dashboard.",
+          "params": []
+        },
+        {
+          "package": "String",
+          "action": "Assign",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Number",
+          "action": "Assign",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Analyze",
+          "action": "Close",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Analyze",
+          "action": "Open",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Analyze",
+          "action": "Close",
+          "intent": "",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "12dcb979f984dc6b",
+      "title": "Example of using remote function call in SAP",
+      "title_ko": "SAP에서 원격 함수 호출 사용의 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/using-remote-function-call-sap",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "sap",
+      "task_summary": "This example describes how to build a bot that will create a document in SAP using the remote function call method.",
+      "packages": [
+        "Data Table",
+        "Message Box",
+        "SAP BAPI"
+      ],
+      "steps": [
+        {
+          "package": "SAP BAPI",
+          "action": "Connect",
+          "intent": "Open a new bot",
+          "params": [
+            [
+              "SAP BAPI Session",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Create function",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get table",
+          "intent": "To create BAPI_ACC_DOCUMENT_POST in SAP, you must first create a structure and tables. Select Get structure to obtain data from a structure using the function alias.",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_Post (the alias you provided for the SAP BAPI function using the Create function action )"
+            ],
+            [
+              "Table name",
+              "ACCOUNTGL (the name of the table from which you want to obtain data)"
+            ],
+            [
+              "SAP BAPI Session",
+              "Default (the session name you used to connect to the SAP application in the Connect action )"
+            ],
+            [
+              "Table alias",
+              "the Alias option to save the data retrieved"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Set field value",
+          "intent": "",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_Post"
+            ],
+            [
+              "Structure alias",
+              "DOC"
+            ],
+            [
+              "Field name",
+              "USERNAME (the name of the field in which you want to set data)"
+            ],
+            [
+              "Field Value",
+              "sy-uname ( the value that you want to set)"
+            ],
+            [
+              "SAP BAPI Session",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get structure",
+          "intent": "",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_POST"
+            ],
+            [
+              "Structure name",
+              "DOCUMENTHEADER"
+            ],
+            [
+              "SAP BAPI Session",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Data Table",
+          "action": "Write to file",
+          "intent": "",
+          "params": [
+            [
+              "Data table name",
+              "the Table variable Sap-Bapi-Table that contains the data to write"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Set field value",
+          "intent": "Specify the location of the file in which to write the data in the Enter file name field. For example, D:/user defined/My Desktop/SAP Test/DOCUMENTHEADER.csv .",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_POST"
+            ],
+            [
+              "Table alias",
+              "GL"
+            ],
+            [
+              "Field name",
+              "ITEMNO_ACC (the name of the field in which you want to set data)"
+            ],
+            [
+              "Field Value",
+              "2 (the value that you want to set)"
+            ],
+            [
+              "SAP BAPI Session",
+              "Default (the session name you used to connect to the SAP application in the Connect action )"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get table",
+          "intent": "While setting values in the table, retain the same value as you previously entered in steps 11(a), 11(b), 11(c), and 11(f). Change the following values for steps 11(d) and 11(e)",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_POST"
+            ],
+            [
+              "Table name",
+              "ACCOUNTGL"
+            ],
+            [
+              "SAP BAPI Session",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Set field value",
+          "intent": "Specify the location of the file in which to write the data in the Enter file name field. For example, D:/user defined /My Desktop/SAP Test/ACCOUNTGL.csv .",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_POST"
+            ],
+            [
+              "Table alias",
+              "CURRENCY"
+            ],
+            [
+              "Field name",
+              "ITEMNO_ACC (the name of the field in which you want to set data)"
+            ],
+            [
+              "Field Value",
+              "2 (the value that you want to set)"
+            ],
+            [
+              "SAP BAPI Session",
+              "Default (the session name you used to connect to the SAP application in the Connect action )"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Run function",
+          "intent": "While setting values in the table, retain the same value as you previously entered in steps 16(a), 16(b), 16(c), and 16(f). Change the following values for steps 16(d) and 16(e)",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_POST"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get table",
+          "intent": "",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_POST"
+            ],
+            [
+              "Table name",
+              "RETURN"
+            ],
+            [
+              "SAP BAPI Session",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get field value",
+          "intent": "",
+          "params": [
+            [
+              "BAPI function alias",
+              "BAPI_POST"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message box window title",
+              "Automation Anywhere Enterprise Client"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "5051da93de2c9a02",
+      "title": "Example of using the DLL package",
+      "title_ko": "DLL 패키지 사용 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-cloud-dll",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "script",
+      "task_summary": "Build a very simple DLL that will generate a message. Create a bot to run the DLL.",
+      "packages": [
+        "DLL",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "DLL",
+          "action": "Open",
+          "intent": "Create a bot to execute the DLL package.",
+          "params": []
+        },
+        {
+          "package": "DLL",
+          "action": "Run function",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "From the DLL: \"$sReturnedString$\""
+            ]
+          ]
+        },
+        {
+          "package": "DLL",
+          "action": "Close",
+          "intent": "",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "cd75aebdb05a3417",
+      "title": "Example of using the Run action",
+      "title_ko": "실행 작업 이용의 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-using-run-action",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "orchestration",
+      "task_summary": "The Run action from the Task Bot package enables you to run and pass values to one or more child bots . In this example, you use the Run action to pass two values from a parent bot to the child bot ; the child bot adds the values and passes the sum back to the parent bot .",
+      "packages": [
+        "Message Box",
+        "Number",
+        "Task Bot"
+      ],
+      "steps": [
+        {
+          "package": "Number",
+          "action": "Assign",
+          "intent": "Create the following variables",
+          "params": []
+        },
+        {
+          "package": "Number",
+          "action": "To string",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Task Bot",
+          "action": "Run",
+          "intent": "Create a Dictionary variable of Any subtype named dSums to accept the values passed from the child bot . Use the Any subtype to enable the parent bot to accept String, Number, or Boolean type values.",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "$dSums{sSum}$"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "72d3e7f87b7d0db0",
+      "title": "Example of using the SOAP web service action",
+      "title_ko": "SOAP 웹 서비스 작업 사용 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-using-soap-web-service-action",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "webservice",
+      "task_summary": "Use the SOAP web service action to pass two numeric values and return the sum from an online calculator application.",
+      "packages": [
+        "SOAP Web Service"
+      ],
+      "steps": [
+        {
+          "package": "SOAP Web Service",
+          "action": "SOAP web service",
+          "intent": "To make a SOAP web services call, perform the following steps",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "1b5483615cc34c80",
+      "title": "Example of using the VBScript package in a resilient automation",
+      "title_ko": "복원력 있는 자동화에서 VBScript 패키지 사용 예시",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-cloud-vbscript",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "script",
+      "task_summary": "Build an automation that executes a Microsoft Visual Basic script. Use the package to end the automation if it fails, making it resilient to deployment failures. A resilient automation allows scheduled and queued tasks to continue even when it encounters any deployment errors.",
+      "packages": [
+        "Error handler",
+        "List",
+        "Message Box",
+        "Prompt",
+        "String",
+        "VBScript"
+      ],
+      "steps": [
+        {
+          "package": "Prompt",
+          "action": "For value action in Prompt",
+          "intent": "For more information on creating a variable, see Create a variable .",
+          "params": [
+            [
+              "Prompt window caption",
+              "Any Number"
+            ],
+            [
+              "Prompt message",
+              "Enter any number to multiply by pi"
+            ],
+            [
+              "Assign the value to a variable",
+              "SampleString"
+            ]
+          ]
+        },
+        {
+          "package": "Error handler",
+          "action": "Try",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Prompt",
+          "action": "For value action in Prompt",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "String",
+          "action": "To number",
+          "intent": "Convert the SampleString (string) to a number value.",
+          "params": []
+        },
+        {
+          "package": "List",
+          "action": "Add item",
+          "intent": "Copy the number value to the first item in the list of numbers to pass to VBScript.",
+          "params": [
+            [
+              "List variable",
+              "lNumbersForPi"
+            ],
+            [
+              "Item to be added",
+              "nPromptAnswer"
+            ]
+          ]
+        },
+        {
+          "package": "VBScript",
+          "action": "Open",
+          "intent": "",
+          "params": [
+            [
+              "VBScript session",
+              "the Manual Input radio button"
+            ]
+          ]
+        },
+        {
+          "package": "VBScript",
+          "action": "Run function",
+          "intent": "Copy the following code and paste it into the Enter script here field",
+          "params": [
+            [
+              "Assign the output to variable",
+              "SampleString"
+            ]
+          ]
+        },
+        {
+          "package": "VBScript",
+          "action": "Close",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "Display the answer generated in the VBScript on the screen.",
+          "params": [
+            [
+              "Message to display",
+              "Pi times your number is:"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "Notify the user if an error occurred before terminating the automation.",
+          "params": [
+            [
+              "Message to display",
+              "Bot failed. Please be sure to enter only numbers"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "88a525cf03a183e7",
+      "title": "Example of writing data to SAP using SAP BAPI package",
+      "title_ko": "SAP BAPI를 사용하여 SAP에 데이터 쓰기의 예 패키지",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-use-sap-bapi-to-insert-data",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "sap",
+      "task_summary": "Using the SAP BAPI package , build a bot that writes data to the SAP database.",
+      "packages": [
+        "Message Box",
+        "SAP BAPI"
+      ],
+      "steps": [
+        {
+          "package": "SAP BAPI",
+          "action": "Connect",
+          "intent": "Create a bot named SAP-BAPI-CreateNewFlightCustomer .",
+          "params": [
+            [
+              "JCo: SAP Java Connector package",
+              "the path to the Java connector .jar file"
+            ],
+            [
+              "JCo DLL/DYLIB dependency",
+              "the path to the dynamic library file. .dll for Windows automation and .dylib for automation"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Create function",
+          "intent": "",
+          "params": [
+            [
+              "Function alias name",
+              "createNewFlightCustomer"
+            ],
+            [
+              "BAPI name",
+              "BAPI_FLCUST_CREATEFROMDATA"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get structure",
+          "intent": "",
+          "params": [
+            [
+              "Structure name",
+              "CUSTOMER_DATA"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Set field value",
+          "intent": "To store the retrieved structure as an alias, click the Alias tab in Destination .",
+          "params": [
+            [
+              "Structure alias",
+              "CustomerData"
+            ],
+            [
+              "Field name",
+              "CUSTNAME"
+            ],
+            [
+              "Field Value",
+              "John Doe"
+            ]
+          ]
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Run function",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "SAP BAPI",
+          "action": "Get field value",
+          "intent": "The BAPI assigns and returns a customer number after a new customer record is created.",
+          "params": [
+            [
+              "Source",
+              "the Function tab"
+            ],
+            [
+              "Field name",
+              "CUSTOMERNUMBER"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "the strCustomerNumber variable"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "beff76e73e095dfc",
+      "title": "Example using Email actions in a bot",
+      "title_ko": "bot에서 이메일 작업을 사용한 예",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-email-package",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "email",
+      "task_summary": "In this example, we use email actions to perform email-related operations using Outlook Client.",
+      "packages": [
+        "Email",
+        "Loop",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "Email",
+          "action": "Connect",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "EmailSession"
+            ]
+          ]
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "",
+          "params": [
+            [
+              "Iterator",
+              "For each mail in mail box"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "Retrieve the total number of attachments from each mail and print.",
+          "params": []
+        },
+        {
+          "package": "Email",
+          "action": "Disconnect",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Email",
+          "action": "Connect",
+          "intent": "Start a new Email session.",
+          "params": [
+            [
+              "Session name",
+              "EmailSession1"
+            ]
+          ]
+        },
+        {
+          "package": "Loop",
+          "action": "Loop action for data iteration",
+          "intent": "",
+          "params": [
+            [
+              "Iterator",
+              "For each mail in mail box"
+            ]
+          ]
+        },
+        {
+          "package": "Email",
+          "action": "Reply All",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "Email",
+          "action": "Disconnect",
+          "intent": "Hi All, See the attached document outlining the release plan.",
+          "params": []
+        },
+        {
+          "package": "Email",
+          "action": "Connect",
+          "intent": "Start a new Email session.",
+          "params": [
+            [
+              "Session name",
+              "EmailSession2"
+            ]
+          ]
+        },
+        {
+          "package": "Email",
+          "action": "Delete all",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "EmailSession2"
+            ]
+          ]
+        },
+        {
+          "package": "Email",
+          "action": "Disconnect",
+          "intent": "",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "eb5deefcc45f7b4b",
+      "title": "Example using user account actions from Active Directory package",
+      "title_ko": "Active Directory 패키지에서 사용자 계정 작업을 사용하여 예시",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/ad-user-account-operations-example",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "identity",
+      "task_summary": "This example shows how to use actions to automate user account management tasks, such as: Create, Delete, Get property, Remove, Rename, and Set property.",
+      "packages": [
+        "Active Directory",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "Active Directory",
+          "action": "Connect",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ],
+            [
+              "Login password",
+              "your user name and password. For example, select Insecure string tab and enter the following values:"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Create group",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ],
+            [
+              "Group name",
+              "AA_India_Documentation"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Create user",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ],
+            [
+              "User name",
+              "Maverick John"
+            ],
+            [
+              "Logon name",
+              "maverick.john"
+            ],
+            [
+              "First name",
+              "Maverick"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Set user property",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Get user property",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "$SampleString$"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Rename user",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Update user details",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Disable user account",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        },
+        {
+          "package": "Active Directory",
+          "action": "Delete user",
+          "intent": "",
+          "params": [
+            [
+              "Session name",
+              "Default"
+            ]
+          ]
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "5781bf718084726e",
+      "title": "Run TaskBot to merge Excel sheets",
+      "title_ko": "Excel 시트 병합을 위한 TaskBot 실행",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/cloud-merge-excel-spreadsheets-example",
+      "kind": "excluded",
+      "kind_reason": "액션 블록 0건 — 개념 설명 또는 미지원 문형",
+      "domain": "",
+      "task_summary": "Download and run sample Task Bot from the Agentic App Store (formerly Bot Store) to merge two spreadsheets.",
+      "packages": [],
+      "steps": [],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    },
+    {
+      "doc_id": "0882edabc2ee6d44",
+      "title": "Using JSON utilities package actions",
+      "title_ko": "bot에서 JSON을 사용하는 예 패키지 작업",
+      "url": "/r/cloud-build/cloud-work-area/a2019-build-bots-examples-list/example-json-package",
+      "kind": "flow",
+      "kind_reason": "",
+      "domain": "json",
+      "task_summary": "The JSON utilities package contains various actions that extract, update, and convert the data available in a JSON text or a file. This example shows how to use the Get node value action to extract the node values from a JSON script.",
+      "packages": [
+        "JSON utilities",
+        "Message Box"
+      ],
+      "steps": [
+        {
+          "package": "JSON utilities",
+          "action": "Start session",
+          "intent": "",
+          "params": []
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Get node value",
+          "intent": "",
+          "params": [
+            [
+              "JSON node key or path",
+              "totalFeed"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "totalFeeds"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "Get node value",
+          "intent": "Perform the following steps to extract a value of a node within an array in the JSON data source using Get node value action .",
+          "params": [
+            [
+              "JSON node key or path",
+              "feeds[0].title"
+            ]
+          ]
+        },
+        {
+          "package": "Message Box",
+          "action": "Message box",
+          "intent": "",
+          "params": [
+            [
+              "Message to display",
+              "firstfeedTitle"
+            ]
+          ]
+        },
+        {
+          "package": "JSON utilities",
+          "action": "End session",
+          "intent": "Perform the following steps to close the JSON session using End session action .",
+          "params": []
+        }
+      ],
+      "catalog_resolved": true,
+      "dropped_actions": [],
+      "holdout": false,
+      "holdout_reason": "",
+      "related_goldset": []
+    }
+  ]
+}

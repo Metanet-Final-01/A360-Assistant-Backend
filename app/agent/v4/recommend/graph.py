@@ -282,11 +282,18 @@ async def _compose_candidate(
     usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_generate")]}
 
     background = f"\n\n[배경 지식 (공식 문서 발췌)]\n{dossier['background']}" if dossier.get("background") else ""
+    # 용례 블록 — 액션 '목록'이 아니라 '조합 패턴'을 보여준다 (RPA-298). 어휘(메뉴)만 주면
+    # 모델은 "이 업무엔 어떤 조작들이 어떤 순서로 필요한가"를 못 고른다. 공식 문서의
+    # Examples 34건에서 목표에 가까운 것을 결정론으로 골라 dossier가 채운다.
+    examples = (
+        f"\n\n[비슷한 업무의 공식 문서 용례 — 조합 패턴 참고용]\n{dossier['examples']}"
+        if dossier.get("examples") else ""
+    )
     system = (
         f"{_BASE_PROMPT}\n\n{_ADDENDUM}\n\n{persona}\n\n"
         f"[업무 분석]\n{analysis_brief(analysis)}\n\n"
         f"[요구사항 스펙]\n{_render_spec_block(spec)}\n\n"
-        f"[액션 후보 메뉴]\n{dossier['menu']}{background}"
+        f"[액션 후보 메뉴]\n{dossier['menu']}{examples}{background}"
     )
     user = (
         "위 요구사항 스펙을 달성하는 A360 흐름도를 당신의 설계 관점대로 설계하고, "
