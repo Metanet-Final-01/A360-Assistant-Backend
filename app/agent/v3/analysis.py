@@ -53,6 +53,8 @@ _SYSTEM_PROMPT = """당신은 Automation Anywhere Automation 360(A360) 업무정
   낮다. 그 내용에만 의존해 판단한 단계나 불확실한 항목은 ambiguities에 남긴다.
 - 문서만으로 확정할 수 없는 것(담당자, 구체 값, 모호한 흐름 등)은 지어내지 말고 ambiguities에
   남긴다.
+- 사용 금지, 승인 필요, 실행 환경, 처리 기한처럼 문서에 명시된 자동화 제약·필수 조건만
+  constraints에 적는다. 문서에 없는 제약을 추론하거나 생성하지 않는다.
 - 한국어로 작성한다.
 
 반드시 아래 형태의 JSON 객체 하나만 출력한다 (설명·코드펜스 없이):
@@ -72,6 +74,7 @@ _SYSTEM_PROMPT = """당신은 Automation Anywhere Automation 360(A360) 업무정
       "evidence": {"page": 1, "snippet": "..."}
     }
   ],
+  "constraints": ["문서에 명시된 자동화 제약 또는 필수 조건", "..."],
   "ambiguities": ["문서만으로 확정 못한 항목", "..."]
 }
 step_id는 "step-1"부터, order는 1부터 순서대로 매긴다. 단계를 찾지 못하면 steps는 빈

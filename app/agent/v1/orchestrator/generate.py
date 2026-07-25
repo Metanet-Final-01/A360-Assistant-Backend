@@ -103,7 +103,10 @@ def _flow_answer(flow: dict, violations: list[dict]) -> str:
 
 async def _generate_a360(state: TurnState) -> dict:
     """기존 recommend 서브그래프 실행 + 최종 harness. 내부 진행 이벤트는 중계한다."""
-    inputs = {"analysis": state["analysis"], "constraints": []}
+    inputs = {
+        "analysis": state["analysis"],
+        "constraints": state["analysis"].get("constraints") or [],
+    }
     final_state: dict = {}
     async for mode, chunk in get_recommend_graph().astream(
         inputs, stream_mode=["custom", "values"],

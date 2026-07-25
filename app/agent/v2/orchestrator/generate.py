@@ -127,7 +127,11 @@ async def _generate_a360(state: TurnState) -> dict:
     # (parsed_doc 없음/텍스트 없음)면 None으로 기존 동작 유지.
     parsed = state.get("parsed_doc")
     document = _format_document(parsed) if parsed and _has_text(parsed) else None
-    inputs = {"analysis": state["analysis"], "constraints": [], "document": document}
+    inputs = {
+        "analysis": state["analysis"],
+        "constraints": state["analysis"].get("constraints") or [],
+        "document": document,
+    }
     final_state: dict = {}
     async for mode, chunk in graph.astream(
         inputs, stream_mode=["custom", "values"], config={"recursion_limit": 100},

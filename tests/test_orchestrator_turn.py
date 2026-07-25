@@ -47,6 +47,7 @@ def _edit_ops_json(change_summary="정리", answer="수정"):
 _ANALYSIS = AnalysisResult(
     summary="테스트 업무",
     steps=[{"step_id": "step-1", "order": 1, "name": "저장", "description": "엑셀 저장"}],
+    constraints=["승인 전 외부 발송 금지"],
 )
 
 
@@ -153,6 +154,7 @@ def test_generate_without_analysis_runs_analyze_first_and_returns_both(monkeypat
     class _FakeRecommendGraph:
         async def astream(self, inputs, **kwargs):
             assert inputs["analysis"]["steps"], "analyze 산출물이 주입돼야 함"
+            assert inputs["constraints"] == ["승인 전 외부 발송 금지"]
             yield ("values", {"recommendation": _CLEAN_FLOW})
 
     monkeypatch.setattr(generate_mod, "build_agent_graph", lambda sink: _FakeRecommendGraph())
@@ -174,6 +176,7 @@ def test_generate_with_existing_analysis_skips_analyze(monkeypatch):
 
     class _FakeRecommendGraph:
         async def astream(self, inputs, **kwargs):
+            assert inputs["constraints"] == ["승인 전 외부 발송 금지"]
             yield ("values", {"recommendation": _CLEAN_FLOW})
 
     monkeypatch.setattr(generate_mod, "build_agent_graph", lambda sink: _FakeRecommendGraph())

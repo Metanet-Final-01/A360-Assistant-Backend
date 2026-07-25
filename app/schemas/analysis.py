@@ -33,6 +33,10 @@ class AnalysisResult(BaseModel):
     document_title: str | None = None
     summary: str = Field("", description="비개발자용 한 문단 업무 요약")
     steps: list[WorkStep]
+    constraints: list[str] = Field(
+        default_factory=list,
+        description="문서나 사용자 발화에 명시된 자동화 제약·필수 조건",
+    )
     ambiguities: list[str] = Field(
         default_factory=list,
         description="문서만으로 확정 못 한 항목 — 챗봇 재질의 후보 (FR-16)",

@@ -73,6 +73,7 @@ def test_analyze_happy_path_calls_chat_and_normalizes(monkeypatch):
                  "systems": ["Edge"], "branching": None,
                  "evidence": {"page": 1, "snippet": "금 시세"}},
             ],
+            "constraints": ["외부 메일 발송 금지"],
             "ambiguities": ["메일 주소 미명시"],
         })
 
@@ -84,6 +85,7 @@ def test_analyze_happy_path_calls_chat_and_normalizes(monkeypatch):
     result = analysis.analyze(parsed)
 
     assert result.document_title == "금 시세 조회"
+    assert result.constraints == ["외부 메일 발송 금지"]
     assert result.ambiguities == ["메일 주소 미명시"]
     assert len(result.steps) == 1
     # 모델이 준 s-A/order=5 → 결정론적으로 재부여
@@ -152,6 +154,17 @@ def test_build_messages_has_roles_and_json_keyword():
     # OpenAI json_object 모드는 메시지 어딘가에 'json' 단어가 있어야 400이 안 난다
     assert "json" in json.dumps(msgs, ensure_ascii=False).lower()
     assert "금 시세 조회" in msgs[1]["content"]
+    assert "constraints" in msgs[0]["content"]
+    assert "문서에 없는 제약을 추론하거나 생성하지 않는다" in msgs[0]["content"]
+
+
+def test_analysis_constraints_default_empty_for_stored_legacy_results():
+    result = AnalysisResult.model_validate({
+        "summary": "기존 분석본",
+        "steps": [{"step_id": "step-1", "order": 1, "name": "조회"}],
+    })
+
+    assert result.constraints == []
 
 
 def test_analyze_repairs_on_schema_invalid_first_output(monkeypatch):
