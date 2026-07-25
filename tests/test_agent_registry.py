@@ -10,7 +10,7 @@ import importlib
 import pytest
 
 from app.agent import available_versions, default_version
-from app.agent.registry import resolve_version
+from app.agent.registry import _discover, resolve_version
 
 
 def test_discovers_v1_and_v2_with_metadata():
@@ -44,9 +44,14 @@ def test_default_version_falls_back_for_unknown_env(monkeypatch):
     assert default_version() == "v2"
 
 
-@pytest.mark.parametrize("name", ["v1", "v2"])
+@pytest.mark.parametrize("name", _discover())
 def test_resolve_version_exposes_entrypoints(name):
-    """양 버전이 각자 위치에서 온전히 import되고 진입점 3종을 노출한다(이동 무결성)."""
+    """발견된 **모든** 버전이 온전히 import되고 진입점 3종을 노출한다(이동 무결성).
+
+    v1·v2를 하드코딩하면 새 버전(v3·v4…)이 진입점을 빠뜨린 채 셀렉터에만 뜨는 걸
+    못 잡는다 — 실제로 v3가 이 검사 밖에 있었다. 발견 목록에서 파라미터를 뽑아
+    폴더를 드롭하는 순간 자동으로 검사 대상이 되게 한다.
+    """
     mod = resolve_version(name)
     for attr in ("stream_agent_turn", "recommend", "analyze"):
         assert hasattr(mod, attr), f"{name}.{attr} 누락"

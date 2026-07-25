@@ -38,6 +38,8 @@ from app.agent.v2 import retrieval as retrieval_mod
 from app.agent.v2.verify import catalog as catalog_mod
 from app.agent.v3 import retrieval as retrieval_mod_v3
 from app.agent.v3.verify import catalog as catalog_mod_v3
+from app.agent.v4 import retrieval as retrieval_mod_v4
+from app.agent.v4.verify import catalog as catalog_mod_v4
 
 from tests.agent_stubs import FakeCatalog, FakeRetriever
 
@@ -83,6 +85,8 @@ def _stub_agent_rag(monkeypatch):
     monkeypatch.setattr(catalog_mod, "_make_catalog", lambda: fake_catalog)
     monkeypatch.setattr(retrieval_mod_v3, "_make_retriever", lambda: fake_retriever)
     monkeypatch.setattr(catalog_mod_v3, "_make_catalog", lambda: fake_catalog)
+    monkeypatch.setattr(retrieval_mod_v4, "_make_retriever", lambda: fake_retriever)
+    monkeypatch.setattr(catalog_mod_v4, "_make_catalog", lambda: fake_catalog)
     # Backend Output Boundary는 Agent checker와 독립적으로 같은 fixture snapshot을 소비한다.
     monkeypatch.setattr("app.services.output_assurance.get_backend_catalog", lambda: fake_catalog)
 
