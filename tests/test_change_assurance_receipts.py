@@ -654,6 +654,9 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     validate_step = next(
         step for step in deploy_job["steps"] if step.get("name") == "Validate deployment credentials"
     )
+    rag_cache_ttl_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Validate RAG cache TTL"
+    )
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
     opensearch_parameter = template["Parameters"]["ExternalOpenSearchHost"]
     opensearch_username_parameter = template["Parameters"]["OpenSearchUsername"]
@@ -723,12 +726,25 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data
     assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in user_data
     assert "REDIS_URL=${RedisUrl}" in user_data
-    assert "<<'EOF_REDIS'" in user_data
-    assert user_data.index("<<'EOF_REDIS'") < user_data.index("REDIS_URL=${RedisUrl}")
+    assert "RAG_CACHE_ENABLED=${RagCacheEnabled}" in user_data
+    assert "RAG_CACHE_TTL_SECONDS=${RagCacheTtlSeconds}" in user_data
+    assert "<<'EOF_RAG_CACHE'" in user_data
+    assert user_data.index("<<'EOF_RAG_CACHE'") < user_data.index("REDIS_URL=${RedisUrl}")
     assert (
         user_data_mapping["RedisUrl"]["Fn::ImportValue"]["Fn::Sub"]
         == "${ProjectName}-${Environment}-RedisUrl"
     )
+    assert template["Parameters"]["RagCacheEnabled"]["Default"] == "false"
+    assert template["Parameters"]["RagCacheEnabled"]["AllowedValues"] == ["true", "false"]
+    assert template["Parameters"]["RagCacheTtlSeconds"]["Default"] == 3600
+    assert "RagCacheEnabled=\"${{ inputs.rag_cache_enabled }}\"" in deploy_script
+    assert "RagCacheTtlSeconds=\"${{ env.RAG_CACHE_TTL_SECONDS }}\"" in deploy_script
+    assert "rag_cache_ttl_seconds" not in deploy_script
+    assert rag_cache_ttl_step["env"]["RAG_CACHE_TTL_SECONDS"] == "${{ inputs.rag_cache_ttl_seconds || '3600' }}"
+    assert "^[0-9]+$" in rag_cache_ttl_step["run"]
+    assert '-lt 1' in rag_cache_ttl_step["run"]
+    assert '-gt 604800' in rag_cache_ttl_step["run"]
+    assert 'RAG_CACHE_TTL_SECONDS=$RAG_CACHE_TTL_SECONDS" >> "$GITHUB_ENV"' in rag_cache_ttl_step["run"]
     assert "OPENSEARCH_HOST=${ExternalOpenSearchHost}" in user_data
     assert "python3" not in user_data
     assert "dnf update -y" not in user_data

@@ -24,6 +24,15 @@ on:
         description: "Max app instance count"
         required: true
         default: "2"
+      rag_cache_enabled:
+        description: "Enable shared Redis-backed RAG cache"
+        required: true
+        type: boolean
+        default: false
+      rag_cache_ttl_seconds:
+        description: "RAG cache TTL seconds"
+        required: true
+        default: "3600"
       start_backend_container:
         description: "Start backend container after EC2 bootstrap. Set false before DB role bootstrap."
         required: true
@@ -147,6 +156,20 @@ jobs:
             exit 1
           fi
 
+      - name: Validate RAG cache TTL
+        env:
+          RAG_CACHE_TTL_SECONDS: ${{ inputs.rag_cache_ttl_seconds || '3600' }}
+        run: |
+          if ! printf '%s' "$RAG_CACHE_TTL_SECONDS" | grep -Eq '^[0-9]+$'; then
+            echo "rag_cache_ttl_seconds must contain only digits." >&2
+            exit 1
+          fi
+          if [ "$RAG_CACHE_TTL_SECONDS" -lt 1 ] || [ "$RAG_CACHE_TTL_SECONDS" -gt 604800 ]; then
+            echo "rag_cache_ttl_seconds must be between 1 and 604800." >&2
+            exit 1
+          fi
+          echo "RAG_CACHE_TTL_SECONDS=$RAG_CACHE_TTL_SECONDS" >> "$GITHUB_ENV"
+
       - name: Deploy CloudFormation
         env:
           FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
@@ -181,4 +204,6 @@ jobs:
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
               MaxCapacity="${{ inputs.max_capacity || '2' }}" \
+              RagCacheEnabled="${{ inputs.rag_cache_enabled }}" \
+              RagCacheTtlSeconds="${{ env.RAG_CACHE_TTL_SECONDS }}" \
               StartBackendContainer="${{ inputs.start_backend_container }}"

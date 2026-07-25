@@ -85,6 +85,15 @@ Parameters:
     NoEcho: true
     AllowedPattern: "^$|^[^\"\\\\\\r\\n]+$"
     ConstraintDescription: OpenSearchPassword must not contain double quotes, backslashes, or newlines.
+  RagCacheEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  RagCacheTtlSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 1
+    MaxValue: 604800
   StartBackendContainer:
     Type: String
     Default: "true"
@@ -356,9 +365,11 @@ Resources:
               ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
               ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
               EOF
-              cat >> /opt/a360/.env <<'EOF_REDIS'
+              cat >> /opt/a360/.env <<'EOF_RAG_CACHE'
               REDIS_URL=${RedisUrl}
-              EOF_REDIS
+              RAG_CACHE_ENABLED=${RagCacheEnabled}
+              RAG_CACHE_TTL_SECONDS=${RagCacheTtlSeconds}
+              EOF_RAG_CACHE
               jq -r 'to_entries[] | select((.key == "OPS_API_KEY" or .key == "ASSURANCE_WRITER_TOKEN" or .key == "ASSURANCE_WRITER_REPOSITORY") | not) | "\(.key)=\(.value)"' /opt/a360/secrets/app.json >> /opt/a360/.env
 
               docker rm -f a360-backend || true
