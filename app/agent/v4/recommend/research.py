@@ -95,7 +95,8 @@ def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, s
        절대 검색되지 않지만 모든 흐름도에 필요한 어휘다.
     카탈로그에 실재하는 것만 반환한다(폐쇄어휘 유지).
     """
-    openers, closers = derive_session_registry(catalog)
+    _reg = derive_session_registry(catalog)
+    openers, closers = _reg.openers, _reg.closers
     candidates: list[tuple[str, str]] = [
         key for key in sorted(openers | closers) if key[0] in menu_packages
     ]

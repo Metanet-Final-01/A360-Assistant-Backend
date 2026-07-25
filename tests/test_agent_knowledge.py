@@ -5,7 +5,32 @@
 나오는지를 못 박는다.
 """
 
-from app.agent.knowledge import lexicon
+import pytest
+
+from app.agent.knowledge import derive, lexicon
+
+
+class _StubCatalog:
+    """iter_action_schemas만 있는 최소 카탈로그 — 유도층은 이 인터페이스만 쓴다."""
+
+    def __init__(self, specs):
+        self._specs = list(specs)
+
+    def iter_action_schemas(self):
+        return list(self._specs)
+
+
+def _spec(package, action, *, session_param=False):
+    params = [{"name": "Session name", "type": "SESSION"}] if session_param else []
+    return {"package": package, "action": action, "parameters": params}
+
+
+@pytest.fixture(autouse=True)
+def _clear_derive_cache():
+    """유도 캐시는 catalog 객체 id 기준이라 테스트 간 id 재사용이 오염을 만든다."""
+    derive.clear_cache()
+    yield
+    derive.clear_cache()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,6 +148,119 @@ def test_knowledge_layer_does_not_touch_infrastructure():
                     if alias.name in banned_names:
                         offenders.append(f"{p.relative_to(root)}:{node.lineno} import {alias.name}")
     assert not offenders, f"지식층이 인프라에 직접 붙었다: {offenders}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# derive — 세션 어휘 유도
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_session_gating_excludes_non_session_packages():
+    """게이팅이 없으면 File/Open·Folder/Open이 opener로 오검출된다 (실측 4건)."""
+    catalog = _StubCatalog([
+        _spec("Excel advanced", "Open", session_param=True),
+        _spec("Excel advanced", "Close", session_param=True),
+        _spec("File", "Open"),            # 세션 파라미터 없음 — opener 아님
+        _spec("Folder", "Open"),
+    ])
+    r = derive.derive_session_registry(catalog)
+    assert ("Excel advanced", "Open") in r.openers
+    assert ("File", "Open") not in r.openers
+    assert ("Folder", "Open") not in r.openers
+    assert r.session_packages == frozenset({"Excel advanced"})
+
+
+def test_openai_prefix_is_not_an_opener():
+    """'OpenAI: Chat AI'는 Open으로 시작하지만 세션 opener가 아니다 — \\b 가드 회귀 방지.
+
+    실측: 이 가드가 없으면 Generative AI 패키지의 OpenAI 액션 6건이 opener로 잡힌다.
+    """
+    catalog = _StubCatalog([
+        _spec("Generative AI", "OpenAI: Chat AI", session_param=True),
+        _spec("Generative AI", "Connect", session_param=True),
+        _spec("Generative AI", "Disconnect", session_param=True),
+    ])
+    r = derive.derive_session_registry(catalog)
+    assert ("Generative AI", "OpenAI: Chat AI") not in r.openers
+    assert ("Generative AI", "Connect") in r.openers
+
+
+def test_empty_catalog_falls_back_to_constants():
+    """순회를 지원하지 않는 스텁에서는 수기 상수를 그대로 쓴다 — 지금 수준 유지."""
+    fallback_open = frozenset({("Excel advanced", "cloudExcelOpen")})
+    fallback_close = frozenset({("Excel advanced", "cloudExcelClose")})
+    r = derive.derive_session_registry(
+        object(), fallback_openers=fallback_open, fallback_closers=fallback_close
+    )
+    assert r.source == "constants"
+    assert r.openers == fallback_open and r.closers == fallback_close
+    assert r.usable
+
+
+def test_no_signal_and_no_fallback_is_empty_and_unusable():
+    r = derive.derive_session_registry(object())
+    assert r.source == "empty" and not r.usable
+
+
+def test_one_sided_derivation_is_unusable():
+    """opener만 있고 closer가 비면 모든 열기가 미종료로 잡힌다 — 전량 오탐이므로 침묵한다.
+
+    지금 v3가 정확히 반대 상황(opener 공집합·closer 3건)이라 R7이 대량 오탐 중이다.
+    """
+    catalog = _StubCatalog([_spec("Excel advanced", "Open", session_param=True)])
+    r = derive.derive_session_registry(catalog)
+    assert r.openers and not r.closers
+    assert not r.usable, "한쪽만 유도됐는데 usable — R7/R8이 전량 오탐을 낸다"
+
+
+def test_partial_derivation_mixes_fallback_for_missing_side():
+    catalog = _StubCatalog([_spec("Excel advanced", "Open", session_param=True)])
+    r = derive.derive_session_registry(
+        catalog, fallback_closers=frozenset({("Excel advanced", "cloudExcelClose")})
+    )
+    assert r.source == "mixed" and r.usable
+
+
+def test_derive_container_exceptions_from_live_names():
+    """v3의 수기 3쌍(loopPackageBreakAction 등)은 현행 카탈로그에 부재다 — 실재 이름을 뽑는다."""
+    catalog = _StubCatalog([
+        _spec("Loop", "Break"),
+        _spec("Loop", "Continue"),
+        _spec("Loop", "Loop action for data iteration"),
+        _spec("Error handler", "Throw"),
+        _spec("Error handler", "Try"),
+        _spec("Excel advanced", "Break time"),   # 컨테이너 패키지가 아니므로 제외
+    ])
+    exc = derive.derive_container_exceptions(catalog)
+    assert exc == frozenset({("Loop", "Break"), ("Loop", "Continue"), ("Error handler", "Throw")})
+    # 주입하면 컨테이너 판정이 뒤집힌다
+    assert not lexicon.is_container("Loop", "Break", non_container=exc)
+    assert lexicon.is_container("Loop", "Loop action for data iteration", non_container=exc)
+
+
+def test_derive_structural_actions_enumerates_control_flow():
+    catalog = _StubCatalog([
+        _spec("Loop", "Loop action for data iteration"),
+        _spec("If", "If"),
+        _spec("Error handler", "Try"),
+        _spec("Excel advanced", "Open"),
+    ])
+    actions = derive.derive_structural_actions(catalog)
+    assert ("Excel advanced", "Open") not in actions
+    assert ("Loop", "Loop action for data iteration") in actions
+    assert list(actions) == sorted(actions), "결정론 정렬이 아니다"
+
+
+def test_derive_survives_broken_catalog():
+    """유도 실패가 턴을 죽이면 안 된다 — 폴백이 받는다."""
+
+    class Broken:
+        def iter_action_schemas(self):
+            raise RuntimeError("DB 연결 끊김")
+
+    r = derive.derive_session_registry(
+        Broken(), fallback_openers=frozenset({("A", "b")}), fallback_closers=frozenset({("A", "c")})
+    )
+    assert r.source == "constants" and r.usable
 
 
 def test_knowledge_layer_not_imported_by_legacy_versions():
