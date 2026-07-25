@@ -117,6 +117,26 @@ def test_loader_degrades_to_config_on_bad_db_value(monkeypatch):
     assert rp.load_active_params() == RetrievalParams.from_config()
 
 
+# --- 캐시 무효화 race (RPA-175) ---
+
+def test_inflight_read_does_not_resurrect_busted_cache(monkeypatch):
+    """조회 중 admin PUT이 무효화하면, 그 조회는 **옛 값을 캐시에 되돌려놓지 않는다** (RPA-175).
+
+    이게 없으면: 조회가 옛 행을 읽는 동안 PUT이 새 값 저장 + bust_cache() → 조회 스레드가
+    그 뒤에 `_cache = (now, 옛값)`을 실행 → **최대 TTL(30초) 동안 변경 전 파라미터가 검색에 적용**된다.
+    budget.py의 동일 회귀(test_inflight_read_does_not_resurrect_busted_cache)와 짝이다.
+    """
+    def _read_during_which_put_happens():
+        rp.bust_cache()  # 조회 "도중" admin PUT이 무효화한 상황을 재현
+        return RetrievalParams(candidate_pool_size=33, rerank_candidates=11,
+                               rrf_k=42, vector_weight=2.0, bm25_weight=0.5)
+
+    monkeypatch.setattr(rp, "_read_override", _read_during_which_put_happens)
+    result = rp.load_active_params()
+    assert result.rrf_k == 42  # 호출자는 자기가 읽은 값을 그대로 받는다
+    assert rp._cache is None, "무효화된 캐시를 조회 스레드가 되살렸다"
+
+
 # --- admin API ---
 
 def _auth_admin():
