@@ -167,6 +167,17 @@ def test_analysis_constraints_default_empty_for_stored_legacy_results():
     assert result.constraints == []
 
 
+def test_analysis_constraints_are_bounded_and_normalized():
+    result = AnalysisResult.model_validate({
+        "summary": "제약 정규화",
+        "steps": [],
+        "constraints": ["  승인 전\n외부 발송 금지  "] * 25,
+    })
+
+    assert len(result.constraints) == 20
+    assert result.constraints[0] == "승인 전 외부 발송 금지"
+
+
 def test_analyze_repairs_on_schema_invalid_first_output(monkeypatch):
     # 1차: 유효 JSON이지만 필수 'name' 누락 → ValidationError 경유 repair (JSONDecodeError와 다른 분기)
     outputs = iter([

@@ -154,8 +154,8 @@ def test_generate_passes_user_catalog_into_the_same_pipeline(monkeypatch):
     assert ctx.catalog.get_action_schema("UiPath.Mail.Activities", "SendOutlookMail") is not None
 
 
-def test_generate_folds_explicit_constraints_into_v3_spec(monkeypatch):
-    """분석에서 추출한 명시적 제약은 v3 품질 루프의 assumptions로 전달한다."""
+def test_generate_keeps_explicit_constraints_separate_in_v3_spec(monkeypatch):
+    """명시적 제약은 편집 가능한 assumptions와 분리해 v3 품질 루프에 전달한다."""
     monkeypatch.setattr(gen_mod, "build_flow_spec", lambda state, doc: {
         "goal": "g", "requirements": [], "assumptions": ["기존 전제"],
     })
@@ -163,6 +163,7 @@ def test_generate_folds_explicit_constraints_into_v3_spec(monkeypatch):
 
     async def fake_generate_flow(analysis, document, spec, ctx):
         seen["assumptions"] = spec["assumptions"]
+        seen["constraints"] = spec["constraints"]
         return {"recommendation": {"steps": []}, "violations": []}
 
     monkeypatch.setattr(gen_mod, "generate_flow", fake_generate_flow)
@@ -174,7 +175,8 @@ def test_generate_folds_explicit_constraints_into_v3_spec(monkeypatch):
     }))
 
     assert out["turn_type"] == "recommendation"
-    assert seen["assumptions"] == ["기존 전제", "승인 전 외부 발송 금지"]
+    assert seen["assumptions"] == ["기존 전제"]
+    assert seen["constraints"] == ["승인 전 외부 발송 금지"]
 
 
 def test_trigger_and_foreign_notice_are_a360_only(monkeypatch):

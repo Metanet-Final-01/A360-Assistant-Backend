@@ -19,6 +19,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.schemas import Recommendation
+from app.schemas.analysis import normalize_constraints
 
 from .. import config
 from ..analysis import _format_document, _has_text, analyze, analyze_text
@@ -129,7 +130,7 @@ async def _generate_a360(state: TurnState) -> dict:
     document = _format_document(parsed) if parsed and _has_text(parsed) else None
     inputs = {
         "analysis": state["analysis"],
-        "constraints": state["analysis"].get("constraints") or [],
+        "constraints": normalize_constraints(state["analysis"].get("constraints")),
         "document": document,
     }
     final_state: dict = {}

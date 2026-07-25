@@ -1,6 +1,25 @@
 """업무정의서 분석 결과 스키마 (FR-05: 단계·입출력·시스템·분기 식별)."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+MAX_CONSTRAINTS = 20
+MAX_CONSTRAINT_CHARS = 500
+
+
+def normalize_constraints(values: object) -> list[str]:
+    """비신뢰 제약 목록을 프롬프트에 싣기 전 결정론적 상한으로 정규화한다."""
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = " ".join(value.split()).strip()
+        if text:
+            normalized.append(text[:MAX_CONSTRAINT_CHARS])
+        if len(normalized) >= MAX_CONSTRAINTS:
+            break
+    return normalized
 
 
 class SourceEvidence(BaseModel):
@@ -41,3 +60,8 @@ class AnalysisResult(BaseModel):
         default_factory=list,
         description="문서만으로 확정 못 한 항목 — 챗봇 재질의 후보 (FR-16)",
     )
+
+    @field_validator("constraints")
+    @classmethod
+    def _normalize_constraints(cls, values: list[str]) -> list[str]:
+        return normalize_constraints(values)

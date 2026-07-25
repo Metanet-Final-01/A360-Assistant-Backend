@@ -18,6 +18,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.schemas import Recommendation
+from app.schemas.analysis import normalize_constraints
 
 from .. import config
 from ..analysis import _has_text, analyze, analyze_text
@@ -105,7 +106,7 @@ async def _generate_a360(state: TurnState) -> dict:
     """기존 recommend 서브그래프 실행 + 최종 harness. 내부 진행 이벤트는 중계한다."""
     inputs = {
         "analysis": state["analysis"],
-        "constraints": state["analysis"].get("constraints") or [],
+        "constraints": normalize_constraints(state["analysis"].get("constraints")),
     }
     final_state: dict = {}
     async for mode, chunk in get_recommend_graph().astream(
