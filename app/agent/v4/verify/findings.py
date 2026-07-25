@@ -29,7 +29,87 @@ def weight(findings: list[Finding]) -> int:
 
 
 # R3는 질문 카드로 승격되므로 결함 축에서 분리한다 (설계 관찰 3 — 정보 부족 ≠ 결함).
+# 다만 **전부는 아니다** — 아래 _r3_is_defect가 파라미터 타입으로 갈라낸다.
 _CARD_RULES = {"R3"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R3 분류 — 동작 옵션(결함) vs 업무 데이터(질문 카드)  (설계 §5.2-E)
+# ─────────────────────────────────────────────────────────────────────────────
+# 왜 가르는가: 우리 사용자는 RPA 비전문가다(과제 요구사항 — "전문 지식 없이도", "별도
+# 교육 없이"). 필수 파라미터 미충족을 전부 카드로 보내면 "Read-write 모드인가요?",
+# "세션 이름을 정해 주세요" 같은 **답할 수 없는 질문**이 사용자에게 간다. 파라미터는
+# 성격이 둘로 갈리고, 카탈로그의 `type`이 그 경계를 결정론으로 그어 준다.
+#
+# 로컬 카탈로그 실측(2026-07-25, action_schema 1,375행 / 파라미터 7,648개):
+#
+#     TYPE          전체   required        성격
+#     TEXT          2155    620    자유 입력 — 셀 주소·검색어         → 카드
+#     SELECT        1385    451    선택지 고정 — 모드·범위            → 결함
+#     SESSION        952    507    흐름도 내부 핸들 이름              → 결함
+#     NUMBER         801     59    자유 입력 — 행 번호·반복 횟수      → 카드
+#     BOOLEAN        746      1    2지선다 토글 — 헤더 유무 등        → 결함
+#     VARIABLE       692    240    산출 변수 이름(흐름도 내부)        → 결함
+#     FILE           274    142    파일·폴더 경로                     → 카드
+#     LIST           246     42    자유 입력                          → 카드
+#     CREDENTIAL     210     34    계정·토큰 — 사용자만 안다          → 카드
+#     DICTIONARY     109     23    자유 입력                          → 카드
+#     UNKNOWN         78      9    타입 미상 — 모름 → 카드            → 카드
+#
+# 실측에서 얻은 두 가지:
+#   ① RADIO는 현행 카탈로그에 **0건**이다(구세대 JAR 표기). 그래도 목록에 남긴다 —
+#      재적재로 표기가 되살아나면 자동으로 옳게 동작한다. 반대로 CHECKBOX/TOGGLE 같은
+#      추측 타입은 **넣지 않는다**(0건이고 근거도 없다).
+#   ② `options`가 채워진 파라미터가 **0건**이다 → R4(enum 값 검사)도 사실상 미발화다.
+#      그래서 판별을 options 유무가 아니라 **type**에 건다. options에 걸면 전량 카드로
+#      떨어져 이 설계가 통째로 죽는다.
+_OPTION_PARAM_TYPES = frozenset({"RADIO", "SELECT", "BOOLEAN"})
+
+# 흐름도 **내부 식별자** — 세션 핸들·산출 변수 이름. 타입이 선택지 고정형은 아니지만
+# 카드로 보내면 안 되는 건 같은 이유다: 사용자가 알 수 없고 답할 수도 없다("사용자만
+# 안다 → 질문 카드"의 정확한 반대). required 실측 747건(SESSION 507 + VARIABLE 240)이
+# 전부 카드로 나가면 비전문가에게 내부 명명을 떠넘기는 꼴이 된다. 게다가 세션 이름이
+# 비면 R7/R8 추적이 어긋나므로 **에이전트가 채우는 편이 검수 정합에도 맞다.**
+_INTERNAL_PARAM_TYPES = frozenset({"SESSION", "VARIABLE"})
+
+
+def _param_type(d: dict) -> str:
+    """위반이 실어 온 카탈로그 파라미터 타입 (대문자, 없으면 "").
+
+    두 표기를 다 읽는다: `Violation.as_dict()`가 승격해 주는 `param_type`(실사용 경로 —
+    harness의 dict 셔틀을 지난다)과 원본 `spec_excerpt["type"]`(Violation을 직접 넘기는
+    경로·테스트). 둘 중 하나만 보면 한쪽 경로가 조용히 '타입 미상'이 된다.
+    """
+    value = d.get("param_type")
+    if value is None:
+        value = (d.get("spec_excerpt") or {}).get("type")
+    return str(value or "").strip().upper()
+
+
+def _r3_is_defect(d: dict) -> bool:
+    """이 R3가 '동작 옵션/내부 식별자 미확정'(결함)인가 — 아니면 업무 데이터(카드)인가.
+
+    타입을 모르면 **카드 쪽으로 떨어진다.** 타 솔루션 카탈로그(대화 추출)는 파라미터
+    타입이 없는 경우가 많고(UiPath·Blue Prism은 enum 자체가 희소), 근거 없이 결함으로
+    올리면 교정 루프가 아무 값이나 채우게 된다. '모름 → 침묵' 원칙의 R3판이다.
+    """
+    ptype = _param_type(d)
+    return ptype in _OPTION_PARAM_TYPES or ptype in _INTERNAL_PARAM_TYPES
+
+
+def _r3_fix_hint(d: dict) -> str:
+    """surgeon에게 줄 수리 지시 — '무엇을 물어보라'가 아니라 '무엇을 확정하라'."""
+    param = d.get("param") or "이 파라미터"
+    if _param_type(d) in _INTERNAL_PARAM_TYPES:
+        return (
+            f"'{param}'은(는) 흐름도 내부 식별자(세션 핸들·산출 변수)입니다 — 사용자에게 "
+            "묻지 말고 흐름도 안에서 일관된 이름을 정해 채우세요."
+        )
+    return (
+        f"'{param}'은(는) 선택지가 카탈로그에 정해진 동작 옵션입니다 — 사용자에게 묻지 말고 "
+        "액션 문서 근거로 값을 확정하세요. 근거가 없으면 문서의 기본값을 씁니다."
+    )
+
+
 # 규칙별 기본 심각도 — R1(환각)은 blocker, 구조·세션은 major, 스타일·경고는 warning.
 # R13/R14(제어 흐름 구조)는 실행 의미가 깨지는 결함이라 major (warning 변형은
 # Violation.severity가 덮는다 — 빈 Try/Loop 본문 등).
@@ -48,6 +128,9 @@ def from_violations(violations: list) -> tuple[list[Finding], list]:
     """checker Violation 목록 → (Finding 목록, 카드 후보 R3 위반 목록).
 
     Violation의 severity="warning"(Loop 누수 등)은 규칙 기본값보다 우선한다.
+
+    R3는 파라미터 타입으로 갈린다 — 동작 옵션·내부 식별자는 major Finding(우리가 확정할
+    책임), 업무 데이터만 카드 후보다(설계 §5.2-E, 판별은 `_r3_is_defect`).
     """
     findings: list[Finding] = []
     card_candidates: list = []
@@ -55,7 +138,18 @@ def from_violations(violations: list) -> tuple[list[Finding], list]:
         d = v.as_dict() if hasattr(v, "as_dict") else dict(v)
         rule = d.get("rule")
         if rule in _CARD_RULES:
-            card_candidates.append(v)
+            if not _r3_is_defect(d):
+                card_candidates.append(v)
+                continue
+            findings.append(
+                Finding(
+                    layer="L0", severity="major", rule=rule,
+                    location=d.get("location"),
+                    step_id=d.get("step_id"),
+                    message=d.get("message", ""),
+                    fix_hint=_r3_fix_hint(d),
+                )
+            )
             continue
         severity = _RULE_SEVERITY.get(rule, "major")
         if d.get("severity") == "warning":

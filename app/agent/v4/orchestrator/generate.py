@@ -8,9 +8,16 @@ analyze → generate는 직렬 파이프라인이고 intake가 종착점을 정�
 generate_node는 solution(세션 확정 키)으로 **카탈로그만** 가르고 파이프라인은 하나다
 (RPA-285). 어휘 출처를 CatalogContext로 주입한다:
 - "a360": DB 적재 카탈로그 + 하이브리드 검색기 — 어휘가 수천 개라 검색으로 좁힌다.
+- "a360-custom": 위에 사내 커스텀 액션을 얹은 오버레이 — A360 어휘·검색을 그대로 두고
+  사용자가 설명한 액션을 1급 어휘로 추가한다 (설계 §6.2).
 - 그 외: 대화에서 추출한 사용자 카탈로그(UserCatalog), 검색기 없음 — 전량이 곧 메뉴다.
 어느 쪽이든 같은 품질 루프(spec→research→후보 N→judge→verify→refine→cards)를 탄다.
 예전엔 타 솔루션이 LLM 단발 호출로 갈라져 품질 루프가 a360에만 쌓였다.
+
+**모드 판정은 생성 전에 끝난다** (설계 §6.6). 예전엔 흐름을 다 만든 뒤 감지해 첫 턴이
+A360 어휘로 나오고 안내만 붙었다 — 사용자가 같은 요청을 한 번 더 해야 했고, 그 한 턴의
+생성(LLM 수십 회)은 통째로 버려졌다. 이제 generate_node 첫 줄에서 판정하고, 구분이
+안 되면 만들지 않고 되묻는다.
 """
 
 import asyncio
@@ -23,11 +30,18 @@ from app.schemas import Recommendation
 
 from .. import config
 from ..analysis import _format_document, _has_text, analyze, analyze_text
-from ..catalog_context import A360, a360_context, user_catalog_context
+from ..catalog_context import a360_context, overlay_context, user_catalog_context
 from ..recommend.graph import generate_flow
 from ..recommend.stream import emit, emit_analysis_frame
+from ..verify.catalog import get_catalog
 from ..verify.checker import run_environment_checks
-from .foreign_catalog import detect as detect_foreign_catalog
+from .foreign_catalog import (
+    MODE_ASK,
+    MODE_FOREIGN,
+    MODE_OVERLAY,
+    CatalogModeDecision,
+    decide_catalog_mode,
+)
 from .jsonio import chat_json
 from .render import chat_task_brief, render_compact, render_history
 from .spec import build_flow_spec
@@ -164,25 +178,23 @@ async def _generate_with(state: TurnState, ctx) -> dict:
     cards = flow.get("needs_input") or []
     if cards:
         answer += f" 확인이 필요한 질문 카드 {len(cards)}장을 함께 담았어요."
-    out: dict = {
+    if ctx.has_overlay:
+        # 커스텀 어휘를 실제로 어휘로 썼다는 사실을 알린다 — 조용히 반영하면 사용자는
+        # 자기 액션이 쓰였는지 확인할 방법이 없다(RPA-285에서 배운 '조용한 오답' 회피).
+        answer += (
+            f"\n\n주신 사내 커스텀 액션 {len(ctx.overlay)}개를 A360 표준 액션과 **동등한 어휘로** "
+            "함께 사용했어요."
+        )
+    # 어휘 출처를 답변 텍스트 밖에서도 알 수 있게 상태로 올린다 — 감지/판정이 생성 전에
+    # 끝나므로(§6.6) 여기서는 '무엇으로 만들었나'만 기록한다.
+    return {
         "turn_type": TYPE_RECOMMENDATION,
         "recommendation_out": flow,
         "violations": violations,
         # 사용자 제공 카탈로그 경로는 KB 검색을 안 하므로 sources가 자연히 빈다.
         "sources": _collect_sources(flow),
+        "answer": answer,
     }
-    if ctx.is_a360:
-        # 사용자가 타 솔루션 카탈로그를 줬는데 A360으로 만든 경우, 그 사실을 알린다 (RPA-285).
-        # 조용히 넘어가면 사용자는 자기 카탈로그가 반영된 줄 안다 — 가장 나쁜 실패다.
-        signal = detect_foreign_catalog(dict(state), ctx.catalog)
-        if signal.found:
-            logger.info("타 솔루션 카탈로그 정황 — 쌍 %d개 중 A360 실재 %d개", signal.pairs, signal.known)
-            answer += "\n\n" + signal.notice()
-            # 백엔드가 세션 solution을 확정하게 신호를 올린다 (2단계). 이름을 못 밝혔으면
-            # "other" — 어느 솔루션인지 몰라도 "A360은 아니다"는 확정할 수 있다.
-            out["detected_solution"] = signal.solution or "other"
-    out["answer"] = answer
-    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,12 +226,25 @@ class UserCatalogAction(BaseModel):
     parameters: list[UserCatalogParam] = Field(default_factory=list)
 
     def as_spec(self) -> dict:
-        return {
+        """checker가 읽는 스펙. **파라미터를 설명 안 했으면 `parameters` 키를 뺀다** (설계 §6.2).
+
+        빈 목록([])은 checker에게 '파라미터가 하나도 없는 액션'이라는 확정이라 R2가 사용자
+        액션에 붙은 모든 파라미터를 '스펙에 없음'으로 잡는다 — 사용자는 액션 이름만 알려줬을
+        뿐인데 흐름이 위반 투성이가 되고 교정 루프가 파라미터를 지운다. 키를 빼면 기존
+        `params_unknown` 경로(checker: `spec["parameters"] is None` → R2~R5 건너뜀)를 그대로
+        타서 **모르는 건 침묵**한다. 사용자가 설명한 액션만 실제로 검수된다.
+        """
+        spec: dict = {
             "package": self.package,
             "action": self.action,
             "label": self.label or self.action,
-            "parameters": [p.as_spec() for p in self.parameters],
         }
+        if self.parameters:
+            spec["parameters"] = [p.as_spec() for p in self.parameters]
+        else:
+            # BackendCatalog의 schema 없는 행과 같은 표식 — 소비자가 '미상'을 구분해 표기한다.
+            spec["params_unknown"] = True
+        return spec
 
 
 class CatalogExtraction(BaseModel):
@@ -264,27 +289,41 @@ def extract_user_catalog(state: TurnState) -> CatalogExtraction:
     )
 
 
-async def resolve_catalog_context(state: TurnState):
-    """이번 턴이 쓸 어휘 출처를 정한다 — a360 카탈로그 또는 대화에서 추출한 사용자 카탈로그.
-
-    세션 solution이 a360이 아니면 대화(메시지+이력+compact.verbatim)에서 카탈로그를
-    추출한다. 못 찾으면 None — 호출부가 "카탈로그를 달라"고 안내한다(흐름도를 만들 어휘가
-    없는데 A360 어휘로 만들면 그게 곧 조용한 오답이다).
-    """
-    solution = state.get("solution") or A360
-    if solution == A360:
-        return a360_context()
-
+async def _extract_specs(state: TurnState) -> list[dict]:
+    """대화에서 사용자 제공 액션 스펙을 뽑는다 (LLM 1회). 없으면 빈 목록."""
     emit({"event": "stage", "stage": "recommending", "message": "제공하신 카탈로그 확인 중"})
     # extract_user_catalog는 동기 LLM 호출 — 이벤트 루프를 막지 않게 스레드로 내린다.
     extraction = await asyncio.to_thread(extract_user_catalog, state)
     if not extraction.actions:
-        return None
-
+        return []
     specs = [a.as_spec() for a in extraction.actions]
     emit({"event": "stage", "stage": "recommending",
           "message": f"{extraction.solution or '제공된'} 카탈로그 {len(specs)}개 액션 확인"})
-    return user_catalog_context(UserCatalog(specs), solution)
+    return specs
+
+
+async def resolve_catalog_context(state: TurnState, decision: CatalogModeDecision | None = None):
+    """이번 턴이 쓸 어휘 출처를 정한다 — a360 / 오버레이 / 사용자 카탈로그.
+
+    decision을 주면 그 판정(생성 전 감지 결과)을 따르고, 안 주면 세션 solution만 보고
+    정한다 — edit 경로는 감지를 다시 돌릴 이유가 없다(수정 대상 흐름이 이미 어느 어휘로
+    만들어졌는지는 세션 solution이 말해 준다).
+
+    타 솔루션인데 대화에서 카탈로그를 못 찾으면 None — 호출부가 "카탈로그를 달라"고
+    안내한다(흐름도를 만들 어휘가 없는데 A360 어휘로 만들면 그게 곧 조용한 오답이다).
+    오버레이는 반대로 못 찾아도 None이 아니다 — A360 어휘가 그대로 남아 있어 만들 수 있다.
+    """
+    if decision is None:
+        decision = decide_catalog_mode(dict(state), get_catalog(), detect_new=False)
+
+    if decision.mode == MODE_OVERLAY:
+        return overlay_context(await _extract_specs(state))
+    if decision.mode == MODE_FOREIGN:
+        specs = await _extract_specs(state)
+        if not specs:
+            return None
+        return user_catalog_context(UserCatalog(specs), decision.solution)
+    return a360_context()
 
 
 _NEED_CATALOG_ANSWER = (
@@ -293,14 +332,41 @@ _NEED_CATALOG_ANSWER = (
     "그 표기 그대로 흐름도를 구성할게요."
 )
 
+_OVERLAY_EMPTY_NOTICE = (
+    "사내 커스텀 액션으로 확인했지만 대화에서 액션 표기를 정확히 추출하지 못해 "
+    "이번 흐름도는 **A360 표준 카탈로그로만** 만들었어요. "
+    "`패키지/액션` 형태로 다시 알려주시면 그 표기를 그대로 쓸게요."
+)
+
 
 async def generate_node(state: TurnState) -> dict:
-    """어휘 출처를 정하고 품질 루프를 돌린다. analysis는 선행 노드가 보장한다.
+    """어휘 모드를 먼저 정하고 품질 루프를 돌린다. analysis는 선행 노드가 보장한다.
 
     (RPA-285) 예전에는 solution으로 파이프라인 자체를 갈랐다 — a360은 품질 루프,
     나머지는 LLM 단발 호출. 이제 갈리는 건 카탈로그뿐이고 루프는 하나다.
+    (설계 §6.6) 판정은 **생성 전**이다. 구분이 안 되면 흐름을 만들지 않고 되묻는다 —
+    헛된 생성 한 턴(LLM 수십 회)이 사라지고, 첫 턴부터 맞는 어휘로 나온다.
     """
-    ctx = await resolve_catalog_context(state)
+    decision = decide_catalog_mode(dict(state), get_catalog())
+    if decision.signal is not None and decision.signal.found:
+        logger.info(
+            "카탈로그 모드 판정 %s — 쌍 %d개 중 A360 실재 %d개",
+            decision.mode, decision.signal.pairs, decision.signal.known,
+        )
+    if decision.mode == MODE_ASK:
+        # 만들지 않는다: A360 사내 패키지인지 타 솔루션인지에 따라 어휘가 통째로 갈려
+        # 지금 만들면 어느 쪽이든 절반은 버리는 산출물이 된다 (설계 §6.2).
+        return {"turn_type": TYPE_ANSWER, "answer": decision.question, "sources": []}
+
+    ctx = await resolve_catalog_context(state, decision)
     if ctx is None:  # 타 솔루션인데 쓸 어휘가 없다 — 만들지 않고 되묻는다(type 정확성)
         return {"turn_type": TYPE_ANSWER, "answer": _NEED_CATALOG_ANSWER, "sources": []}
-    return await _generate_with(state, ctx)
+
+    out = await _generate_with(state, ctx)
+    if decision.mode == MODE_OVERLAY and not ctx.has_overlay:
+        out["answer"] = f"{out['answer']}\n\n{_OVERLAY_EMPTY_NOTICE}"
+    if decision.confirm:
+        # 백엔드가 세션 solution을 확정하게 신호를 올린다(RPA-285 2단계 계약 재사용).
+        # 오버레이는 A360_CUSTOM — 재오픈 시 커스텀 모드가 복원된다(설계 §6.2 '세션 범위').
+        out["detected_solution"] = decision.solution
+    return out

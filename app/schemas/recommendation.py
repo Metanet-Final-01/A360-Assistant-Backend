@@ -56,6 +56,11 @@ class RecommendedAction(BaseModel):
     order: int
     package: str = Field(description="예: 'Excel_MS'")
     action: str = Field(description="예: 'GoToCell'")
+    # ⚠️ Optional + default 고정. v1~v3가 같은 스키마로 자기 산출물을 검증하므로 필수화하면
+    # req_id를 안 내는 구버전 출력이 통째로 검증 거부된다(버전 비교 셀렉터가 깨진다).
+    req_id: str | None = Field(
+        None, description="이 액션이 담당하는 FlowSpec 요구 id — 누락 추적의 앵커"
+    )
     label: str | None = Field(None, description="사람용 라벨, 예: '셀로 이동'")
     parameters: list[ActionParameter] = Field(default_factory=list)
     children: list["RecommendedAction"] = Field(

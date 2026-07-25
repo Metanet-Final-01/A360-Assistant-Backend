@@ -9,11 +9,16 @@ v2는 compose ReAct가 후보 1개를 만들며 순차 도구 왕복(≤6)을 �
 검색한다. 한국어는 본문(의미), 영어는 식별자(어휘)를 맞혀 상호 보완한다.
 
 검색 히트는 run 단위 sink에 누적된다 — finalize의 sources/confidence 부착 계약 유지.
+
+v4는 조사 앞에 **조작 단위 확정**을 둔다(설계 Phase 3). "이 요구를 하려면 몇 번의 조작이
+필요한가"는 액션 어휘를 몰라도 답할 수 있는 질문이라 compose에서 떼어낼 수 있고, 떼어내면
+compose가 동시에 지는 다섯 과업(분해·선택·파라미터·구조·스키마) 중 하나가 빠진다.
 """
 
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +41,7 @@ from .stream import emit
 logger = logging.getLogger(__name__)
 
 _PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "research_queries.md").read_text(encoding="utf-8")
+_OPS_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "operation_units.md").read_text(encoding="utf-8")
 
 # recommend 검색은 액션 후보 메뉴용 — 문서 페이지 오염 방지 (v2 계약 유지).
 ACTION_SOURCE_TYPES = ["action_schema", "bot_example"]
@@ -47,6 +53,15 @@ _MAX_MENU_ACTIONS = 14   # Dossier 액션 메뉴 상한 (스펙 포함이라 토
 # 이 값에 닿지 않고, 닿으면 잘린 사실을 프롬프트·로그·진행 메시지 셋 다에 남긴다).
 _MAX_USER_MENU_ACTIONS = 200
 _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
+# 조작 단위 상한 — 봇 수준 완성도(정답 봇 70액션)를 노리므로 요구 수의 3~5배를 담을 만큼
+# 넉넉해야 한다. 다만 여기가 터지면 compose 프롬프트가 통째로 조작 목록에 잠식된다.
+_MAX_OPERATIONS = 40
+# 조작 단위 블록을 액션 메뉴 앞에 함께 실을지.
+# compose 프롬프트를 조립하는 곳은 graph.py인데 그 파일은 2상 구조 작업이 잡고 있다.
+# 그래서 dossier["operations"](정식 키)로 내보내면서, 확실히 주입되는 menu 앞에도 같은
+# 블록을 붙여 오늘 당장 효력을 갖게 한다. graph가 operations를 자기 섹션으로 주입하게 되면
+# **이 값을 False로 내려** 같은 블록이 두 번 실리는 것을 막을 것.
+_INLINE_OPERATIONS_IN_MENU = True
 # 프롬프트에 실을 용례 수 — 2건이면 조합 패턴을 보여주기 충분하다. 늘리면 컨텍스트를
 # 잡아먹으면서 모델이 예제를 그대로 베끼는 쪽으로 기운다.
 _MAX_EXAMPLES = 2
@@ -146,16 +161,123 @@ class _ResearchPlan(BaseModel):
     units: list[_ResearchUnit] = Field(default_factory=list)
 
 
-def _expand_queries(spec: dict) -> list[_ResearchUnit]:
-    """FlowSpec 요구를 기능 단위로 묶어 (한국어, 영어) 질의 쌍을 만든다 (LLM 1회, 경량)."""
+class _OperationUnit(BaseModel):
+    """조작 단위 한 건 — 액션 어휘가 아니라 '몇 번의 조작인가'만 담는다.
+
+    req_ids가 느슨한 타입인 이유: 모델이 리스트 대신 문자열 하나를 내는 슬립이 흔한데,
+    그 한 건 때문에 분해 전체를 잃으면 손해가 크다(정규화가 흡수한다).
+    """
+
+    op_id: str = ""
+    intent: str = ""
+    req_ids: Any = None
+    repeat: bool = False
+
+
+class _OperationPlan(BaseModel):
+    operations: list[_OperationUnit] = Field(default_factory=list)
+
+
+def normalize_operations(units: list, spec: dict) -> list[dict]:
+    """조작 단위 초안을 결정론으로 정리한다 — 번호 재부여·중복 제거·요구 id 대조·상한.
+
+    - **번호 재부여**: 뒤 단계(compose·역방향 감사)가 op-N으로 조작을 지목하는데, LLM이 낸
+      번호는 건너뛰거나 중복된다. 위치 순서대로 다시 매겨 앵커를 신뢰 가능하게 만든다.
+    - **미실재 req_id 제거**: 환각 앵커가 섞이면 "어느 요구가 어느 조작으로 실현됐나"의
+      역매핑이 조용히 틀린다. spec에 있는 id만 남긴다.
+    - **중복 제거**: 같은 조작이 두 번 세어지면 조작 수 자체가 신호가 되지 못한다.
+    """
+    def field(u, name):
+        # 모델(초안)로도 dict(상태 왕복분)로도 들어올 수 있다 — 둘 다 받는다.
+        return u.get(name) if isinstance(u, dict) else getattr(u, name, None)
+
+    known = {r.get("req_id") for r in spec.get("requirements") or [] if r.get("req_id")}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for u in units or []:
+        intent = " ".join(str(field(u, "intent") or "").split())
+        key = intent.lower()
+        if not intent or key in seen:
+            continue
+        seen.add(key)
+        raw_ids = field(u, "req_ids")
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        req_ids = [r for r in (raw_ids or []) if isinstance(r, str) and r in known]
+        out.append({
+            "op_id": f"op-{len(out) + 1}",
+            "intent": intent,
+            "req_ids": req_ids,
+            "repeat": bool(field(u, "repeat")),
+        })
+        if len(out) >= _MAX_OPERATIONS:
+            break
+    return out
+
+
+def render_operations_block(operations: list[dict]) -> str:
+    """조작 단위를 프롬프트용 한 덩어리 텍스트로 (결정론 — LLM 없음)."""
+    lines = []
+    for op in operations:
+        tail = f" ← {', '.join(op['req_ids'])}" if op.get("req_ids") else ""
+        tail += " (반복 안)" if op.get("repeat") else ""
+        lines.append(f"- [{op['op_id']}] {op['intent']}{tail}")
+    return "\n".join(lines)
+
+
+def plan_operations(spec: dict) -> list[dict]:
+    """액션을 고르기 **전에** 조작 단위만 확정한다 (LLM 1회 — 설계 Phase 3).
+
+    왜 별도 호출인가: 지금 compose 호출 하나가 mini 모델에게 업무 분해 + 액션 선택 +
+    파라미터 + 구조 + 스키마 준수를 동시에 요구한다. 다섯 과업을 한 컨텍스트에 얹으면 전부
+    중간 품질이 된다(설계 §3.1 원인 B). 분해는 어휘를 몰라도 답할 수 있는 질문이라 떼어낼
+    수 있고, 떼어내면 compose는 '확정된 단위'를 어휘로 옮기는 일만 한다.
+
+    실패는 강등이다 — 조작 단위 없이도 파이프라인은 예전 그대로 돈다.
+    """
+    reqs = spec.get("requirements") or []
+    goal = (spec.get("goal") or "").strip()
+    if not reqs and not goal:
+        return []
+    req_lines = "\n".join(
+        f"- [{r.get('req_id')}] ({r.get('priority', 'must')}) {r.get('text', '')}" for r in reqs
+    )
+    try:
+        plan = chat_json(
+            [
+                {"role": "system", "content": _OPS_PROMPT},
+                {"role": "user", "content": f"[목표]\n{goal}\n\n[요구사항]\n{req_lines}"},
+            ],
+            purpose="recommend",
+            model_cls=_OperationPlan,
+        )
+    except (ValueError, RuntimeError) as e:
+        logger.warning("조작 단위 확정 실패 — 분해 없이 진행: %s", e)
+        return []
+    return normalize_operations(plan.operations, spec)
+
+
+def _expand_queries(spec: dict, operations: list[dict] | None = None) -> list[_ResearchUnit]:
+    """FlowSpec 요구를 기능 단위로 묶어 (한국어, 영어) 질의 쌍을 만든다 (LLM 1회, 경량).
+
+    확정된 조작 단위가 있으면 함께 준다 — 요구 문장("일별 시세를 정리한다")보다 조작
+    ("날짜 문자열을 만든다", "행 목록을 순회한다")이 검색어에 가깝다. 분해를 앞세운 값이
+    질의 품질로도 돌아오는 지점.
+    """
     req_lines = "\n".join(
         f"- [{r.get('req_id')}] {r.get('text', '')}" for r in spec.get("requirements") or []
+    )
+    ops_block = (
+        f"\n\n[확정된 조작 단위 — 이 조작들을 수행할 어휘를 찾아야 한다]\n"
+        f"{render_operations_block(operations)}"
+        if operations else ""
     )
     try:
         plan = chat_json(
             [
                 {"role": "system", "content": _PROMPT},
-                {"role": "user", "content": f"[목표]\n{spec.get('goal', '')}\n\n[요구사항]\n{req_lines}"},
+                {"role": "user",
+                 "content": f"[목표]\n{spec.get('goal', '')}\n\n[요구사항]\n{req_lines}{ops_block}"},
             ],
             purpose="recommend",
             model_cls=_ResearchPlan,
@@ -238,12 +360,17 @@ def _whole_catalog_dossier(ctx) -> dict:
         # 다른 제품의 흐름에 A360 액션 조합을 보여주면 폐쇄 어휘를 깨는 유도가 된다.
         "examples": "",
         "example_ids": [],
+        # 조작 단위도 이 경로에서는 만들지 않는다(제약 #24·#25: 타 솔루션은 측정 대상이 아니고
+        # 파이프라인만 공유한다). 키는 항상 있어야 소비자가 get 없이 읽어도 안 깨진다.
+        "operations": "",
+        "operation_units": [],
     }
 
 
 async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
-    """Capability Dossier를 만든다: {menu: str, actions: [(pkg, act)], background: str}.
+    """Capability Dossier를 만든다: {menu, actions, background, examples, operations, …}.
 
+    - **조작 단위 확정**(plan_operations) — 액션 선택 전에 "몇 번의 조작인가"만 먼저 정한다
     - 기능 단위별 이중 질의 병렬 검색(action_schema/bot_example) → (pkg, act) 후보 집계
     - 상위 후보의 카탈로그 스펙 프리페치 → 파라미터까지 담긴 액션 메뉴 텍스트
     - 배경 지식: 목표 문장으로 doc_page 1회 검색 (전체 문서 적재 가정 — 없으면 빈 결과)
@@ -256,7 +383,16 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
 
     retriever = ctx.retriever
     catalog = ctx.catalog
-    units = _expand_queries(spec)
+
+    # [0] 조작 단위 확정 — 액션 선택 **전에**. 질의 확장보다 앞서므로 검색어도 이 분해를 탄다.
+    # 두 호출 모두 동기 LLM이라 to_thread로 뺀다 — 여기서 이벤트 루프를 잡으면 같은 워커의
+    # 다른 턴까지 멈춘다(호출을 하나 더 얹는 김에 기존 것도 함께 내보낸다).
+    operations = await asyncio.to_thread(plan_operations, spec)
+    if operations:
+        emit({"event": "stage", "stage": "searching",
+              "message": f"조작 단위 {len(operations)}개 확정 — 이 단위로 어휘를 찾는다"})
+
+    units = await asyncio.to_thread(_expand_queries, spec, operations)
 
     queries: list[str] = []
     for u in units:
@@ -330,10 +466,22 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     emit({"event": "stage", "stage": "searching",
           "message": f"조사 완료 — 액션 후보 {len(menu_actions)}개 확보 "
                      f"(구조·세션 보완 {len(extra_blocks)}개 · 용례 {len(picked)}건 포함)"})
+
+    ops_block = render_operations_block(operations)
+    menu = "\n".join(blocks) or "(조사된 액션 없음 — 도구로 직접 검색 필요)"
+    if ops_block and _INLINE_OPERATIONS_IN_MENU:
+        # 어휘 목록보다 **앞에** 둔다 — 무엇을 할지 정한 뒤 무엇으로 할지 고르는 순서다.
+        menu = (
+            "[조작 단위 — 액션을 고르기 전에 확정됨. 각 조작은 흐름도에서 최소 한 액션으로 "
+            "실현돼야 하고, 여러 액션으로 나뉘어도 된다]\n"
+            f"{ops_block}\n\n[사용 가능한 액션]\n{menu}"
+        )
     return {
-        "menu": "\n".join(blocks) or "(조사된 액션 없음 — 도구로 직접 검색 필요)",
+        "menu": menu,
         "actions": menu_actions,
         "background": background,
         "examples": examples,
         "example_ids": selection_trace(picked),
+        "operations": ops_block,
+        "operation_units": operations,
     }

@@ -31,7 +31,15 @@ from app.core.llm import UsageCallbackHandler
 from .. import config
 from ..recommend.graph import _coerce_flow
 from ..recommend.stream import emit, emit_flow_frame
-from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
+from .edit_ops import (
+    EditOps,
+    annotate_ids,
+    apply_edit_ops,
+    render_outline,
+    renumber,
+    spec_requirements,
+    strip_ids,
+)
 from .generate import resolve_catalog_context
 from .harness import attach_confidence, verify_and_repair
 from .render import render_compact, render_history
@@ -112,12 +120,17 @@ def _is_noop_edit(out_flow: dict, in_flow: dict) -> bool:
     set_flow만으로 메모·변수를 바꾸는 편집은 액션 트리가 그대로라, notes/variables를 빼면
     항상 무변경으로 오판돼 실패 경로로 저하된다. 스펙 전제(spec.assumptions)도 같은 이유로
     본다 — "대상 OS를 macOS로" 같은 전제 교체는 액션이 그대로여도 실변경이고, 이걸 무변경으로
-    저하시키면 사용자가 확정한 제약이 통째로 유실된다 (RPA-282)."""
+    저하시키면 사용자가 확정한 제약이 통째로 유실된다 (RPA-282).
+
+    요구 목록(spec.requirements)도 같은 이유로 본다 — "이 업무는 이제 필요 없어요"는 set_spec
+    하나로 끝나는 편집이라 액션 트리가 그대로다. 이걸 무변경으로 저하시키면 사용자가 지운
+    요구가 살아남아 다음 검수에서 누락 blocker로 되살아난다 (설계 §6.1)."""
     return (
         _canon_steps(out_flow) == _canon_steps(in_flow)
         and out_flow.get("notes") == in_flow.get("notes")
         and out_flow.get("variables") == in_flow.get("variables")
         and _assumptions_of(out_flow) == _assumptions_of(in_flow)
+        and spec_requirements(out_flow) == spec_requirements(in_flow)
     )
 
 
@@ -136,6 +149,8 @@ def _is_premise_only_edit(out_flow: dict, in_flow: dict) -> bool:
         and _canon_steps(out_flow) == _canon_steps(in_flow)
         and out_flow.get("notes") == in_flow.get("notes")
         and out_flow.get("variables") == in_flow.get("variables")
+        # 요구까지 함께 손댔다면 "전제만 갱신했다"는 안내가 실제 변경(요구 삭제)을 숨긴다.
+        and spec_requirements(out_flow) == spec_requirements(in_flow)
     )
 
 
@@ -215,11 +230,33 @@ def _assumptions_block(flow: dict) -> str:
     )
 
 
+def _requirements_block(flow: dict) -> str:
+    """현재 흐름도의 요구 목록(spec.requirements)을 프롬프트 블록으로 렌더한다 (설계 §6.1).
+
+    요구 id가 안 보이면 편집 LLM은 set_spec의 remove_req_ids에 무엇을 넣어야 하는지 모른다 —
+    결국 액션만 지우고 요구를 남겨, 다음 검수의 누락 blocker가 그 액션을 도로 넣는다.
+    요구가 없으면 빈 문자열(프롬프트 불변).
+    """
+    reqs = spec_requirements(flow)
+    if not reqs:
+        return ""
+    lines = "\n".join(
+        f"- [{r.get('req_id')}] ({r.get('priority', 'must')}) {r.get('text', '')}" for r in reqs
+    )
+    return (
+        "[현재 흐름도가 충족해야 할 요구 — 검수가 '누락'을 판정하는 기준]\n"
+        f"{lines}\n"
+        "어떤 업무 자체가 더는 필요 없다는 요청이면, 액션 제거(remove)와 함께 그 요구를 "
+        "set_spec의 remove_req_ids로 지워라. 요구를 남기면 검수가 그 액션을 도로 넣는다.\n\n"
+    )
+
+
 def _build_messages(state: TurnState, outline: str, label_hint: str = "") -> list:
-    """현재 흐름도 구조(노드 id 포함)·전제·압축·이력·수정 요청을 담은 edit 프롬프트를 만든다."""
+    """현재 흐름도 구조(노드 id 포함)·요구·전제·압축·이력·수정 요청을 담은 edit 프롬프트를 만든다."""
     user_content = (
         f"[현재 흐름도 구조 — 대괄호 안이 각 액션의 참조 id]\n{outline}\n\n"
         f"{label_hint}"
+        f"{_requirements_block(state.get('recommendation') or {})}"
         f"{_assumptions_block(state.get('recommendation') or {})}"
         f"[이전 대화 압축 요약]\n{render_compact(state.get('compact'))}\n\n"
         f"[대화 이력]\n{render_history(state.get('history'))}\n\n"
@@ -250,7 +287,11 @@ def _label_hint_block(message: str, is_a360: bool) -> str:
 
 # 구조를 바꾸는 연산 — 이런 수정 뒤에만 L2 시맨틱 재채점을 태운다("라벨 바꿔줘"에
 # 시맨틱 채점 수십 초는 UX 배신 — 검증 심도를 수정 규모에 연동, v3 설계 §5).
-_STRUCTURAL_OPS = frozenset({"wrap", "insert", "remove", "move", "split_step", "merge_step"})
+# set_spec도 포함한다: 요구가 늘거나 줄면 커버리지의 분모 자체가 바뀌므로, 재채점 없이는
+# 지워진 요구를 여전히 못 채운 것으로 세는 낡은 flow_confidence가 남는다 (§6.1).
+_STRUCTURAL_OPS = frozenset({
+    "wrap", "insert", "remove", "move", "split_step", "merge_step", "set_spec",
+})
 
 
 async def _rescore_if_structural(flow: dict, ops: EditOps) -> None:
@@ -391,7 +432,12 @@ async def edit_node(state: TurnState) -> dict:
     # 라이브 렌더: 적용된 수정안을 즉시 프레임으로 흘려보낸다(추천 흐름도 상세 패널이 트리로 표시).
     emit_flow_frame(flow, None, "수정안 구성")
     if ctx is not None:
-        result = verify_and_repair(flow, ctx.catalog)
+        # 수정 후 흐름도에 동봉된 spec을 검수에 함께 넘긴다 — 누락(요구 미배정)도 같은
+        # 회귀 가드 축에 실려, "위반 있는 액션을 지우면 가중합이 준다"는 삭제 편향이 막힌다.
+        # 넘길 수 있게 된 전제가 set_spec이다: 사용자가 "이 단계 빼주세요"라고 하면 edit이
+        # 액션과 **요구를 함께** 지우므로, 남은 요구가 방금 지운 액션을 도로 부르지 않는다
+        # (설계 §6.1). set_spec 없이 이걸 켜면 사용자의 삭제가 검수에 의해 되돌려진다.
+        result = verify_and_repair(flow, ctx.catalog, spec=flow.get("spec"))
     else:
         # 타 솔루션 세션인데 대화에서 카탈로그를 못 찾았다 — 검수 기준이 없어 생략한다
         # (A360 카탈로그로 검수하면 사용자가 준 액션이 전부 R1 위반으로 찍힌다).

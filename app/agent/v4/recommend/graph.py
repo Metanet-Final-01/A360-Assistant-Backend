@@ -19,7 +19,9 @@ import asyncio
 import copy
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ from .. import config
 from .stream import (
     emit,
     emit_candidates_frame,
+    emit_draft_frame,
     emit_flow_frame,
     emit_scorecard_frame,
     emit_verdict_frame,
@@ -388,27 +391,61 @@ async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 2상 구조 — 초안(draft) / 정밀화(refine) 사이의 전달 계약 (설계 §6.3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class DraftResult:
+    """1상(draft_flow)이 2상(refine_draft)에 넘기는 **유일한** 전달 계약.
+
+    frozen·JSON 직렬화 가능으로 못 박은 이유는 지금 필요해서가 아니라 **다음 이슈 때문**이다:
+    정밀화를 백그라운드 잡으로 떼어내면 이 dataclass가 그대로 잡 페이로드가 된다. 그래서
+    Pydantic 객체(CandidateReport·Finding)를 객체째 들지 않고 `model_dump()`로 눕혀 담는다 —
+    객체를 담으면 같은 프로세스에서는 돌지만 큐에는 못 싣는다(그때 계약을 다시 뜯게 된다).
+    frozen은 2상이 1상 산출물을 제자리 변형해 재시도 시 입력이 달라지는 사고를 막는다.
+
+    - flow      : 심판이 고른 승자 초안 (교정 전)
+    - spec/dossier: 2상이 재채점·재교정에 쓰는 기준과 조사 결과
+    - reports   : 후보별 CandidateReport dump — 후보 간 합의(agreement) 산출에 flow가 필요
+    - verdict   : 프레임용 심판 결과 dict. `verdict["winner"]`가 승자 candidate_id
+    - sink      : 검색 히트 — 근거 부착(FR-11)과 confidence의 근거 축
+    - findings  : 2상 첫 라운드에 실을 개선 지시(승자 L2/L3 발견 + 심판 이식 지시) dump
+    - draft_id  : 이 초안의 식별자. 후속 이슈에서 프론트가 초안↔정밀화 결과를 잇는 키
+    """
+
+    flow: dict
+    spec: dict
+    dossier: dict
+    reports: tuple[dict, ...]
+    verdict: dict
+    sink: tuple[dict, ...]
+    findings: tuple[dict, ...]
+    draft_id: str
+
+    def winner_report(self) -> dict:
+        """verdict가 지목한 승자 후보 리포트(dump). 못 찾으면 빈 dict(신호 결측 취급)."""
+        wid = self.verdict.get("winner")
+        return next((r for r in self.reports if r.get("candidate_id") == wid), {})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 파이프라인 본체
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=None) -> dict:
-    """spec → research → compose×N → verify → judge → refine → finalize.
+async def draft_flow(analysis: Any, document: str | None, spec: dict, ctx=None) -> DraftResult:
+    """1상 — research → compose×N → verify → judge. 교정은 하지 않는다.
 
-    반환: {"recommendation": Recommendation dict, "violations": list[dict]}.
+    절단선은 원래 코드에 이미 있었다: `emit_flow_frame(..., "선택된 초안 · 다듬기 시작")`이
+    정확히 초안 확정 지점이다. 여기까지가 사용자에게 **먼저 보여줄 수 있는 것**이고,
+    분 단위가 걸리는 교정·재채점은 2상(refine_draft)으로 넘긴다.
+
+    설계 §5-I에 따라 초안에는 **결정론 검사 결과만 실어 표시하고 교정하지 않는다** —
+    초안 지연을 안 늘리는 것이 2상으로 쪼갠 이유 자체다.
+
     전 후보 실패 시 RuntimeError (호출부가 error 이벤트로 처리).
     """
-    from ..orchestrator import cards as cards_mod
-    from ..orchestrator.harness import (
-        attach_confidence,
-        collect_violations,
-        compute_flow_confidence,
-        from_violations_dicts,
-        refine_flow,
-    )
     from ..catalog_context import a360_context
     from ..orchestrator.judge import judge_candidates
-    from ..verify import findings as F
-    from ..verify.semantic import run_semantic_check
     from .research import build_dossier
 
     # ctx 미지정은 a360 기본 — 기존 호출부(테스트 포함) 호환 (RPA-285).
@@ -466,11 +503,65 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
                         f"선택된 설계 구성 {i + 1}/{len(steps)}")
         await asyncio.sleep(_REVEAL_DELAY)
     emit_flow_frame(winner.flow, winner.violations, "선택된 초안 · 다듬기 시작")
+    # kind="draft"를 **추가로** 흘린다(기존 flow 프레임은 그대로 둔다) — 프론트는 아직
+    # kind="draft"를 모르므로 이걸 빼면 FE가 초안 캡션을 잃는다. 계약 무변경이 우선이다.
+    draft_id = uuid.uuid4().hex
+    emit_draft_frame(winner.flow, winner.violations, draft_id, "선택된 초안 · 다듬기 시작")
+
+    # 2상에 넘길 개선 지시 — 승자의 L2/L3 발견 + 심판의 이식 지시. Finding 객체가 아니라
+    # dump로 눕혀 담는다(DraftResult 계약: 큐에 실을 수 있어야 한다).
+    extra = [f for f in winner.findings if f.layer in ("L2", "L3")] + verdict["transplant_findings"]
+    return DraftResult(
+        flow=winner.flow,
+        spec=spec,
+        dossier=dossier,
+        reports=tuple(r.model_dump() for r in reports),
+        verdict=verdict["verdict"],
+        sink=tuple(sink),
+        findings=tuple(f.model_dump() for f in extra),
+        draft_id=draft_id,
+    )
+
+
+async def refine_draft(draft: DraftResult, ctx=None) -> dict:
+    """2상 — refine → finalize. 초안을 교정하고 근거·신뢰도·질문 카드를 합성한다.
+
+    반환은 `generate_flow`의 반환 그대로다: {"recommendation": ..., "violations": ...}.
+    이 상만 따로 재실행해도 되도록 draft를 **읽기만** 한다 — 교정 대상 흐름은 deepcopy로
+    떠서 쓴다. 안 그러면 refine이 무개선일 때 finalize의 제자리 변형(needs_input·spec 주입)이
+    draft.flow에 새어, 재시도 시 입력이 이미 오염돼 있다.
+    """
+    from ..catalog_context import a360_context
+    from ..orchestrator import cards as cards_mod
+    from ..orchestrator.harness import (
+        attach_confidence,
+        compute_flow_confidence,
+        from_violations_dicts,
+        refine_flow,
+    )
+    from ..verify import findings as F
+    from ..verify.findings import Finding
+    from ..verify.semantic import run_semantic_check
+
+    ctx = ctx or a360_context()
+    spec = draft.spec
+    sink = list(draft.sink)
+    sem = asyncio.Semaphore(config.MAX_LLM_CONCURRENCY)
+    winner_report = draft.winner_report()
 
     # [6] refine — 정적 위반 + L2/L3 발견 + 이식 지시를 surgeon 패치로
-    extra = [f for f in winner.findings if f.layer in ("L2", "L3")] + verdict["transplant_findings"]
+    #
+    # spec을 넘기는 게 §5-D의 발효 지점이다. 이걸 안 넘기면 회귀 가드의 비교축이 정적
+    # 위반 가중합뿐이라, 위반 있는 액션을 **지우는 것**이 항상 유효한 개선 경로가 된다
+    # (실측 서명: 정밀도만 오르고 재현율 정체). spec이 있으면 요구를 담당하던 액션을
+    # 지울 때 누락 blocker(100)가 생겨 major(10) 제거를 압도하고 가드가 그 패치를 거부한다.
+    #
+    # 생성 경로에서만 넘긴다 — edit 경로는 set_spec으로 요구를 함께 지우기 전까지
+    # "이 단계 빼주세요"가 blocker로 되살아나므로 harness 기본값(None)을 유지한다(§6.1).
+    extra = [Finding.model_validate(f) for f in draft.findings]
     refined = await asyncio.to_thread(
-        refine_flow, winner.flow, ctx.catalog, extra_findings=extra, purpose="turn_generate"
+        refine_flow, copy.deepcopy(draft.flow), ctx.catalog,
+        extra_findings=extra, purpose="turn_generate", spec=spec,
     )
     flow, violations = refined["flow"], refined["violations"]
 
@@ -478,7 +569,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     flow = _attach_sources(flow, sink)
 
     coverage = None
-    sim_rate = winner.sim_pass_rate
+    sim_rate = winner_report.get("sim_pass_rate")
     if refined["repaired"]:  # 흐름이 바뀌었을 때만 L2/L3 재채점 (설계: 심판 시점+최종 시점 2회)
         try:
             async with sem:
@@ -492,7 +583,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
                 sim_rate = (await asyncio.to_thread(run_simulation, spec, flow)).pass_rate
         except Exception as e:  # noqa: BLE001
             logger.warning("최종 L3 재실행 실패 — 승자 통과율 재사용: %s", e)
-    must_cov = coverage.must_coverage if coverage is not None else winner.must_coverage
+    must_cov = coverage.must_coverage if coverage is not None else winner_report.get("must_coverage")
 
     findings_final, r3_cards = from_violations_dicts(violations)
     if coverage is not None:
@@ -504,12 +595,13 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
         async with sem:
             cards = await asyncio.to_thread(cards_mod.polish_card_wording, cards)
 
-    # confidence — agreement(후보 간 합의)는 후보 2개 이상일 때만
+    # confidence — agreement(후보 간 합의)는 후보 2개 이상일 때만.
+    # 1상이 후보 flow를 reports에 담아 넘긴 건 이 합의 계산 때문이다(다른 용도 없음).
     agreement = None
-    if len(flows) >= 2:
+    if len(draft.reports) >= 2:
         counts: dict[tuple[str, str], int] = {}
-        for _c, _n, f in flows:
-            for key in set(_iter_pkg_actions(f)):
+        for r in draft.reports:
+            for key in set(_iter_pkg_actions(r.get("flow") or {})):
                 counts[key] = counts.get(key, 0) + 1
         agreement = {k for k, v in counts.items() if v >= 2}
     attach_confidence(flow, sink, violations, agreement=agreement)
@@ -540,13 +632,32 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
         # 마지막 관문에서 전부 버리지 않는다 — 교정 전 승자 초안(직전 유효 후보)으로 강등 시도.
         logger.warning("최종 흐름도 정규화 실패 — 승자 초안으로 강등 시도: %s", e)
         try:
-            rec = Recommendation.model_validate(_coerce_flow(copy.deepcopy(winner.flow)))
+            rec = Recommendation.model_validate(_coerce_flow(copy.deepcopy(draft.flow)))
         except ValidationError as e2:
             logger.warning("승자 초안도 정규화 실패, 빈 추천안: %s", e2)
             rec = Recommendation(steps=[])
     rec_dict = rec.model_dump()
     emit_flow_frame(rec_dict, violations, "완료")
     return {"recommendation": rec_dict, "violations": violations}
+
+
+async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=None) -> dict:
+    """spec → research → compose×N → verify → judge → refine → finalize.
+
+    2상(draft_flow + refine_draft)의 순차 합성일 뿐, **시그니처와 반환은 그대로다** —
+    백엔드가 '턴 = SSE 1스트림 = done 1회 = 추천 0~1버전' 등식 위에 서 있고 done 1회 가정이
+    `app/api/sessions.py` 세 곳에 흩어져 있어서다. 이번 변경은 같은 턴·같은 스트림 안에서
+    파이프라인을 두 상으로 쪼갠 **구조 작업**이고, 백그라운드 실행·done 2회는 후속 이슈다.
+
+    반환: {"recommendation": Recommendation dict, "violations": list[dict]}.
+    전 후보 실패 시 RuntimeError (호출부가 error 이벤트로 처리).
+    """
+    from ..catalog_context import a360_context
+
+    # ctx를 여기서 한 번만 확정해 두 상이 같은 어휘 출처를 보게 한다 (RPA-285).
+    ctx = ctx or a360_context()
+    draft = await draft_flow(analysis, document, spec, ctx)
+    return await refine_draft(draft, ctx)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

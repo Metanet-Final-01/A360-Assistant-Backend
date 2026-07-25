@@ -9,7 +9,8 @@ v2와의 차이:
   패치화가 예산 확대의 전제조건. 생성 refine·수정 교정·기타 솔루션 경로가 모두 이
   엔진 하나를 지난다.
 - 회귀 가드: 라운드 단위 — 교정 후 심각도 가중합(findings.weight)이 줄지 않으면 그
-  라운드를 폐기한다. 2라운드 연속 무개선이면 종료(진동 방지).
+  라운드를 폐기한다. 2라운드 연속 무개선이면 종료(진동 방지). spec을 주면 가중합에
+  **완성도 항**(coverage_det의 결정론 누락)이 함께 들어가 삭제 편향이 막힌다(설계 §5-D).
 - confidence: RAG 단일 산식 → 증거 합성(grounding × evidence × agreement × semantic).
   R3는 감점하지 않는다 — 질문 카드가 붙은 R3는 결함이 아니라 입력 대기다(관찰 3).
 
@@ -25,17 +26,39 @@ from ..recommend.research import structural_complement
 from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
 from ..verify.checker import derive_session_registry, run_flow_checks
+from ..verify.coverage_det import coverage_findings, missing_requirements
 from ..verify.findings import Finding, from_violations, weight
-from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
+from .edit_ops import (
+    NODE_ID,
+    EditOps,
+    annotate_ids,
+    apply_edit_ops,
+    render_outline,
+    renumber,
+    strip_ids,
+)
 from .jsonio import chat_json
 
 logger = logging.getLogger(__name__)
 
 _SURGEON_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "surgeon.md").read_text(encoding="utf-8")
 
-MAX_REFINE_ROUNDS = 3   # 패치 기반이라 v2(2)보다 예산을 늘려도 총비용이 싸다
+# 교정 예산 (설계 §5-F "대폭 확대"). 3 → 8.
+# 왜 늘리나: 누락 blocker가 목적 함수에 들어오면서 라운드가 할 일이 '위반 제거'에서
+# '위반 제거 + 누락 채움'으로 늘었다. 누락 하나를 메우는 삽입(insert/wrap)은 그 자체가
+# 새 정적 위반(파라미터 미충족 등)을 만들어 다음 라운드가 또 필요하다 — 3라운드면
+# blocker 하나를 메우다 예산이 끝난다.
+# 왜 무한이 아닌가: _STOP_AFTER_NO_IMPROVE(2)가 실질 상한을 쥔다. 개선이 멈추면 2라운드
+# 만에 빠져나오므로 8은 '개선이 계속 나오는 동안만' 소모되는 예산이다. 그럼에도 상한을
+# 두는 이유는 surgeon이 매 라운드 미세 개선을 내며 무한 지연시키는 병리를 막기 위함.
+# 비용: 패치는 라운드당 토큰이 전체 재출력의 1/10이라 8라운드 ≈ v2 재출력 1회 미만.
+MAX_REFINE_ROUNDS = 8
 _MAX_FINDINGS_IN_PROMPT = 15
 _STOP_AFTER_NO_IMPROVE = 2  # 연속 무개선 종료 — 진동 방지
+
+# 자리표시자 단계 id 접두사 (설계 §5-G·H). 재검수(edit 경로 등)에서 stale 자리표시자를
+# 식별해 걷어내기 위한 앵커다 — 접두사로 판별하므로 스키마에 새 필드가 필요 없다.
+PLACEHOLDER_STEP_PREFIX = "step-unresolved-"
 
 # 질문 카드로 승격되는 규칙 — 교정 대상도, confidence 감점 대상도 아니다.
 CARD_RULES = frozenset({"R3"})
@@ -221,6 +244,120 @@ def _error_findings(findings: list[Finding]) -> list[Finding]:
     return [f for f in findings if f.severity != "warning"]
 
 
+# 슬롯 목적 블록의 상한 — 프롬프트 예산 보호. findings 상한(15)과 같은 자릿수로 둔다.
+_MAX_SLOTS_IN_PROMPT = 25
+
+
+def slot_purpose_block(flow: dict, spec: dict | None) -> str:
+    """id가 붙은 흐름도의 각 액션이 **어떤 요구를 담당하는 자리인지**를 렌더한다 (설계 §5.2-C).
+
+    왜 필요한가(§5.1-②): surgeon은 흐름도 노드만 보고 그 자리가 무엇을 하려던 자리인지
+    모른다. 그래서 "이 액션이 카탈로그에 없다"(R1)를 받으면 재선택할 근거가 없어 가장 싸고
+    확실한 remove를 고른다 — 위반은 사라지지만 업무도 함께 사라진다. 슬롯의 목적을 함께
+    주면 "지운다"가 아니라 "그 요구를 실제로 수행하는 액션으로 바꾼다"가 자연스러운
+    선택지가 된다.
+
+    액션에 req_id가 없거나 spec이 없으면 빈 문자열 — 프롬프트 불변(기존 동작).
+    이는 coverage_det의 침묵 원칙과 같다: 앵커 미기재는 '목적이 없다'가 아니라
+    '연결 정보가 없다'이므로, 없는 정보를 지어내 보여주지 않는다.
+    """
+    reqs = {
+        r.get("req_id"): r
+        for r in (spec or {}).get("requirements") or []
+        if isinstance(r, dict) and r.get("req_id")
+    }
+    if not reqs:
+        return ""
+
+    lines: list[str] = []
+
+    def walk(actions) -> None:
+        for a in actions or []:
+            if not isinstance(a, dict):
+                continue
+            rid = a.get("req_id")
+            req = reqs.get(rid.strip()) if isinstance(rid, str) and rid.strip() else None
+            if req is not None and len(lines) < _MAX_SLOTS_IN_PROMPT:
+                lines.append(
+                    f"- [{a.get(NODE_ID)}] «{a.get('label') or a.get('action')}» "
+                    f"→ {req.get('req_id')}({req.get('priority', 'must')}): {req.get('text', '')}"
+                )
+            walk(a.get("children"))
+
+    for step in flow.get("steps") or []:
+        if isinstance(step, dict):
+            walk(step.get("actions"))
+    if not lines:
+        return ""
+    return (
+        "\n\n[슬롯 목적 — 각 자리가 담당하는 요구]\n"
+        + "\n".join(lines)
+        + "\n담당 요구가 있는 자리를 remove로 비우면 그 업무가 흐름도에서 사라진다. "
+        "위반이 있으면 먼저 **그 요구를 수행하는 다른 액션으로 교체(update)** 하거나 "
+        "파라미터를 고쳐라 — 삭제는 그 요구가 더는 필요 없다는 근거가 있을 때만이다."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 자리표시자 — 예산을 다 써도 남는 누락의 최종 폴백 (설계 §5-G·H)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _strip_placeholder_steps(flow: dict) -> dict:
+    """이전 실행이 남긴 자리표시자 단계를 걷어낸다 (제자리 변형 금지 — 얕은 사본).
+
+    edit 경로가 같은 흐름도로 verify_and_repair를 반복 호출하므로, 걷어내지 않으면
+    해소된 요구의 자리표시자가 눌어붙고 매 턴 중복 누적된다. spec이 있을 때만 부르는
+    이유는 재유도 가능성 때문이다 — spec 없이 지우면 정보만 잃는다.
+    """
+    steps = flow.get("steps") or []
+    kept = [s for s in steps
+            if not (isinstance(s, dict) and str(s.get("step_id") or "").startswith(PLACEHOLDER_STEP_PREFIX))]
+    if len(kept) == len(steps):
+        return flow
+    return {**flow, "steps": kept}
+
+
+def _placeholder_steps(flow: dict, spec: dict) -> dict:
+    """미해결 must 요구마다 자리표시자 단계를 덧붙인다 — "아무것도 안 내보내기"의 대안.
+
+    설계 §5-H: 예산을 늘려도 누락은 0이 되지 않는다. 그때 흐름도에서 요구를 통째로
+    증발시키면 사용자는 무엇이 빠졌는지 알 길이 없다(=조용한 삭제, 결정 A가 막으려던 바로 그
+    실패). 대신 "여기에 ○○가 필요한데 맞는 액션을 못 찾았어요"를 흐름도 안에 남긴다.
+
+    구현 선택 — **액션 없는 단계(Step 스캐폴드)**를 쓴다. 근거:
+    - `Recommendation`에 새 최상위 필드를 추가할 수 없다. output_assurance._unknown_field_findings가
+      스키마 model_fields 밖의 키를 미지 필드로 보고 fail_decision="deny"로 기록한다.
+    - 자리표시자를 '액션'으로 만들면 package/action에 실재하지 않는 표기를 넣게 되어
+      R1(환각) blocker가 발화한다 — 누락을 알리려다 환각 위반을 자작하는 꼴.
+      actions=[]인 단계는 어떤 정적 규칙도 건드리지 않으면서 렌더에는 남는다.
+    - step_id 접두사만으로 식별되므로 스키마·전송 포맷이 그대로다.
+
+    should 요구는 자리표시자를 만들지 않는다 — minor 등급이라 '흐름도에 자리를 파둘 만큼'의
+    미해결이 아니고, 낮은 우선순위까지 넣으면 스캐폴드가 실제 단계를 압도한다.
+    """
+    by_id = {r.get("req_id"): r for r in (spec or {}).get("requirements") or [] if isinstance(r, dict)}
+    pending = [
+        rid for rid in missing_requirements(flow, spec)
+        if (by_id.get(rid) or {}).get("priority", "must") != "should"
+    ]
+    if not pending:
+        return flow
+    extra = []
+    for rid in pending:
+        text = str((by_id.get(rid) or {}).get("text") or "").strip() or rid
+        extra.append({
+            "step_id": f"{PLACEHOLDER_STEP_PREFIX}{rid}",
+            "label": f"[미해결] {text[:60]}",
+            "description": (
+                f"요구 {rid}('{text}')를 담당할 액션을 찾지 못했습니다. "
+                "카탈로그에서 맞는 액션을 직접 지정하거나, 이 요구가 필요 없다면 알려 주세요."
+            ),
+            "actions": [],
+        })
+    logger.info("자리표시자 %d건 부착 — 미해결 must 요구: %s", len(extra), pending)
+    return {**flow, "steps": list(flow.get("steps") or []) + extra}
+
+
 def refine_flow(
     flow: dict,
     catalog: CatalogLookup,
@@ -228,24 +365,37 @@ def refine_flow(
     extra_findings: list[Finding] | None = None,
     max_rounds: int = MAX_REFINE_ROUNDS,
     purpose: str = "verify",
+    spec: dict | None = None,
 ) -> dict:
-    """findings(정적 위반 + 심판/L2/L3 지시)를 surgeon EditOps 패치로 반복 교정한다.
+    """findings(정적 위반 + 누락 + 심판/L2/L3 지시)를 surgeon EditOps 패치로 반복 교정한다.
 
-    라운드마다: findings → surgeon(EditOps만 출력) → 결정론 적용 → L0/L1 재검증 →
-    심각도 가중합이 줄었을 때만 채택(회귀 가드). 수렴: 오류 findings 소진 / 라운드
-    소진 / 연속 무개선 2회. extra_findings(심판 이식 지시 등)는 첫 라운드에만 싣는다 —
-    적용 여부를 정적 재검증으로 판정할 수 없으므로 반복 강제하면 진동한다.
+    라운드마다: findings → surgeon(EditOps만 출력) → 결정론 적용 → L0/L1 + 결정론 누락
+    재검증 → 심각도 가중합이 줄었을 때만 채택(회귀 가드). 수렴: 오류 findings 소진 /
+    라운드 소진 / 연속 무개선 2회. extra_findings(심판 이식 지시 등)는 첫 라운드에만
+    싣는다 — 적용 여부를 정적 재검증으로 판정할 수 없으므로 반복 강제하면 진동한다.
+
+    **spec을 주면 회귀 가드 비교축에 완성도 항(결정론 누락)이 들어간다** (설계 §5-D).
+    기존 비교축은 정적 위반 가중합뿐이라, remove가 허용 연산인 상태에서 "위반 있는 액션을
+    지우면 가중합이 반드시 준다" → 삭제가 항상 유효한 개선 경로였다. 누락을 같은 축에
+    넣으면 req_id를 든 액션의 삭제가 blocker(100)를 만들어 major(10) 제거를 압도하고,
+    회귀 가드가 그 패치를 스스로 거부한다. 목적 함수를 재설계하지 않고 규칙 하나로
+    삭제 편향이 해소되는 것이 §5-D의 요지다.
+    spec을 안 주면 누락 항이 0이라 기존 동작 그대로다(하위호환).
 
     반환: {"flow", "violations", "repaired"}.
     """
+    if spec is not None:
+        flow = _strip_placeholder_steps(flow)
     violations = collect_violations(flow, catalog)
     findings, _cards = from_violations_dicts(violations)
-    round_findings = findings + list(extra_findings or [])
+    missing = coverage_findings(flow, spec) if spec is not None else []
+    round_findings = findings + missing + list(extra_findings or [])
     if not _error_findings(round_findings):
         return {"flow": flow, "violations": violations, "repaired": False}
 
     emit({"event": "stage", "stage": "verifying",
-          "message": f"검수 위반 {len(violations)}건 · 개선 지시 {len(extra_findings or [])}건 교정 중",
+          "message": (f"검수 위반 {len(violations)}건 · 요구 누락 {len(missing)}건 · "
+                      f"개선 지시 {len(extra_findings or [])}건 교정 중"),
           "data": {"violations": [
               {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
               for v in violations
@@ -253,9 +403,11 @@ def refine_flow(
 
     current = flow
     current_violations = violations
-    # 회귀 가드 비교축은 '정적 위반 가중합'만 쓴다 — extra(이식 지시 등)는 정적 재검증으로
-    # 소거를 판정할 수 없어, 합산하면 첫 라운드가 정적 결함을 새로 만들어도 통과해 버린다.
-    current_weight = weight(_error_findings(findings))
+    # 회귀 가드 비교축 = '정적 위반 + 결정론 누락' 가중합. extra(이식 지시 등)는 여기서
+    # 제외한다 — 정적 재검증으로 소거를 판정할 수 없어, 합산하면 첫 라운드가 정적 결함을
+    # 새로 만들어도 통과해 버린다. 반면 누락은 매 라운드 결정론으로 다시 재는 축이라
+    # 같은 문제가 없고, 이 항이 있어야 '삭제로 위반을 줄이는' 경로가 막힌다(§5-D).
+    current_weight = weight(_error_findings(findings + missing))
     # extra만 있고 정적 위반이 0인 흐름도 개선(이식)은 '정적 악화 없음(<=)'이면 채택한다.
     extras_pending = bool(_error_findings(list(extra_findings or [])))
     repaired = False
@@ -266,8 +418,12 @@ def refine_flow(
         outline = render_outline(work)
         excerpts, excerpt_keys = _spec_excerpts(current_violations, catalog)
         repair_menu = repair_spec_excerpts(current, catalog, excerpt_keys)
+        # 슬롯 목적은 아웃라인 바로 뒤에 붙인다 — surgeon이 노드 id를 읽는 그 자리에서
+        # "이 자리는 무엇을 하려던 자리인가"가 같이 보여야 재선택이 선택지가 된다(§5.2-C).
+        # spec 인자가 없으면 흐름도에 동봉된 spec을 쓴다(edit 경로는 spec을 흐름도에 싣고 온다).
+        purposes = slot_purpose_block(work, spec if spec is not None else current.get("spec"))
         user_content = (
-            f"[흐름도 아웃라인]\n{outline}\n\n"
+            f"[흐름도 아웃라인]\n{outline}{purposes}\n\n"
             f"[고칠 문제들 (심각도순)]\n{_findings_lines(round_findings)}\n\n"
             f"[스펙 발췌]\n{excerpts}"
             + (f"\n\n[수리용 액션 스펙 — 세션 여닫기·반복·분기·예외 처리를 삽입(insert/wrap)할 때 이 표기 사용]\n{repair_menu}"
@@ -299,7 +455,8 @@ def refine_flow(
 
         new_violations = collect_violations(work, catalog)
         new_findings, _ = from_violations_dicts(new_violations)
-        new_weight = weight(_error_findings(new_findings))
+        new_missing = coverage_findings(work, spec) if spec is not None else []
+        new_weight = weight(_error_findings(new_findings + new_missing))
         # 회귀 가드 — 정적 가중합이 줄었을 때만 채택. 이식 지시가 걸려 있는 라운드는
         # '정적 악화 없음(<=)'까지 허용한다 (이식은 정적 신호에 안 잡히는 개선이므로).
         if new_weight < current_weight or (extras_pending and new_weight <= current_weight):
@@ -309,7 +466,8 @@ def refine_flow(
             no_improve = 0
             extras_pending = False  # 이식 지시는 1회 반영으로 소진 — 반복 강제하면 진동한다
             emit_flow_frame(current, current_violations, f"교정 라운드 {round_no} 적용")
-            round_findings = new_findings  # 이후 라운드는 잔여 정적 위반만 (extra는 1회성)
+            # 이후 라운드는 잔여 정적 위반 + 잔여 누락만 (extra는 1회성)
+            round_findings = new_findings + new_missing
             if not _error_findings(round_findings):
                 break
         else:
@@ -319,6 +477,10 @@ def refine_flow(
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
 
+    # 최종 폴백 — 예산을 다 쓰고도 남은 미해결 must 요구는 자리표시자로 남긴다 (§5-H).
+    # 조용히 빠뜨리는 것은 선택지가 아니다.
+    if spec is not None:
+        current = _placeholder_steps(current, spec)
     return {"flow": current, "violations": current_violations, "repaired": repaired}
 
 
@@ -336,11 +498,15 @@ def from_violations_dicts(violations: list[dict]) -> tuple[list[Finding], list[d
     return fs, [c.as_dict() for c in cards]
 
 
-def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
+def verify_and_repair(flow: dict, catalog: CatalogLookup, *, spec: dict | None = None) -> dict:
     """흐름도를 검수하고 위반이 있으면 surgeon refine 루프로 교정한다 (v2 시그니처 유지).
 
     edit 경로·타 솔루션(generate_other) 경로가 이 관문을 그대로 쓴다.
+    spec은 선택 — 주면 누락(완성도) 항이 회귀 가드에 함께 들어간다(refine_flow 참조).
+    ⚠️ edit 경로에서 spec을 넘길 때는 "이 단계 빼주세요"가 요구 삭제까지 동반해야 한다
+    (설계 §6.1의 set_spec 연산). 요구가 남은 채 액션만 지우면 누락 blocker가 그 액션을
+    도로 넣는다 — 그래서 여기 기본값은 None이다.
     반환: {"flow": dict, "violations": list[dict], "repaired": bool}.
     """
     emit({"event": "stage", "stage": "verifying", "message": "흐름도 최종 검수 중"})
-    return refine_flow(flow, catalog)
+    return refine_flow(flow, catalog, spec=spec)

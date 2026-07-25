@@ -36,6 +36,10 @@ VarRef)다. composer 명시가 1차이고 `$var$` 파싱이 교차 보정한다 
 세션 opener/closer와 컨테이너 예외는 공용 지식층(app/agent/knowledge)이 카탈로그에서
 유도한다 — 수기 상수는 폴백으로만 남는다. 유도가 한쪽이라도 비면 R7/R8은 침묵한다
 ('검사 안 함'이 '틀리게 검사함'보다 낫다 — RPA-298).
+
+같은 체커가 타 솔루션 흐름도(대화에서 추출한 UserCatalog)도 검수한다. 어휘는 이식되지만
+**구조·세션 모델은 이식되지 않아** R6/R7/R8/R12/R13/R14는 A360에서만 돈다 —
+`run_flow_checks(..., is_a360=False)`가 그 게이트다(근거는 해당 docstring).
 """
 
 import logging
@@ -142,7 +146,16 @@ class Violation:
     severity: str = "error"  # "error"|"warning" — warning은 감점·심판 앵커용(교정 강제 비대상)
 
     def as_dict(self) -> dict:
-        """위반을 repair 프롬프트·관측 로그용 dict로 직렬화한다."""
+        """위반을 repair 프롬프트·관측 로그용 dict로 직렬화한다.
+
+        `param_type`은 `spec_excerpt["type"]`(카탈로그 파라미터 타입)의 사본이다. R3를
+        '동작 옵션(결함)'과 '업무 데이터(질문 카드)'로 가르는 판별축인데(설계 §5.2-E),
+        실사용 경로는 harness의 dict 셔틀(`from_violations_dicts`)을 지나므로 as_dict가
+        떨어뜨리면 findings 쪽에서 타입을 영영 볼 수 없어 **전부 카드로** 흘러버린다.
+        `spec_excerpt` 전체를 싣지 않는 이유는 R2의 `valid_params`(액션당 수십 건)가
+        SSE 흐름도 프레임에 매 위반마다 실려 payload를 부풀리기 때문이다 — 판별에 필요한
+        스칼라 한 개만 승격한다.
+        """
         return {
             "rule": self.rule,
             "location": self.location,
@@ -150,6 +163,7 @@ class Violation:
             "package": self.package,
             "action": self.action,
             "param": self.param,
+            "param_type": self.spec_excerpt.get("type"),
             "step_id": self.step_id,
             "severity": self.severity,
         }
@@ -255,8 +269,13 @@ def _check_action(
     catalog: CatalogLookup,
     location: str,
     non_container: frozenset[tuple[str, str]] = frozenset(),
+    check_containers: bool = True,
 ) -> list[Violation]:
-    """액션 하나를 R1(카탈로그 존재)·R2~R5(파라미터)·R6(children 컨테이너)로 검사하고 children을 재귀한다."""
+    """액션 하나를 R1(카탈로그 존재)·R2~R5(파라미터)·R6(children 컨테이너)로 검사하고 children을 재귀한다.
+
+    `check_containers=False`면 R6를 끈다 — 컨테이너 어휘(CONTAINER_PACKAGES)가 A360
+    전용이라 타 솔루션 흐름에서는 전량 오탐이 된다(설계 §6.6). 상세는 run_flow_checks 참조.
+    """
     violations: list[Violation] = []
     pkg, act = action.get("package"), action.get("action")
     children = action.get("children") or []
@@ -277,7 +296,7 @@ def _check_action(
         violations.extend(_check_parameters(action, spec, location))
 
     # R6: children은 컨테이너 액션에만
-    if children and not is_container(pkg, act, non_container=non_container):
+    if check_containers and children and not is_container(pkg, act, non_container=non_container):
         violations.append(
             Violation(
                 "R6", location,
@@ -288,7 +307,9 @@ def _check_action(
 
     for i, child in enumerate(children):
         violations.extend(
-            _check_action(child, catalog, f"{location}.children[{i}]", non_container)
+            _check_action(
+                child, catalog, f"{location}.children[{i}]", non_container, check_containers
+            )
         )
     return violations
 
@@ -297,15 +318,18 @@ def run_checks(
     actions: list[dict],
     catalog: CatalogLookup,
     non_container: frozenset[tuple[str, str]] | None = None,
+    *,
+    check_containers: bool = True,
 ) -> list[Violation]:
     """액션 트리(한 단계의 actions[])를 R1~R6로 검사해 위반 목록을 반환한다.
 
     actions: RecommendedAction.model_dump() 리스트 또는 동형 dict 리스트.
+    check_containers=False면 R6를 끈다(타 솔루션 — run_flow_checks의 is_a360 게이트).
     """
     exc = container_exceptions(catalog) if non_container is None else non_container
     violations: list[Violation] = []
     for i, action in enumerate(actions):
-        violations.extend(_check_action(action, catalog, f"actions[{i}]", exc))
+        violations.extend(_check_action(action, catalog, f"actions[{i}]", exc, check_containers))
     return violations
 
 
@@ -1119,16 +1143,54 @@ def run_environment_checks(flow: dict, catalog: CatalogLookup) -> list[Violation
 # 통합 실행기 (v3) — L0(R1~R6) + L1(R7~R16) 한 번에
 # ─────────────────────────────────────────────────────────────────────────────
 
+# 구조·세션 모델에 의존해 A360에서만 유효한 규칙 — is_a360=False면 통째로 끈다 (설계 §6.6).
+# 관측·문서용 상수다(게이트 자체는 아래 run_flow_checks가 호출 단위로 건다).
+A360_ONLY_RULES: frozenset[str] = frozenset({"R6", "R7", "R8", "R12", "R13", "R14"})
+
+
 def run_flow_checks(
     flow: dict,
     catalog: CatalogLookup,
     registry: knowledge_derive.SessionRegistry | tuple[frozenset, frozenset] | None = None,
+    *,
+    is_a360: bool = True,
 ) -> list[Violation]:
     """흐름도 전체를 L0 정적(R1~R6) + L1 데이터플로우·세션(R7~R12)으로 검사한다.
 
     registry를 주지 않으면 카탈로그에서 세션 레지스트리를 유도한다(derive_session_registry).
     유도가 실패하면 R7/R8은 침묵한다 — run_session_checks 참조.
     반환 위반의 step_id는 단계별 검사(R1~R6)에도 채워진다 — 국소 교정 라우팅용.
+
+    ## is_a360 — 구조·세션 검사는 A360 전용이다 (설계 §6.6)
+
+    이 체커는 타 솔루션 흐름도(대화에서 추출한 UserCatalog)도 같은 파이프라인으로 검수한다.
+    **어휘(R1~R5)는 이식되지만 구조는 이식되지 않는다.** 조사 결과:
+
+    | 제품 | 제어 흐름 | 세션 open/close 쌍 |
+    |---|---|---|
+    | Power Automate Desktop · Brity RPA | 평평한 리스트 + begin/end 마커 | 유효 (A360과 동일) |
+    | UiPath | 중첩 컨테이너(Sequence/TryCatch/ForEach) | **스코프 자동 종료** — 닫는 액션이 없다 |
+    | Blue Prism | 2D 플로차트 | 중첩 표현 자체가 불가능, "session"이 다른 뜻 |
+    | Power Automate 클라우드 | `runAfter` DAG | 세션 개념 없음 |
+
+    그래서 A360 어휘에 묶인 규칙을 타 솔루션에 돌리면 **올바른 자동화가 결함으로 판정**된다:
+
+    - R6는 `CONTAINER_PACKAGES`(Loop/If/Step/Error handler/Trigger loop)에 없는 패키지에
+      children이 있으면 위반이다 → UiPath의 Sequence·TryCatch·ForEach 본문이 **전부 major**가
+      되고, 교정 루프가 본문을 풀거나 액션을 지운다. 교정 예산 확대(설계 §5.2-F)로 악화된다.
+    - R7/R8은 open/close 쌍을 전제한다 → UiPath에서는 닫는 액션이 없는 게 정상인데 R8이
+      전량 미종료로 잡는다.
+    - R13/R14는 'Error handler'/'Loop' 패키지명 리터럴에 걸린다 → 타 솔루션에서는 조용하지만,
+      조용한 이유가 '검사가 성립해서'가 아니라 '이름이 안 맞아서'다. 명시적으로 끈다.
+    - R12a는 없는 예외 구조를 지적하며 **A360의 `Error handler` 패키지를 처방**한다 →
+      surgeon이 그대로 넣으면 타 솔루션 카탈로그에 없는 액션이라 R1 blocker로 되돌아온다.
+
+    R1~R5(어휘·파라미터)와 R9~R11(변수 데이터플로우 — 우리 스키마의 produces/consumes가
+    원료라 제품 무관), R15/R16(카탈로그 메타 기반 — 메타가 없으면 자연 침묵)은 그대로 돈다.
+
+    기본값이 True인 이유는 하위호환이다 — 호출부(harness.collect_violations 등)가 인자를
+    안 넘겨도 A360 동작이 그대로 유지된다. 타 솔루션 경로는 `CatalogContext.is_a360`을
+    그대로 흘려주면 된다.
     """
     steps = flow.get("steps") or []
     violations: list[Violation] = []
@@ -1137,19 +1199,21 @@ def run_flow_checks(
 
     for step in steps:
         step_id = step.get("step_id")
-        for v in run_checks(step.get("actions") or [], catalog, exc):
+        for v in run_checks(step.get("actions") or [], catalog, exc, check_containers=is_a360):
             v.step_id = v.step_id or step_id
             violations.append(v)
 
-    reg = registry or derive_session_registry(catalog)
-    violations.extend(run_session_checks(steps, reg, emit_r12=True))
+    if is_a360:
+        reg = registry or derive_session_registry(catalog)
+        violations.extend(run_session_checks(steps, reg, emit_r12=True))
     violations.extend(run_dataflow_checks(flow, catalog))
-    violations.extend(run_structure_checks(steps, exc))
+    if is_a360:
+        violations.extend(run_structure_checks(steps, exc))
     violations.extend(run_environment_checks(flow, catalog))
 
     # R12a: 규모 있는 흐름도에 예외 처리 구조가 아예 없음 (A360 표준 골격 위배 — warning)
     total, has_eh = _flow_stats(steps)
-    if total >= 5 and not has_eh:
+    if is_a360 and total >= 5 and not has_eh:
         violations.append(
             Violation(
                 "R12", "actions[0]",

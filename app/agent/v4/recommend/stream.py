@@ -50,6 +50,38 @@ def emit_flow_frame(
     })
 
 
+def emit_draft_frame(
+    flow: dict, violations: list[dict] | None, draft_id: str, caption: str
+) -> None:
+    """확정된 초안(정밀화 전)을 partial(kind="draft")로 흘린다 — 2상 구조의 1상 종료 신호 (설계 §6.3).
+
+    **새 event 값을 만들지 않는 이유**: 프론트는 모르는 `data.kind`를 무시하므로 kind 추가는
+    FE 무변경으로 안전하지만, 새 event는 `ProgressEvent`의 Literal과 FE 분기를 둘 다 고쳐야
+    한다. 그래서 채널은 partial 그대로 두고 kind로만 갈랐다.
+
+    싣는 위반은 **결정론 검사 결과뿐이고 교정하지 않은 상태**다(설계 §5-I) — 초안 단계에서
+    교정을 돌리면 초안 지연이 정밀화 지연만큼 늘어 2상으로 쪼갠 의미가 사라진다.
+
+    draft_id는 이 초안의 식별자다. 후속 이슈에서 정밀화가 백그라운드로 빠지면 프론트가
+    "이 초안의 정밀화 결과"를 이 id로 잇는다 — 지금은 같은 스트림 안이라 참조용이다.
+    """
+    emit({
+        "event": "partial",
+        "stage": "recommending",
+        "message": caption,
+        "data": {
+            "kind": "draft",
+            "caption": caption,
+            "draft_id": draft_id,
+            "flow": flow,
+            "violations": [
+                {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
+                for v in (violations or [])
+            ],
+        },
+    })
+
+
 def emit_candidates_frame(candidates: list[dict], caption: str) -> None:
     """후보 진행 요약 카드를 partial(kind="candidates")로 흘린다 (v3).
 

@@ -18,6 +18,7 @@
 - set_params  : 노드 파라미터를 name 기준 병합/치환한다.
 - update      : 노드의 package/action/label을 바꾼다.
 - set_flow    : 흐름도 수준 notes/variables와 스펙 전제(spec.assumptions)를 바꾼다.
+- set_spec    : 채점 기준(spec)의 요구 목록·목표를 바꾼다 — "그 업무 자체가 필요 없다"는 수정용.
 
 id는 프롬프트에 보여줄 때만 임시로 붙였다가(_annotate_ids) 적용 후 벗긴다(strip_ids) —
 스키마(RecommendedAction)에는 저장하지 않는 관측용 필드다.
@@ -28,7 +29,10 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 # 임시 노드 id를 다는 전이(transient) 키 — 프롬프트 참조용, 적용 후 제거한다.
-_ID = "_id"
+# harness도 같은 키로 노드를 훑어 '슬롯 목적' 블록을 만들기 때문에 공개 이름을 둔다
+# (사설 이름을 모듈 밖에서 참조하면 이 키를 바꿀 때 조용히 깨진다).
+NODE_ID = "_id"
+_ID = NODE_ID
 
 _POSITIONS = frozenset({"before", "after", "into_start", "into_end"})
 
@@ -55,7 +59,7 @@ class EditOp(BaseModel):
 
     op: Literal[
         "wrap", "insert", "remove", "move", "set_params", "update", "set_flow",
-        "split_step", "merge_step",
+        "split_step", "merge_step", "set_spec",
     ]
     target: str | None = None                 # remove/move/set_params/update: 대상 노드 id
     targets: list[str] = Field(default_factory=list)  # wrap: 감쌀 연속 형제 노드 id들
@@ -74,6 +78,34 @@ class EditOp(BaseModel):
     produces: list[dict] | None = None        # set_params/update: 변수 연결 동반 갱신 (v3)
     consumes: list[dict] | None = None        # set_params/update: 변수 연결 동반 갱신 (v3)
     step_id: str | None = None                # split_step/merge_step: 대상 단계
+    # set_spec — 채점 기준(FlowSpec)의 요구를 조작한다 (§6.1). 액션만 지우고 요구를 남기면
+    # 누락 blocker가 그 액션을 도로 불러온다 = 사용자의 삭제 지시가 검수에 의해 되돌려진다.
+    remove_req_ids: list[str] = Field(default_factory=list)  # set_spec: 지울 요구 id들
+    requirements: list[dict] | None = None    # set_spec: 요구 upsert ({req_id?, text, priority?, source?})
+    goal: str | None = None                   # set_spec: 목표 문장 교체
+
+    @field_validator("remove_req_ids", mode="before")
+    @classmethod
+    def _coerce_req_ids(cls, v):
+        """단일 id 문자열("req-2") 슬립을 목록으로 승격 — 목록 강제 실패로 배치 전체가 죽지 않게."""
+        if isinstance(v, str):
+            return [v] if v.strip() else []
+        return v
+
+    @field_validator("requirements", mode="before")
+    @classmethod
+    def _coerce_requirements(cls, v):
+        """요구를 문자열로만 낸 슬립("메일 발송")을 최소 dict로 코얼스한다.
+
+        req_id는 여기서 짓지 않는다 — 적용부가 기존 id와 충돌하지 않는 번호를 부여해야 한다.
+        """
+        if isinstance(v, list):
+            return [
+                {"text": item.strip()} if isinstance(item, str) else item
+                for item in v
+                if not isinstance(item, str) or item.strip()
+            ]
+        return v
 
     @field_validator("action", "container", mode="before")
     @classmethod
@@ -217,6 +249,16 @@ def _new_action(spec: dict | None, children: list[dict] | None = None) -> dict:
         out["produces"] = _var_refs(spec.get("produces"))
     if spec.get("consumes"):
         out["consumes"] = _var_refs(spec.get("consumes"))
+    # 담당 요구(req_id)도 보존한다 — 버리면 삽입으로 누락 blocker를 **영원히 못 지운다**.
+    # 누락 판정이 "이 요구를 담당하는 액션이 있는가"라서, surgeon이 액션을 채워 넣어도
+    # req_id가 떨어지면 여전히 미배정으로 잡혀 교정 루프가 예산만 태우고 자리표시자로 끝난다.
+    if spec.get("req_id"):
+        out["req_id"] = str(spec["req_id"])
+    # 요구 앵커도 보존한다 — 누락(요구 미배정)을 메우려고 삽입한 액션에서 req_id를 버리면
+    # 결정론 커버리지가 그 요구를 여전히 '미배정'으로 세고, 교정 루프가 같은 삽입을
+    # 무한히 반복한다(수렴 실패).
+    if spec.get("req_id"):
+        out["req_id"] = spec["req_id"]
     return out
 
 
@@ -338,6 +380,33 @@ def _apply_update(flow: dict, op: EditOp) -> bool:
     )
 
 
+def _ensure_spec(flow: dict) -> dict:
+    """flow["spec"](채점 기준 FlowSpec)을 쓰기 가능한 dict로 정규화해 돌려준다.
+
+    setdefault를 쓰면 안 된다: Recommendation.spec의 기본값이 None이라 model_dump()를 거친
+    흐름도는 spec 키가 **None 값으로 존재**하고, setdefault는 키가 있으면 값을 바꾸지 않는다.
+    그러면 갱신이 조용히 유실될 뿐 아니라 changed가 False로 남아 연산이 '적용 실패'로 기록돼
+    사용자에게 "반영하지 못했어요"가 나간다 (RPA-282에서 실제로 겪은 버그).
+
+    ⚠ 호출 측은 '실제로 바꿀 것이 확정된 뒤에만' 부른다 — 무효 연산에서도 부르면 spec이
+    None이던 흐름도에 빈 dict가 생겨 무변경 판정이 흔들린다.
+    """
+    spec = flow.get("spec")
+    if not isinstance(spec, dict):  # None·구버전 잔재·타입 슬립을 모두 정규화
+        flow["spec"] = spec = {}
+    return spec
+
+
+def spec_requirements(flow: dict) -> list[dict]:
+    """흐름도에 동봉된 요구 목록(spec.requirements). 없으면 빈 목록.
+
+    수정 전후 비교(무변경 판정)에서도 쓰라고 공개한다 — 요구만 바뀐 편집을 '무변경'으로
+    저하시키면 사용자가 지운 업무가 되살아난다.
+    """
+    spec = flow.get("spec")
+    return list(spec.get("requirements") or []) if isinstance(spec, dict) else []
+
+
 def _apply_set_flow(flow: dict, op: EditOp) -> bool:
     changed = False
     if op.notes is not None:
@@ -350,17 +419,98 @@ def _apply_set_flow(flow: dict, op: EditOp) -> bool:
         # 전제는 흐름도가 아니라 채점 기준(FlowSpec)에 산다 — recommend가 flow["spec"]으로
         # 동봉해 두고(graph.py finalize), 이후 턴의 재채점·재생성이 그걸 다시 읽는다.
         # 여기서 갱신해야 "대상 OS를 바꿔 달라"는 요청이 다음 턴까지 살아남는다 (RPA-282).
-        #
-        # setdefault를 쓰면 안 된다: Recommendation.spec의 기본값이 None이라 model_dump()를
-        # 거친 흐름도는 spec 키가 **None 값으로 존재**하고, setdefault는 키가 있으면 값을
-        # 바꾸지 않는다. 그러면 전제가 조용히 유실될 뿐 아니라 changed가 False로 남아 연산이
-        # '적용 실패'로 기록돼 사용자에게 "반영하지 못했어요"가 나간다.
-        spec = flow.get("spec")
-        if not isinstance(spec, dict):  # None·구버전 잔재·타입 슬립을 모두 정규화
-            flow["spec"] = spec = {}
-        spec["assumptions"] = op.assumptions
+        _ensure_spec(flow)["assumptions"] = op.assumptions
         changed = True
     return changed
+
+
+def _next_req_id(taken: set[str]) -> str:
+    """기존 id와 충돌하지 않는 다음 req-N을 고른다 — req_id는 L2 채점·심판·카드의 공유 앵커라
+    중복되면 서로 다른 요구가 한 칸으로 뭉개진다 (spec.py의 보정 규칙과 같은 방식)."""
+    n = 1
+    while f"req-{n}" in taken:
+        n += 1
+    return f"req-{n}"
+
+
+def _detach_req_ids(flow: dict, removed: set[str]) -> None:
+    """지워진 요구를 가리키던 액션의 req_id를 떼어 낸다.
+
+    요구를 지우면서 그 요구를 담당하던 액션 전부를 함께 지우는 것은 아니다(일부만 남길 수
+    있다). 남은 액션이 사라진 요구를 계속 가리키면 커버리지 채점과 surgeon 슬롯 목적이
+    존재하지 않는 앵커를 참조한다 — 매달린 참조를 여기서 끊어 상태를 일관되게 둔다.
+    req_id 필드가 아직 없는 흐름도에서는 자연히 no-op이다.
+    """
+    def walk(actions: list[dict]) -> None:
+        for a in actions:
+            if a.get("req_id") in removed:
+                a["req_id"] = None
+            walk(a.get("children") or [])
+
+    for step in flow.get("steps") or []:
+        walk(step.get("actions") or [])
+
+
+def _apply_set_spec(flow: dict, op: EditOp) -> bool:
+    """채점 기준(spec)의 요구 목록·목표를 바꾼다 (설계 §6.1).
+
+    왜 이 연산이 필요한가: 검수는 spec의 요구를 기준으로 '누락'을 판정한다. 사용자가
+    "이 메일 발송 단계 빼주세요"라고 해서 액션만 remove하면 요구는 그대로 남아 누락
+    blocker(가중치 100)가 발화하고, 교정 루프가 그 액션을 **도로 넣는다** — 사용자의 지시가
+    검수에 의해 조용히 되돌려진다. 액션을 빼는 이유가 "그 업무가 필요 없다"면 요구도 함께
+    지워야 상태가 일관된다(요구가 없으니 누락도 없다).
+
+    remove_req_ids(삭제) → requirements(upsert) → goal 순으로 적용한다. 아무것도 실제로
+    바뀌지 않으면 False를 돌려 '미적용'으로 보고한다 — 존재하지 않는 req_id를 지우라는
+    연산을 성공으로 삼키면 사용자는 지워진 줄 안다.
+    """
+    cur = flow.get("spec")
+    reqs = list((cur or {}).get("requirements") or []) if isinstance(cur, dict) else []
+    changed_reqs = False
+
+    if op.remove_req_ids:
+        drop = {rid for rid in op.remove_req_ids if rid}
+        kept = [r for r in reqs if r.get("req_id") not in drop]
+        if len(kept) != len(reqs):
+            _detach_req_ids(flow, drop)
+            reqs = kept
+            changed_reqs = True
+
+    if op.requirements:
+        by_id = {r.get("req_id"): i for i, r in enumerate(reqs) if r.get("req_id")}
+        for item in op.requirements:
+            if not isinstance(item, dict):
+                continue
+            rid = item.get("req_id")
+            if rid and rid in by_id:  # 기존 요구 수정 — 준 필드만 덮어쓴다(부분 갱신)
+                before = reqs[by_id[rid]]
+                after = {**before, **{k: v for k, v in item.items() if v is not None}}
+                if after != before:
+                    reqs[by_id[rid]] = after
+                    changed_reqs = True
+                continue
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue  # 본문 없는 요구는 채점 앵커가 못 된다 — 조용히 버린다
+            rid = rid or _next_req_id({r.get("req_id") for r in reqs if r.get("req_id")})
+            reqs.append({
+                "req_id": rid, "text": text,
+                "priority": item.get("priority") or "must",
+                "source": item.get("source") or "chat",
+            })
+            by_id[rid] = len(reqs) - 1
+            changed_reqs = True
+
+    goal_changed = op.goal is not None and (cur or {}).get("goal") != op.goal
+    if not changed_reqs and not goal_changed:
+        return False
+
+    spec = _ensure_spec(flow)  # 실변경이 확정된 뒤에만 실체화
+    if changed_reqs:
+        spec["requirements"] = reqs
+    if goal_changed:
+        spec["goal"] = op.goal
+    return True
 
 
 def _find_step(flow: dict, step_id: str | None) -> int | None:
@@ -420,6 +570,7 @@ _APPLIERS = {
     "set_params": _apply_set_params,
     "update": _apply_update,
     "set_flow": _apply_set_flow,
+    "set_spec": _apply_set_spec,
     "split_step": _apply_split_step,
     "merge_step": _apply_merge_step,
 }
@@ -441,6 +592,12 @@ def apply_edit_ops(flow: dict, ops: list[EditOp]) -> tuple[int, list[str]]:
             continue
         if ok:
             applied += 1
+        elif op.op in ("set_flow", "set_spec"):
+            # 노드를 안 쓰는 연산이라 "대상 노드를 못 찾았다"는 안내가 오히려 오도한다 —
+            # 재요청 피드백이 엉뚱한 곳을 고치게 만든다.
+            errors.append(
+                f"op[{i}] {op.op}: 바뀐 값이 없다(빈 필드이거나, 지우려는 req_id가 스펙에 없음)"
+            )
         else:
             errors.append(f"op[{i}] {op.op}: 대상 노드를 못 찾았거나 조건(연속 형제 등) 불충족")
     return applied, errors

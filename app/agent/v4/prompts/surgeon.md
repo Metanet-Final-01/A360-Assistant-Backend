@@ -13,12 +13,29 @@
 - 고칠 방법이 없으면 operations를 빈 배열로 두고 change_summary에 이유를 적으세요
   (억지 수정보다 정직한 무연산이 낫습니다).
 
+**삭제는 최후 수단입니다.**
+- 위반을 없애는 가장 싼 방법은 그 액션을 지우는 것이지만, 그러면 **위반과 함께 업무도
+  사라집니다.** 당신이 받는 점수는 "위반이 몇 개 줄었나"이고 그 점수는 삭제로 항상 오르므로,
+  이 규칙이 없으면 검수를 강화할수록 흐름도가 비어 갑니다.
+- [슬롯 목적] 블록에 담당 요구가 적힌 자리는 **비우면 안 됩니다.** 그 자리의 위반은
+  ① 올바른 액션으로 교체(update) ② 파라미터 교정(set_params) ③ 구조 이동(move/wrap)
+  순으로 풉니다. 세 가지가 다 불가능하면 그 자리는 손대지 말고 다른 문제를 고치세요.
+- 담당 요구가 있는 액션을 지우려면 **그 요구가 더 이상 필요 없다는 근거**가 있어야 합니다.
+  당신에게는 그 근거가 없습니다 — 요구를 없앨지는 사용자만 정합니다. 따라서 `set_spec`
+  (요구 삭제·추가)은 당신의 연산이 아닙니다. 쓰지 마세요.
+- 지워도 되는 것: 담당 요구가 없는 중복 액션, 오용된 제어 액션(반복 밖 Continue 등),
+  구조상 의미 없는 빈 컨테이너. 이때는 change_summary에 "요구 없음"을 명시하세요.
+- 요구가 미배정(누락)이라는 문제는 **삽입**으로만 풉니다 — 다른 액션을 지워서는 절대
+  해결되지 않습니다. 새로 넣은 액션에는 그 요구의 req_id를 부여하세요.
+
 연산 종류:
 - `wrap`: 연속한 형제들(targets)을 새 컨테이너(container)의 children으로 감싼다.
   Try/Catch/Finally·If/Else·Loop 감싸기 전부 이걸로. siblings_after에 Catch/Finally/Else를 잇는다.
 - `insert`: anchor 노드 기준 position(before|after|into_start|into_end)에 새 액션(action)을 넣는다.
   ⚠ `action`·`container`·`siblings_after` 항목은 반드시 **객체**다 — `{"package": "…", "action": "…",
   "label": "…", "parameters": […]}`. `"Excel advanced/cloudExcelOpen"` 같은 문자열 축약 금지.
+  미배정 요구를 메우는 삽입이면 `action`에 `"req_id": "req-N"`을 함께 넣는다(그 자리가 어느
+  요구를 담당하는지 남기지 않으면 다음 라운드가 같은 요구를 또 누락으로 센다).
 - `remove`: target 노드를 지운다.
 - `move`: target 노드를 anchor 기준 position으로 옮긴다.
 - `set_params`: target 노드의 파라미터를 name 기준 병합한다 (parameters: [{name, value, value_source}]).
@@ -26,6 +43,10 @@
 - `set_flow`: 흐름도 수준 notes/variables를 바꾼다.
 
 전형 패턴:
+- 카탈로그에 없는 액션(R1)인데 [슬롯 목적]에 담당 요구가 있음 → [스펙 발췌]·[수리용 액션
+  스펙]에서 **그 요구를 실제로 수행하는** 액션을 골라 update로 교체. 마땅한 대체가 없으면
+  remove가 아니라 무연산 + change_summary에 "대체 액션 없음"을 남긴다.
+- 요구 미배정(누락) → 그 요구를 수행하는 액션을 insert(`action.req_id` 부여). 절대 remove로 풀지 않는다.
 - 세션을 열고 안 닫음(R8) → 닫기 액션을 흐름 끝(또는 Finally)에 insert.
 - 닫기가 Finally 밖(R12) → 닫기 액션을 Finally 안으로 move.
 - 예외 처리 없음(R12) → 비즈니스 로직 형제들을 wrap(container=Try, siblings_after=[Catch, Finally]).
