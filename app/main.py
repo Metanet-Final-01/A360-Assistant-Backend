@@ -22,6 +22,7 @@ from app.api.debug import router as debug_router
 from app.api.documents import router as documents_router
 from app.api.rag import router as rag_router
 from app.api.sessions import router as sessions_router
+from app.core import config
 from app.core.errors import install_error_handlers
 from app.core.http_logging import register_http_logging
 
@@ -107,12 +108,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
 
+# 기본값은 레지스트리(config.py)가 단일 진실 공급원 — literal 중복 제거 (RPA-294).
 frontend_origins = [
     origin.strip()
-    for origin in os.getenv(
-        "FRONTEND_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    ).split(",")
+    for origin in config.FRONTEND_ORIGINS.split(",")
     if origin.strip()
 ]
 
@@ -120,10 +119,7 @@ frontend_origins = [
 # a360-assistant-frontend-<hash>-a360-assistant.vercel.app), so a fixed
 # FRONTEND_ORIGINS entry breaks on each redeploy. Allow any deployment of
 # this Vercel project via regex instead of chasing the hash by hand.
-frontend_origin_regex = os.getenv(
-    "FRONTEND_ORIGIN_REGEX",
-    r"https://a360-assistant-frontend-.*-a360-assistant\.vercel\.app",
-)
+frontend_origin_regex = config.FRONTEND_ORIGIN_REGEX
 
 app.add_middleware(
     CORSMiddleware,

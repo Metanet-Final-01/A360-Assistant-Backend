@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
+from app.core import config
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -37,11 +39,14 @@ def _database_url() -> str:
     if shared:
         return _normalize_sqlalchemy_url(shared)
 
-    host = os.getenv("DATABASE_HOST", "localhost")
-    port = os.getenv("DATABASE_PORT", "5432")
-    name = os.getenv("DATABASE_NAME", "a360")
-    user = os.getenv("DATABASE_USERNAME", "a360_admin")
-    password = os.getenv("DATABASE_PASSWORD", "")
+    # 조각 기본값은 레지스트리(config.py)가 단일 진실 공급원 — literal 중복 제거 (RPA-294).
+    # config.*는 접근 시점에 os.getenv를 타므로 import 시점 호출(engine 생성) 타이밍은 불변이고,
+    # 빈 문자열은 선언 기본값으로 저하해 빈 host로 URL이 깨지는 것도 막는다.
+    host = config.DATABASE_HOST
+    port = config.DATABASE_PORT
+    name = config.DATABASE_NAME
+    user = config.DATABASE_USERNAME
+    password = config.DATABASE_PASSWORD
     # 자격증명은 URL 인코딩한다 — RDS 자동생성 비밀번호의 '%'·'@'·':'·'/' 등이
     # URL을 깨뜨리는 것(호스트 오파싱·인증 실패)을 막는다 (RPA-51).
     return f"postgresql+psycopg://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}/{name}"
