@@ -6,9 +6,19 @@
 - probe=1 → DEBUG_RAG_PROBE_ENABLED 게이트, 통과 시 live_probe 추가
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _open_debug_router(monkeypatch):
+    """이 파일은 debug 라우터 하위(probe) 게이트를 검증하므로 라우터 게이트를 연다 (RPA-290 fail-closed).
+
+    라우터가 기본 차단이라 플래그를 안 켜면 모든 테스트가 하위 게이트 도달 전 403이 된다.
+    """
+    monkeypatch.setenv("DEBUG_ENDPOINTS_ENABLED", "true")
 
 
 def test_status_without_probe_returns_service_status(monkeypatch):

@@ -6,9 +6,11 @@
 
 import asyncio
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.api.debug import _pin_url_to_ip, _resolve_validated_ip
+from app.api.debug import _pin_url_to_ip, _resolve_validated_ip, require_debug_enabled
 from app.main import app
 
 
@@ -41,15 +43,22 @@ def test_allows_public_host_returns_pinned_ip():
     assert reason is None and ip is not None  # 연결에 쓸 검증된 IP를 반환
 
 
-def test_endpoint_403_when_disabled(monkeypatch):
+def test_endpoint_403_when_http_client_disabled(monkeypatch):
+    """라우터 게이트는 열되(플래그 on), http 프록시 하위 게이트만 꺼서 403을 검증한다.
+
+    라우터 게이트를 안 열면 그게 먼저 403을 내 http-client 하위 게이트가 검증되지 않는다
+    (가짜 초록). 그래서 DEBUG_ENDPOINTS_ENABLED=true로 라우터를 연 뒤 하위 게이트만 본다.
+    """
+    monkeypatch.setenv("DEBUG_ENDPOINTS_ENABLED", "true")
     monkeypatch.delenv("DEBUG_HTTP_CLIENT_ENABLED", raising=False)
-    monkeypatch.setenv("APP_ENV", "development")  # 예전엔 이것만으로 열렸음 — 이제 막혀야 함
     with TestClient(app) as client:
         r = client.post("/api/debug/http-request", json={"url": "https://api.github.com"})
     assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "DEBUG_HTTP_DISABLED"  # 라우터가 아닌 http 하위 게이트
 
 
 def test_endpoint_blocks_metadata_when_enabled(monkeypatch):
+    monkeypatch.setenv("DEBUG_ENDPOINTS_ENABLED", "true")  # 라우터 게이트 개방
     monkeypatch.setenv("DEBUG_HTTP_CLIENT_ENABLED", "true")
     with TestClient(app) as client:
         r = client.post("/api/debug/http-request", json={"url": "http://169.254.169.254/"})
@@ -57,35 +66,48 @@ def test_endpoint_blocks_metadata_when_enabled(monkeypatch):
     assert r.json()["detail"]["code"] == "BLOCKED_TARGET"  # {code, message} 포맷
 
 
-def test_debug_router_gated_in_production(monkeypatch):
-    """프로덕션에서는 디버그 라우터 전체가 차단된다 (RAG 디버그 엔드포인트 포함)."""
-    monkeypatch.setenv("APP_ENV", "production")
+def test_debug_router_closed_without_flag(monkeypatch):
+    """플래그 미설정이면 디버그 라우터 전체가 차단된다 — APP_ENV 무관, fail-closed (RPA-290).
+
+    env 미설정은 '로컬'과 '배포 오설정'을 구분 못 하므로, 미설정 형태 그대로 차단됨을 본다.
+    """
     monkeypatch.delenv("DEBUG_ENDPOINTS_ENABLED", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
     with TestClient(app) as client:
         r = client.get("/api/rag/debug/status")  # http-request가 아닌 다른 디버그 라우트
     assert r.status_code == 403
     assert r.json()["detail"]["code"] == "DEBUG_DISABLED"
 
 
+def test_debug_gate_closed_in_staging(monkeypatch):
+    """staging 등 production이 아닌 배포에서도 플래그 없으면 닫힌다 (과거 fail-open 지점, RPA-290)."""
+    monkeypatch.setenv("APP_ENV", "staging")
+    monkeypatch.delenv("DEBUG_ENDPOINTS_ENABLED", raising=False)
+    with pytest.raises(HTTPException) as exc:
+        require_debug_enabled()
+    assert exc.value.detail["code"] == "DEBUG_DISABLED"
+
+
+def test_debug_gate_closed_by_default(monkeypatch):
+    """기본값(플래그·APP_ENV 모두 미설정)에서 게이트는 닫혀 있다 — fail-closed (RPA-290).
+
+    예전엔 여기서 '열려 있다'를 단언했다(fail-open의 근원 계약). 이제 뒤집는다.
+    """
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("DEBUG_ENDPOINTS_ENABLED", raising=False)
+    with pytest.raises(HTTPException) as exc:
+        require_debug_enabled()
+    assert exc.value.detail["code"] == "DEBUG_DISABLED"
+
+
 def test_debug_gate_forced_on_passes(monkeypatch):
-    """프로덕션이라도 DEBUG_ENDPOINTS_ENABLED=true면 게이트를 통과한다.
+    """DEBUG_ENDPOINTS_ENABLED=true면 게이트를 통과한다 (APP_ENV 무관 — production이라도).
 
     (엔드포인트 본문은 무거운 외부 의존이 있어 게이트 함수만 직접 검증)
     """
-    from app.api.debug import require_debug_enabled
-
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("DEBUG_ENDPOINTS_ENABLED", "true")
     require_debug_enabled()  # 예외가 나지 않으면 통과
-
-
-def test_debug_gate_allows_local(monkeypatch):
-    """로컬/개발(APP_ENV 미설정=development)에서는 게이트가 열려 있다."""
-    from app.api.debug import require_debug_enabled
-
-    monkeypatch.delenv("APP_ENV", raising=False)
-    monkeypatch.delenv("DEBUG_ENDPOINTS_ENABLED", raising=False)
-    require_debug_enabled()  # 예외 없음
 
 
 def test_pin_url_to_ip_preserves_host_and_port():
