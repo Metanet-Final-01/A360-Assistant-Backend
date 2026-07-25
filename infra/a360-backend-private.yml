@@ -351,12 +351,14 @@ Resources:
               DATABASE_PASSWORD=$SERVICE_PASSWORD
               OBSERVABILITY_DATABASE_URL=postgresql://$OBS_USER:$OBS_PASSWORD@${ObservabilityDbEndpoint}:5432/${ObservabilityDbName}?sslmode=require
               RAG_DATABASE_URL=postgresql://$RAG_USER:$RAG_PASSWORD@${RagDbEndpoint}:5432/${RagDbName}?sslmode=require
-              REDIS_URL=${RedisUrl}
               OPENSEARCH_HOST=${ExternalOpenSearchHost}
               OPS_API_KEY=$OPS_API_KEY
               ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
               ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
               EOF
+              cat >> /opt/a360/.env <<'EOF_REDIS'
+              REDIS_URL=${RedisUrl}
+              EOF_REDIS
               jq -r 'to_entries[] | select((.key == "OPS_API_KEY" or .key == "ASSURANCE_WRITER_TOKEN" or .key == "ASSURANCE_WRITER_REPOSITORY") | not) | "\(.key)=\(.value)"' /opt/a360/secrets/app.json >> /opt/a360/.env
 
               docker rm -f a360-backend || true
