@@ -18,6 +18,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ..orchestrator.jsonio import chat_json
+from app.agent.knowledge.derive import derive_structural_actions
+
 from ..verify.checker import derive_session_registry
 from .stream import emit
 
@@ -37,15 +39,19 @@ _MAX_USER_MENU_ACTIONS = 200
 _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
 
 
-# 제어 흐름 구조 액션 후보 — 카탈로그에 실재하는 것만 메뉴에 실린다. 요구사항 문장에는
-# 이런 액션이 명시되지 않아 검색 질의가 생성되지 않으므로(0374 JIRA 봇 실측: Loop 이터레이터
-# 부재 → Continue 오용, 세션 opener 부재 → 세션 생명주기 통누락) 결정론으로 보완한다.
-# 카탈로그 표기 세대가 바뀔 때마다 이 목록이 깨지는 회귀가 반복됐다(과거 "ifPackageIfAction"
-# MISS로 Else If 오용 — 정준환 실측 / 2026-07-18 재적재로 9개 중 8개 MISS 재발).
-# 대응: 알려진 표기 세대를 전부 병기한다 — structural_complement가 카탈로그 조회로 존재하는
-# 것만 남기므로, 현재 연결된 카탈로그(네온 구표기든 v2 문서 정본이든)에 맞는 이름이 자동
-# 선택되고 나머지는 무해하게 걸러진다. 정본 어휘층(별칭 사전)이 생기면 그쪽으로 이관 예정.
-_STRUCTURAL_CANDIDATES: list[tuple[str, str]] = [
+# 제어 흐름 구조 액션 폴백 — 요구사항 문장에는 이런 액션이 명시되지 않아 검색 질의가
+# 생성되지 않으므로(0374 JIRA 봇 실측: Loop 이터레이터 부재 → Continue 오용, 세션 opener
+# 부재 → 세션 생명주기 통누락) 결정론으로 보완한다.
+#
+# **이 병기 목록은 이제 폴백이다** (RPA-298). 카탈로그 표기 세대가 바뀔 때마다 목록이
+# 깨지는 회귀가 반복돼 알려진 세대를 전부 병기했는데, 실측 결과 32쌍 중 **10쌍만 실재**했고
+# 더 나쁘게는 **실재하는 제어 흐름 액션 39개 중 29개를 놓치고** 있었다 — Loop 이터레이터
+# 전부(For each row in table, For each mail in mail box, Loop action for data iteration …)가
+# 메뉴에서 빠져 에이전트가 반복문을 만들 어휘 자체를 못 봤다.
+#
+# 이제 knowledge.derive_structural_actions가 카탈로그의 제어 흐름 패키지 액션을 전량
+# 열거한다. 유도가 빈 결과를 내는 환경(순회 미지원 스텁 등)에서만 아래 목록이 쓰인다.
+_STRUCTURAL_FALLBACK: list[tuple[str, str]] = [
     # v2 문서 정본 표기 (khub identity 카탈로그, 2026-07-19)
     ("Loop", "Loop"),
     ("Loop", "Break"),
@@ -92,7 +98,8 @@ def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, s
     ① 메뉴에 등장한 패키지의 세션 opener/closer (derive_session_registry 재사용) —
        업무 액션이 뽑혔는데 여닫기가 빠지는 연쇄(세션 생명주기 통누락)를 차단한다.
     ② 제어 흐름 구조 액션(Loop 이터레이터·If·Error handler·Step) — 요구사항 질의로는
-       절대 검색되지 않지만 모든 흐름도에 필요한 어휘다.
+       절대 검색되지 않지만 모든 흐름도에 필요한 어휘다. 카탈로그에서 전량 유도한다
+       (RPA-298: 수기 병기 목록은 실재 39개 중 29개를 놓치고 있었다).
     카탈로그에 실재하는 것만 반환한다(폐쇄어휘 유지).
     """
     _reg = derive_session_registry(catalog)
@@ -100,7 +107,8 @@ def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, s
     candidates: list[tuple[str, str]] = [
         key for key in sorted(openers | closers) if key[0] in menu_packages
     ]
-    candidates += _STRUCTURAL_CANDIDATES
+    derived = derive_structural_actions(catalog)
+    candidates += list(derived) if derived else _STRUCTURAL_FALLBACK
     out: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for pkg, act in candidates:

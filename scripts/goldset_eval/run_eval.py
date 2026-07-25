@@ -12,6 +12,7 @@
 
 import argparse
 import asyncio
+import importlib
 import json
 import logging
 import sys
@@ -91,9 +92,24 @@ def _pred_structure(rec: dict, pred_canons) -> dict:
     return counts
 
 
-async def _run_case(entry: dict, goldset: Path, case_out: Path, timeout: float, kb_canons) -> dict:
+def agent_module(version: str):
+    """평가 대상 에이전트 버전 모듈. 기본 v3 — 기존 실행 명령이 그대로 동작해야 한다.
+
+    v3 하드코딩이던 것을 인자화했다. v4를 만들어도 골드셋으로 잴 수 없으면 '나아졌는지'를
+    판정할 수단이 없어 개선 자체가 무의미해진다.
+    """
+    import importlib
+
+    return importlib.import_module(f"app.agent.{version}")
+
+
+async def _run_case(
+    entry: dict, goldset: Path, case_out: Path, timeout: float, kb_canons,
+    agent_version: str = "v3",
+) -> dict:
     """케이스 1회 실행: PDF 파싱 → analyze → recommend → 채점. 반환은 요약 행."""
-    from app.agent.v3 import analyze, recommend
+    _agent = agent_module(agent_version)
+    analyze, recommend = _agent.analyze, _agent.recommend
     from app.services.parser import parse_document
 
     from .gold import load_case, merged_sequence
@@ -178,7 +194,8 @@ async def _run_case(entry: dict, goldset: Path, case_out: Path, timeout: float, 
 
     # 커버리지: 업무정의서 원문(분석·정답 봇과 독립)을 기준으로 흐름도가 문서 요구를
     # 달성했는지 LLM 심판. 성긴 문서엔 성긴 요구만 나오므로 미명시 접착제를 감점하지 않는다.
-    from app.agent.v3.analysis import _format_document, _has_text
+    _analysis = importlib.import_module(f"app.agent.{agent_version}.analysis")
+    _format_document, _has_text = _analysis._format_document, _analysis._has_text
 
     from .coverage import score_coverage
 
@@ -260,7 +277,8 @@ def _write_report(out_dir: Path, rows: list[dict], meta: dict) -> None:
     lines = [
         f"# 골드셋 평가 리포트 — {meta['tag']}",
         "",
-        f"- 실행: {meta['started']} · 모델: {meta['model']} · 케이스 {len(rows)}건 (성공 {len(ok)})",
+        f"- 실행: {meta['started']} · 에이전트 {meta.get('agent_version', 'v3')} · "
+        f"모델: {meta['model']} · 케이스 {len(rows)}건 (성공 {len(ok)})",
         f"- KB 액션 스펙: {meta['kb_actions']}개",
         "",
         "| " + " | ".join(cols) + " |",
@@ -307,6 +325,8 @@ async def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--cases", default="", help="쉼표 구분 인덱스 (기본: 전체)")
     ap.add_argument("--tag", default="run")
+    ap.add_argument("--agent-version", default="v3",
+                    help="평가할 에이전트 버전 (기본 v3 — 기존 명령 호환)")
     ap.add_argument("--timeout", type=float, default=720.0, help="케이스당 recommend 타임아웃(초)")
     ap.add_argument("--repeat", type=int, default=1,
                     help="케이스당 반복 실행 수 — LLM 분산 억제용. >1이면 케이스 폴더에 rep1/rep2/… 저장, 요약 행은 평균±표준편차")
@@ -335,7 +355,7 @@ async def main() -> int:
         return 2
 
     # 환경 사전 점검 — 카탈로그·키 없이 13케이스를 돌다 말면 낭비다
-    from app.agent.v3 import config as agent_config
+    agent_config = agent_module(args.agent_version).config
     from app.services.catalog import get_backend_catalog
 
     from .notation import CanonAction
@@ -349,6 +369,7 @@ async def main() -> int:
     ]
     meta = {
         "tag": args.tag,
+        "agent_version": args.agent_version,
         "started": stamp,
         "model": agent_config.OPENAI_MODEL,
         "kb_actions": len(kb_canons),
@@ -368,7 +389,9 @@ async def main() -> int:
         async with sem:  # 세마포어 안에서만 시간 측정 — 큐 대기 제외, 실제 compute만
             t0 = time.monotonic()
             try:
-                row = await _run_case(e, goldset, case_out, args.timeout, kb_canons)
+                row = await _run_case(
+                    e, goldset, case_out, args.timeout, kb_canons, args.agent_version
+                )
             except Exception as ex:  # noqa: BLE001 — 반복 1회 실패 격리
                 logger.exception("[%02d] rep%d 실패", e["index"], rep_i + 1)
                 row = {"index": e["index"], "bot_name": e["bot_name"],
