@@ -337,6 +337,7 @@ Resources:
               DATABASE_PASSWORD=$SERVICE_PASSWORD
               OBSERVABILITY_DATABASE_URL=postgresql://$OBS_USER:$OBS_PASSWORD@${ObservabilityDbEndpoint}:5432/${ObservabilityDbName}?sslmode=require
               RAG_DATABASE_URL=postgresql://$RAG_USER:$RAG_PASSWORD@${RagDbEndpoint}:5432/${RagDbName}?sslmode=require
+              REDIS_URL=${RedisUrl}
               OPENSEARCH_HOST=${ExternalOpenSearchHost}
               OPS_API_KEY=$OPS_API_KEY
               ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
@@ -393,6 +394,9 @@ Resources:
               RagRuntimeSecretArn:
                 Fn::ImportValue:
                   Fn::Sub: "${ProjectName}-${Environment}-RagRuntimeSecretArn"
+              RedisUrl:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-RedisUrl"
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
