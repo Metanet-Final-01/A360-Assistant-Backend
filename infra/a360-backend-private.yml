@@ -73,6 +73,18 @@ Parameters:
     NoEcho: true
     AllowedPattern: "^https?://[^\\s]+$"
     ConstraintDescription: ExternalOpenSearchHost must be a non-empty http(s) URL without whitespace.
+  OpenSearchUsername:
+    Type: String
+    Default: ""
+    NoEcho: true
+    AllowedPattern: "^$|^[^\"\\\\\\s]+$"
+    ConstraintDescription: OpenSearchUsername must not contain whitespace, double quotes, or backslashes when provided.
+  OpenSearchPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+    AllowedPattern: "^$|^[^\"\\\\\\r\\n]+$"
+    ConstraintDescription: OpenSearchPassword must not contain double quotes, backslashes, or newlines.
   StartBackendContainer:
     Type: String
     Default: "true"
@@ -96,6 +108,8 @@ Resources:
           "OPENAI_API_KEY": "${OpenAiApiKey}",
           "GITHUB_TOKEN": "${GithubToken}",
           "VOYAGE_API_KEY": "${VoyageApiKey}",
+          "OPENSEARCH_USERNAME": "${OpenSearchUsername}",
+          "OPENSEARCH_PASSWORD": "${OpenSearchPassword}",
           "JWT_SECRET": "${JwtSecret}",
           "OPS_API_KEY": "${OpsApiKey}",
           "ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}",

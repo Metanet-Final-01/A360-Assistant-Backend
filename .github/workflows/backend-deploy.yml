@@ -109,6 +109,8 @@ jobs:
       - name: Validate OpenSearch host
         env:
           OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
         run: |
           if [ -z "$OPENSEARCH_HOST" ]; then
             echo "OPENSEARCH_HOST secret is required for deployed RAG search." >&2
@@ -118,8 +120,45 @@ jobs:
             echo "OPENSEARCH_HOST must be a non-empty http(s) URL without whitespace." >&2
             exit 1
           fi
+          if [ -n "$OPENSEARCH_USERNAME" ] && ! printf '%s' "$OPENSEARCH_USERNAME" | grep -Eq '^[^[:space:]]+$'; then
+            echo "OPENSEARCH_USERNAME must not contain whitespace." >&2
+            exit 1
+          fi
+          if [ -n "$OPENSEARCH_USERNAME" ] && printf '%s' "$OPENSEARCH_USERNAME" | grep -Eq '["\\]'; then
+            echo 'OPENSEARCH_USERNAME must not contain double quotes or backslashes.' >&2
+            exit 1
+          fi
+          if [ -n "$OPENSEARCH_PASSWORD" ] && printf '%s' "$OPENSEARCH_PASSWORD" | grep -Eq '["\\]'; then
+            echo 'OPENSEARCH_PASSWORD must not contain double quotes or backslashes.' >&2
+            exit 1
+          fi
+          case "$OPENSEARCH_PASSWORD" in
+            *$'\r'*|*$'\n'*)
+              echo "OPENSEARCH_PASSWORD must not contain newlines." >&2
+              exit 1
+              ;;
+          esac
+          if [ -n "$OPENSEARCH_USERNAME" ] && [ -z "$OPENSEARCH_PASSWORD" ]; then
+            echo "OPENSEARCH_PASSWORD is required when OPENSEARCH_USERNAME is set." >&2
+            exit 1
+          fi
+          if [ -z "$OPENSEARCH_USERNAME" ] && [ -n "$OPENSEARCH_PASSWORD" ]; then
+            echo "OPENSEARCH_USERNAME is required when OPENSEARCH_PASSWORD is set." >&2
+            exit 1
+          fi
 
       - name: Deploy CloudFormation
+        env:
+          FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
+          ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
         run: |
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
@@ -128,14 +167,16 @@ jobs:
             --parameter-overrides \
               Environment="${{ inputs.environment }}" \
               ContainerImage="${{ needs.build.outputs.image_uri }}" \
-              FrontendOrigins="${{ secrets.FRONTEND_ORIGINS }}" \
-              OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
-              VoyageApiKey="${{ secrets.VOYAGE_API_KEY }}" \
-              JwtSecret="${{ secrets.JWT_SECRET }}" \
-              ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}" \
-              GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
-              OpsApiKey="${{ secrets.OPS_API_KEY }}" \
-              AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
+              FrontendOrigins="$FRONTEND_ORIGINS" \
+              OpenAiApiKey="$OPENAI_API_KEY" \
+              VoyageApiKey="$VOYAGE_API_KEY" \
+              JwtSecret="$JWT_SECRET" \
+              ExternalOpenSearchHost="$OPENSEARCH_HOST" \
+              OpenSearchUsername="$OPENSEARCH_USERNAME" \
+              OpenSearchPassword="$OPENSEARCH_PASSWORD" \
+              GithubToken="$GHCR_READ_TOKEN" \
+              OpsApiKey="$OPS_API_KEY" \
+              AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN" \
               AssuranceWriterRepository="${{ github.repository }}" \
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
