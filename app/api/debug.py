@@ -26,16 +26,21 @@ def _error(status: int, code: str, message: str) -> HTTPException:
 
 
 def require_debug_enabled() -> None:
-    """디버그 라우터 전체 게이트 — 프로덕션에서는 기본 차단한다.
+    """디버그 라우터 전체 게이트 — 기본 차단(fail-closed), 명시적 opt-in에서만 허용.
 
-    debug 라우트(RAG 단계별 실행·연결 상태·로그·HTTP 프록시)는 내부 구현과
-    로그를 노출하므로 운영 환경에 열려선 안 된다. APP_ENV=production이면 막고,
-    그 외(로컬/개발)에서는 허용한다. DEBUG_ENDPOINTS_ENABLED=true로 강제 허용 가능.
+    debug 라우트(RAG 단계별 실행·연결 상태·로그·HTTP 프록시)는 모델명·의존성 도달성·
+    파이프라인 로그·raw 예외 등 내부 구현을 노출하므로 기본적으로 닫혀 있어야 한다.
+
+    과거엔 `APP_ENV=='production'`일 때만 막았는데(fail-open), APP_ENV는 실제 안전 여부의
+    **대리 지표**일 뿐이라 env 미설정·staging·오설정 배포에서 라우터가 무인증으로 열렸다
+    (RPA-290). 이제 게이트가 읽는 신호를 동작의 안전 여부와 일치시킨다 — `DEBUG_ENDPOINTS_ENABLED
+    =true`라는 명시적 opt-in에서만 허용하고, 그 외(미설정 포함)는 전부 차단한다. 이는 아래
+    http-request 프록시가 이미 쓰는 opt-in 패턴(DEBUG_HTTP_CLIENT_ENABLED)과 동일하다.
+    로컬은 .env의 DEBUG_ENDPOINTS_ENABLED=true로 켠다.
     """
     if os.getenv("DEBUG_ENDPOINTS_ENABLED", "").lower() == "true":
         return
-    if os.getenv("APP_ENV", "development").lower() == "production":
-        raise _error(403, "DEBUG_DISABLED", "디버그 엔드포인트는 이 환경에서 비활성화되어 있습니다.")
+    raise _error(403, "DEBUG_DISABLED", "디버그 엔드포인트는 이 환경에서 비활성화되어 있습니다.")
 
 
 router = APIRouter(tags=["debug"], dependencies=[Depends(require_debug_enabled)])

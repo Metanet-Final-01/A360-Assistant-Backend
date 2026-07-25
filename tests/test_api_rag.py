@@ -113,6 +113,7 @@ def test_debug_vector_search_db_search_failure_standardized(monkeypatch):
     import app.rag.retrieval.embed as embed_mod
     import app.rag.store.db as db
 
+    monkeypatch.setenv("DEBUG_ENDPOINTS_ENABLED", "true")  # 라우터 게이트 개방 (RPA-290 fail-closed)
     monkeypatch.setattr(embed_mod, "embed_query", lambda q: [0.1, 0.2])
     conn = _FakeConn()
     monkeypatch.setattr(db, "connect", lambda: conn)
