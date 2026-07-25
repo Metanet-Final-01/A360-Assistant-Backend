@@ -28,7 +28,7 @@ on:
         description: "Enable shared Redis-backed RAG cache"
         required: true
         type: boolean
-        default: false
+        default: true
       rag_cache_ttl_seconds:
         description: "RAG cache TTL seconds"
         required: true
