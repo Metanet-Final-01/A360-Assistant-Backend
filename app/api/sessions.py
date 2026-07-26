@@ -29,7 +29,8 @@ from app.core import config
 from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
-from app.schemas import ProgressEvent, Recommendation
+from app.schemas import AnalysisResult, ProgressEvent, Recommendation
+from app.schemas.analysis import normalize_constraints
 from app.services import alerts, budget
 from app.services.assurance_evidence import persist_output_receipt
 from app.services.output_assurance import (
@@ -293,7 +294,7 @@ def _save_recommendation(
     source: str, parent_version: int | None, change_summary: str | None = None,
     request_id: str | None = None, requested_agent_version: str | None = None,
     resolved_agent_version: str | None = None, agent_registry_snapshot: Any = None,
-    producer_advisory: Any = None,
+    producer_advisory: Any = None, expected_constraints: list[str] | None = None,
 ) -> dict:
     """새 추천안 버전을 저장한다 (version은 세션 내 max+1). 새 세션 사용(스트리밍 후에도 안전).
 
@@ -312,6 +313,7 @@ def _save_recommendation(
         resolved_agent_version=resolved_agent_version,
         agent_registry_snapshot=agent_registry_snapshot,
         producer_advisory=producer_advisory,
+        expected_constraints=tuple(normalize_constraints(expected_constraints or [])),
     )
     try:
         observation = observe_recommendation_candidate(payload, boundary_context)
@@ -458,6 +460,9 @@ def save_edited_recommendation(
         source=payload.source, parent_version=payload.parent_version if payload.parent_version is not None else base.version,
         change_summary=payload.change_summary,
         request_id=_current_request_id(),
+        expected_constraints=(
+            ((base.payload or {}).get("spec") or {}).get("constraints") or []
+        ),
     )
     return saved
 
@@ -771,7 +776,7 @@ def _persist_chat_turn(
 
 def _persist_turn_result(
     session_id: uuid.UUID, rec_analysis_id: uuid.UUID | None, document_id: uuid.UUID | None,
-    user_message: str, result: dict,
+    user_message: str, result: dict, expected_constraints: list[str] | None = None,
 ) -> dict:
     """반환 결과를 저장하고, 프론트에 줄 최종 done.data를 만든다.
 
@@ -804,6 +809,12 @@ def _persist_turn_result(
 
     ar = result.get("analysis_result")
     rec = result.get("updated_recommendation")
+
+    if ar is not None:
+        candidate = dict(ar) if isinstance(ar, dict) else ar
+        if isinstance(candidate, dict):
+            candidate["constraints"] = normalize_constraints(candidate.get("constraints"))
+        ar = AnalysisResult.model_validate(candidate).model_dump(mode="json")
 
     # 선언한 type의 산출물이 실제로 있어야 한다 (없으면 성공 done 대신 error)
     if rtype == "analysis" and ar is None:
@@ -852,6 +863,9 @@ def _persist_turn_result(
             resolved_agent_version=result.get("resolved_agent_version"),
             agent_registry_snapshot=_agent_registry_snapshot(),
             producer_advisory=result.get("violations"),
+            expected_constraints=(
+                ar.get("constraints", []) if ar is not None else expected_constraints
+            ),
         )
         out.update(saved)  # id, version, parent_version, source, change_summary, created_at
         out["recommendation"] = rec
@@ -1366,6 +1380,11 @@ async def agent_turn(
         # targets 좌표로 결정론 수행한다 (백엔드는 흐름도 구조를 해석하지 않는다).
         agent_context["card_values"] = payload.card_values or {}
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
+    expected_constraints = normalize_constraints(
+        (agent_context.get("analysis") or {}).get("constraints")
+        if isinstance(agent_context.get("analysis"), dict)
+        else []
+    )
 
     # 턴 노드 타임라인 관측(RPA-105) — 스트림을 지나는 stage/error/done을 버퍼링해 턴
     # 종료 시 일괄 적재. request_id는 미들웨어가 심은 ContextVar에서 (같은 요청 묶음 키).
@@ -1461,7 +1480,12 @@ async def agent_turn(
                 persistence_result["_backend_request_id"] = turn_request_id
                 persistence_result["_backend_requested_agent_version"] = payload.agent_version
                 final = _persist_turn_result(
-                    session_key, rec_analysis_id, document_id, message, persistence_result
+                    session_key,
+                    rec_analysis_id,
+                    document_id,
+                    message,
+                    persistence_result,
+                    expected_constraints=expected_constraints,
                 )
                 # 대화 누적 게이지 — compact 턴은 intake가 없어 갱신 안 함(다음 대화 턴에서 압축값 반영).
                 # best-effort: 게이지 조회 실패가 정상 응답을 error로 바꾸지 않게 한다.

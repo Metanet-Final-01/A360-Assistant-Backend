@@ -1,6 +1,6 @@
 """업무정의서 분석 결과 스키마 (FR-05: 단계·입출력·시스템·분기 식별)."""
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 MAX_CONSTRAINTS = 20
 MAX_CONSTRAINT_CHARS = 500
@@ -60,8 +60,3 @@ class AnalysisResult(BaseModel):
         default_factory=list,
         description="문서만으로 확정 못 한 항목 — 챗봇 재질의 후보 (FR-16)",
     )
-
-    @field_validator("constraints")
-    @classmethod
-    def _normalize_constraints(cls, values: list[str]) -> list[str]:
-        return normalize_constraints(values)
