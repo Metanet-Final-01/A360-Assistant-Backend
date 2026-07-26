@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import delete, func, select
@@ -521,6 +521,77 @@ def export_recommendation(
     filename = f"recommendation-{session.id}-v{row.version}.json"
     return JSONResponse(
         content=envelope,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+_MAX_FLOW_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — 캡처 흐름도 PNG 한 장이면 충분
+
+
+def _sniff_image_kind(data: bytes) -> str | None:
+    """매직 바이트로 PNG/JPEG만 통과시킨다 — content-type 헤더는 위조 가능하니 바이트로 판정."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    return None
+
+
+@router.post("/{session_id}/recommendations/{version}/export/docx")
+async def export_recommendation_docx(
+    session_id: str,
+    version: int,
+    flow_image: UploadFile | None = File(
+        None, description="프론트가 캡처한 흐름도 이미지(PNG/JPEG, 선택) — 있으면 문서에 임베드"
+    ),
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> Response:
+    """추천안을 Word(.docx) 서식 문서로 내보낸다 — 프론트 캡처 흐름도 임베드 지원 (FR-17, RPA-296).
+
+    `GET .../export?format=docx`는 데이터만 담은 문서다. 흐름도(FR-18)는 프론트가 트리에서
+    그리므로 백엔드가 서버에서 캡처할 수 없다 — 프론트가 캡처한 PNG/JPEG를 multipart로 보내면
+    이 POST가 "추천 흐름"에 그대로 임베드한다. 이미지 없이 불러도 데이터 문서로 동작한다.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    row = db.execute(
+        select(models.RecommendationVersion).where(
+            models.RecommendationVersion.session_id == session.id,
+            models.RecommendationVersion.version == version,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
+        )
+    image_bytes: bytes | None = None
+    if flow_image is not None:
+        # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413.
+        data = await flow_image.read(_MAX_FLOW_IMAGE_BYTES + 1)
+        if len(data) > _MAX_FLOW_IMAGE_BYTES:
+            raise HTTPException(
+                413, detail={"code": "IMAGE_TOO_LARGE", "message": "흐름도 이미지가 너무 큽니다(최대 8MB)."}
+            )
+        if _sniff_image_kind(data) is None:
+            raise HTTPException(
+                400, detail={"code": "INVALID_IMAGE", "message": "흐름도 이미지는 PNG/JPEG만 허용됩니다."}
+            )
+        image_bytes = data
+
+    from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+    content = build_recommendation_docx(
+        row.payload,
+        session_id=str(session.id),
+        version=row.version,
+        source=row.source,
+        exported_at=datetime.now(timezone.utc).isoformat(),
+        flow_image=image_bytes,
+    )
+    filename = f"recommendation-{session.id}-v{row.version}.docx"
+    return Response(
+        content=content,
+        media_type=DOCX_MEDIA_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

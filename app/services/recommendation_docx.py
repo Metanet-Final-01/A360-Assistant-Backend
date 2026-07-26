@@ -13,7 +13,7 @@ from __future__ import annotations
 from io import BytesIO
 
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Inches, Pt
 
 from app.schemas import Recommendation
 from app.schemas.recommendation import RecommendedAction
@@ -84,11 +84,16 @@ def build_recommendation_docx(
     version: int,
     source: str | None,
     exported_at: str,
+    flow_image: bytes | None = None,
 ) -> bytes:
     """저장된 추천안 payload(dict 또는 Recommendation)를 .docx 바이트로 렌더한다.
 
     payload는 저장 시 Recommendation으로 검증된 것이지만, 여기서도 model_validate로 타입을
     확보한다(구조가 깨졌으면 ValidationError로 드러난다 — 호출부가 처리).
+
+    flow_image: 프론트가 캡처한 흐름도 PNG/JPEG 바이트(선택, RPA-296). 있으면 "추천 흐름"
+    머리 아래에 임베드한다 — UI 렌더를 그대로 문서에 싣기 위함. 흐름도는 프론트(FR-18)가
+    트리에서 그리므로 백엔드가 서버에서 캡처할 수 없어, 호출부가 이미지를 넘겨준다.
     """
     rec = payload if isinstance(payload, Recommendation) else Recommendation.model_validate(payload)
 
@@ -147,6 +152,14 @@ def build_recommendation_docx(
 
     # 추천 흐름 — 본문
     doc.add_heading("추천 흐름", level=1)
+    if flow_image:
+        # 프론트가 캡처한 UI 흐름도를 시각 요약으로 먼저 싣고, 아래에 단계별 텍스트를 잇는다.
+        try:
+            doc.add_picture(BytesIO(flow_image), width=Inches(6.3))
+            cap = doc.add_paragraph("흐름도 (편집 화면 기준)")
+            cap.runs[0].italic = True
+        except Exception:  # noqa: BLE001 — 이미지가 깨져도 문서 생성 자체는 죽이지 않는다
+            doc.add_paragraph("(흐름도 이미지를 표시할 수 없습니다.)")
     if not rec.steps:
         doc.add_paragraph("(흐름 단계가 없습니다.)")
     for i, step in enumerate(rec.steps, start=1):

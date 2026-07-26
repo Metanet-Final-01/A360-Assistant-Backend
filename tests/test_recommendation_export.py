@@ -172,3 +172,70 @@ def test_export_invalid_format_422():
     with TestClient(app) as c:
         r = c.get(f"/api/sessions/{SID}/recommendations/1/export", params={"format": "pdf"})
     assert r.status_code == 422
+
+
+# --- 프론트 캡처 흐름도 임베드 (RPA-296, POST export/docx) ---
+
+def _png_bytes() -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (160, 90), (210, 225, 255)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_export_docx_post_embeds_flow_image():
+    """POST + 캡처 PNG → docx에 흐름도 이미지가 실제로 임베드되고, 데이터 섹션도 함께 담긴다."""
+    from io import BytesIO
+
+    from docx import Document
+
+    session = SimpleNamespace(id=SID, user_id=None)
+    row = SimpleNamespace(id=uuid.uuid4(), version=5, source="agent", payload=_rec_rich())
+    _override(FakeDB(session=session, row=row))
+    with TestClient(app) as c:
+        r = c.post(
+            f"/api/sessions/{SID}/recommendations/5/export/docx",
+            files={"flow_image": ("flow.png", _png_bytes(), "image/png")},
+        )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert "v5.docx" in r.headers["content-disposition"]
+    doc = Document(BytesIO(r.content))
+    assert len(doc.inline_shapes) >= 1  # 흐름도 이미지가 임베드됨
+    blob = "\n".join(p.text for p in doc.paragraphs)
+    assert "Excel_MS / OpenWorkbook" in blob  # 데이터 섹션도 함께 렌더
+
+
+def test_export_docx_post_without_image_is_data_doc():
+    """이미지 없이 POST해도 데이터 문서로 동작한다(이미지 임베드 없음)."""
+    from io import BytesIO
+
+    from docx import Document
+
+    session = SimpleNamespace(id=SID, user_id=None)
+    row = SimpleNamespace(id=uuid.uuid4(), version=5, source="agent", payload=_rec())
+    _override(FakeDB(session=session, row=row))
+    with TestClient(app) as c:
+        r = c.post(f"/api/sessions/{SID}/recommendations/5/export/docx")
+    assert r.status_code == 200
+    doc = Document(BytesIO(r.content))
+    assert len(doc.inline_shapes) == 0
+
+
+def test_export_docx_post_rejects_non_image():
+    """PNG/JPEG 매직바이트가 아니면 400 — content-type만 이미지라고 우겨도 차단."""
+    session = SimpleNamespace(id=SID, user_id=None)
+    row = SimpleNamespace(id=uuid.uuid4(), version=1, source="drag", payload=_rec())
+    _override(FakeDB(session=session, row=row))
+    with TestClient(app) as c:
+        r = c.post(
+            f"/api/sessions/{SID}/recommendations/1/export/docx",
+            files={"flow_image": ("evil.txt", b"not really an image", "image/png")},
+        )
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "INVALID_IMAGE"
