@@ -516,6 +516,8 @@ Resources:
             ContentType: text/plain
             MessageBody: forbidden
 
+  # Ops Server가 X-API-Key(require_admin, fail-closed)로 인증된 상태로 이 경로를
+  # 호출한다. ALB에서 막으면 정당한 요청도 막히므로 앱 레벨 인증에 위임하고 forward한다.
   HttpAdminBlockRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
@@ -525,11 +527,8 @@ Resources:
         - Field: path-pattern
           Values: [/api/admin/*]
       Actions:
-        - Type: fixed-response
-          FixedResponseConfig:
-            StatusCode: "403"
-            ContentType: text/plain
-            MessageBody: forbidden
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
 
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -573,6 +572,8 @@ Resources:
             ContentType: text/plain
             MessageBody: forbidden
 
+  # Ops Server가 X-API-Key(require_admin, fail-closed)로 인증된 상태로 이 경로를
+  # 호출한다. ALB에서 막으면 정당한 요청도 막히므로 앱 레벨 인증에 위임하고 forward한다.
   HttpsAdminBlockRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Condition: HasCertificate
@@ -583,11 +584,8 @@ Resources:
         - Field: path-pattern
           Values: [/api/admin/*]
       Actions:
-        - Type: fixed-response
-          FixedResponseConfig:
-            StatusCode: "403"
-            ContentType: text/plain
-            MessageBody: forbidden
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
 
   AppAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup

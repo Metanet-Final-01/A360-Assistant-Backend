@@ -931,3 +931,26 @@ def test_backend_instance_role_can_read_bootstrap_role_secrets():
     assert "${ProjectName}-${Environment}-OpsReaderSecretArn" in policy_text
     assert "${ProjectName}-${Environment}-RagRuntimeSecretArn" in policy_text
     assert "${ProjectName}-${Environment}-RagIngestSecretArn" in policy_text
+
+
+def test_alb_forwards_admin_api_to_backend_target_group():
+    template = yaml.load(
+        (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
+        Loader=_CloudFormationLoader,
+    )
+    resources = template["Resources"]
+
+    for rule_name in ("HttpAdminBlockRule", "HttpsAdminBlockRule"):
+        rule = resources[rule_name]["Properties"]
+        assert rule["Conditions"][0]["Values"] == ["/api/admin/*"]
+        action = rule["Actions"][0]
+        assert action["Type"] == "forward"
+        assert action["TargetGroupArn"] == "BackendTargetGroup"
+
+    # /api/internal/* stays blocked except the one explicitly-forwarded change-receipts path —
+    # this test only asserts the admin rule changed, not that internal blocking regressed.
+    for rule_name in ("HttpInternalBlockRule", "HttpsInternalBlockRule"):
+        rule = resources[rule_name]["Properties"]
+        assert rule["Conditions"][0]["Values"] == ["/api/internal/*"]
+        assert rule["Actions"][0]["Type"] == "fixed-response"
+        assert rule["Actions"][0]["FixedResponseConfig"]["StatusCode"] == "403"
