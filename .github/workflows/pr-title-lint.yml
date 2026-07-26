@@ -1,5 +1,5 @@
-# PR 제목이 커밋 컨벤션(type(scope): 제목)을 따르는지 검사
-# PR 제목은 이력 조회·머지 커밋의 단위이므로 컨벤션을 강제한다
+# PR 제목과 본문이 저장소 컨벤션을 따르는지 검사
+# 제목은 이력 조회 단위이고 본문은 리뷰 계약이므로 둘 다 강제한다
 name: PR Title Lint
 
 on:
@@ -7,12 +7,15 @@ on:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
+  contents: read
   pull-requests: read
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -29,3 +32,6 @@ jobs:
             style
           # 한글 제목 허용 (기본 subject 패턴은 그대로 통과)
           requireScope: false
+
+      - name: PR 본문 템플릿 검사
+        run: python scripts/validate_pr_body.py
