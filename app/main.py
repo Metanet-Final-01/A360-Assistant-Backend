@@ -109,9 +109,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
 
 # 기본값은 레지스트리(config.py)가 단일 진실 공급원 — literal 중복 제거 (RPA-294).
+# ⚠️ 단 CORS는 present-but-empty(`FRONTEND_ORIGINS=`)로 허용목록/정규식을 **의도적으로 비우는**
+#    운영 동작이 있다(Qodo #413). config.*는 빈 문자열을 기본값으로 코얼레스하므로(config.py:211),
+#    여기선 기본값만 레지스트리에서 취하고 "부재(None) vs 빈값"은 원시 env로 판정해 옛 동작을 보존한다.
+_origins_raw = os.getenv("FRONTEND_ORIGINS")
 frontend_origins = [
     origin.strip()
-    for origin in config.FRONTEND_ORIGINS.split(",")
+    for origin in (config.FRONTEND_ORIGINS if _origins_raw is None else _origins_raw).split(",")
     if origin.strip()
 ]
 
@@ -119,7 +123,8 @@ frontend_origins = [
 # a360-assistant-frontend-<hash>-a360-assistant.vercel.app), so a fixed
 # FRONTEND_ORIGINS entry breaks on each redeploy. Allow any deployment of
 # this Vercel project via regex instead of chasing the hash by hand.
-frontend_origin_regex = config.FRONTEND_ORIGIN_REGEX
+_regex_raw = os.getenv("FRONTEND_ORIGIN_REGEX")
+frontend_origin_regex = config.FRONTEND_ORIGIN_REGEX if _regex_raw is None else _regex_raw
 
 app.add_middleware(
     CORSMiddleware,
