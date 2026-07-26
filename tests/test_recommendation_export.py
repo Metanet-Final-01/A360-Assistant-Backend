@@ -227,6 +227,16 @@ def test_export_docx_post_without_image_is_data_doc():
     assert len(doc.inline_shapes) == 0
 
 
+def test_docx_trigger_empty_title_does_not_crash():
+    """trigger.title이 빈 문자열이어도 렌더가 크래시하지 않는다 (Qodo #421 — runs[0] 인덱싱 회피)."""
+    from app.services.recommendation_docx import build_recommendation_docx
+
+    payload = {"schema_version": "1.0", "steps": [],
+               "trigger": {"kind": "trigger", "title": ""}}
+    content = build_recommendation_docx(payload, session_id="s", version=1, source=None, exported_at="t")
+    assert content and len(content) > 0
+
+
 def test_export_docx_post_rejects_non_image():
     """PNG/JPEG 매직바이트가 아니면 400 — content-type만 이미지라고 우겨도 차단."""
     session = SimpleNamespace(id=SID, user_id=None)

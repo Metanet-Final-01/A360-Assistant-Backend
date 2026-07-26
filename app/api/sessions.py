@@ -566,8 +566,11 @@ async def export_recommendation_docx(
         )
     image_bytes: bytes | None = None
     if flow_image is not None:
-        # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413.
-        data = await flow_image.read(_MAX_FLOW_IMAGE_BYTES + 1)
+        # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413. UploadFile은 반드시 닫는다.
+        try:
+            data = await flow_image.read(_MAX_FLOW_IMAGE_BYTES + 1)
+        finally:
+            await flow_image.close()
         if len(data) > _MAX_FLOW_IMAGE_BYTES:
             raise HTTPException(
                 413, detail={"code": "IMAGE_TOO_LARGE", "message": "흐름도 이미지가 너무 큽니다(최대 8MB)."}
@@ -580,14 +583,22 @@ async def export_recommendation_docx(
 
     from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
 
-    content = build_recommendation_docx(
-        row.payload,
-        session_id=str(session.id),
-        version=row.version,
-        source=row.source,
-        exported_at=datetime.now(timezone.utc).isoformat(),
-        flow_image=image_bytes,
-    )
+    try:
+        # 렌더는 CPU/IO 바운드(python-docx ZIP 저장·이미지 파싱) → 이벤트 루프 밖 threadpool에서 (Qodo).
+        content = await run_in_threadpool(
+            build_recommendation_docx,
+            row.payload,
+            session_id=str(session.id),
+            version=row.version,
+            source=row.source,
+            exported_at=datetime.now(timezone.utc).isoformat(),
+            flow_image=image_bytes,
+        )
+    except Exception:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로
+        logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+        raise HTTPException(
+            500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+        ) from None
     filename = f"recommendation-{session.id}-v{row.version}.docx"
     return Response(
         content=content,

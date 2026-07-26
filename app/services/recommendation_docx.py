@@ -10,6 +10,7 @@ package/action 표기는 RAG 카탈로그를 따른다(예: `Excel_MS / GoToCell
 
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 
 from docx import Document
@@ -17,6 +18,8 @@ from docx.shared import Inches, Pt
 
 from app.schemas import Recommendation
 from app.schemas.recommendation import RecommendedAction
+
+logger = logging.getLogger(__name__)
 
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -135,7 +138,7 @@ def build_recommendation_docx(
         doc.add_heading("실행 시점", level=1)
         t = rec.trigger
         head = t.title + (f"  ({t.package})" if t.package else "")
-        doc.add_paragraph(head).runs[0].bold = True
+        doc.add_paragraph().add_run(head).bold = True  # add_run은 빈 문자열에도 안전(runs[0] 인덱싱 회피)
         if t.reason:
             doc.add_paragraph(f"근거: {t.reason}")
         if t.setup_hint:
@@ -156,9 +159,9 @@ def build_recommendation_docx(
         # 프론트가 캡처한 UI 흐름도를 시각 요약으로 먼저 싣고, 아래에 단계별 텍스트를 잇는다.
         try:
             doc.add_picture(BytesIO(flow_image), width=Inches(6.3))
-            cap = doc.add_paragraph("흐름도 (편집 화면 기준)")
-            cap.runs[0].italic = True
+            doc.add_paragraph().add_run("흐름도 (편집 화면 기준)").italic = True
         except Exception:  # noqa: BLE001 — 이미지가 깨져도 문서 생성 자체는 죽이지 않는다
+            logger.warning("흐름도 이미지 임베드 실패 — 문구로 대체", exc_info=True)
             doc.add_paragraph("(흐름도 이미지를 표시할 수 없습니다.)")
     if not rec.steps:
         doc.add_paragraph("(흐름 단계가 없습니다.)")
