@@ -174,6 +174,18 @@ def test_export_invalid_format_422():
     assert r.status_code == 422
 
 
+def test_export_docx_render_failure_returns_standard_500():
+    """렌더 실패(잘못된 payload)는 트레이스백 500이 아니라 표준 DOCX_RENDER_FAILED (Qodo #421, GET 경로)."""
+    session = SimpleNamespace(id=SID, user_id=None)
+    # steps 없음 → Recommendation 검증 실패 → build가 예외 → 엔드포인트가 표준 에러로 저하
+    row = SimpleNamespace(id=uuid.uuid4(), version=1, source="drag", payload={"schema_version": "1.0"})
+    _override(FakeDB(session=session, row=row))
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/recommendations/1/export", params={"format": "docx"})
+    assert r.status_code == 500
+    assert r.json()["detail"]["code"] == "DOCX_RENDER_FAILED"
+
+
 # --- 프론트 캡처 흐름도 임베드 (RPA-296, POST export/docx) ---
 
 def _png_bytes() -> bytes:

@@ -497,13 +497,19 @@ def export_recommendation(
         # 무거운 렌더러(python-docx)는 docx 경로에서만 로드한다 — JSON 경로 import 비용 0.
         from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
 
-        content = build_recommendation_docx(
-            row.payload,
-            session_id=str(session.id),
-            version=row.version,
-            source=row.source,
-            exported_at=exported_at,
-        )
+        try:
+            content = build_recommendation_docx(
+                row.payload,
+                session_id=str(session.id),
+                version=row.version,
+                source=row.source,
+                exported_at=exported_at,
+            )
+        except Exception:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로 (Qodo #421)
+            logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+            raise HTTPException(
+                500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+            ) from None
         filename = f"recommendation-{session.id}-v{row.version}.docx"
         return Response(
             content=content,
