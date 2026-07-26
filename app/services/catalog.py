@@ -43,6 +43,46 @@ def _param_names(spec: dict) -> tuple | None:
         if isinstance(p, dict) and p.get("name")
     ))
 
+
+def _scalar_default(default):
+    """카탈로그 default의 typed-value 봉투를 사람이 쓸 값으로 푼다 (RPA-313).
+
+    카탈로그 default는 `{"type": T, "<값키>": v}` 봉투이고, v가 또 봉투일 수 있다
+    (예: SESSION → `{"type":"SESSION","sessionName":{"type":"STRING","string":"Default"}}`).
+    단일 값 봉투는 재귀로 언랩하고, 다중 키(EXCEPTION 등)·리스트·스칼라는 그대로 둔다.
+    """
+    if not isinstance(default, dict) or "type" not in default:
+        return default
+    others = [(k, v) for k, v in default.items() if k != "type"]
+    if len(others) == 1:  # 단일 값 봉투 → 재귀 언랩
+        return _scalar_default(others[0][1])
+    return default  # 다중 키(EXCEPTION 등) → 구조 유지(프론트가 판단)
+
+
+def _public_param(p: dict) -> dict:
+    """카탈로그 파라미터 스펙 → 편집기 피커용 공개 형태 (RPA-313).
+
+    default는 typed-value 봉투라 _scalar_default로 정규화한다. options는 {label,value}만 추린다.
+    """
+    out: dict = {
+        "name": p.get("name"),
+        "label": p.get("label") or p.get("name"),
+        "type": p.get("type"),
+        "required": bool(p.get("required")),
+    }
+    if p.get("description"):
+        out["description"] = p["description"]
+    opts = p.get("options")
+    if isinstance(opts, list) and opts:
+        out["options"] = [
+            {"label": o.get("label"), "value": o.get("value")}
+            for o in opts if isinstance(o, dict)
+        ]
+    default = _scalar_default(p.get("default"))
+    if default is not None:
+        out["default"] = default
+    return out
+
 # 인메모리 카탈로그 캐시의 재적재 주기 (RPA-225).
 # 왜 필요한가: 이 캐시는 최초 1회 적재 후 갱신 경로가 없어, 적재(ingest)로 액션이
 # 추가돼도 이미 떠 있는 프로세스는 **영원히** 옛 카탈로그를 봤다. 다중 인스턴스(ASG)면
@@ -330,6 +370,74 @@ class BackendCatalog:
         테스트 스텁에 없어도 duck-typing 폴백으로 동작하도록 사용처가 getattr로 조회한다.)
         """
         yield from self._ensure_index().values()
+
+    def list_package_catalog(self) -> list[dict]:
+        """전체 카탈로그 — 흐름도 편집기 피커(RPA-313)용.
+
+        `[{package, label, actions: [{action, label, isContainer, parameters?}]}]`.
+        - package/action은 **카탈로그 machine명**(추천 payload의 package/action과 동일 표기).
+        - 액션은 캐시된 인덱스(iter_action_schemas)에서, 패키지 라벨은 package_overview에서(저빈도 조회).
+        - isContainer는 checker.CONTAINER_ACTIONS(컨테이너 여부의 단일 출처)를 따른다.
+        - params_unknown 액션은 parameters 키를 생략한다 — '스키마 미상'과 '파라미터 0개'를 구분.
+        """
+        # 컨테이너 판정의 단일 출처를 재사용한다(중복 정의 시 드리프트). 지연 import로 순환 회피.
+        from app.agent.v1.verify.checker import CONTAINER_ACTIONS
+
+        labels = self._load_package_labels()
+        grouped: dict[str, list[dict]] = {}
+        for spec in self.iter_action_schemas():
+            pkg, act = spec.get("package"), spec.get("action")
+            if not pkg or not act:
+                continue
+            entry = {
+                "action": act,
+                "label": spec.get("label") or act,
+                "isContainer": (pkg, act) in CONTAINER_ACTIONS,
+            }
+            if not spec.get("params_unknown"):
+                entry["parameters"] = [
+                    _public_param(p) for p in (spec.get("parameters") or []) if isinstance(p, dict)
+                ]
+            grouped.setdefault(pkg, []).append(entry)
+        return [
+            {
+                "package": pkg,
+                "label": labels.get(pkg) or pkg,
+                "actions": sorted(grouped[pkg], key=lambda a: a["action"]),
+            }
+            for pkg in sorted(grouped)
+        ]
+
+    def _load_package_labels(self) -> dict[str, str]:
+        """package_overview에서 {package_name: 표시라벨}. title 형식은 '{label} 패키지'(merge.py 생성).
+
+        실패해도 카탈로그를 못 주면 안 되므로 빈 dict로 저하한다 — 소비처가 package_name으로 폴백.
+        """
+        from app.rag.store import db
+
+        try:
+            conn = db.connect(connect_timeout=_CATALOG_DB_TIMEOUT_SEC)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
+                    cur.execute(
+                        """
+                        SELECT package_name, title FROM rag_documents
+                        WHERE source_type = 'package_overview' AND package_name IS NOT NULL
+                        """
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — 라벨 조회 실패가 카탈로그 전체를 막으면 안 된다
+            logger.warning("package_overview 라벨 조회 실패 — 패키지명으로 폴백", exc_info=True)
+            return {}
+        out: dict[str, str] = {}
+        for package_name, title in rows:
+            label = (title or "").removesuffix(" 패키지").strip()
+            if label:
+                out[package_name] = label
+        return out
 
 
 _backend_catalog: BackendCatalog | None = None
