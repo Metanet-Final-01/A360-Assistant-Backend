@@ -505,11 +505,11 @@ def export_recommendation(
                 source=row.source,
                 exported_at=exported_at,
             )
-        except Exception:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로 (Qodo #421)
+        except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로 (Qodo #421)
             logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
             raise HTTPException(
                 500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
-            ) from None
+            ) from exc
         filename = f"recommendation-{session.id}-v{row.version}.docx"
         return Response(
             content=content,
@@ -600,11 +600,11 @@ async def export_recommendation_docx(
             exported_at=datetime.now(timezone.utc).isoformat(),
             flow_image=image_bytes,
         )
-    except Exception:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로
+    except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로
         logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
         raise HTTPException(
             500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
-        ) from None
+        ) from exc
     filename = f"recommendation-{session.id}-v{row.version}.docx"
     return Response(
         content=content,
