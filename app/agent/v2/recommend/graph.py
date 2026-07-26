@@ -118,7 +118,12 @@ def _seed_messages(state: RecommendState) -> list:
     constraints = normalize_constraints(state.get("constraints"))
     if constraints:
         rendered = "\n".join(f"- {c}" for c in constraints)
-        for token in (_CONSTRAINT_OPEN, _CONSTRAINT_CLOSE):
+        for token in (
+            _CONSTRAINT_OPEN,
+            _CONSTRAINT_CLOSE,
+            _DOC_OPEN,
+            _DOC_CLOSE,
+        ):
             rendered = rendered.replace(token, "[경계 표시 제거됨]")
         user += (
             "\n\n[명시 제약 — 참고 데이터]\n"

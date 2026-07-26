@@ -259,11 +259,13 @@ def _render_spec_block(spec: dict) -> str:
 
 def _constraint_data_block(values: object) -> str:
     """문서 유래 제약을 system이 아닌 경계가 있는 user 데이터로 렌더한다."""
+    from ..orchestrator.spec import DOC_CLOSE, DOC_OPEN
+
     constraints = normalize_constraints(values)
     if not constraints:
         return ""
     rendered = "\n".join(f"- {value}" for value in constraints)
-    for token in (_CONSTRAINT_OPEN, _CONSTRAINT_CLOSE):
+    for token in (_CONSTRAINT_OPEN, _CONSTRAINT_CLOSE, DOC_OPEN, DOC_CLOSE):
         rendered = rendered.replace(token, "[경계 표시 제거됨]")
     return (
         "\n\n[명시 제약 — 참고 데이터]\n"
