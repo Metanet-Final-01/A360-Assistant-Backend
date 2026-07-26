@@ -113,13 +113,20 @@ app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan
 #    동작이 있다(Qodo #413-2 보존). 반면 공백만인 값(" ")은 실수/패딩이라 미설정으로 봐야 한다
 #    (#413-1, config.get의 공백=미설정 규칙과 일치). → 명시적 빈 문자열만 보존하고, 부재·공백은
 #    레지스트리 기본값으로 저하시킨다.
-def _cors_env(key: str) -> str:
-    return "" if os.getenv(key) == "" else config.get(key)
+def _cors_value(raw: str | None, default: str) -> str:
+    """CORS 값 — 명시적 빈 문자열('')만 '의도적 비우기'로 보존, 부재·공백은 기본값으로 저하한다.
+
+    os.getenv는 **리터럴 키로 호출부에서** 부른다(변수 키 회피) — 설정 레지스트리 래칫
+    (test_config_registry의 동적 키 접근 검사)이 env 읽기를 static하게 찾을 수 있게.
+    """
+    if raw == "":
+        return ""
+    return default if raw is None or raw.strip() == "" else raw
 
 
 frontend_origins = [
     origin.strip()
-    for origin in _cors_env("FRONTEND_ORIGINS").split(",")
+    for origin in _cors_value(os.getenv("FRONTEND_ORIGINS"), config.FRONTEND_ORIGINS).split(",")
     if origin.strip()
 ]
 
@@ -127,7 +134,9 @@ frontend_origins = [
 # a360-assistant-frontend-<hash>-a360-assistant.vercel.app), so a fixed
 # FRONTEND_ORIGINS entry breaks on each redeploy. Allow any deployment of
 # this Vercel project via regex instead of chasing the hash by hand.
-frontend_origin_regex = _cors_env("FRONTEND_ORIGIN_REGEX")
+frontend_origin_regex = _cors_value(
+    os.getenv("FRONTEND_ORIGIN_REGEX"), config.FRONTEND_ORIGIN_REGEX
+)
 
 app.add_middleware(
     CORSMiddleware,
