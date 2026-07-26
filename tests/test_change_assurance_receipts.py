@@ -827,7 +827,7 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "upload_bootstrap_logs()" in user_data
     assert "backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID" in user_data
     assert "trap 'upload_bootstrap_logs;" in user_data
-    assert "dnf install -y awscli aws-cfn-bootstrap curl-minimal" in user_data
+    assert "curl-minimal" not in user_data  # AL2023 base AMI already provides it; forcing install risks a dnf conflict
     assert user_data.count("--connect-timeout 1 --max-time 2") == 2
     upload_calls = [i for i in range(len(user_data)) if user_data.startswith("upload_bootstrap_logs", i)]
     assert len(upload_calls) == 5  # function def + ERR trap + bootstrap-mode success + health success + health timeout

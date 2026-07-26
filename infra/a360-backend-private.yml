@@ -336,7 +336,7 @@ Resources:
               set -o pipefail
               exec > >(tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log) 2>&1
               echo "[a360-bootstrap] starting user-data"
-              dnf install -y awscli aws-cfn-bootstrap curl-minimal
+              dnf install -y awscli aws-cfn-bootstrap
               IMDS_TOKEN=$(curl -fsS --connect-timeout 1 --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
               INSTANCE_ID=$(curl -fsS --connect-timeout 1 --max-time 2 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
               upload_bootstrap_logs() {
