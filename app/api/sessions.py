@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import delete, func, select
@@ -466,12 +466,19 @@ def save_edited_recommendation(
 def export_recommendation(
     session_id: str,
     version: int,
+    fmt: str = Query(
+        "json",
+        alias="format",
+        pattern="^(json|docx)$",
+        description="내보내기 형식 — json(기계 교환·재적재, 기본) | docx(사람이 읽는 서식 문서, FR-17)",
+    ),
     db: Session = Depends(get_db),
     user: models.User | None = Depends(get_optional_user),
-) -> JSONResponse:
-    """확정된 추천안(흐름도)을 다운로드용 JSON으로 내보낸다 (FR-17).
+) -> Response:
+    """확정된 추천안(흐름도)을 다운로드용으로 내보낸다 (FR-17).
 
-    지정 버전의 Recommendation 페이로드를 메타 봉투에 담아 attachment로 반환한다.
+    - format=json(기본): Recommendation 페이로드를 메타 봉투에 담은 JSON — 기계 교환·재적재용.
+    - format=docx: 담당자가 검토·공유·결재에 쓸 Word 서식 문서(흐름·근거·변수·전제·질문카드).
     라우트는 4세그먼트라 /recommendations·/recommendations/latest와 충돌하지 않는다.
     """
     session = _owned_session_or_404(session_id, db, user)
@@ -485,12 +492,30 @@ def export_recommendation(
         raise HTTPException(
             404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
         )
+    exported_at = datetime.now(timezone.utc).isoformat()
+    if fmt == "docx":
+        # 무거운 렌더러(python-docx)는 docx 경로에서만 로드한다 — JSON 경로 import 비용 0.
+        from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+        content = build_recommendation_docx(
+            row.payload,
+            session_id=str(session.id),
+            version=row.version,
+            source=row.source,
+            exported_at=exported_at,
+        )
+        filename = f"recommendation-{session.id}-v{row.version}.docx"
+        return Response(
+            content=content,
+            media_type=DOCX_MEDIA_TYPE,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     envelope = {
         "schema_version": "1.0",
         "session_id": str(session.id),
         "recommendation_version": row.version,
         "source": row.source,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": exported_at,
         "recommendation": row.payload,
     }
     filename = f"recommendation-{session.id}-v{row.version}.json"
