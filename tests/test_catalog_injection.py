@@ -154,31 +154,6 @@ def test_generate_passes_user_catalog_into_the_same_pipeline(monkeypatch):
     assert ctx.catalog.get_action_schema("UiPath.Mail.Activities", "SendOutlookMail") is not None
 
 
-def test_generate_keeps_explicit_constraints_separate_in_v3_spec(monkeypatch):
-    """명시적 제약은 편집 가능한 assumptions와 분리해 v3 품질 루프에 전달한다."""
-    monkeypatch.setattr(gen_mod, "build_flow_spec", lambda state, doc: {
-        "goal": "g", "requirements": [], "assumptions": ["기존 전제"],
-    })
-    seen = {}
-
-    async def fake_generate_flow(analysis, document, spec, ctx):
-        seen["assumptions"] = spec["assumptions"]
-        seen["constraints"] = spec["constraints"]
-        return {"recommendation": {"steps": []}, "violations": []}
-
-    monkeypatch.setattr(gen_mod, "generate_flow", fake_generate_flow)
-
-    out = asyncio.run(gen_mod.generate_node({
-        "solution": "a360",
-        "message": "만들어줘",
-        "analysis": {"steps": [], "constraints": ["승인 전 외부 발송 금지"]},
-    }))
-
-    assert out["turn_type"] == "recommendation"
-    assert seen["assumptions"] == ["기존 전제"]
-    assert seen["constraints"] == ["승인 전 외부 발송 금지"]
-
-
 def test_trigger_and_foreign_notice_are_a360_only(monkeypatch):
     """트리거 제안·타 솔루션 안내는 A360 세션에서만 — 타 솔루션엔 대응물이 없다."""
     monkeypatch.setattr(

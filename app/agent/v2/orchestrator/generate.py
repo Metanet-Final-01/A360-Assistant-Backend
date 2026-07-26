@@ -19,7 +19,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.schemas import Recommendation
-from app.schemas.analysis import normalize_constraints
 
 from .. import config
 from ..analysis import _format_document, _has_text, analyze, analyze_text
@@ -128,11 +127,7 @@ async def _generate_a360(state: TurnState) -> dict:
     # (parsed_doc 없음/텍스트 없음)면 None으로 기존 동작 유지.
     parsed = state.get("parsed_doc")
     document = _format_document(parsed) if parsed and _has_text(parsed) else None
-    inputs = {
-        "analysis": state["analysis"],
-        "constraints": normalize_constraints(state["analysis"].get("constraints")),
-        "document": document,
-    }
+    inputs = {"analysis": state["analysis"], "constraints": [], "document": document}
     final_state: dict = {}
     async for mode, chunk in graph.astream(
         inputs, stream_mode=["custom", "values"], config={"recursion_limit": 100},

@@ -752,19 +752,6 @@ def test_set_flow_replaces_spec_assumptions():
     assert "Windows 러너" not in " ".join(flow["spec"]["assumptions"])
 
 
-def test_set_flow_preserves_explicit_constraints():
-    """전제 전체 교체는 문서에 명시된 별도 constraints를 지우지 않는다."""
-    flow = _flow_with_spec(_WIN_ASSUME)
-    flow["spec"]["constraints"] = ["승인 전 외부 발송 금지"]
-    op = edit_ops.EditOp(op="set_flow", assumptions=_MAC_ASSUME)
-
-    applied, errors = edit_ops.apply_edit_ops(flow, [op])
-
-    assert applied == 1 and not errors
-    assert flow["spec"]["assumptions"] == _MAC_ASSUME
-    assert flow["spec"]["constraints"] == ["승인 전 외부 발송 금지"]
-
-
 def test_set_flow_creates_spec_when_absent():
     """spec이 없는 흐름도(구버전·타 솔루션)에도 전제를 남길 수 있다."""
     flow = _three_action_flow()

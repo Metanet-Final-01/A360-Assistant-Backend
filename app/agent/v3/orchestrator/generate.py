@@ -20,7 +20,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.schemas import Recommendation
-from app.schemas.analysis import normalize_constraints
 
 from .. import config
 from ..analysis import _format_document, _has_text, analyze, analyze_text
@@ -140,9 +139,6 @@ async def _generate_with(state: TurnState, ctx) -> dict:
     document = _format_document(parsed) if parsed and _has_text(parsed) else None
     # build_flow_spec은 동기 LLM 호출 — 이벤트 루프를 막지 않게 스레드로 내린다.
     spec = await asyncio.to_thread(build_flow_spec, dict(state), document)
-    constraints = normalize_constraints(state["analysis"].get("constraints"))
-    if constraints:
-        spec["constraints"] = constraints
     result = await generate_flow(state["analysis"], document, spec, ctx)
 
     flow = result.get("recommendation") or Recommendation(steps=[]).model_dump()
