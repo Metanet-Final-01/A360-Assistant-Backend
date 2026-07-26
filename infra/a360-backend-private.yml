@@ -102,8 +102,8 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
-    AllowedPattern: "^$|^[^\"\\\\\\r\\n]+$"
-    ConstraintDescription: OpenSearchPassword must not contain double quotes, backslashes, or newlines.
+    AllowedPattern: "^$|^[^\"\\\\\\t\\r\\n]+$"
+    ConstraintDescription: OpenSearchPassword must not contain double quotes, backslashes, tabs, or newlines.
   RagCacheEnabled:
     Type: String
     Default: "true"
@@ -121,6 +121,19 @@ Parameters:
   LogRetentionDays:
     Type: Number
     Default: 14
+
+Rules:
+  OpenSearchCredentialsMustBePaired:
+    Assertions:
+      - Assert:
+          Fn::Or:
+            - Fn::And:
+                - !Equals [!Ref OpenSearchUsername, ""]
+                - !Equals [!Ref OpenSearchPassword, ""]
+            - Fn::And:
+                - !Not [!Equals [!Ref OpenSearchUsername, ""]]
+                - !Not [!Equals [!Ref OpenSearchPassword, ""]]
+        AssertDescription: OpenSearchUsername and OpenSearchPassword must both be empty or both be set.
 
 Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
@@ -323,9 +336,9 @@ Resources:
               set -o pipefail
               exec > >(tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log) 2>&1
               echo "[a360-bootstrap] starting user-data"
-              dnf install -y awscli aws-cfn-bootstrap
-              IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
-              INSTANCE_ID=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
+              dnf install -y awscli aws-cfn-bootstrap curl-minimal
+              IMDS_TOKEN=$(curl -fsS --connect-timeout 1 --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
+              INSTANCE_ID=$(curl -fsS --connect-timeout 1 --max-time 2 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
               upload_bootstrap_logs() {
                 aws s3 cp /var/log/a360-bootstrap.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/a360-bootstrap.log" || true
                 aws s3 cp /var/log/cloud-init-output.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/cloud-init-output.log" || true
@@ -339,6 +352,7 @@ Resources:
                   --stack ${AWS::StackName} \
                   --resource AppAutoScalingGroup \
                   --region ${AWS::Region}
+                upload_bootstrap_logs
                 exit 0
               fi
 
@@ -412,6 +426,11 @@ Resources:
                 fi
                 sleep 5
               done
+              upload_bootstrap_logs
+              /opt/aws/bin/cfn-signal --success false \
+                --stack ${AWS::StackName} \
+                --resource AppAutoScalingGroup \
+                --region ${AWS::Region}
               exit 1
             - ArtifactBucketName:
                 Fn::ImportValue:

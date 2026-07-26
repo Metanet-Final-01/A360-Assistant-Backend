@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY assurance ./assurance
+COPY assurance/change ./assurance/change
 COPY alembic.ini .
 COPY migrations ./migrations
 
