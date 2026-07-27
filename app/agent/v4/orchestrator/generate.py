@@ -26,12 +26,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from app.core.llm import current_usage_context
 from app.schemas import Recommendation
 
 from .. import config
 from ..analysis import _format_document, _has_text, analyze, analyze_text
 from ..catalog_context import a360_context, overlay_context, user_catalog_context
-from ..recommend.graph import generate_flow
+from ..recommend.graph import generate_flow_two_phase
 from ..recommend.stream import emit, emit_analysis_frame
 from ..verify.catalog import get_catalog
 from ..verify.checker import run_environment_checks
@@ -45,7 +46,15 @@ from .foreign_catalog import (
 from .jsonio import chat_json
 from .render import chat_task_brief, render_compact, render_history
 from .spec import build_flow_spec
-from .state import TYPE_ANALYSIS, TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
+from .state import (
+    REFINE_DONE,
+    TYPE_ANALYSIS,
+    TYPE_ANSWER,
+    TYPE_RECOMMENDATION,
+    TurnState,
+    current_turn_deadline,
+)
+from .bot_meta import fill_bot_meta
 from .triggers import recommend_trigger
 
 logger = logging.getLogger(__name__)
@@ -129,6 +138,44 @@ def _collect_sources(flow: dict) -> list[dict]:
     return out
 
 
+def _session_scope() -> str | None:
+    """이번 턴의 세션 id — 2상 정밀화 잠금의 범위 키 (설계 §6.3 "세션 범위").
+
+    에이전트는 stateless라 백엔드 context(RPA-64 계약)에 session_id가 없다. 대신 백엔드가
+    턴 전체를 `usage_context(session_id=...)`로 감싸므로(`app/api/sessions.py::agent_turn`)
+    그 ContextVar에서 읽는다 — **계약을 늘리지 않고** 세션 범위를 얻는 유일한 경로다.
+    없으면(평가 스크립트·단독 recommend·단위 테스트) None → 잠금 없이 진행한다.
+    """
+    try:
+        sid = current_usage_context().session_id
+    except Exception:  # noqa: BLE001 — 귀속 컨텍스트 조회 실패로 생성을 막지 않는다
+        return None
+    return str(sid) if sid else None
+
+
+def _turn_deadline() -> float | None:
+    """이번 턴이 백엔드에 의해 끊기는 time.monotonic() 시각 — 2상 예산의 기준점.
+
+    파이프라인이 자기 시작 시각으로 잔여를 재면 그 **앞**(intake 라우팅 · analyze ·
+    build_flow_spec)이 통째로 빠진다. 그 구간이 길었던 턴에서 정밀화가 턴 상한을 넘겨
+    스트림이 error로 끊기면 **초안조차 저장되지 않는다** — 2상으로 쪼갠 목적이 무너진다.
+    그래서 진짜 데드라인을 백엔드가 심어 준 값(state.turn_deadline_scope)에서 읽는다.
+    없으면(평가 스크립트·단위 테스트) None → graph가 종전 근사로 폴백한다.
+    """
+    try:
+        return current_turn_deadline()
+    except Exception:  # noqa: BLE001 — 예산 조회 실패로 생성을 막지 않는다
+        return None
+
+
+# 정밀화를 못 끝냈을 때의 안내 — 사유와 함께 "지금 뭘 할 수 있는지"를 같이 말한다.
+# 잠금이 이미 풀렸다는 사실을 밝히지 않으면 사용자는 계속 기다려야 하는 줄 안다.
+_REFINE_INCOMPLETE_NOTICE = (
+    "\n\n다듬기(정밀화)를 끝내지 못해 **초안 그대로 확정**했어요 — {reason} "
+    "수정 잠금은 풀렸으니 이어서 고쳐 달라고 말씀하시면 됩니다."
+)
+
+
 def _flow_answer(flow: dict, violations: list[dict]) -> str:
     n_steps = len(flow.get("steps", []))
     answer = f"{n_steps}개 업무 단계의 자동화 흐름도를 만들었어요."
@@ -140,20 +187,28 @@ def _flow_answer(flow: dict, violations: list[dict]) -> str:
 
 
 async def _generate_with(state: TurnState, ctx) -> dict:
-    """품질 루프 실행: spec 정형화 → recommend 파이프라인(generate_flow).
+    """품질 루프 실행: spec 정형화 → recommend 2상 파이프라인(generate_flow_two_phase).
 
-    진행 이벤트(spec/candidates/verdict/flow/scorecard)는 파이프라인이 직접 부모 그래프
-    스트림으로 emit한다. 업무정의서 원문(RPA-142)은 spec과 compose 양쪽에 실린다 —
-    분석은 힌트, 원문이 근거.
+    진행 이벤트(spec/candidates/verdict/flow/draft/refine/scorecard)는 파이프라인이 직접
+    부모 그래프 스트림으로 emit한다. 업무정의서 원문(RPA-142)은 spec과 compose 양쪽에
+    실린다 — 분석은 힌트, 원문이 근거.
 
     ctx(CatalogContext)가 어휘 출처를 나른다 — a360이든 사용자 제공 카탈로그든 **같은
     루프**를 탄다(RPA-285). 솔루션마다 파이프라인을 따로 두면 한쪽만 발전한다.
+
+    운영 경로는 2상 진입점을 탄다(설계 §6.3): 초안이 먼저 프레임으로 나가고, 정밀화가
+    이어지는 동안 이 세션의 수정이 잠긴다. 정밀화를 못 끝내면(탈출구·타임아웃·실패)
+    초안이 확정본이 되고 사유를 답변에 붙인다 — 턴 자체는 성공으로 끝난다.
     """
     parsed = state.get("parsed_doc")
     document = _format_document(parsed) if parsed and _has_text(parsed) else None
     # build_flow_spec은 동기 LLM 호출 — 이벤트 루프를 막지 않게 스레드로 내린다.
     spec = await asyncio.to_thread(build_flow_spec, dict(state), document)
-    result = await generate_flow(state["analysis"], document, spec, ctx)
+    result = await generate_flow_two_phase(
+        state["analysis"], document, spec, ctx,
+        session_id=_session_scope(), turn_deadline_mono=_turn_deadline(),
+    )
+    refine = result.get("refine") or {}
 
     flow = result.get("recommendation") or Recommendation(steps=[]).model_dump()
     violations = result.get("violations") or []
@@ -174,10 +229,19 @@ async def _generate_with(state: TurnState, ctx) -> dict:
             note = f"실행 제안: {trigger['title']}" + (f" — {trigger['reason']}" if trigger.get("reason") else "")
             flow["notes"] = f"{flow['notes']} / {note}" if flow.get("notes") else note
 
+    # 봇 저장 메타 (제약 #15) — **트리거가 붙은 뒤**에 채운다. run_mode가 트리거 유무로
+    # 갈리므로 순서를 바꾸면 트리거 있는 흐름이 attended로 잘못 나간다.
+    # 타 솔루션에도 채운다: 이름·저장 위치는 어느 제품에서나 사람이 처음 만나는 빈칸이고,
+    # 결정론 두 필드는 A360 고유 개념(트리거 패키지)이 아니라 흐름도 자체에서 읽는다.
+    fill_bot_meta(flow)
+
     answer = _flow_answer(flow, violations)
     cards = flow.get("needs_input") or []
     if cards:
         answer += f" 확인이 필요한 질문 카드 {len(cards)}장을 함께 담았어요."
+    if refine.get("status") and refine["status"] != REFINE_DONE:
+        # 조용히 초안을 주면 사용자는 정밀화된 결과를 받았다고 믿는다 — 그게 '조용한 오답'이다.
+        answer += _REFINE_INCOMPLETE_NOTICE.format(reason=refine.get("reason") or "사유 미상.")
     if ctx.has_overlay:
         # 커스텀 어휘를 실제로 어휘로 썼다는 사실을 알린다 — 조용히 반영하면 사용자는
         # 자기 액션이 쓰였는지 확인할 방법이 없다(RPA-285에서 배운 '조용한 오답' 회피).
@@ -194,6 +258,8 @@ async def _generate_with(state: TurnState, ctx) -> dict:
         # 사용자 제공 카탈로그 경로는 KB 검색을 안 하므로 sources가 자연히 빈다.
         "sources": _collect_sources(flow),
         "answer": answer,
+        # 2상 결과 요약 — 관측용. done까지 올리려면 orchestrator/graph.py::_done_data 수정 필요.
+        "refine_status": refine or None,
     }
 
 

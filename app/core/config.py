@@ -110,6 +110,11 @@ REGISTRY: dict[str, EnvSpec] = {
     "LLM_CONNECT_TIMEOUT_SECONDS": EnvSpec("5.0", cast=float, group="llm", doc="LLM 연결 타임아웃(초)"),
     "LLM_MAX_RETRIES": EnvSpec("2", cast=int, group="llm", doc="LLM 재시도 횟수"),
     "AGENT_VERSION": EnvSpec(None, group="llm", doc="에이전트 그래프 버전 선택 (v1/v2/v3, 미설정=기본)"),
+    # v4 심판 반증 모드 토글. 켜짐(기본)이면 심판이 판정 1콜 → 1+N+3콜(후보 N=2~3이므로
+    # 6~7콜)로 늘어난다 — 초안 구간 비용/지연이 걸린 스위치라 끌 수 있어야 한다.
+    # false면 v3와 같은 채점형 1콜 경로로 되돌아간다 (app/agent/v4/orchestrator/judge.py).
+    "V4_JUDGE_REFUTATION": EnvSpec("true", cast=_bool, group="llm",
+        doc="v4 심판 반증 모드 (맹목 기대·반증·중요 슬롯 다수결). false=레거시 채점형 1콜"),
     # LLM 단가(1M 토큰당 USD) — os.environ[]로 읽는 보조 모델 폴백 단가 (llm.py). 미설정 시
     # None → 비용 계산 생략(기존 동작). RPA-224 래칫이 environ[]를 못 잡아 누락됐던 키들.
     "LLM_INPUT_COST_PER_1M": EnvSpec(None, cast=float, group="llm", doc="입력 토큰 1M당 USD"),

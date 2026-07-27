@@ -10,7 +10,8 @@ v2와의 차이:
   엔진 하나를 지난다.
 - 회귀 가드: 라운드 단위 — 교정 후 심각도 가중합(findings.weight)이 줄지 않으면 그
   라운드를 폐기한다. 2라운드 연속 무개선이면 종료(진동 방지). spec을 주면 가중합에
-  **완성도 항**(coverage_det의 결정론 누락)이 함께 들어가 삭제 편향이 막힌다(설계 §5-D).
+  **완성도 항**(coverage_det의 결정론 누락 + 뭉갬)이 함께 들어가 삭제 편향과 뭉갬이
+  동시에 막힌다(설계 §5-D, Phase 3).
 - confidence: RAG 단일 산식 → 증거 합성(grounding × evidence × agreement × semantic).
   R3는 감점하지 않는다 — 질문 카드가 붙은 R3는 결함이 아니라 입력 대기다(관찰 3).
 
@@ -26,7 +27,12 @@ from ..recommend.research import structural_complement
 from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
 from ..verify.checker import derive_session_registry, run_flow_checks
-from ..verify.coverage_det import coverage_findings, missing_requirements
+from ..verify.coverage_det import (
+    completeness_findings,
+    conflated_slots,
+    missing_requirements,
+    slot_req_ids,
+)
 from ..verify.findings import Finding, from_violations, weight
 from .edit_ops import (
     NODE_ID,
@@ -260,6 +266,12 @@ def slot_purpose_block(flow: dict, spec: dict | None) -> str:
     액션에 req_id가 없거나 spec이 없으면 빈 문자열 — 프롬프트 불변(기존 동작).
     이는 coverage_det의 침묵 원칙과 같다: 앵커 미기재는 '목적이 없다'가 아니라
     '연결 정보가 없다'이므로, 없는 정보를 지어내 보여주지 않는다.
+
+    한 자리가 요구를 여럿 주장하면(뭉갬) **같은 노드 id로 줄이 여러 개** 나온다. 이건
+    렌더 사고가 아니라 신호다: 뭉갬 finding이 지목하는 자리를 surgeon이 아웃라인에서
+    찾을 수 있어야 하고, 동시에 그 자리가 '담당 요구 있는 자리'로 인식돼 삭제 보호를
+    받아야 한다. 앵커 해석은 coverage_det.slot_req_ids와 **같은 함수**를 쓴다 —
+    여기서만 스칼라로 읽으면 뭉갬 슬롯이 목적 없는 자리로 보여 remove 후보가 된다.
     """
     reqs = {
         r.get("req_id"): r
@@ -269,18 +281,21 @@ def slot_purpose_block(flow: dict, spec: dict | None) -> str:
     if not reqs:
         return ""
 
+    known = set(reqs)
     lines: list[str] = []
 
     def walk(actions) -> None:
         for a in actions or []:
             if not isinstance(a, dict):
                 continue
-            rid = a.get("req_id")
-            req = reqs.get(rid.strip()) if isinstance(rid, str) and rid.strip() else None
-            if req is not None and len(lines) < _MAX_SLOTS_IN_PROMPT:
+            claimed = [reqs[r] for r in slot_req_ids(a, known) if r in reqs]
+            for req in claimed:
+                if len(lines) >= _MAX_SLOTS_IN_PROMPT:
+                    break
+                mark = " ⚠뭉갬" if len(claimed) > 1 else ""
                 lines.append(
                     f"- [{a.get(NODE_ID)}] «{a.get('label') or a.get('action')}» "
-                    f"→ {req.get('req_id')}({req.get('priority', 'must')}): {req.get('text', '')}"
+                    f"→ {req.get('req_id')}({req.get('priority', 'must')}): {req.get('text', '')}{mark}"
                 )
             walk(a.get("children"))
 
@@ -295,6 +310,8 @@ def slot_purpose_block(flow: dict, spec: dict | None) -> str:
         + "\n담당 요구가 있는 자리를 remove로 비우면 그 업무가 흐름도에서 사라진다. "
         "위반이 있으면 먼저 **그 요구를 수행하는 다른 액션으로 교체(update)** 하거나 "
         "파라미터를 고쳐라 — 삭제는 그 요구가 더는 필요 없다는 근거가 있을 때만이다."
+        "\n같은 노드 id가 ⚠뭉갬으로 여러 줄에 걸쳐 있으면 그 한 자리가 요구 여럿을 떠맡고 "
+        "있다는 뜻이다 — 요구마다 액션을 나누고 각각 req_id를 부여하라."
     )
 
 
@@ -374,13 +391,17 @@ def refine_flow(
     라운드 소진 / 연속 무개선 2회. extra_findings(심판 이식 지시 등)는 첫 라운드에만
     싣는다 — 적용 여부를 정적 재검증으로 판정할 수 없으므로 반복 강제하면 진동한다.
 
-    **spec을 주면 회귀 가드 비교축에 완성도 항(결정론 누락)이 들어간다** (설계 §5-D).
+    **spec을 주면 회귀 가드 비교축에 완성도 항(결정론 누락 + 뭉갬)이 들어간다** (설계 §5-D).
     기존 비교축은 정적 위반 가중합뿐이라, remove가 허용 연산인 상태에서 "위반 있는 액션을
     지우면 가중합이 반드시 준다" → 삭제가 항상 유효한 개선 경로였다. 누락을 같은 축에
     넣으면 req_id를 든 액션의 삭제가 blocker(100)를 만들어 major(10) 제거를 압도하고,
     회귀 가드가 그 패치를 스스로 거부한다. 목적 함수를 재설계하지 않고 규칙 하나로
     삭제 편향이 해소되는 것이 §5-D의 요지다.
-    spec을 안 주면 누락 항이 0이라 기존 동작 그대로다(하위호환).
+    같은 축의 뭉갬 항(요구당 major)은 반대 방향 도피로를 막는다: 뭉갬을 "req_id 하나를
+    떼서" 없애면 그 요구가 즉시 누락 blocker(100)가 되어 뭉갬 제거(−10·−20)를 압도한다.
+    반대로 **정직한 재분해는 통과한다** — 2중 뭉갬(20)을 쪼개다 부수 위반 1건(10)이
+    생겨도 가중합은 준다(뭉갬을 요구당 1건으로 세는 이유, coverage_det 참조).
+    spec을 안 주면 완성도 항이 0이라 기존 동작 그대로다(하위호환).
 
     반환: {"flow", "violations", "repaired"}.
     """
@@ -388,13 +409,18 @@ def refine_flow(
         flow = _strip_placeholder_steps(flow)
     violations = collect_violations(flow, catalog)
     findings, _cards = from_violations_dicts(violations)
-    missing = coverage_findings(flow, spec) if spec is not None else []
-    round_findings = findings + missing + list(extra_findings or [])
+    gaps = completeness_findings(flow, spec) if spec is not None else []
+    round_findings = findings + gaps + list(extra_findings or [])
     if not _error_findings(round_findings):
         return {"flow": flow, "violations": violations, "repaired": False}
 
+    # 진행 메시지는 '무엇을 고치는 중인가'를 사람 말로 나눠 보여준다 — 누락과 뭉갬은
+    # 사용자가 체감하는 불만이 서로 달라서(빠뜨림 vs 뭉갬) 한 숫자로 합치면 안 읽힌다.
+    n_missing = len(missing_requirements(flow, spec)) if spec is not None else 0
+    n_conflated = len(conflated_slots(flow, spec)) if spec is not None else 0
     emit({"event": "stage", "stage": "verifying",
-          "message": (f"검수 위반 {len(violations)}건 · 요구 누락 {len(missing)}건 · "
+          "message": (f"검수 위반 {len(violations)}건 · 요구 누락 {n_missing}건 · "
+                      f"요구 뭉갬 {n_conflated}건 · "
                       f"개선 지시 {len(extra_findings or [])}건 교정 중"),
           "data": {"violations": [
               {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
@@ -403,11 +429,11 @@ def refine_flow(
 
     current = flow
     current_violations = violations
-    # 회귀 가드 비교축 = '정적 위반 + 결정론 누락' 가중합. extra(이식 지시 등)는 여기서
+    # 회귀 가드 비교축 = '정적 위반 + 결정론 누락 + 뭉갬' 가중합. extra(이식 지시 등)는 여기서
     # 제외한다 — 정적 재검증으로 소거를 판정할 수 없어, 합산하면 첫 라운드가 정적 결함을
-    # 새로 만들어도 통과해 버린다. 반면 누락은 매 라운드 결정론으로 다시 재는 축이라
+    # 새로 만들어도 통과해 버린다. 반면 완성도 항은 매 라운드 결정론으로 다시 재는 축이라
     # 같은 문제가 없고, 이 항이 있어야 '삭제로 위반을 줄이는' 경로가 막힌다(§5-D).
-    current_weight = weight(_error_findings(findings + missing))
+    current_weight = weight(_error_findings(findings + gaps))
     # extra만 있고 정적 위반이 0인 흐름도 개선(이식)은 '정적 악화 없음(<=)'이면 채택한다.
     extras_pending = bool(_error_findings(list(extra_findings or [])))
     repaired = False
@@ -455,8 +481,8 @@ def refine_flow(
 
         new_violations = collect_violations(work, catalog)
         new_findings, _ = from_violations_dicts(new_violations)
-        new_missing = coverage_findings(work, spec) if spec is not None else []
-        new_weight = weight(_error_findings(new_findings + new_missing))
+        new_gaps = completeness_findings(work, spec) if spec is not None else []
+        new_weight = weight(_error_findings(new_findings + new_gaps))
         # 회귀 가드 — 정적 가중합이 줄었을 때만 채택. 이식 지시가 걸려 있는 라운드는
         # '정적 악화 없음(<=)'까지 허용한다 (이식은 정적 신호에 안 잡히는 개선이므로).
         if new_weight < current_weight or (extras_pending and new_weight <= current_weight):
@@ -466,8 +492,8 @@ def refine_flow(
             no_improve = 0
             extras_pending = False  # 이식 지시는 1회 반영으로 소진 — 반복 강제하면 진동한다
             emit_flow_frame(current, current_violations, f"교정 라운드 {round_no} 적용")
-            # 이후 라운드는 잔여 정적 위반 + 잔여 누락만 (extra는 1회성)
-            round_findings = new_findings + new_missing
+            # 이후 라운드는 잔여 정적 위반 + 잔여 완성도 항(누락·뭉갬)만 (extra는 1회성)
+            round_findings = new_findings + new_gaps
             if not _error_findings(round_findings):
                 break
         else:

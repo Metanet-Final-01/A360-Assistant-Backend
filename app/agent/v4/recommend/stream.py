@@ -82,6 +82,45 @@ def emit_draft_frame(
     })
 
 
+def emit_refine_frame(
+    status: str,
+    draft_id: str,
+    caption: str,
+    *,
+    reason: str | None = None,
+    locked: bool = False,
+    elapsed_ms: int | None = None,
+) -> None:
+    """2상 정밀화의 진행/종료를 partial(kind="refine")로 흘린다 (설계 §6.3).
+
+    emit_draft_frame과 짝이다: draft가 "초안 나왔다", refine이 "그 초안을 지금 다듬는
+    중이고 그동안 수정이 잠긴다 / 다 됐다 / 이런 사유로 접었다"를 말한다. 채널을 새
+    event가 아닌 partial+kind로 가른 이유는 emit_draft_frame의 docstring과 같다.
+
+    - status  : state.py의 REFINE_* (running|done|cancelled|timeout|failed|superseded)
+    - locked  : 지금 이 세션의 수정이 잠겨 있는가. **status=running이어도 False일 수 있다**
+                — 세션 밖 실행(평가 스크립트·단독 recommend)은 잠글 대상이 없다.
+    - reason  : 정상 완료가 아닐 때 사용자에게 보일 사유. 잠금은 이미 풀린 상태다.
+
+    프론트가 status=running·locked=true를 보면 편집 UI를 잠그고 "정밀화 중단하고 지금
+    초안으로 수정하기"(POST /api/sessions/{id}/refine/cancel)를 노출하면 된다.
+    """
+    emit({
+        "event": "partial",
+        "stage": "verifying",
+        "message": caption,
+        "data": {
+            "kind": "refine",
+            "caption": caption,
+            "draft_id": draft_id,
+            "status": status,
+            "locked": locked,
+            "reason": reason,
+            "elapsed_ms": elapsed_ms,
+        },
+    })
+
+
 def emit_candidates_frame(candidates: list[dict], caption: str) -> None:
     """후보 진행 요약 카드를 partial(kind="candidates")로 흘린다 (v3).
 

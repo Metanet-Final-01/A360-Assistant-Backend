@@ -180,11 +180,45 @@ class TriggerRecommendation(BaseModel):
     sources: list[RagSource] = Field(default_factory=list)
 
 
+class BotMeta(BaseModel):
+    """봇 저장 메타 — 사람이 Control Room에 옮길 때 **첫 화면**에서 요구받는 항목 (설계 제약 #15).
+
+    ⚠️ **골드셋으로 채점되지 않는다.** 정답 봇 JSON에 이 정보가 없기 때문이다 — 최상위 키가
+    `breakpoints/nodes/packages/triggers/variables/workItemTemplateName`뿐이고, 이름은
+    파일명에서 오고 폴더는 Control Room이 저장할 때 붙인다(실측). 공식 문서 코퍼스에도
+    "봇을 어떻게 이름 짓고 어디 두는가"를 다루는 페이지가 없다(검색 결과 릴리스 노트뿐).
+    그래서 이 필드들의 목적은 점수가 아니라 **비전문가가 옮길 때 빈칸 앞에서 멈추지 않는 것**이다.
+
+    각 필드의 출처를 의도적으로 갈랐다 — 근거 없는 값을 지어내지 않기 위해서다(설계 §5.2-G):
+      - `name`   — 에이전트가 업무 목표에서 **제안**한다. 사람이 바꿔도 그만인 값이라
+                   지어내도 손해가 없는 유일한 항목이다.
+      - `folder` — **자리표시자만.** 사용자 작업공간 경로는 업무 데이터지 동작 옵션이
+                   아니다(제약 #10). 추측하면 존재하지 않는 경로를 확신 있게 적게 된다.
+      - `target_os` / `run_mode` — **결정론.** LLM에 묻지 않는다. 각각 검수기의
+                   `target_os(flow)`(R16)와 트리거 유무(R15)가 이미 내리는 판단이라,
+                   여기서 따로 판단하면 경고와 출력이 어긋난다.
+    """
+
+    name: str | None = Field(None, description="제안 봇 이름 — 업무 목표에서 유도 (사람이 바꿔도 됨)")
+    folder: str | None = Field(
+        None, description="저장 폴더. 사용자 작업공간 경로라 에이전트는 자리표시자만 남긴다"
+    )
+    target_os: Literal["windows", "macos"] | None = Field(
+        None, description="대상 러너 OS — spec.assumptions에서 결정론으로 읽는다 (R16과 같은 출처)"
+    )
+    run_mode: Literal["attended", "unattended"] | None = Field(
+        None, description="트리거가 붙으면 unattended, 없으면 attended (R15와 같은 판단)"
+    )
+
+
 class Recommendation(BaseModel):
     """추천안 전체 — 이 JSON이 최종 내보내기 형식이자 골드셋 채점 대상이다."""
 
     schema_version: str = "1.0"
     steps: list[StepRecommendation]
+    bot_meta: BotMeta | None = Field(
+        None, description="봇 저장 메타(이름·폴더·OS·실행 방식) — 제약 #15. 채점 대상 아님"
+    )
     variables: list[BotVariable] = Field(default_factory=list)
     notes: str | None = Field(None, description="전제·주의사항, 예: 'Knox 메일은 Email 패키지 기준'")
     trigger: TriggerRecommendation | None = Field(

@@ -19,6 +19,7 @@ import asyncio
 import copy
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from .stream import (
     emit_candidates_frame,
     emit_draft_frame,
     emit_flow_frame,
+    emit_refine_frame,
     emit_scorecard_frame,
     emit_verdict_frame,
 )
@@ -64,6 +66,27 @@ SEARCH_SOURCE_TYPES = ["action_schema", "bot_example"]
 # 에이전트가 흔히 슬립하는 enum 필드의 허용값 — 벗어나면 안전값으로 강등한다.
 _VALID_VALUE_SOURCE = {"schema_default", "llm", "user"}
 _VALID_DIRECTION = {"input", "output", "local"}
+
+# 2상 정밀화 예산 (설계 §6.3 "실패·타임아웃: 잠금 해제 + 초안 유지 + 사유 안내").
+#
+# ⚠️ 이 숫자들은 백엔드의 턴 상한(`app/api/sessions.py` TURN_MAX_DURATION_SEC, 기본 900초)
+#    **아래**에 있어야 한다. 정밀화가 턴 상한까지 끌면 sessions.py가 스트림을 error로 끊고
+#    그러면 **초안조차 저장되지 않는다** — 2상으로 쪼갠 목적(먼저 준 것은 지킨다)이 통째로
+#    무너지는 최악의 실패다. 그래서 여기서 먼저 접고 초안을 확정한다.
+#  - _TURN_RESERVE_SEC: 정밀화가 끝난 **뒤에** 남아 있는 일(finalize·검증 요약·trigger·
+#    백엔드 저장)의 몫. 실제 턴 데드라인을 알 때 거기서 이만큼 떼고 쓴다.
+#  - _TURN_SOFT_BUDGET_SEC: 데드라인을 **모를 때만** 쓰는 폴백(900 - 60). 이 값은 "초안
+#    생성 시작"부터 재는 것이라 그 앞의 intake·analyze·spec 생성을 못 센다 —
+#    그래서 데드라인을 아는 경로(운영)에서는 쓰지 않는다.
+#  - _REFINE_TIMEOUT_SEC: 1상이 아무리 빨라도 정밀화에 이보다 더 주지는 않는다.
+#  - _REFINE_MIN_BUDGET_SEC: 남은 예산이 이보다 적으면 시작조차 안 한다 — 어차피 못 끝낼
+#    정밀화를 켜서 잠금만 걸었다 푸는 것은 사용자에게 손해만 준다.
+_TURN_RESERVE_SEC = 60.0
+_TURN_SOFT_BUDGET_SEC = 840.0
+_REFINE_TIMEOUT_SEC = 420.0
+_REFINE_MIN_BUDGET_SEC = 30.0
+# 취소·타임아웃 확인 주기. 탈출구 버튼의 체감 반응 속도가 이 값이다(0.5초면 즉시로 느껴진다).
+_REFINE_POLL_SEC = 0.5
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -491,8 +514,11 @@ async def draft_flow(analysis: Any, document: str | None, spec: dict, ctx=None) 
         st["status"] = "done"
     emit_candidates_frame(cand_status, "후보 검증 완료 — 심판 채점 중")
 
-    # [5] judge — 승자 + 이식 지시
-    verdict = await asyncio.to_thread(judge_candidates, spec, list(reports))
+    # [5] judge — 승자 + 이식 지시.
+    # 문서 원문을 함께 넘긴다: 심판의 맹목 기대는 "spec+문서만 보고 독립 생성"이 전제라
+    # 문서가 빠지면 요구사항 요약만 보고 세운 기대가 되고, 입력 비대칭(후보는 원문을 봤다)
+    # 때문에 원문에만 있는 누락을 잡아내지 못한다.
+    verdict = await asyncio.to_thread(judge_candidates, spec, list(reports), document=document)
     winner = verdict["winner"]
     emit_verdict_frame(verdict["verdict"], f"후보 {winner.candidate_id} 선택")
 
@@ -641,6 +667,215 @@ async def refine_draft(draft: DraftResult, ctx=None) -> dict:
     return {"recommendation": rec_dict, "violations": violations}
 
 
+def _finalize_draft_only(draft: DraftResult) -> dict:
+    """정밀화 없이 초안만으로 확정본을 만든다 — 탈출구·타임아웃·실패의 공통 출구.
+
+    반환은 refine_draft와 같은 {"recommendation", "violations"}라 호출부가 분기 없이
+    같은 자리에 꽂을 수 있다. **LLM을 한 번도 부르지 않는다** — 탈출구는 "지금 당장"이
+    존재 이유라 여기서 또 기다리게 하면 탈출이 아니다.
+
+    2상에서 오는 것 중 여기서 빠지는 것과 그 이유:
+    - 교정(surgeon): 초안은 결정론 검사 결과만 실어 표시하고 교정하지 않는다(설계 §5-I).
+      그래서 violations는 승자 후보의 검사 결과 **그대로**다 — 화면의 초안과 위반 표시가
+      정확히 일치한다.
+    - 질문 카드(needs_input): 카드 문구 다듬기가 LLM 경로다. 빈 목록으로 둔다(프론트가
+      키 부재와 빈 목록을 다르게 다루지 않도록 키 자체는 채운다).
+    - flow_confidence: 결정론 축(커버리지·위반·시뮬)만으로 계산한다. 카드 감쇠는 0.
+    spec은 반드시 싣는다 — 이후 수정 턴의 회귀 가드가 flow["spec"]의 요구를 비교축으로
+    쓰기 때문에, 여기서 빠뜨리면 초안 확정본을 고칠 때 삭제 편향이 되살아난다(§5-D).
+    """
+    from ..orchestrator.harness import (
+        attach_confidence,
+        compute_flow_confidence,
+        from_violations_dicts,
+    )
+
+    winner = draft.winner_report()
+    violations = list(winner.get("violations") or [])
+    sink = list(draft.sink)
+
+    flow = _coerce_flow(copy.deepcopy(draft.flow))  # 1상 산출물은 읽기만 한다(재시도 입력 보존)
+    flow = _attach_sources(flow, sink)
+    attach_confidence(flow, sink, violations)
+    findings, _cards = from_violations_dicts(violations)
+    flow["needs_input"] = []
+    flow["spec"] = draft.spec
+    flow["flow_confidence"] = compute_flow_confidence(
+        must_coverage=winner.get("must_coverage"),
+        findings=findings,
+        sim_pass_rate=winner.get("sim_pass_rate"),
+        blocking_cards=0,
+    )
+
+    try:
+        rec = Recommendation.model_validate(flow)
+    except ValidationError as e:
+        logger.warning("초안 확정 정규화 실패 — 빈 추천안: %s", e)
+        rec = Recommendation(steps=[])
+    return {"recommendation": rec.model_dump(), "violations": violations}
+
+
+async def generate_flow_two_phase(
+    analysis: Any,
+    document: str | None,
+    spec: dict,
+    ctx=None,
+    *,
+    session_id: str | None = None,
+    refine_timeout_sec: float = _REFINE_TIMEOUT_SEC,
+    turn_deadline_mono: float | None = None,
+) -> dict:
+    """2상 운영 진입점 — 초안을 **먼저** 내보내고, 잠금을 건 채 정밀화를 잇는다 (설계 §6.3).
+
+    `generate_flow`의 대체가 아니라 **추가 진입점**이다. generate_flow는 시그니처·반환이
+    v1~v3와 맞아야 비교(골드셋)가 성립하므로 건드리지 않았다.
+
+    ### 왜 "백그라운드 태스크"가 아니라 같은 스트림 안인가
+    이 서비스의 턴은 `POST /{id}/turn` SSE 1스트림이고, 백엔드는 **done 1회**에서만 추천
+    버전을 저장한다(`app/api/sessions.py::_persist_turn_result`). 턴이 끝난 뒤에도 도는
+    진짜 백그라운드 잡을 만들려면 (a) 정밀화 결과를 저장할 두 번째 경로, (b) 프론트가
+    그 결과를 받아갈 채널(폴링/재연결), (c) 워커 간 잡 큐가 함께 필요하다 — 프론트가 별도
+    레포라 동시 수정이 안 되는 이번 범위에서 감당할 수 없다. 그래서 **같은 스트림 안에서
+    초안 프레임을 먼저 흘리고 정밀화를 잇는** 형태를 골랐다. 사용자 관점의 이득(초안을
+    분 단위로 먼저 본다)은 그대로고, 남는 것은 "턴이 끝나야 새 턴을 시작할 수 있다"뿐이다.
+    DraftResult가 frozen·JSON 직렬화로 못 박혀 있는 이유가 그 후속 이전을 위해서다.
+
+    ### 관측 가능한 것
+    1. 초안이 정밀화 **전에** 나간다 — draft_flow의 emit_draft_frame(kind="draft").
+    2. 진행 중 상태 — emit_refine_frame(status="running", locked=...).
+    3. 잠금 — session_id 범위로 레지스트리에 등록(수정 경로가 이걸 보고 거부).
+    4. 탈출구 — 다른 요청이 request_refine_cancel()을 걸면 접고 초안을 확정.
+    5. 실패·타임아웃 — 잠금 해제 + 초안 유지 + 사유. 턴 자체는 성공으로 끝난다.
+
+    session_id를 안 주면(평가 스크립트·단독 실행) 잠금만 생략하고 흐름은 같다.
+
+    turn_deadline_mono(백엔드가 이 턴을 끊는 time.monotonic() 시각)를 주면 남은 예산을
+    **턴 시작 기준**으로 계산한다. 안 주면 초안 생성 시간만 빼는 종전 계산으로 폴백한다 —
+    그 폴백은 intake·analyze·spec 생성을 못 세므로 운영 경로는 반드시 넘긴다.
+
+    반환: {"recommendation", "violations", "refine": {status, reason, draft_id, elapsed_ms,
+    locked}}. refine 키는 **추가**라 {"recommendation","violations"}만 읽던 호출부는 그대로다.
+    """
+    from ..catalog_context import a360_context
+    from ..orchestrator.state import (
+        REFINE_ABORTED,
+        REFINE_CANCELLED,
+        REFINE_DONE,
+        REFINE_FAILED,
+        REFINE_RUNNING,
+        REFINE_TIMEOUT,
+        acquire_refine_lock,
+        defer_refine_lock_release,
+        release_refine_lock,
+    )
+
+    ctx = ctx or a360_context()
+    t_turn = time.monotonic()
+    draft = await draft_flow(analysis, document, spec, ctx)  # emit_draft_frame이 여기서 나간다
+    draft_elapsed = time.monotonic() - t_turn
+
+    # 남은 턴 예산. 데드라인을 알면 **턴 시작부터의 잔여**를, 모르면 초안 생성 시간만 뺀
+    # 근사를 쓴다. 이걸 안 깎으면 턴 상한에 걸려 초안까지 잃는다(위 상수 주석).
+    if turn_deadline_mono is not None:
+        remaining = turn_deadline_mono - time.monotonic() - _TURN_RESERVE_SEC
+    else:
+        remaining = _TURN_SOFT_BUDGET_SEC - draft_elapsed
+    budget = min(refine_timeout_sec, remaining)
+    if budget < _REFINE_MIN_BUDGET_SEC:
+        # 원인이 초안 생성만은 아니다(데드라인 경로에선 intake·분석이 먹었을 수도 있다) —
+        # 초안 소요는 참고로만 밝히고 결론("초안 그대로 확정")을 앞세운다.
+        reason = (
+            f"이번 턴에 남은 시간이 부족해 다듬기를 생략했어요(초안 생성 {int(draft_elapsed)}초) "
+            "— 초안 그대로 확정했습니다."
+        )
+        emit_refine_frame(REFINE_TIMEOUT, draft.draft_id, "정밀화 생략 · 초안 확정",
+                          reason=reason, locked=False, elapsed_ms=0)
+        return {**_finalize_draft_only(draft),
+                "refine": {"status": REFINE_TIMEOUT, "reason": reason,
+                           "draft_id": draft.draft_id, "elapsed_ms": 0, "locked": False,
+                           "persist_pending": False}}  # 잠근 적이 없으니 넘길 것도 없다
+
+    lock = acquire_refine_lock(session_id, draft.draft_id, budget)
+    emit_refine_frame(
+        REFINE_RUNNING, draft.draft_id,
+        "초안 확정 · 정밀화 중 (완료까지 수정이 잠깁니다)" if lock else "초안 확정 · 정밀화 중",
+        locked=lock is not None,
+    )
+
+    t0 = time.monotonic()
+    task = asyncio.create_task(refine_draft(draft, ctx))
+    status, reason = REFINE_DONE, None
+    out: dict | None = None
+    persist_pending = False  # 잠금을 백엔드 저장까지 넘겼는가 (아래 finally에서 확정)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=_REFINE_POLL_SEC)
+            if task in done:
+                break
+            if lock is not None and lock.cancel_requested:
+                status = REFINE_CANCELLED
+                reason = lock.cancel_reason or "정밀화를 중단하고 초안으로 확정했어요."
+                break
+            if time.monotonic() - t0 >= budget:
+                status = REFINE_TIMEOUT
+                reason = (
+                    f"정밀화가 {int(budget)}초를 넘겨 중단했어요 — 초안 그대로 확정했습니다."
+                )
+                break
+        if status == REFINE_DONE:
+            out = task.result()
+    except asyncio.CancelledError:
+        # 바깥 취소(클라이언트 끊김·턴 상한)는 **삼키지 않는다** — 삼키면 asyncio 협조적
+        # 취소가 깨진다. 다만 상태까지 REFINE_DONE으로 남기면, 추천 버전이 하나도 저장되지
+        # 않은 턴을 재접속 클라이언트(GET /refine의 last)에게 "정밀화 정상 완료"로 보고하게
+        # 된다 — 이 레포가 반복해 피하는 조용한 오답이다. 상태만 바로잡고 다시 던진다.
+        status, reason = REFINE_ABORTED, "턴이 중단돼 정밀화를 끝내지 못했어요."
+        raise
+    except Exception as e:  # noqa: BLE001 — 정밀화 실패로 초안까지 잃지 않는다
+        logger.warning("2상 정밀화 실패 — 초안으로 확정: %s", e, exc_info=True)
+        status, reason = REFINE_FAILED, "정밀화 중 오류가 생겨 초안 그대로 확정했어요."
+    finally:
+        # 잠금은 여기서 풀지 않는다 — 추천 버전 INSERT는 한참 뒤 백엔드(`app/api/sessions.py::
+        # _persist_turn_result`)에서 일어난다. 여기서 풀면 그 사이(trigger LLM·R15 재검사·
+        # 그래프 마무리·DB 쓰기) 들어온 편집이 409를 안 받고 vN을 만들고, 턴 저장이 그 위를
+        # 덮어쓴다. 그래서 '저장 대기'로만 표시하고 반납은 저장을 마친 백엔드가 한다.
+        persist_pending = defer_refine_lock_release(lock, status, reason)
+        if not persist_pending:
+            # 잠금이 없거나(세션 밖 실행) 이미 새 초안에 밀려난 경우 — 종전 경로 그대로.
+            release_refine_lock(lock, status, reason)
+        if not task.done():
+            # refine_draft가 asyncio.to_thread 안(교정·재채점)이면 **그 스레드는 끝까지 돈다**
+            # — 파이썬이 스레드를 죽일 수 없기 때문이다. 진행 중이던 LLM 호출 1건의 비용은
+            # 그대로 나가고 결과는 버려진다(고아 스레드는 deepcopy한 흐름만 만지므로 확정본을
+            # 오염시키지는 않는다). 다만 **여기서 기다리는 시간은 0이다**: to_thread의 asyncio
+            # 래퍼 future는 취소 즉시 cancelled로 확정되고 스레드 종료를 기다리지 않는다.
+            # 잠금 반납이 이제 턴 저장 뒤로 밀린 만큼 이 대기가 탈출구를 늦추는지 실측했고,
+            # 늦추지 않는다(3초짜리 to_thread를 취소하고 wait 한 소요 0.000초).
+            task.cancel()
+            # asyncio.wait는 태스크 예외를 되던지지 않는다 — 여기서 전파되는 CancelledError는
+            # 오직 **바깥 취소**뿐이라 협조적 취소가 깨지지 않는다(await task를 쓰면 우리가 건
+            # 취소까지 올라와 삼켜야 하고, 그러다 바깥 취소도 같이 먹는다).
+            await asyncio.wait({task})
+        if not task.cancelled() and task.exception() is not None:
+            logger.debug("정밀화 태스크 잔여 예외 회수: %s", task.exception())
+
+    if out is None:  # 취소·타임아웃·실패 — 정밀화는 접었고 초안이 확정본이다
+        out = _finalize_draft_only(draft)
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    # locked=False는 계약 그대로 둔다 — 프론트가 이 프레임을 "정밀화 구간이 끝났다"로 읽고
+    # 편집 UI를 되살리는 신호다. 실제 잠금은 턴 저장까지 조금 더 남아 있지만, 그 사이 들어온
+    # 편집은 조용히 덮이는 대신 409(탈출구 경로 포함)로 정확히 거절된다 — 그게 권위 있는
+    # 게이트다. 남은 창을 아는 클라이언트를 위해 persist_pending을 **추가**로만 싣는다.
+    emit_refine_frame(
+        status, draft.draft_id,
+        "정밀화 완료" if status == REFINE_DONE else "정밀화 중단 · 초안 확정",
+        reason=reason, locked=False, elapsed_ms=elapsed_ms,
+    )
+    return {**out, "refine": {"status": status, "reason": reason, "draft_id": draft.draft_id,
+                              "elapsed_ms": elapsed_ms, "locked": False,
+                              "persist_pending": persist_pending}}
+
+
 async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=None) -> dict:
     """spec → research → compose×N → verify → judge → refine → finalize.
 
@@ -648,6 +883,10 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     백엔드가 '턴 = SSE 1스트림 = done 1회 = 추천 0~1버전' 등식 위에 서 있고 done 1회 가정이
     `app/api/sessions.py` 세 곳에 흩어져 있어서다. 이번 변경은 같은 턴·같은 스트림 안에서
     파이프라인을 두 상으로 쪼갠 **구조 작업**이고, 백그라운드 실행·done 2회는 후속 이슈다.
+
+    잠금·탈출구·타임아웃이 붙은 운영 경로는 `generate_flow_two_phase`다. 이쪽은 그 장치가
+    없는 **순수 합성**으로 남긴다 — 골드셋 평가(`recommend()`)가 타는 경로라, 여기에 시간
+    예산을 걸면 평가 점수가 인프라 지연에 흔들려 버전 비교가 성립하지 않는다.
 
     반환: {"recommendation": Recommendation dict, "violations": list[dict]}.
     전 후보 실패 시 RuntimeError (호출부가 error 이벤트로 처리).

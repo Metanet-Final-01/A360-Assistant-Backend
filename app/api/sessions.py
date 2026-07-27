@@ -6,11 +6,13 @@
 
 import asyncio
 import contextlib
+import importlib
 import json
 import logging
 import math
 import os
 import re
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -423,8 +425,11 @@ def save_edited_recommendation(
 
     수정은 UPDATE가 아니라 새 버전 INSERT — undo·수정 이력이 여기서 나온다.
     페이로드는 Recommendation 스키마로 검증한다(카탈로그 액션명 검증은 후속).
+
+    에이전트 2상 정밀화가 도는 동안은 409로 거절한다 — 아래 _assert_not_refining 참고.
     """
     session = _owned_session_or_404(session_id, db, user)
+    _assert_not_refining(session.id)
     try:
         Recommendation.model_validate(payload.recommendation)  # 스키마 검증 (구조 깨짐 방지)
     except ValidationError as e:
@@ -498,6 +503,186 @@ def export_recommendation(
         content=envelope,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2상 정밀화 잠금 — 상태 조회와 탈출구 (설계 §6.3, RPA-298)
+#
+# 에이전트 v4는 흐름도 생성을 두 상으로 쪼갠다: 초안(1상)을 SSE partial(kind="draft")로
+# 먼저 흘리고, 분 단위가 걸리는 정밀화(2상)를 이어서 돈다. 초안이 화면에 뜬 순간부터
+# 사용자는 그 흐름도를 만질 수 있으므로, 정밀화가 끝나기 전에 수정이 들어오면 두 결과가
+# 서로를 덮어쓴다 — 그래서 정밀화 중에는 수정 경로를 잠근다.
+#
+# 잠금만 있으면 갇힌 느낌이라 탈출구를 함께 둔다(§6.3): POST .../refine/cancel이
+# "정밀화 중단하고 지금 초안으로 수정하기"다. 즉시 푸는 게 아니라 정밀화 소유자에게
+# 중단을 요청하고, 소유자가 초안을 확정한 뒤 스스로 반납한다(남이 풀면 소유자가 계속
+# 돌다가 나중에 결과를 확정해 초안을 덮어쓴다).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 잠금 레지스트리를 가진 에이전트 버전 모듈. 새 버전이 같은 장치를 가지면 여기 추가한다.
+_REFINE_LOCK_MODULES = ("app.agent.v4.orchestrator.state",)
+
+
+def _refine_lock_module():
+    """잠금 레지스트리 모듈을 돌려준다 — **이미 로드된 경우에만**.
+
+    import를 강제하지 않는 게 핵심이다. 잠금은 이 프로세스 메모리에 있으므로 모듈이
+    로드조차 안 됐다면 살아 있는 잠금도 없다(정확한 판정이지 근사가 아니다). 반대로
+    import를 강제하면 드래그 저장 한 번이 에이전트 전체(langchain·프롬프트)를 끌어올린다.
+
+    ⚠️ **프로세스 메모리 잠금의 한계**: 서버가 워커/레플리카 여러 개로 뜨면 정밀화가 도는
+    프로세스와 수정 요청이 도착한 프로세스가 다를 수 있고, 그러면 이 게이트는 통과된다
+    (잠금이 없는 것과 같다). 지금 Dockerfile은 워커 1의 단일 uvicorn이라 실효가 있다.
+    스케일아웃하면 잠금 상태를 DB(세션 행)나 Redis로 옮겨야 한다.
+    """
+    for name in _REFINE_LOCK_MODULES:
+        mod = sys.modules.get(name)
+        if mod is not None and hasattr(mod, "refine_lock_status"):
+            return mod
+    return None
+
+
+def _load_refine_lock_module():
+    """잠금 레지스트리 모듈을 **불러서** 돌려준다 — 턴 실행 경로 전용.
+
+    `_refine_lock_module()`이 일부러 import를 강제하지 않는 것과 다르다. 저 함수는 드래그
+    저장 같은 가벼운 요청에서 불리므로 에이전트를 끌어올리면 안 되지만, 이 함수는 곧
+    에이전트를 통째로 돌릴 턴 경로에서만 불린다 — 리프 모듈(langchain·프롬프트 의존 없음)
+    하나를 미리 import하는 비용은 사실상 0이고, 그래야 턴 데드라인을 심을 수 있다.
+    """
+    for name in _REFINE_LOCK_MODULES:
+        try:
+            mod = importlib.import_module(name)
+        except Exception:  # noqa: BLE001 — 없는 버전은 건너뛴다(잠금 장치 없는 에이전트)
+            continue
+        if hasattr(mod, "turn_deadline_scope"):
+            return mod
+    return None
+
+
+def _turn_deadline_scope(turn_max_sec: float):
+    """이 턴이 끊기는 시각을 에이전트가 볼 수 있게 심는다 (설계 §6.3의 시간 예산).
+
+    에이전트는 stateless라 "이 턴이 언제 시작했는지"를 모른다. 2상 정밀화는 턴 상한에
+    걸리기 전에 스스로 접어야 하는데(걸리면 초안조차 저장되지 않는다), 자기 파이프라인
+    시작 시각으로 재면 그 앞의 intake·analyze·spec 생성이 통째로 빠진다. 그래서 상한을
+    실제로 집행하는 여기(`_iter_with_heartbeat`에 넘기는 값과 같은 값)에서 알려 준다.
+    RPA-64 context 계약을 늘리지 않으려고 usage_context와 같은 ContextVar 통로를 쓴다.
+    """
+    mod = _load_refine_lock_module()
+    if mod is None:
+        return contextlib.nullcontext()
+    try:
+        return mod.turn_deadline_scope(turn_max_sec)
+    except Exception:  # noqa: BLE001 — 예산 힌트 실패가 턴을 막으면 안 된다
+        logger.warning("턴 데드라인 전달 실패 (무시)", exc_info=True)
+        return contextlib.nullcontext()
+
+
+def _release_pending_refine_lock(session_id: uuid.UUID) -> None:
+    """턴 저장이 끝난 뒤 정밀화 잠금을 반납한다 (설계 §6.3).
+
+    **에이전트가 아니라 여기서** 푸는 이유: 추천 버전 INSERT(`_persist_turn_result`)는
+    에이전트가 정밀화를 마친 한참 뒤다. 에이전트 쪽에서 풀면 그 사이에 들어온 편집이
+    409를 안 받고 새 버전을 만들고, 이 턴의 저장이 그 위를 덮어쓴다 — 사용자가 방금 한
+    수정이 조용히 사라진다. 그래서 에이전트는 '저장 대기'로만 표시하고(정밀화 결과는
+    거기 적혀 있다) 반납은 저장을 마친 이 지점이 한다.
+
+    저장 대기 중인 잠금만 풀린다 — 아직 정밀화가 도는 잠금은 소유자 것이라 건드리지
+    않는다(남이 풀면 소유자가 나중에 초안을 덮어쓴다). 실패해도 조용히 지나간다:
+    반납이 유실돼도 레지스트리의 짧은 자동 만료가 세션을 되살린다.
+    """
+    mod = _refine_lock_module()
+    if mod is None or not hasattr(mod, "release_pending_refine_lock"):
+        return
+    try:
+        mod.release_pending_refine_lock(str(session_id))
+    except Exception:  # noqa: BLE001 — 반납 실패가 완료된 턴을 실패로 만들지 않는다
+        logger.warning("정밀화 잠금 반납 실패 (자동 만료 대기): session=%s", session_id, exc_info=True)
+
+
+def _refine_status(session_id: uuid.UUID) -> dict:
+    """세션의 정밀화 상태 — {locked, refine, last}. 레지스트리가 없으면 잠금 없음."""
+    mod = _refine_lock_module()
+    if mod is None:
+        return {"locked": False, "refine": None, "last": None}
+    try:
+        return mod.refine_lock_status(str(session_id))
+    except Exception:  # noqa: BLE001 — 관측 실패가 본 기능을 막지 않는다(잠금 없음으로 처리)
+        logger.warning("정밀화 잠금 상태 조회 실패 (무시): session=%s", session_id, exc_info=True)
+        return {"locked": False, "refine": None, "last": None}
+
+
+def _assert_not_refining(session_id: uuid.UUID) -> None:
+    """정밀화 중이면 409로 거절한다 — 흐름도를 바꾸는 경로 앞에 세운다.
+
+    409에 진행 상태와 탈출구 경로를 함께 실어, 프론트가 "정밀화 중입니다 / 중단하고 지금
+    수정하기"를 그대로 그릴 수 있게 한다. 사유 없는 거절은 잠금이 아니라 고장으로 보인다.
+    """
+    status = _refine_status(session_id)
+    if not status.get("locked"):
+        return
+    raise HTTPException(
+        409,
+        detail={
+            "code": "REFINE_IN_PROGRESS",
+            "message": "흐름도를 다듬는 중이라 지금은 수정할 수 없어요. "
+                       "지금 바로 고치려면 정밀화를 중단해 주세요.",
+            "refine": status.get("refine"),
+            "cancel_path": f"/api/sessions/{session_id}/refine/cancel",
+        },
+    )
+
+
+@router.get("/{session_id}/refine")
+def get_refine_status(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """이 세션이 정밀화로 잠겨 있는지 — 새로고침·재접속 후 편집 UI 상태 복원용.
+
+    SSE partial(kind="refine")을 놓친 클라이언트가 물어볼 곳이 필요하다. last에는 마지막
+    정밀화 결과(done/cancelled/timeout/failed)가 잠시 남는다 — 완료 직후 "잠금 없음"만
+    돌려주면 정상 완료인지 중단인지 구분할 수 없다.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    return _refine_status(session.id)
+
+
+@router.post("/{session_id}/refine/cancel")
+def cancel_refine(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """탈출구 — "정밀화 중단하고 지금 초안으로 수정하기" (설계 §6.3).
+
+    중단을 **요청**만 하고 즉시 돌아온다. 진행 중인 턴이 다음 확인 주기(0.5초 이내)에
+    정밀화를 접고 초안을 확정한 뒤 done을 낸다 — 그 done이 초안을 추천 버전으로 저장하고
+    잠금을 푼다. 그래서 이 응답의 accepted=true는 "곧 풀린다"이지 "이미 풀렸다"가 아니다.
+
+    잠금이 없으면 404가 아니라 accepted=false다 — 정밀화가 방금 끝나 이미 풀린 경우가
+    정상 시나리오라(사용자 클릭과 완료가 겹친다) 에러로 만들면 멀쩡한 흐름이 실패로 보인다.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    mod = _refine_lock_module()
+    snapshot = None
+    if mod is not None:
+        try:
+            snapshot = mod.request_refine_cancel(
+                str(session.id), "사용자가 정밀화를 중단하고 초안으로 확정했어요."
+            )
+        except Exception:  # noqa: BLE001 — 탈출구 실패가 500이 되면 갇힌 느낌이 더 커진다
+            logger.warning("정밀화 중단 요청 실패: session=%s", session.id, exc_info=True)
+    status = _refine_status(session.id)
+    return {
+        "accepted": snapshot is not None,
+        "locked": status.get("locked", False),
+        # 요청과 조회 사이에 소유자가 반납했을 수 있다 — 그 경우 방금 찍은 스냅샷을 쓴다.
+        "refine": snapshot or status.get("refine"),
+        "last": status.get("last"),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1289,8 +1474,15 @@ async def agent_turn(
     그래프를 골라 intent(analyze/edit/ask)를 판단한다. 반환 type으로 저장을 분기한다.
     대화 누적이 하드 임계를 넘으면(chat 턴) 실제 턴 전에 자동 compact를 먼저 돌린다(RPA-84).
     이벤트: [자동압축 stage] → (에이전트가 흘리는) stage/partial/token → done(data={type, ...}).
+
+    정밀화 중에는 **fill_cards만** 막는다(설계 §6.3의 수정 잠금). 카드 응답 반영은 흐름도를
+    결정론으로 고쳐 새 버전을 만드는 확정적 '수정'이라, 정밀화 결과와 충돌한다. 반면 chat
+    턴은 여기서 라우팅(질문/분석/수정)이 아직 안 갈렸다 — 전부 막으면 정밀화 중 질문까지
+    막히므로, chat 안의 수정 요청은 에이전트 edit 노드에서 걸러야 한다(그쪽은 아직 미배선).
     """
     session = _owned_session_or_404(session_id, db, user)
+    if payload.operation == "fill_cards":
+        _assert_not_refining(session.id)
     stream_turn = _get_agent_turn()
     if stream_turn is None:
         # 스트림 열기 전 판정 — 프론트가 일반 HTTP 에러로 잡아 폴백 분기하기 쉽게
@@ -1409,9 +1601,11 @@ async def agent_turn(
                     event="stage", stage="compacting", message="대화가 길어 자동 압축했습니다"
                 ).to_sse()
             # async 제너레이터라 usage_context가 yield를 넘어도 안전 (같은 태스크 컨텍스트).
+            # 턴 데드라인도 같은 통로로 심는다 — 아래 _iter_with_heartbeat에 넘기는 상한과
+            # **같은 값**이어야 에이전트의 2상 예산이 실제 절단선과 어긋나지 않는다.
             with usage_context(
                 component="agent", actor_type="user", user_id=user_id, session_id=session_key
-            ):
+            ), _turn_deadline_scope(turn_max_sec):
                 async for event in _iter_with_heartbeat(
                     stream_turn(message, agent_context), _SSE_HEARTBEAT_SEC, turn_max_sec
                 ):
@@ -1499,6 +1693,11 @@ async def agent_turn(
             yield ProgressEvent(
                 event="error", stage="agent", message="응답 생성 중 오류가 발생했습니다"
             ).to_sse()
+        finally:
+            # 저장이 끝난(또는 실패해 더는 저장하지 않을) 지금이 잠금을 푸는 자리다.
+            # 타임아웃·예외·클라이언트 끊김(GeneratorExit)에도 반드시 지나가야 세션이
+            # 잠긴 채 남지 않는다.
+            _release_pending_refine_lock(session_key)
         # 타임라인 일괄 적재 — 스트림이 정상 종료된 뒤 한 번 (best-effort, threadpool).
         # 클라이언트가 중간에 끊으면 여기 못 오지만, 끊김 처리는 별도 과제(HIGH todo).
         await run_in_threadpool(_save_turn_events, session_key, turn_request_id, tev)

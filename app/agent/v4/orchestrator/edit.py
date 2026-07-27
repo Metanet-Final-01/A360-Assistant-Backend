@@ -28,6 +28,7 @@ from pydantic import ValidationError
 
 from app.agent.knowledge import channels
 from app.core.llm import UsageCallbackHandler
+from .bot_meta import fill_bot_meta
 
 from .. import config
 from ..recommend.graph import _coerce_flow
@@ -454,6 +455,12 @@ async def edit_node(state: TurnState) -> dict:
     attach_confidence(result["flow"], sink, result["violations"])
     # 구조 연산이었으면 L2 재채점으로 flow_confidence 갱신 (검증 심도 ∝ 수정 규모, v3).
     await _rescore_if_structural(result["flow"], ops)
+    # 봇 메타 갱신 (제약 #15) — 편집으로 전제가 바뀌면 따라 바뀌어야 한다. "맥OS로 바꿔줘"는
+    # set_flow가 spec.assumptions를 갈아끼우는데(RPA-282), 메타를 다시 안 읽으면 target_os가
+    # 생성 시점 값에 얼어붙어 R16 경고와 어긋난다. 사용자가 지정한 folder는 보존된다.
+    # trust_folder=True: 이 흐름도는 저장된 추천안에서 왔으므로 자리표시자가 아닌 폴더 값은
+    # 사람이 넣은 것이다. 생성 경로(LLM 산출)는 기본값 False로 무조건 자리표시자로 되돌린다.
+    fill_bot_meta(result["flow"], trust_folder=True)
     # 라이브 렌더: 검수·교정 반영한 최종본을 "완료" 프레임으로 흘려보낸다(done 직전).
     emit_flow_frame(result["flow"], result["violations"], "완료")
     answer = ops.answer or (ops.change_summary or "요청하신 대로 흐름도를 수정했어요.")

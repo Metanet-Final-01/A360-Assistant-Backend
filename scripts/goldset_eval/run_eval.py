@@ -8,6 +8,11 @@
 전체 저장: summary.json / report.md
 
 실패 격리: 케이스 하나의 예외는 기록 후 다음 케이스로 진행한다.
+
+엄밀 축(RPA-298 Phase 0-1): 골드셋에 믿을 수 있는 고정 정답지(`정답흐름도/`)가 있으면
+`exact_metrics.attach_exact_axes`로 `action_exact*`·중첩·순서를 **기존 축과 나란히** 낸다.
+재채점기(`rescore.py`)와 같은 함수를 쓴다 — 갈리면 재채점 수치를 원 런과 비교할 수 없다.
+정답지가 없거나 못 믿으면 기존 축만 낸다(정답지 생성 전 환경에서도 러너는 돌아야 한다).
 """
 
 import argparse
@@ -19,6 +24,11 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+# 채점 축 정의만 가져온다(앱·DB를 끌고 오지 않는 순수 모듈이라 모듈 최상위에 둬도 안전).
+from .build_gold_flows import DEFAULT_OUT_NAME, check_gold_flows, load_gold_flow
+from .exact_metrics import EXACT_ROW_KEYS
+from .quality_axes import L1_ROW_KEYS, L3_ROW_KEYS, l1_row, l3_row
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("goldset_eval")
@@ -105,9 +115,13 @@ def agent_module(version: str):
 
 async def _run_case(
     entry: dict, goldset: Path, case_out: Path, timeout: float, kb_canons,
-    agent_version: str = "v3",
+    agent_version: str = "v3", gold_flow: dict | None = None, judge: bool = False,
 ) -> dict:
-    """케이스 1회 실행: PDF 파싱 → analyze → recommend → 채점. 반환은 요약 행."""
+    """케이스 1회 실행: PDF 파싱 → analyze → recommend → 채점. 반환은 요약 행.
+
+    `gold_flow`(고정 정답지 한 케이스)를 주면 엄밀 축을 기존 축 **옆에** 얹는다.
+    없으면 기존 축만 — 정답지가 없는 환경에서도 러너는 그대로 돌아야 한다.
+    """
     _agent = agent_module(agent_version)
     analyze, recommend = _agent.analyze, _agent.recommend
     from app.services.parser import parse_document
@@ -202,6 +216,31 @@ async def _run_case(
     doc_text = _format_document(parsed) if _has_text(parsed) else ""
     cov = await asyncio.to_thread(score_coverage, doc_text, recommendation)
     score["coverage"] = cov
+
+    # 엄밀 축 — 고정 정답지 대비 문자열 일치·중첩·순서. 기존 축 값은 건드리지 않는다.
+    if gold_flow:
+        from .exact_metrics import attach_exact_axes
+
+        attach_exact_axes(score, recommendation, gold_flow)
+
+    # 납득 기준 L1·L3 (제약 #13). L1은 결정론이라 항상, L3는 LLM 2콜이라 opt-in.
+    from .quality_axes import groundedness, judge_axis, l1_row, l3_row
+
+    score["groundedness"] = groundedness(recommendation)
+    judged = None
+    if judge:
+        spec_for_judge = recommendation.get("spec") or {}
+        if spec_for_judge.get("requirements"):
+            judged = await asyncio.to_thread(
+                judge_axis, recommendation, spec_for_judge, doc_text or None,
+                score.get("violations"),
+            )
+        else:
+            # spec이 없으면 기대를 세울 근거가 없다 — 조용히 0점을 내면 '나쁜 흐름도'와
+            # 구별이 안 된다. 축을 아예 안 낸다.
+            logger.warning("[%02d] spec 요구가 없어 심판 축 생략", idx)
+    if judged:
+        score["judge"] = judged
     (case_out / "score.json").write_text(
         json.dumps(score, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -217,6 +256,12 @@ async def _run_case(
         "f1_core": score["action_core"]["f1"],
         "n_gold_core": score["action_core"]["n_gold_core"],
         "n_gold_boiler": score["action_core"]["n_gold_boilerplate"],
+        # 기능 등가 축 (RPA-298) — 다른 패키지로 같은 자원을 다룬 것도 성공.
+        # n_cross가 0이면 그 케이스엔 대안 경로가 없었다는 뜻이라 엄격 축과 같은 값이 된다.
+        "f1_equiv": score["action_equiv"]["f1"],
+        "precision_equiv": score["action_equiv"]["precision"],
+        "recall_equiv": score["action_equiv"]["recall"],
+        "n_cross_pkg": score["action_equiv"]["n_cross_package"],
         "pkg_f1": score["package"]["f1"],
         "order": score["order_score"],
         "kb_gaps": len(score["kb_gaps"]),
@@ -226,13 +271,24 @@ async def _run_case(
         "cov_covered": (cov or {}).get("n_covered"),
         "cov_total": (cov or {}).get("n_total"),
     })
+    # 엄밀 축 스칼라 — 정답지가 없으면 빈 dict라 행 모양이 기존과 완전히 같다.
+    from .exact_metrics import exact_row
+
+    row.update(exact_row(score))
+    row.update(l1_row(recommendation))     # L1은 결정론 — 항상 낸다
+    row.update(l3_row(judged))             # L3는 못 냈으면 빈 dict (0으로 안 채운다)
     return row
 
 
 _AGG_KEYS = ("precision", "recall", "recall_achv", "recall_core", "f1", "f1_core",
+             "f1_equiv", "precision_equiv", "recall_equiv", "n_cross_pkg",
              "n_gold_core", "n_gold_boiler", "pkg_f1", "order",
              "coverage", "cov_covered", "cov_total", "n_pred", "n_matched", "kb_gaps",
-             "flow_confidence", "cards", "analyze_sec", "recommend_sec")
+             "flow_confidence", "cards", "analyze_sec", "recommend_sec",
+             # 엄밀 축 (RPA-298 Phase 0-1) — 정답지가 있는 런에서만 행에 존재한다.
+             *EXACT_ROW_KEYS,
+             # 납득 기준 L1·L3 (제약 #13). L3는 --judge 런에서만 행에 존재한다.
+             *L1_ROW_KEYS, *L3_ROW_KEYS)
 
 
 def _aggregate_reps(entry: dict, reps: list[dict]) -> dict:
@@ -274,11 +330,25 @@ def _fmt(v) -> str:
     return str(v)
 
 
+# 리포트 표에 붙이는 엄밀 축 열. 정답지가 있는 런에만 붙는다 — 없는 런의 표 모양은
+# 기존과 한 칸도 달라지지 않아야 지난 리포트와 나란히 읽힌다.
+_EXACT_COLS = ["f1_exact", "recall_exact", "recall_exact_core", "nesting_path", "order_exact"]
+
+
 def _write_report(out_dir: Path, rows: list[dict], meta: dict) -> None:
     ok = [r for r in rows if "error" not in r]
     cols = ["index", "bot_name", "n_gold", "n_gold_core", "n_gold_boiler", "n_pred", "n_matched",
-            "precision", "recall", "recall_core", "f1", "coverage", "cov_covered", "cov_total",
+            "precision", "recall", "recall_core", "f1", "f1_equiv", "n_cross_pkg",
+            "coverage", "cov_covered", "cov_total",
             "pkg_f1", "order", "flow_confidence", "recommend_sec"]
+    exact_on = any(any(c in r for c in _EXACT_COLS) for r in ok)
+    if exact_on:
+        cols += _EXACT_COLS
+    # L1은 항상 있고, L3는 --judge 런에만 있다 — 없는 열을 표에 넣으면 전부 '—'로 채워져
+    # "쟀는데 0"처럼 읽힌다.
+    cols += ["action_cited", "param_grounded"]
+    if any("judge_met_rate" in r for r in ok):
+        cols += ["judge_met_rate", "judge_soundness"]
     lines = [
         f"# 골드셋 평가 리포트 — {meta['tag']}",
         "",
@@ -305,7 +375,32 @@ def _write_report(out_dir: Path, rows: list[dict], meta: dict) -> None:
             f"- action P/R/F1: {_fmt(mean('precision'))} / {_fmt(mean('recall'))} / {_fmt(mean('f1'))}",
             f"- **실업무 재현율(보일러플레이트 제외): {_fmt(mean('recall_core'))}** · 실업무 F1: {_fmt(mean('f1_core'))}",
             f"- 달성가능 재현율(KB gap 제외): {_fmt(mean('recall_achv'))}",
+            f"- **기능 등가 P/R/F1: {_fmt(mean('precision_equiv'))} / {_fmt(mean('recall_equiv'))} "
+            f"/ {_fmt(mean('f1_equiv'))}** · 케이스당 교차패키지 매칭 {_fmt(mean('n_cross_pkg'))}건",
             f"- package F1: {_fmt(mean('pkg_f1'))} · 순서 보존: {_fmt(mean('order'))}",
+            "",
+            "### 납득 기준 (제약 #13)",
+            f"- **L1 문서 근거성**: 액션 인용률 {_fmt(mean('action_cited'))} "
+            f"({_fmt(mean('n_action_cited'))}/{_fmt(mean('n_action_citable'))}) · "
+            f"파라미터 근거값 비율 {_fmt(mean('param_grounded'))}",
+            (
+                f"- **L3 독립 심판**: must 기대 충족률 {_fmt(mean('judge_met_rate'))} · "
+                f"견고성 {_fmt(mean('judge_soundness'))} · "
+                f"미충족 must {_fmt(mean('judge_unmet_must'))}건 · 치명 결함 {_fmt(mean('judge_fatal'))}건"
+                if any("judge_met_rate" in r for r in ok)
+                else "- L3 독립 심판: 미측정 (`--judge`로 켠다 — 케이스·반복당 LLM 2콜)"
+            ),
+            "",
+            "> **L1**은 결정론이다(LLM 0콜). `sources`가 빈 액션은 검색에 한 번도 안 잡힌 것 —",
+            "> 모델이 기억에서 꺼냈거나 결정론 보완으로 들어왔다. 구조 액션(Loop·If·Error",
+            "> handler)은 카탈로그 직조회로 들어오므로 분모에서 뺀다. ⚠️ 근거의 **존재**를",
+            "> 재지 적절성을 재지 않는다 — 엉뚱한 문서가 붙어도 1.0이다(적절성은 L3의 몫).",
+            ">",
+            "> **L3**는 정답 봇을 **보지 않는다.** spec+문서만으로 세운 기대에 흐름도를 대므로,",
+            "> 재현율이 '정답 봇을 얼마나 베꼈나'를 잰다면 이쪽은 '실제로 돌아가는가'를 잰다.",
+            "> 두 축이 갈리는 지점이 곧 정답 봇이 문서 없이 채운 구현량이다. 실측 예: 케이스",
+            "> 01에서 에이전트가 `Jira/Create project`를 냈는데 정답이 `Rest/restPost`라 재현율은",
+            "> 0점이었다 — 전용 패키지 쪽이 더 관용적인데도 감점이다. L3엔 그 편향이 없다.",
             "",
             "> 커버리지=문서가 명시한 작업의 달성률(covered+0.5·partial)/total. F1=정답 봇 액션",
             "> 시퀀스와의 문자열 매칭. 문서가 성길수록 둘의 격차가 크며, 그 격차가 곧 '정답 봇이",
@@ -316,7 +411,38 @@ def _write_report(out_dir: Path, rows: list[dict], meta: dict) -> None:
             "> 마켓 심사 요건이라 업무정의서에도 공식 문서에도 없어 에이전트가 만들어낼 근거가",
             "> 없다 — 실측 528개 중 180개(34%). `recall`은 기존 기준선과의 비교용,",
             "> `recall_core`는 실제 실력 측정용으로 나란히 본다.",
+            ">",
+            "> **기능 등가**는 패키지가 달라도 **같은 자원**을 다루면 성공으로 친다",
+            "> (`Email/emailConnect` ↔ `Microsoft 365 Outlook/Connect`). 엄격 채점은 패키지가",
+            "> 다르면 유사도를 0으로 막는데, 우리 정답 기준은 '사람이 손으로 옮겨 돌아가면 성공'",
+            "> 이라 대안 경로도 성공이다. `n_cross_pkg`가 0인 케이스는 대안 경로가 없어 엄격",
+            "> 채점과 같은 값이다. 도메인 표(`notation._PKG_DOMAIN`)는 사람 판단이므로 어떤",
+            "> 등가가 발동했는지 각 `score.json`의 `equiv_pairs`에 남는다 — 사후 감사용이다.",
         ]
+        if exact_on:
+            gf = meta.get("gold_flows") or {}
+            lines += [
+                "",
+                "## 엄밀 축 (고정 정답지 대비 — 퍼지 유사도 없음)",
+                f"- 정답지: `{gf.get('dir')}` (생성 {gf.get('generated_at')}, "
+                f"KB 사상률 {_fmt(gf.get('resolve_rate'))})",
+                f"- **엄밀 P/R/F1: {_fmt(mean('precision_exact'))} / {_fmt(mean('recall_exact'))} "
+                f"/ {_fmt(mean('f1_exact'))}**",
+                f"- 엄밀 실업무 재현율(보일러플레이트 제외): {_fmt(mean('recall_exact_core'))} · "
+                f"엄밀 실업무 F1: {_fmt(mean('f1_exact_core'))}",
+                f"- 사상된 정답만 대비한 재현율: {_fmt(mean('recall_exact_resolved'))} "
+                f"(정답지 미사상 액션 케이스당 {_fmt(mean('n_gold_unresolved'))}건은 절대 안 맞는다)",
+                f"- 중첩 경로 일치율 {_fmt(mean('nesting_path'))} · 깊이 일치율 "
+                f"{_fmt(mean('nesting_depth'))} · 순서 보존(엄밀 매칭 기준) "
+                f"{_fmt(mean('order_exact'))} · 파라미터 이름 Jaccard {_fmt(mean('param_jaccard'))}",
+                "",
+                "> **엄밀 축이 기존 축보다 낮게 나오는 것이 정상이다.** 기존 축은 토큰 유사도",
+                "> ≥0.55면 맞는 것으로 치지만, 엄밀 축은 정답지에 박아 둔 **KB 표기 문자열이",
+                "> 정확히 같아야** 맞고(`Create` ≠ `Create folder`) 정답지에서 KB로 사상되지",
+                "> 못한 액션이 분모에 그대로 남는다. 대신 기존 축이 아예 못 보던 것 —",
+                "> 액션이 Loop/If **안에 있는가**(`nesting_path`) — 을 잰다.",
+                "> 기존 축과 값·의미가 다르므로 서로 빼거나 합치지 말고 나란히 읽어라.",
+            ]
     # KB gap 롤업 (repeat>1이면 rep 하위 폴더까지 — rglob)
     gap_counter: dict[str, int] = {}
     for sc in out_dir.rglob("score.json"):
@@ -340,6 +466,8 @@ async def main() -> int:
     ap.add_argument("--agent-version", default="v3",
                     help="평가할 에이전트 버전 (기본 v3 — 기존 명령 호환)")
     ap.add_argument("--timeout", type=float, default=720.0, help="케이스당 recommend 타임아웃(초)")
+    ap.add_argument("--judge", action="store_true",
+                    help="독립 LLM 심판 축(L3)을 함께 낸다 — **케이스·반복당 LLM 2콜 추가**. spec+문서만 보고 세운 기대에 흐름도를 대므로 정답 봇과 무관한 축이다(제약 #13)")
     ap.add_argument("--repeat", type=int, default=1,
                     help="케이스당 반복 실행 수 — LLM 분산 억제용. >1이면 케이스 폴더에 rep1/rep2/… 저장, 요약 행은 평균±표준편차")
     ap.add_argument("--parallel", type=int, default=1,
@@ -379,6 +507,14 @@ async def main() -> int:
         CanonAction(s["package"], s["action"])
         for s in get_backend_catalog().iter_action_schemas()
     ]
+    # 고정 정답지(엄밀 축). 없거나 못 믿으면 기존 축만 낸다 — 정답지 생성 전 환경에서도
+    # 러너가 돌아야 하고, 망가진 정답지 위의 그럴듯한 0점은 없느니만 못하다.
+    flows_dir = goldset / DEFAULT_OUT_NAME
+    gold_status = check_gold_flows(flows_dir)
+    for msg in gold_status.messages:
+        # ⚠는 사람이 조치해야 하는 것(낡음·못 믿음), ⓘ는 정상 상태의 안내다
+        (logger.warning if msg.startswith("⚠") else logger.info)("%s", msg)
+
     meta = {
         "tag": args.tag,
         "agent_version": args.agent_version,
@@ -386,6 +522,14 @@ async def main() -> int:
         "model": agent_config.OPENAI_MODEL,
         "kb_actions": len(kb_canons),
     }
+    if gold_status.usable:
+        gm = gold_status.manifest or {}
+        meta["gold_flows"] = {
+            "dir": str(flows_dir),
+            "generated_at": gm.get("generated_at"),
+            "resolve_rate": (gm.get("totals") or {}).get("resolve_rate"),
+            "builder": gm.get("builder"),
+        }
     logger.info("평가 시작: %d케이스, 모델=%s, KB=%d액션, out=%s",
                 len(entries), meta["model"], len(kb_canons), out_dir)
 
@@ -396,13 +540,26 @@ async def main() -> int:
     sem = asyncio.Semaphore(max(1, args.parallel))
     started_at = time.monotonic()
 
+    # 케이스별 정답지는 반복마다 다시 읽지 않고 한 번만 읽는다(같은 파일 × repeat회).
+    gold_flows: dict[str, dict] = {}
+    if gold_status.usable:
+        for e in entries:
+            gf = load_gold_flow(flows_dir, e["case_dir"])
+            if gf is None:
+                logger.warning("[%02d] 정답지에 이 케이스가 없다 — 엄밀 축 생략: %s",
+                               e["index"], e["case_dir"])
+            else:
+                gold_flows[e["case_dir"]] = gf
+
     async def _one(e: dict, rep_i: int) -> dict:
         case_out = out_dir / e["case_dir"] / (f"rep{rep_i + 1}" if args.repeat > 1 else "")
+        gold_flow = gold_flows.get(e["case_dir"])  # 못 믿는 정답지면 비어 있다
         async with sem:  # 세마포어 안에서만 시간 측정 — 큐 대기 제외, 실제 compute만
             t0 = time.monotonic()
             try:
                 row = await _run_case(
-                    e, goldset, case_out, args.timeout, kb_canons, args.agent_version
+                    e, goldset, case_out, args.timeout, kb_canons, args.agent_version,
+                    gold_flow=gold_flow, judge=args.judge,
                 )
             except Exception as ex:  # noqa: BLE001 — 반복 1회 실패 격리
                 logger.exception("[%02d] rep%d 실패", e["index"], rep_i + 1)

@@ -13,6 +13,7 @@
 | 업무 분해 | `DECOMPOSE` | `package_overview` (용례는 별도 결정론 자산) |
 | 액션 선택 | `ACTION` | `action_schema` |
 | 파라미터 | `PARAM_DOC` | `doc_page` (해당 액션 표기로 질의) |
+| 실행 시점 | `TRIGGER` | `trigger_schema` (메뉴는 전량 — 검색은 **순서만** 준다) |
 | 구조 | (검색 없음) | `derive_structural_actions` — 카탈로그 직조회 |
 
 ## 채널 정의가 여기 하나뿐이어야 하는 이유
@@ -47,6 +48,11 @@ v4 검색기만 켠다). 2026-07-26 로컬 실측(5433/9201, 12질의, 캐시 OF
 **DB에 행이 0건**이라서다. 후단 필터라 에러 없이 조용히 안 잡혀 v1~v3 내내 아무도
 몰랐다 — 채널 정의에서 빼고, `__post_init__`이 선언 시점에 다시 못 들어오게 막는다.
 
+`trigger_schema`는 정반대 방향의 결론이다: **push-down이 없었으면 채널이 될 수 없었다.**
+12질의 전부 0건이던 것이 전부 포화(0 → 48히트)로 뒤집혀 Phase 3에서 `TRIGGER` 채널로
+편입했다. 다만 이 채널만은 검색이 메뉴를 *좁히지* 않는다 — 9문서짜리 폐쇄 어휘라 전량이
+곧 메뉴이고, 검색은 그 메뉴의 **순서**만 정한다(`v4/orchestrator/triggers.py`).
+
 ## 굶주림 우회책은 push-down과 함께 제거했다
 
 푸시다운 전에는 좁은 채널에 질의 정형 접미사를 붙여 버텼다(`package_overview`에
@@ -79,7 +85,7 @@ LOADED_SOURCE_TYPES = frozenset({
     "doc_page",           # 16,164 — 공식 문서 페이지 (package_name/action_name이 비어 있다)
     "package_overview",   # 136 — 패키지 개요
     "package_release",    # 132 — 릴리스 노트 (어느 채널에도 넣지 않는다 — 설계 §4)
-    "trigger_schema",     # 31 — 트리거 (Phase 3에서 채널 편입 예정)
+    "trigger_schema",     # 31 — 트리거 (`TRIGGER` 채널, 9문서로 청킹돼 있다)
 })
 
 # 채널이 **연속** 이 횟수만큼 0건이면 WARN한다. 채널마다 `warn_after`로 덮어쓴다.
@@ -173,7 +179,29 @@ PARAM_DOC = SearchChannel(
     doc="파라미터 — 이미 고른 액션의 표기로 그 액션 문서 본문만 집는다",
 )
 
-CHANNELS: tuple[SearchChannel, ...] = (DECOMPOSE, ACTION, PARAM_DOC)
+TRIGGER = SearchChannel(
+    name="trigger",
+    source_types=("trigger_schema",),
+    # 이 채널만 검색이 메뉴를 좁히지 않는다 — 9문서짜리 폐쇄 어휘라 전량을 실어도 토큰이
+    # 싸고, 좁히면 정답이 상위 k 밖으로 밀릴 위험만 생긴다. 검색은 **순서**를 준다.
+    # limit을 메뉴 크기와 같은 9로 두는 이유: 31행이 9문서로 청킹돼 있어(평균 3.4청크/문서)
+    # 히트 9건이 곧 문서 9개가 아니다 — 문서 단위로 접고 나면 메뉴 상위 절반쯤이 순위를
+    # 받는다. 리랭크 비용은 후보 20건에 붙지 limit에 붙지 않아 올려도 손해가 없다(ACTION 동일).
+    limit=9, quota=9,
+    # 한 턴 질의 수 = **1건**. 의도 게이트를 통과한 턴에만, 의도 조각을 합쳐 한 번 던진다.
+    # 그래서 1 말고 쓸 수 있는 값이 없다 — 2 이상이면 한 턴 안에서 임계에 못 닿아 감지기가
+    # 꺼진다(DECOMPOSE가 공통값 6에서 겪은 함정과 같다).
+    # 다른 채널과 달리 1이 소음이 아닌 이유: 코퍼스가 31행뿐이라 push-down 뒤에는 하이브리드가
+    # 항상 limit을 채운다(실측 12/12 포화). 이 채널의 0건은 "질의에 안 맞았다"가 아니라
+    # **채널이 죽었다**는 뜻이다.
+    warn_after=1,
+    # rescue_suffix를 두지 않는다: 위 이유로 0건이 곧 고장 신호인데 구제 재질의가 어쩌다
+    # 살려내면 그 고장을 가린다. 게다가 메뉴는 검색과 무관하게 전량이라 굶어도 기능이 줄지
+    # 않는다 — 굶주림을 뚫을 이유가 없고 드러낼 이유만 있다.
+    doc="실행 시점 — 트리거 메뉴(전량)의 순서를 질의 관련도로 매긴다",
+)
+
+CHANNELS: tuple[SearchChannel, ...] = (DECOMPOSE, ACTION, PARAM_DOC, TRIGGER)
 _BY_NAME = {c.name: c for c in CHANNELS}
 
 # v1~v3가 쓰던 레거시 목록 — 여기 있는 이름이 넘어오면 ACTION 채널로 접는다.
@@ -189,6 +217,9 @@ def channel_for_source_types(source_types: list[str] | None) -> SearchChannel | 
     호출부 수정 없이 유지하는 장치다. graph.py가 채널을 직접 넘기게 되면 이 경로는 죽는다.
 
     None(전체 검색 — qa 경로)은 그대로 None을 돌려준다: 문서까지 봐야 하는 단계다.
+
+    `TRIGGER`는 일부러 접지 않는다 — 레거시 호출부가 `trigger_schema`를 넘긴 적이 없고
+    (트리거 검색은 v4에서 처음 생겼다), 트리거 경로는 채널 객체를 직접 들고 부른다.
     """
     if not source_types:
         return None
