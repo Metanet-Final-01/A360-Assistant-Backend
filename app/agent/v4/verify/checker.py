@@ -168,6 +168,12 @@ class Violation:
             "action": self.action,
             "param": self.param,
             "param_type": self.spec_excerpt.get("type"),
+            # R17이 '어느 패키지로 옮겨야 하는가'를 스칼라로 싣는다. 문장 안에만 있으면
+            # 교정 쪽이 그걸 파싱해야 하고, 실측에서 모델은 패키지만 바꾸고 **액션 이름은
+            # 옛 패키지 것을 그대로 복사**해 `Microsoft 365 Excel/Save workbook action in
+            # Excel advanced package` 같은 없는 표기를 3라운드 연속 만들었다. 대상 패키지를
+            # 구조로 알아야 그 패키지의 실제 액션 목록을 결정론으로 붙여 줄 수 있다.
+            "expected_package": self.spec_excerpt.get("expected_package"),
             "step_id": self.step_id,
             "severity": self.severity,
         }
@@ -1289,6 +1295,7 @@ def run_session_package_checks(
                 f"유효해 실행 시 이 단계에서 멈춥니다. 같은 자원을 다루는 액션은 "
                 f"{owner[0]} 패키지로 통일하세요.",
                 package=pkg, action=act, step_id=step_id,
+                spec_excerpt={"expected_package": owner[0]},
             ))
     return violations
 

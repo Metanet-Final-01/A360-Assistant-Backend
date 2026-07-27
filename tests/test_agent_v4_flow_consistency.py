@@ -197,6 +197,70 @@ def test_실행되는_액션은_대상이_아니다():
     assert run_scaffold_checks(steps) == []
 
 
+def _mixed():
+    """실측 산출물의 그 형태 — Excel advanced가 연 핸들을 Microsoft 365 Excel이 받는다."""
+    return _steps(
+        _a("Excel advanced", "Open", produces=["book"]),
+        _a("Microsoft 365 Excel", "Save workbook action in Excel advanced package",
+           consumes=["book"]),
+    )
+
+
+def test_R17은_옮겨_갈_패키지를_스칼라로_싣는다():
+    """문장 안에만 있으면 교정 쪽이 그걸 파싱해야 한다 — 대상 패키지는 구조로 나가야 한다."""
+    (v,) = run_session_package_checks(_mixed(), _REG)
+
+    assert v.as_dict()["expected_package"] == "Excel advanced"
+
+
+def test_패키지_교체_후보가_대상_패키지의_실제_액션을_보여준다():
+    """🔴 실측 2026-07-27 — surgeon이 3라운드 내내 같은 연산을 내고 매번 버려졌다.
+
+        update → Microsoft 365 Excel/Save workbook action in Excel advanced package
+
+    package는 정확히 옮겼는데 **액션 이름을 옛 패키지 것에서 그대로 복사**했다. package와
+    action_name을 둘 다 준 형태라 반쪽 교체 검사에도 안 걸린다 — 규칙을 어긴 게 아니라
+    대상 패키지의 대응 액션 이름을 **모르는 것**이 원인이다. R17 blocker 2건이 그대로 남았다.
+
+    수리 메뉴에 그 액션이 있어도 소용없다: "이 자리를 저 패키지의 무엇으로"라는 짝짓기는
+    수십 줄짜리 목록에서 안 읽힌다. 자리마다 짝을 붙여야 한다.
+    """
+    from app.agent.v4.orchestrator.harness import package_swap_block
+
+    from tests.agent_stubs import FakeCatalog
+
+    viols = [v.as_dict() for v in run_session_package_checks(_mixed(), _REG)]
+    block = package_swap_block(viols, FakeCatalog())
+
+    assert "**Excel advanced** 패키지로 옮긴다" in block
+    assert "excelAdvancedPackageSaveWorkbookAction" in block, "대상 패키지의 실제 액션 이름"
+    assert "Excel advanced/Save workbook action in Excel advanced package" in block, \
+        "지금 이름을 그대로 쓰면 뭐가 되는지 눈앞에 보여준다"
+
+
+def test_교체_후보는_대상_패키지_밖의_액션을_섞지_않는다():
+    """폐쇄 어휘 — 여기서 다른 패키지 액션을 보여주면 R17을 고치다 R1을 만든다."""
+    from app.agent.v4.orchestrator.harness import package_swap_block
+
+    from tests.agent_stubs import FakeCatalog
+
+    catalog = FakeCatalog()
+    viols = [v.as_dict() for v in run_session_package_checks(_mixed(), _REG)]
+    listed = package_swap_block(viols, catalog).split("고른다: ")[1].split("\n")[0]
+
+    for name in [n.strip() for n in listed.split(",") if "외 " not in n]:
+        assert catalog.get_action_schema("Excel advanced", name) is not None, name
+
+
+def test_R17이_없으면_블록이_안_나온다():
+    """조건부 블록 — 없는 문제로 프롬프트를 늘리지 않는다(프리픽스 캐시·예산)."""
+    from app.agent.v4.orchestrator.harness import package_swap_block
+
+    from tests.agent_stubs import FakeCatalog
+
+    assert package_swap_block([{"rule": "R7", "package": "P", "action": "A"}], FakeCatalog()) == ""
+
+
 def test_R18_수리_힌트가_반쪽_교체를_경고한다():
     """🔴 실측 2026-07-27 — R18 5건이 4라운드 동안 한 번도 수리되지 않았다.
 

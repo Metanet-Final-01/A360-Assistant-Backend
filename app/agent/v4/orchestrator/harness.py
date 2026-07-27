@@ -22,6 +22,7 @@ catalog는 CatalogLookup 프로토콜이면 무엇이든 된다: 호출부가 Ca
 import copy
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -292,6 +293,71 @@ def repair_spec_excerpts(
         seen.add((pkg, act))
         blocks.append(_spec_block(pkg, act, spec))
     return "\n".join(blocks)
+
+
+# 패키지 교체 후보를 R17 한 건당 몇 개까지 보여줄지. 대상 패키지 전량을 열면 수리 메뉴와
+# 겹쳐 프롬프트만 부풀고, 너무 적으면 정작 맞는 액션이 잘린다.
+_MAX_SWAP_CANDIDATES = 10
+
+
+def _name_tokens(text: str) -> set[str]:
+    """액션 이름을 소문자 토큰으로. 순위용일 뿐 판정에는 쓰지 않는다."""
+    return {t for t in re.split(r"[^a-z0-9가-힣]+", (text or "").lower()) if len(t) > 2}
+
+
+def package_swap_block(violations: list[dict], catalog: CatalogLookup) -> str:
+    """R17(세션 핸들 패키지 불일치) 자리마다 **옮겨 갈 패키지의 실제 액션 이름**을 보여준다.
+
+    ## 왜 필요한가 (실측, 2026-07-27)
+
+    surgeon이 3라운드 내내 같은 연산을 내고 매번 버려졌다:
+
+        update → Microsoft 365 Excel/Save workbook action in Excel advanced package
+
+    package는 정확히 옮겼는데 **액션 이름을 옛 패키지 것에서 그대로 복사**했다. "package와
+    action_name을 둘 다 줘라"는 규칙은 지킨 형태라 반쪽 교체 검사에도 안 걸린다 — 모델이
+    대상 패키지의 대응 액션 이름을 **모르는 것**이 원인이지 규칙을 어긴 게 아니다.
+    R17 blocker 2건이 그대로 남은 이유다.
+
+    수리 메뉴에 그 액션이 들어 있어도 소용없었다: 메뉴는 수십 줄이고, "이 자리를 저 패키지의
+    무엇으로 바꿔야 하나"라는 **짝짓기**는 거기서 읽히지 않는다. 그래서 자리마다 짝을 붙인다.
+
+    순위는 이름 토큰이 겹치는 것부터 — 카탈로그에서 유도한 정렬일 뿐 사전이 아니다.
+    겹치는 게 없으면 이름순이라 결정론이 유지된다.
+    """
+    if catalog is None:
+        return ""
+    by_package: dict[str, list[str]] = {}
+    lines: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for v in violations or []:
+        if v.get("rule") != "R17":
+            continue
+        target = v.get("expected_package")
+        pkg, act = v.get("package"), v.get("action")
+        key = (str(target), str(pkg), str(act))
+        if not target or not act or key in seen:
+            continue
+        seen.add(key)
+        if target not in by_package:
+            by_package[target] = sorted(
+                s.get("action")
+                for s in catalog.iter_action_schemas()
+                if isinstance(s, dict) and s.get("package") == target and s.get("action")
+            )
+        pool = by_package[target]
+        if not pool:
+            continue
+        want = _name_tokens(act)
+        ranked = sorted(pool, key=lambda name: (-len(want & _name_tokens(name)), name))
+        shown = ranked[:_MAX_SWAP_CANDIDATES]
+        tail = f" … 외 {len(pool) - len(shown)}개" if len(pool) > len(shown) else ""
+        lines.append(
+            f"- {v.get('location')} 의 `{pkg}/{act}` → **{target}** 패키지로 옮긴다.\n"
+            f"  그 패키지의 액션 이름은 이 중에서 고른다: {', '.join(shown)}{tail}\n"
+            f"  ⚠ `{act}`를 그대로 쓰면 `{target}/{act}` — 없는 표기라 연산이 통째로 무시된다."
+        )
+    return "\n".join(lines)
 
 
 # 라운드 기록에 실을 연산 수 상한 — turn_events.detail은 4,000자를 넘으면 통째로 preview
@@ -762,6 +828,7 @@ def refine_flow(
         outline = render_outline(work)
         excerpts, excerpt_keys = _spec_excerpts(current_violations, catalog)
         repair_menu = repair_spec_excerpts(current, catalog, excerpt_keys, current_violations)
+        swaps = package_swap_block(current_violations, catalog)
         # 슬롯 목적은 아웃라인 바로 뒤에 붙인다 — surgeon이 노드 id를 읽는 그 자리에서
         # "이 자리는 무엇을 하려던 자리인가"가 같이 보여야 재선택이 선택지가 된다(§5.2-C).
         # spec 인자가 없으면 흐름도에 동봉된 spec을 쓴다(edit 경로는 spec을 흐름도에 싣고 온다).
@@ -770,6 +837,8 @@ def refine_flow(
             f"[흐름도 아웃라인]\n{outline}{purposes}\n\n"
             f"[고칠 문제들 (심각도순)]\n{_findings_lines(round_findings)}\n\n"
             f"[스펙 발췌]\n{excerpts}"
+            # 짝짓기는 수리 메뉴에서 안 읽힌다 — "이 자리를 저 패키지의 무엇으로"를 자리마다 붙인다.
+            + (f"\n\n[패키지 교체 후보 — 세션 핸들 불일치(R17) 수리용]\n{swaps}" if swaps else "")
             + (f"\n\n[수리용 액션 스펙 — 삽입(insert/wrap)·교체(update)에 쓸 수 있는 표기. "
                f"세션 여닫기·반복·분기·예외 처리 + 이 흐름도가 이미 쓰는 패키지의 업무 액션. "
                f"여기 없는 표기는 쓰지 말 것]\n{repair_menu}"
