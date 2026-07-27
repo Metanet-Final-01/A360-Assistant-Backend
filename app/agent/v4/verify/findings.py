@@ -121,6 +121,12 @@ _RULE_SEVERITY = {
     "R10": "warning", "R12": "warning",
     # R15(attended 함정)·R16(플랫폼)은 환경 가정에 의존하는 경고 — 수리를 강제하지 않는다.
     "R15": "warning", "R16": "warning",
+    # R17(세션 핸들 패키지 불일치)은 **실행이 확실히 멈추는** 결함이라 R1(환각)과 동급이다
+    # (RPA-298). 실측: Excel advanced로 연 워크북을 Microsoft 365 Excel이 받아 3.5에서 실패.
+    # major로 두면 교정 루프가 다른 위반과 저울질하다 그냥 남길 수 있다 — 여기선 안 된다.
+    "R17": "blocker",
+    # R18(비실행 구획이 요구 담당)은 액션 하나를 채우면 풀리는 결함이라 major.
+    "R18": "major",
 }
 
 

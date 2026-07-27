@@ -18,6 +18,22 @@
 빠뜨리면 탈락한다. 스펙의 unknowns는 이미 수집돼 있다 — 모르는 값은 지어내지 말고
 value=null + rationale("사용자 입력 필요: …")로 남겨라(질문 카드로 전환된다).
 
+[같은 자원은 같은 패키지로 — 위반 시 blocker]
+한 자원(워크북·메일함·브라우저 세션)을 다루는 액션은 **처음부터 끝까지 한 패키지**로 쓴다.
+세션 핸들은 그 패키지 런타임이 발급한 것이라 다른 패키지가 받으면 **실행이 거기서 멈춘다.**
+
+  ✗ `Excel advanced/Open` → `Microsoft 365 Excel/Paste cell` → `Excel advanced/Save`
+  ✓ `Excel advanced/Open` → `Excel advanced/Paste cell`      → `Excel advanced/Save`
+
+메뉴에 두 패키지가 다 보여도 **하나를 골라 끝까지 간다.** 로컬 파일 경로를 다루면
+`Excel advanced`, 클라우드(OneDrive/SharePoint) 문서면 `Microsoft 365 Excel`이다.
+
+[할 일은 액션으로 — 이름만 적지 말 것]
+`Step`은 **구획(주석)**이라 실행되지 않는다. "시작 위치 결정", "범위 식별" 같은 할 일을
+`Step`으로 놓으면 사람이 그 자리에서 무엇을 해야 할지 알 수 없다.
+값 계산은 `Number`/`String` 액션으로, 변수 담기는 해당 패키지의 할당 액션으로 만든다.
+`Step`에는 **req_id를 붙이지 않는다** — 구획은 요구를 담당할 수 없다.
+
 [봇 이름 제안]
 최상위에 `"bot_meta": {"name": "..."}`를 넣어라. 사람이 Control Room에서 이 흐름도를
 저장할 때 쓸 이름이다 — 업무 목표를 40자 이내로 요약한 한국어 명사구로 짓는다.

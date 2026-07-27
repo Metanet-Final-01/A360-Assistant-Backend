@@ -31,6 +31,7 @@ L3는 정답 봇을 안 보므로 그 편향이 없다.
 """
 
 import logging
+import re
 
 logger = logging.getLogger("goldset_eval")
 
@@ -47,7 +48,12 @@ _STRUCTURAL_PACKAGES = frozenset({
 #   llm            — 모델이 정함 = 근거 없음
 _GROUNDED_VALUE_SOURCES = frozenset({"schema_default", "user"})
 
-L1_ROW_KEYS = ("action_cited", "param_grounded", "n_action_cited", "n_action_citable")
+# 세션을 여는 액션 이름 패턴 — `app/agent/knowledge/derive.py:_OPENER_RE`와 같은 규칙.
+# 두 곳이 갈리면 검수기가 잡는 결함과 채점이 세는 결함이 달라진다.
+_OPENER_RE = re.compile(r"^\s*(open|connect|start\s+session|log\s?in)\b", re.IGNORECASE)
+
+L1_ROW_KEYS = ("action_cited", "param_grounded", "n_action_cited", "n_action_citable",
+               "session_pkg_breaks", "scaffold_claims")
 L3_ROW_KEYS = ("judge_met_rate", "judge_soundness", "judge_unmet_must", "judge_fatal")
 
 
@@ -67,6 +73,11 @@ def _iter_actions(flow: dict):
 
 def _is_structural(action: dict) -> bool:
     return (action.get("package") or "").strip().lower() in _STRUCTURAL_PACKAGES
+
+
+def _norm_pkg(name: str) -> str:
+    """패키지 비교 키 — "Excel advanced"와 "Excel advanced 패키지"를 같게 본다."""
+    return re.sub(r"(패키지|package)$", "", (name or "").strip(), flags=re.I).replace(" ", "").lower()
 
 
 # ── L1 근거성 (결정론, 비용 0) ───────────────────────────────────────────────
@@ -106,6 +117,71 @@ def groundedness(flow: dict) -> dict:
         "n_action_citable": len(citable),
         "n_param_valued": n_param,
     }
+
+
+# ── 흐름 내부 일관성 (결정론, 비용 0) ───────────────────────────────────────
+#
+# 🔴 **왜 별도 축이 필요한가.** 기존 축은 전부 "정답 대비"다 — 재현율·정밀도·등가 모두
+# 정답 봇과 대조한다. 그런데 실사용에서 나온 치명 결함은 정답과 무관하게 **흐름 자체가
+# 모순**인 형태였다(2026-07-27 실측):
+#
+#     3.3  Excel advanced      / Open        produces sExcelSession
+#     3.5  Microsoft 365 Excel / Paste cell  consumes sExcelSession   ← 실행 시 여기서 멈춤
+#
+# 이걸 어느 축도 못 잡는다. 특히 **기능 등가 축은 오히려 성공으로 센다** — 두 패키지가
+# 같은 `spreadsheet` 도메인이라 "대안 경로"로 인정해 버린다. 등가 축은 "정답이 A인데
+# 에이전트가 B를 썼다"를 봐주려던 장치고, **한 흐름 안에서의 일관성은 보지 않는다.**
+# 결함을 성공으로 세는 지표 위에서는 개선을 측정할 수 없어 축을 따로 낸다.
+#
+# 검수기(R17·R18)와 **같은 결함**을 세지만 목적이 다르다: 검수기는 그 흐름을 고치고,
+# 여기서는 런 전체에서 몇 건 남았는지를 센다.
+
+def flow_consistency(flow: dict) -> dict:
+    """흐름 내부 모순 — 정답과 무관하게 **실행하면 깨지는** 것만 센다.
+
+    `session_pkg_breaks` — 세션 핸들을 연 패키지와 다른 패키지가 소비한 건수 (R17).
+    `scaffold_claims`    — 실행되지 않는 구획(Step/Comment)이 req_id를 달고 있는 건수 (R18).
+
+    검수기를 그대로 부르지 않고 여기서 다시 세는 이유: 채점은 **저장된 산출물**만 보고
+    돌아야 한다(재채점이 API 호출 0회라는 계약). 검수기는 카탈로그(DB)를 필요로 한다.
+    대신 판정 기준은 같게 유지한다 — 세션 판정만 카탈로그 없이 가능한 근사로 바꾼다.
+
+    ⚠️ 근사의 한계: 카탈로그 opener 목록 없이는 "이 변수가 세션 핸들인가"를 확정할 수
+    없어, **액션 이름이 여는 동작**(open/connect/start session/log in)인 것을 opener로 본다
+    (`app/agent/knowledge/derive.py`의 `_OPENER_RE`와 같은 패턴). 그래서 검수기보다
+    적게 잡을 수 있다 — 이 축은 **하한**이지 정확한 개수가 아니다.
+    """
+    handle_owner: dict[str, str] = {}
+    breaks = 0
+    scaffolds = 0
+
+    for a in _iter_actions(flow):
+        pkg = (a.get("package") or "").strip()
+        act = (a.get("action") or "").strip()
+        if not pkg:
+            continue
+
+        if _is_structural(a) and not a.get("children") and a.get("req_id"):
+            scaffolds += 1
+
+        produces = [r.get("name") for r in a.get("produces") or []
+                    if isinstance(r, dict) and r.get("name")]
+        opens = bool(_OPENER_RE.match(act)) or any(
+            (r.get("role") or "").lower() == "session"
+            for r in a.get("produces") or [] if isinstance(r, dict)
+        )
+        if opens:
+            for name in produces:
+                handle_owner[name] = pkg
+
+        for r in a.get("consumes") or []:
+            if not isinstance(r, dict) or not r.get("name"):
+                continue
+            owner = handle_owner.get(r["name"])
+            if owner and _norm_pkg(owner) != _norm_pkg(pkg):
+                breaks += 1
+
+    return {"session_pkg_breaks": breaks, "scaffold_claims": scaffolds}
 
 
 # ── L3 독립 심판 (LLM 2콜, opt-in) ───────────────────────────────────────────
@@ -149,9 +225,9 @@ def judge_axis(flow: dict, spec: dict, document: str | None = None,
 # ── 행 조립 (run_eval·rescore 공용) ──────────────────────────────────────────
 
 def l1_row(flow: dict) -> dict:
-    """요약 행에 얹을 L1 키. 항상 낸다(결정론)."""
-    g = groundedness(flow)
-    return {k: g[k] for k in L1_ROW_KEYS}
+    """요약 행에 얹을 L1 + 흐름 내부 일관성 키. 항상 낸다(결정론, LLM 0콜)."""
+    merged = {**groundedness(flow), **flow_consistency(flow)}
+    return {k: merged[k] for k in L1_ROW_KEYS}
 
 
 def l3_row(judged: dict | None) -> dict:

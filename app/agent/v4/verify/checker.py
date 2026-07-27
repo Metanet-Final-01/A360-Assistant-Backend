@@ -30,6 +30,10 @@ v3 신설 (run_flow_checks가 통합 실행):
   R15 attended 함정 — 트리거 자동 실행 흐름의 대화형 액션             (warning)
   R16 플랫폼 — 대상 OS(spec.assumptions) 미지원 패키지 사용          (warning)
 
+RPA-298 신설:
+  R17 세션 핸들 패키지 일관성 — 세션을 연 패키지와 다른 패키지가 그 핸들을 소비  (blocker)
+  R18 비실행 구획이 요구 담당 — Step/Comment가 req_id를 달고 액션 자리에 있음    (major)
+
 R9~R11의 원료는 스키마 확장 필드 produces/consumes(app/schemas/recommendation.py의
 VarRef)다. composer 명시가 1차이고 `$var$` 파싱이 교차 보정한다 — 흐름도에 produces
 명시가 하나도 없으면 R9/R10은 침묵한다(정보 없이 검사하면 전부 오탐이므로).
@@ -1140,6 +1144,173 @@ def run_environment_checks(flow: dict, catalog: CatalogLookup) -> list[Violation
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# R17~R18 (RPA-298) — 실행하면 확실히 깨지는데 기존 규칙이 전부 통과시키던 두 가지
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _flat_actions(steps: list[dict]):
+    """(경로, step_id, 액션)을 실행 순서대로 — 컨테이너 children 포함."""
+
+    def walk(actions, path, step_id):
+        for i, a in enumerate(actions or []):
+            if not isinstance(a, dict):
+                continue
+            loc = f"{path}[{i}]"
+            yield loc, step_id, a
+            yield from walk(a.get("children"), f"{loc}.children", step_id)
+
+    for step in steps or []:
+        if isinstance(step, dict):
+            yield from walk(step.get("actions"), "actions", step.get("step_id"))
+
+
+def _var_names(action: dict, key: str) -> list[str]:
+    out = []
+    for ref in action.get(key) or []:
+        if isinstance(ref, dict) and ref.get("name"):
+            out.append(str(ref["name"]))
+        elif isinstance(ref, str) and ref.strip():
+            out.append(ref.strip())
+    return out
+
+
+def run_session_package_checks(
+    steps: list[dict], registry: knowledge_derive.SessionRegistry | None = None
+) -> list[Violation]:
+    """R17 — 세션 핸들을 **연 패키지와 다른 패키지**가 소비하면 blocker.
+
+    ## 왜 필요한가 (실측)
+
+    2026-07-27 실사용 산출물에서 나온 결함이다:
+
+        3.3  Excel advanced      / Open              produces sExcelSession
+        3.5  Microsoft 365 Excel / Paste cell        consumes sExcelSession   ← 여기서 깨진다
+        3.7  Excel advanced      / Format table cell consumes sExcelSession
+
+    세션 핸들은 그 패키지의 런타임이 발급한 것이라 **다른 패키지가 받을 수 없다.**
+    사람이 그대로 Control Room에 옮기면 3.5에서 실행이 멈춘다.
+
+    그런데 기존 규칙이 전부 통과시켰다:
+      - R7/R8은 열기·닫기 **쌍**만 본다 — `Excel advanced`로 열고 닫았으니 만족이다.
+      - R9(def-before-use)는 변수가 **먼저 정의됐는지**만 본다 — 정의돼 있으니 만족이다.
+      - R1은 두 액션 모두 카탈로그에 **실재**하니 만족이다.
+    아무도 "같은 핸들인데 패키지가 갈렸다"를 안 봤다.
+
+    ## 오탐이 0인 이유
+
+    세션 핸들만 본다. 판정 근거는 **카탈로그에서 유도한 opener 목록**이다 —
+    `Excel advanced/Open`처럼 세션을 여는 액션이 만든 변수만 핸들로 취급한다.
+    `tGoldPrices` 같은 데이터 변수는 패키지를 건너다녀도 정상이라(Data Table을 메일에
+    싣는 등) 대상이 아니다. opener 유도가 실패하면(`usable`이 False) 통째로 침묵한다 —
+    '검사 안 함'이 '틀리게 검사함'보다 낫다는 이 파일의 기존 방침 그대로다.
+
+    `produces`가 없는 흐름도에서도 자연히 침묵한다(핸들을 특정할 근거가 없다).
+
+    ⚠️ `registry`를 **반드시 넘겨라.** 생략하면 `derive_session_registry()`가 카탈로그 없이
+    불려 수기 폴백 상수(opener 4건)로 떨어지고, 그 4건에 없는 패키지의 불일치는 통째로
+    놓친다 — 실측으로 이 함정을 밟았다(카탈로그를 주면 51건). 프로덕션 경로
+    (`run_flow_checks`)는 유도된 레지스트리를 넘기므로 정상이고, 이 기본값은 테스트·
+    단독 호출 편의용이다.
+    """
+    reg = registry if registry is not None else derive_session_registry()
+    if not getattr(reg, "usable", False):
+        return []
+
+    # 세션을 연 액션이 만든 변수 → 그 패키지. 같은 이름이 여러 번 열리면 마지막 것이 유효하다
+    # (재사용 패턴: 닫고 다시 열기).
+    handle_owner: dict[str, tuple[str, str]] = {}
+    violations: list[Violation] = []
+
+    for loc, step_id, a in _flat_actions(steps):
+        pkg, act = a.get("package"), a.get("action")
+        if not pkg or not act:
+            continue
+        # opener 대조는 **원표기 그대로** — 레지스트리가 카탈로그 표기를 담고 있고
+        # 기존 R7/R8(_SessionWalker._process)도 같은 방식이다. 여기서만 정규화하면
+        # 두 검사가 같은 액션을 다르게 읽는다.
+        is_opener = (pkg, act) in reg.openers or any(
+            (r.get("role") or "").lower() == "session"
+            for r in a.get("produces") or [] if isinstance(r, dict)
+        )
+        if is_opener:
+            for name in _var_names(a, "produces"):
+                handle_owner[name] = (pkg, act)
+
+        for name in _var_names(a, "consumes"):
+            owner = handle_owner.get(name)
+            # 패키지 비교는 정규화한다 — "Excel advanced"와 "Excel advanced 패키지"는
+            # 같은 패키지고, 그 흔들림까지 결함으로 세면 오탐이 된다.
+            if owner is None or lexicon.normalize_package(owner[0]) == lexicon.normalize_package(pkg):
+                continue
+            violations.append(Violation(
+                "R17", loc,
+                f"세션 '{name}'은(는) {owner[0]}/{owner[1]}이(가) 연 핸들인데 "
+                f"{pkg}/{act}이(가) 받고 있습니다 — 세션 핸들은 발급한 패키지 안에서만 "
+                f"유효해 실행 시 이 단계에서 멈춥니다. 같은 자원을 다루는 액션은 "
+                f"{owner[0]} 패키지로 통일하세요.",
+                package=pkg, action=act, step_id=step_id,
+            ))
+    return violations
+
+
+def run_scaffold_checks(steps: list[dict]) -> list[Violation]:
+    """R18 — 실행되지 않는 구획(Step·Comment)이 요구를 담당한다고 주장하면 major.
+
+    ## 왜 필요한가 (실측)
+
+    같은 산출물에서:
+
+        3.2  Step / Step   req_id=req-7  produces sStartCell   "엑셀 시작 위치 결정"
+        3.6  Step / Step   req_id=req-8  produces sTableRange  "테두리 적용 범위 식별"
+
+    A360에서 `Step`은 **구획(주석)**이라 아무것도 실행하지 않는다. 즉 "시작 위치를
+    결정한다"는 할 일을 **이름으로만 적고 액션으로 만들지 않은** 상태다. 비전문가가
+    Control Room에 옮기면 그 자리에서 멈춘다 — 무엇을 넣으라는 건지 알 수 없다.
+
+    커버리지 검사는 이걸 **못 잡는다.** req_id가 붙어 있으니 "그 요구는 담당 액션이
+    있다"로 읽혀 만족으로 계산된다. 누락이 커버리지 뒤에 숨는 정확한 형태다.
+
+    ## 오탐 경계
+
+    - **children이 있으면 구획으로 정상**이다(하위 액션을 묶는 용도) — 건너뛴다.
+    - **req_id가 없으면** 순수 구획 표시라 정상이다 — 건너뛴다. 요구를 담당한다고
+      주장할 때만 결함이다.
+    - `produces`가 있으면 정황이 더 짙지만(값을 만든다고 주장) 판정 조건에는 넣지
+      않는다 — req_id만으로 이미 충분하고, 조건을 늘리면 놓치는 경우가 생긴다.
+    """
+    violations: list[Violation] = []
+    for loc, step_id, a in _flat_actions(steps):
+        if canon_scaffold_package(a.get("package")) is None:
+            continue
+        if a.get("children"):
+            continue  # 하위를 묶는 진짜 구획
+        req_id = a.get("req_id")
+        if not req_id:
+            continue
+        label = a.get("label") or a.get("action") or "이 단계"
+        violations.append(Violation(
+            "R18", loc,
+            f"'{label}'이(가) 요구 {req_id}을(를) 담당한다고 돼 있는데 "
+            f"{a.get('package')}은(는) 실행되지 않는 구획입니다 — 할 일이 이름으로만 "
+            f"적혀 있고 액션이 없습니다. 이 자리에서 실제로 무엇을 하는지 "
+            f"(값 계산·변수 할당 등) 카탈로그 액션으로 채우세요.",
+            package=a.get("package"), action=a.get("action"), step_id=step_id,
+        ))
+    return violations
+
+
+# 실행되지 않는 구획 패키지 — 표기 흔들림을 흡수해 판정한다.
+_SCAFFOLD_PACKAGES = frozenset({"step", "comment"})
+
+
+def canon_scaffold_package(package) -> str | None:
+    """구획 패키지면 정규화 이름, 아니면 None."""
+    if not package:
+        return None
+    key = re.sub(r"[\s_/.-]+", "", str(package)).lower()
+    return key if key in _SCAFFOLD_PACKAGES else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 통합 실행기 (v3) — L0(R1~R6) + L1(R7~R16) 한 번에
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1206,6 +1377,12 @@ def run_flow_checks(
     if is_a360:
         reg = registry or derive_session_registry(catalog)
         violations.extend(run_session_checks(steps, reg, emit_r12=True))
+        # R17 — 세션 핸들이 패키지를 건너는 것. A360 세션 모델 전제라 게이트 안이다
+        # (UiPath 등은 스코프 자동 종료라 핸들 개념 자체가 다르다).
+        violations.extend(run_session_package_checks(steps, reg))
+    # R18 — 실행되지 않는 구획이 요구를 담당한다고 주장. 구조 모델과 무관하게
+    # "이름만 적고 액션을 안 만들었다"는 어느 솔루션에서나 결함이라 게이트 밖이다.
+    violations.extend(run_scaffold_checks(steps))
     violations.extend(run_dataflow_checks(flow, catalog))
     if is_a360:
         violations.extend(run_structure_checks(steps, exc))

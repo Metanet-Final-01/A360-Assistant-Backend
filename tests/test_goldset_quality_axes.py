@@ -216,8 +216,17 @@ def test_must가_없으면_충족률은_None이다(monkeypatch):
 # ── 행 조립 ─────────────────────────────────────────────────────────────────
 
 def test_L1은_항상_행에_붙는다():
-    assert set(l1_row(_flow(_action(sources=_SRC)))) == {
-        "action_cited", "param_grounded", "n_action_cited", "n_action_citable"}
+    """L1(근거성)과 흐름 내부 일관성(R17/R18 대응)은 둘 다 결정론이라 조건 없이 붙는다.
+
+    `L1_ROW_KEYS`와 정확히 일치해야 한다 — 행에만 넣고 `_AGG_KEYS`에 안 넣으면
+    반복 실행 평균에서 조용히 빠진다(그 반대도 마찬가지).
+    """
+    from scripts.goldset_eval.quality_axes import L1_ROW_KEYS
+
+    row = l1_row(_flow(_action(sources=_SRC)))
+    assert set(row) == set(L1_ROW_KEYS)
+    assert {"action_cited", "param_grounded"} <= set(row), "근거성 축"
+    assert {"session_pkg_breaks", "scaffold_claims"} <= set(row), "흐름 내부 일관성 축"
 
 
 def test_L3를_못_냈으면_행에_키가_아예_없다():
