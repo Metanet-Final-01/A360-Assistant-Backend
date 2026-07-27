@@ -17,6 +17,7 @@ compose가 동시에 지는 다섯 과업(분해·선택·파라미터·구조·
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "research_queries.md").read_text(encoding="utf-8")
 _OPS_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "operation_units.md").read_text(encoding="utf-8")
+_RESCUE_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "rescue_queries.md").read_text(encoding="utf-8")
 
 # 검색 채널은 `app.agent.knowledge.channels` 하나에서만 정의된다 (RPA-298).
 # v3까지는 같은 목록이 이 파일(`ACTION_SOURCE_TYPES`)과 `recommend/graph.py`
@@ -160,6 +162,17 @@ class _ResearchUnit(BaseModel):
 
 class _ResearchPlan(BaseModel):
     units: list[_ResearchUnit] = Field(default_factory=list)
+
+
+class _RescueQuery(BaseModel):
+    """구제 질의 한 건 — 요구 하나를 조작 어휘 영어로 옮긴 것 (`rescue_en_queries` 참조)."""
+
+    req_id: str = ""
+    en_query: str = ""
+
+
+class _RescuePlan(BaseModel):
+    queries: list[_RescueQuery] = Field(default_factory=list)
 
 
 class _OperationUnit(BaseModel):
@@ -393,6 +406,191 @@ def _decompose_queries(spec: dict) -> list[str]:
     return [q for q in out if q]
 
 
+# ── 요구별 질의 커버리지 감사 (RPA-298) ──────────────────────────────────────
+#
+# 🔴 **왜 필요한가 — 실측(2026-07-27).** 업무정의서의 Task 1·2는 "증권 버튼 클릭",
+# "'국내 금' 클릭" 두 요구인데, 질의 확장이 이 둘을 **"브라우저에서 네이버 금융 국내 금
+# 시세 페이지 열기"** 한 질의로 뭉쳤다. 액션 채널이 던진 질의 8건 어디에도 '클릭'이 없었고,
+# 그래서 메뉴 12,973자에 클릭 액션이 **0건**이었다.
+#
+# 카탈로그에는 `Recorder/Click` 등 클릭 액션이 19개 있고 검색도 정상적으로 올린다
+# (직접 질의하면 나온다). **찾아달라고 물어보질 않은 것**이다. 폐쇄 어휘라 메뉴에 없는
+# 액션은 쓸 수 없으므로, LLM은 그 자리를 실행되지 않는 `Step` 구획으로 비웠다
+# (17개 액션 중 9개). 뒤 단계가 아무리 잘해도 복구가 안 되는 종류의 손실이다.
+#
+# 그래서 질의 확장 **결과를 결정론으로 감사**한다: 어느 must 요구도 자기 어휘를 다루는
+# 질의를 못 받았으면 그 요구 문장 자체로 구제 질의를 추가한다. 이 판정은 LLM을 쓰지 않아,
+# 질의를 만든 그 모델에게 "잘 만들었니"를 되묻는 순환을 피한다.
+#
+# 판정과 구제는 별개다. 판정이 결정론이라고 **구제 질의까지** 한국어 원문 하나로 끝낼 수는
+# 없었다 — 실측상 한국어 질의는 필요한 액션을 후보에 올리지도 못한다(`rescue_en_queries`의
+# 순위 표). 그래서 구제도 본 경로와 같은 한/영 쌍으로 던진다: 한국어는 요구 원문(결정론),
+# 영어는 모델 번역(최선 노력, 실패해도 한국어 쪽은 남는다).
+
+# 요구 텍스트에서 검색어 가치가 없는 조사·기능어. 이걸 안 빼면 "…를 클릭한다"의
+# '한다'가 아무 질의에나 걸려 전부 커버된 것처럼 보인다.
+_STOPWORDS = frozenset({
+    "그리고", "또는", "에서", "으로", "하여", "하고", "한다", "된다", "있다", "없다",
+    "이를", "그", "이", "의", "를", "을", "은", "는", "에", "와", "과", "로", "및",
+    "the", "a", "an", "to", "of", "in", "on", "and", "or", "for", "with", "from",
+})
+_MIN_TOKEN_LEN = 2
+# 요구의 의미 토큰 중 이 비율 이상이 어떤 질의에 들어 있으면 "다뤄졌다"고 본다.
+# 0.5는 절반이다 — 너무 높이면 표현이 조금만 달라도 구제 질의가 남발되고, 너무 낮추면
+# 실측 사례("증권 버튼 클릭" vs "네이버 금융 페이지 열기")가 커버된 것으로 통과한다.
+_COVER_RATIO = 0.5
+
+
+# 어절 끝에서 떼어낼 조사·어미. 형태소 분석기를 두지 않는 대신(의존성 추가 + 이 판정은
+# 근사면 충분하다) 자주 쓰이는 것만 뗀다. 긴 것부터 봐야 '에서'가 '서'로 잘못 잘리지 않는다.
+_TRAILING_2 = ("에서", "으로", "에게", "라고", "한다", "된다", "하다", "이다", "한테", "부터")
+_TRAILING_1 = ("를", "을", "이", "가", "은", "는", "에", "의", "로", "와", "과", "도", "만")
+
+
+def _stem(token: str) -> str:
+    """한글 어절에서 조사·어미를 근사 제거한다 — '표를'·'표에' → '표'.
+
+    ⚠️ 접두 비교만으로는 안 된다. '표를'과 '표에'는 **어느 쪽도 다른 쪽의 접두가 아니라**
+    조사만 다른데도 다른 토큰이 된다('메일로' vs '메일에'도 같다). 실측에서 이 때문에
+    커버된 요구가 미커버로 넘어갔다.
+    """
+    if not re.fullmatch(r"[가-힣]+", token):
+        return token  # 영문·숫자는 그대로
+    if len(token) >= 4 and token.endswith(_TRAILING_2):
+        return token[:-2]
+    if len(token) >= 2 and token.endswith(_TRAILING_1):
+        return token[:-1]
+    return token
+
+
+def _sem_tokens(text: str) -> set[str]:
+    """검색어 비교용 의미 토큰 — 어절마다 **어간 하나**만 담는다.
+
+    ⚠️ 어간 근사형을 원형과 **함께** 담지 않는다. 처음엔 '클릭한다'에서 '클릭'·'클릭한'을
+    같이 넣었는데, 그러면 요구 쪽 토큰 수(분모)만 3배로 불어 교집합 비율이 인위적으로
+    낮아진다 — 실측에서 must 7건이 **전부** 미커버로 잡혔다("엑셀 표 테두리"가 겹치는
+    요구조차 18%). 한 어절 = 한 토큰이어야 비율이 의미를 갖는다.
+    """
+    out: set[str] = set()
+    for raw in re.split(r"[^0-9A-Za-z가-힣]+", (text or "").lower()):
+        if len(raw) < _MIN_TOKEN_LEN or raw in _STOPWORDS:
+            continue
+        stem = _stem(raw)
+        if stem and stem not in _STOPWORDS:
+            out.add(stem)
+    return out
+
+
+def _covers(req_token: str, query_tokens: set[str]) -> bool:
+    """요구의 어간 하나가 질의 어간 집합에 담겨 있는가 — 남은 차이는 접두로 흡수.
+
+    어간 절단이 못 잡는 합성어('시세표' vs '시세')를 위해 접두 비교를 남긴다.
+    방향을 한쪽으로만 두면 요구가 더 짧은 경우를 놓치므로 양방향으로 본다.
+    """
+    return any(
+        t == req_token or t.startswith(req_token) or req_token.startswith(t)
+        for t in query_tokens
+    )
+
+
+def uncovered_requirements(spec: dict, queries: list[str]) -> list[dict]:
+    """질의 목록이 다루지 못한 **must 요구**를 골라낸다 (결정론, LLM 0회).
+
+    `should` 요구는 대상이 아니다 — 빠져도 흐름이 성립하고, 전부 구제하면 질의가 배로 는다.
+    요구 문장에 의미 토큰이 없으면(기호·숫자만) 판정 근거가 없어 건너뛴다.
+    """
+    query_tokens = [_sem_tokens(q) for q in queries]
+    missing: list[dict] = []
+    for r in spec.get("requirements") or []:
+        if not isinstance(r, dict) or r.get("priority") != "must":
+            continue
+        req_tokens = _sem_tokens((r.get("text") or "").strip())
+        if not req_tokens:
+            continue
+        best = max(
+            (sum(1 for t in req_tokens if _covers(t, qt)) / len(req_tokens)
+             for qt in query_tokens),
+            default=0.0,
+        )
+        if best < _COVER_RATIO:
+            missing.append(r)
+    return missing
+
+
+def rescue_en_queries(spec: dict, rescued: list[dict]) -> list[str]:
+    """구제 대상 요구의 **영어 질의**를 모델에게 받는다 (LLM 1회, 구제가 걸릴 때만).
+
+    ## 왜 한국어 구제 질의만으로는 부족한가 (실측, 2026-07-27)
+
+    요구 원문을 그대로 던지면 정작 필요한 액션이 후보에 **아예 안 든다**:
+
+    | 질의 | Recorder/Click 순위 |
+    |---|---|
+    | 네이버 메인 화면에서 증권 버튼을 클릭한다. | 없음 (Mouse/Click, SAP/Click menu가 상위) |
+    | 증권 페이지에서 국내 금 항목을 클릭한다.   | 없음 (SAP 액션이 상위 4개를 점유) |
+    | click the stock button on the Naver main page | 3위 |
+    | click the domestic gold item on the stock page | 1위 |
+
+    한국어를 일반화해도("웹 페이지에서 버튼을 클릭한다") 안 올라온다 — 언어 문제이지
+    표현 문제가 아니다. KB 액션 식별자가 영어라 **어휘 검색이 영어 쪽에서만 걸린다**는
+    모듈 도입부의 한/영 이중 질의 근거가 구제 경로에도 그대로 적용된다.
+
+    ## 왜 대역 사전이 아닌가
+
+    '클릭→click' 같은 표를 코드에 심으면 (1) 표에 없는 동사는 영원히 구제되지 않고
+    (2) 표를 늘리는 일이 그대로 유지보수 부채가 된다. 번역은 모델이 이미 하는 일이고,
+    이 경로는 감사가 결함을 **증명한 뒤에만** 돌아 호출이 낭비되지 않는다.
+
+    ## 왜 `_expand_queries` 재사용이 아닌가 (실측으로 기각)
+
+    처음엔 구제 대상 요구만 담은 sub-spec으로 기존 질의 확장을 다시 불렀다. 결과는
+    **`Naver finance stock domestic gold daily prices`** — 클릭 요구 2건을 하나로 다시
+    뭉치고, 조작 동사('click')는 아예 빠뜨린 채 **도메인 명사만 번역**했다. 메뉴는 구제
+    전과 똑같았다. 그 프롬프트의 일은 '요구를 기능 단위로 묶는 것'이라 여기서 필요한
+    '요구 하나를 조작 어휘로 옮기는 것'과 목적이 다르다 — 특히 "같은 기능이면 한 단위로
+    묶으세요"라는 규칙이 이 결함을 처음 만든 바로 그 규칙이다.
+
+    그래서 전용 프롬프트를 둔다: 요구 하나당 질의 하나, 동사로 시작, 고유명사 제거.
+    마지막 항목이 중요하다 — '네이버'·'증권'은 카탈로그에 없는 말이라 랭킹을 SAP 쪽으로
+    끌고 간다(실측: 요구 원문 질의의 상위 4개가 SAP 액션이었다).
+
+    ## 실패해도 구제는 성립한다
+
+    한국어 쪽은 요구 원문을 쓰는 결정론 경로가 이미 보장한다 — 이 호출은 그 위에 영어를
+    얹을 뿐이다. 그래서 어떤 예외도 삼킨다: 여기서 터져 추천 전체를 잃으면, 감사가 없던
+    때보다 오히려 나빠진다.
+    """
+    if not rescued:
+        return []
+    req_lines = "\n".join(
+        f"- [{r.get('req_id')}] {(r.get('text') or '').strip()}"
+        for r in rescued if (r.get("text") or "").strip()
+    )
+    if not req_lines:
+        return []
+    # 응답 읽기까지 try 안에 둔다 — 호출만 감싸면 "어떤 예외도 삼킨다"가 거짓이 된다.
+    out: list[str] = []
+    try:
+        plan = chat_json(
+            [
+                {"role": "system", "content": _RESCUE_PROMPT},
+                {"role": "user", "content": f"[요구사항]\n{req_lines}"},
+            ],
+            purpose="recommend",
+            model_cls=_RescuePlan,
+        )
+        # 요구 수를 넘는 질의는 받지 않는다 — 한 요구를 여러 갈래로 풀면 검색 팬아웃이
+        # 구제 대상 수와 무관하게 분다. 중복도 접는다(같은 조작이 두 요구에서 나올 수 있다).
+        for q in plan.queries:
+            text = " ".join((q.en_query or "").split())
+            if text and text.lower() not in {o.lower() for o in out}:
+                out.append(text)
+    except Exception as e:  # noqa: BLE001 — 최선 노력 경로. 위 독스트링 참조.
+        logger.warning("구제 영어 질의 생성 실패 — 한국어 구제 질의만 사용: %s", e)
+        return []
+    return out[:len(rescued)]
+
+
 def _one_line(text: str, limit: int) -> str:
     """검색 본문을 '- 항목' 한 줄에 넣을 수 있게 공백을 접는다.
 
@@ -481,8 +679,28 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
             queries.append(u.ko_query.strip())
         if u.en_query.strip():
             queries.append(u.en_query.strip())
+
+    # 요구별 질의 커버리지 감사 (RPA-298) — 위 `uncovered_requirements` 참조.
+    # 확장이 요구를 뭉개면 그 어휘가 메뉴에 아예 안 실려 뒤 단계가 복구할 수 없다.
+    #
+    # 구제도 **한/영 쌍**으로 던진다. 한국어는 요구 원문 그대로(결정론, 보장), 영어는
+    # 모델 번역(최선 노력) — 실측상 한국어만으로는 필요한 액션이 후보에 들지도 못한다
+    # (`rescue_en_queries` 독스트링의 순위 표).
+    rescued = uncovered_requirements(spec, queries)
+    rescue_queries: list[str] = []
+    if rescued:
+        logger.info(
+            "질의 확장이 must 요구 %d건을 다루지 않아 구제 질의를 추가한다: %s",
+            len(rescued), [r.get("req_id") for r in rescued],
+        )
+        rescue_queries = [t for t in ((r.get("text") or "").strip() for r in rescued) if t]
+        rescue_queries += await asyncio.to_thread(rescue_en_queries, spec, rescued)
+        queries.extend(rescue_queries)
+
     emit({"event": "stage", "stage": "searching",
-          "message": f"액션 카탈로그 조사 중 ({len(units)}개 기능, 질의 {len(queries)}건)",
+          "message": (f"액션 카탈로그 조사 중 ({len(units)}개 기능, 질의 {len(queries)}건"
+                      + (f" · 요구 구제 {len(rescued)}건→질의 {len(rescue_queries)}건" if rescued else "")
+                      + ")"),
           "data": {"queries": [q[:80] for q in queries]}})
 
     # [2] 액션 채널 — 질의별 결과를 **따로** 받아 순위로 병합한다. 점수로 합치지 않는 이유는

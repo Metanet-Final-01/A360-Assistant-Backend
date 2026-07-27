@@ -68,12 +68,20 @@ def _spec(goal="엑셀 데이터를 읽어 메일로 보낸다", *texts):
 
 
 def _stub_research_llm(monkeypatch, queries=("엑셀", "메일")):
-    """조작 단위·질의 확장 LLM을 결정론 스텁으로 — API 한도와 무관하게 돌아야 한다."""
-    from app.agent.v4.recommend.research import _ResearchUnit
+    """조작 단위·질의 확장 LLM을 결정론 스텁으로 — API 한도와 무관하게 돌아야 한다.
+
+    `model_cls`로 갈라야 한다. 세 호출(조작 단위·질의 확장·요구 구제)이 모두 chat_json을
+    타는데 한 응답만 돌려주면, 짧은 스텁 질의("엑셀")가 요구를 못 다뤄 구제 경로가 도는
+    순간 엉뚱한 모델을 받는다 — 그 경로는 최선 노력이라 실패를 삼켜서, **틀린 스텁이
+    조용히 통과**한다.
+    """
+    from app.agent.v4.recommend.research import _RescuePlan, _RescueQuery, _ResearchUnit
 
     def fake(messages, *, purpose, model_cls):
         if model_cls is _OperationPlan:
             return _OperationPlan(operations=[])
+        if model_cls is _RescuePlan:
+            return _RescuePlan(queries=[_RescueQuery(req_id="req-1", en_query="open workbook")])
         return _ResearchPlan(units=[_ResearchUnit(topic=q, ko_query=q) for q in queries])
 
     monkeypatch.setattr(research_mod, "chat_json", fake)
@@ -393,6 +401,8 @@ def test_decompose_channel_feeds_operation_planning(monkeypatch, retriever):
         prompts.append(messages[1]["content"])
         if model_cls is _OperationPlan:
             return _OperationPlan(operations=[])
+        if model_cls is research_mod._RescuePlan:
+            return research_mod._RescuePlan(queries=[])
         return _ResearchPlan(units=[])
 
     monkeypatch.setattr(research_mod, "chat_json", fake)
