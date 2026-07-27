@@ -173,8 +173,11 @@ jobs:
                 exit 1
                 ;;
             esac
-            if ! printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '^https://hooks\.slack\.com/'; then
-              echo "SLACK_WEBHOOK_URL must start with https://hooks.slack.com/ when set." >&2
+            # CFN AllowedPattern(^$|^https://hooks\.slack\.com/[^\s"\\]+$)과 **동일**하게: 슬래시 뒤
+            # 경로가 최소 1자 있어야 한다. 접두만 보면 'https://hooks.slack.com/'(빈 경로)가 여기선
+            # 통과하고 CFN에서야 실패해 fail-fast가 무너진다(Qodo #439 재리뷰). 가드가 동작을 그대로 읽게.
+            if ! printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '^https://hooks\.slack\.com/.+$'; then
+              echo "SLACK_WEBHOOK_URL must be https://hooks.slack.com/<non-empty path> when set." >&2
               exit 1
             fi
           fi
