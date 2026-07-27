@@ -181,6 +181,7 @@ def test_state_survives_module_reload(sent, state):
         def __exit__(self, *a): return False
         def get(self, model, key, with_for_update=None): return state.get(key)
         def add(self, row): state[row.key] = row
+        def rollback(self): pass
         def commit(self): pass
 
     alerts._obs_session = lambda: _DB()
@@ -261,6 +262,7 @@ def agg(monkeypatch, state):
             # 알림 상태 저장소 — dict 하나로 전이·쿨다운이 실제로 동작하게 한다
             def get(self, model, key, with_for_update=None): return state.get(key)
             def add(self, row): state[row.key] = row
+            def rollback(self): pass
             def commit(self): pass
 
         monkeypatch.setattr(alerts, "_obs_session", lambda: _DB())
