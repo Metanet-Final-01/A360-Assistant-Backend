@@ -156,6 +156,32 @@ jobs:
             exit 1
           fi
 
+      - name: Validate Slack webhook URL
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            # 값은 SecretsManager의 JSON SecretString에 그대로 보간된다 — 공백/큰따옴표/역슬래시/개행이 있으면
+            # JSON이 깨져 스택 배포가 CloudFormation 단계에서야 실패한다. 여기서 fail-fast로 막는다.
+            if printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '[[:space:]"\\]'; then
+              echo 'SLACK_WEBHOOK_URL must not contain whitespace, double quotes, or backslashes (it is stored in a JSON secret).' >&2
+              exit 1
+            fi
+            case "$SLACK_WEBHOOK_URL" in
+              *$'\r'*|*$'\n'*)
+                echo "SLACK_WEBHOOK_URL must not contain newlines." >&2
+                exit 1
+                ;;
+            esac
+            # CFN AllowedPattern(^$|^https://hooks\.slack\.com/[^\s"\\]+$)과 **동일**하게: 슬래시 뒤
+            # 경로가 최소 1자 있어야 한다. 접두만 보면 'https://hooks.slack.com/'(빈 경로)가 여기선
+            # 통과하고 CFN에서야 실패해 fail-fast가 무너진다(Qodo #439 재리뷰). 가드가 동작을 그대로 읽게.
+            if ! printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '^https://hooks\.slack\.com/.+$'; then
+              echo "SLACK_WEBHOOK_URL must be https://hooks.slack.com/<non-empty path> when set." >&2
+              exit 1
+            fi
+          fi
+
       - name: Validate RAG cache TTL
         env:
           RAG_CACHE_TTL_SECONDS: ${{ inputs.rag_cache_ttl_seconds || '3600' }}
@@ -182,6 +208,9 @@ jobs:
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
           OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
           ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALERT_GLOBAL_DAILY_USD: ${{ vars.ALERT_GLOBAL_DAILY_USD }}
+          ALERT_5XX_DAILY: ${{ vars.ALERT_5XX_DAILY }}
         run: |
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
@@ -201,6 +230,9 @@ jobs:
               OpsApiKey="$OPS_API_KEY" \
               AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN" \
               AssuranceWriterRepository="${{ github.repository }}" \
+              SlackWebhookUrl="$SLACK_WEBHOOK_URL" \
+              AlertGlobalDailyUsd="$ALERT_GLOBAL_DAILY_USD" \
+              Alert5xxDaily="$ALERT_5XX_DAILY" \
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
               MaxCapacity="${{ inputs.max_capacity || '2' }}" \
