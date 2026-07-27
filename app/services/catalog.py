@@ -421,22 +421,25 @@ class BackendCatalog:
         ]
 
     def _get_package_labels(self) -> dict[str, str]:
-        """캐시된 {package_name: 표시라벨} — 인덱스와 같은 TTL·stale-while-revalidate (RPA-313, Qodo #424).
+        """캐시된 {package_name: 표시라벨} — TTL·stale-while-revalidate (RPA-313, Qodo #424).
 
-        편집기 카탈로그가 매 요청마다 package_overview를 DB에서 다시 읽지 않게 캐싱한다.
+        편집기 카탈로그가 매 요청마다 package_overview를 다시 읽지 않게 캐싱한다. 첫 적재 DB 조회는
+        **락 밖에서** 한다 — 공유 _lock을 DB I/O 동안 쥐면 index/trigger 등 다른 카탈로그 작업까지
+        타임아웃만큼 막힌다(Qodo #424). index 로드(무거움)는 double-checked-locking으로 1회만 돌지만,
+        라벨은 싸고 멱등이라 첫 요청 경합 시 중복 조회를 감수하고(마지막 저장 채택) 락은 저장만 짧게 잡는다.
         """
-        if self._package_labels is None:
-            with self._lock:  # 첫 적재는 동기 (트리거·인덱스와 대칭)
-                if self._package_labels is None:
-                    loaded = self._load_package_labels()
-                    if loaded is None:  # 첫 적재 실패 — 캐싱 않고 이번엔 machine명 폴백, 다음 호출 재시도
-                        return {}
-                    self._package_labels = loaded
-                    self._package_labels_loaded_at = time.monotonic()
-            return self._package_labels
-        if self._is_stale(self._package_labels_loaded_at):
-            self._start_reload("_reloading_package_labels", self._reload_package_labels)
-        return self._package_labels
+        cached = self._package_labels
+        if cached is not None:
+            if self._is_stale(self._package_labels_loaded_at):
+                self._start_reload("_reloading_package_labels", self._reload_package_labels)
+            return cached
+        loaded = self._load_package_labels()  # 락 밖 DB 조회
+        if loaded is None:  # 첫 적재 실패 — 캐싱 않고 machine명 폴백, 다음 호출 재시도
+            return {}
+        with self._lock:  # 저장만 짧게 락
+            self._package_labels = loaded
+            self._package_labels_loaded_at = time.monotonic()
+        return loaded
 
     def _load_package_labels(self) -> dict[str, str] | None:
         """package_overview에서 {package_name: 표시라벨}. title 형식은 '{label} 패키지'(merge.py 생성).
