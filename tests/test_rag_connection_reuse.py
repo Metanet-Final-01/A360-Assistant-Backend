@@ -10,12 +10,14 @@ Neon(ap-southeast-1)이라 연결 수립이 실측 451ms/회인데, 에이전트
 만들어졌나"라는 **원인**을 센다 — 이게 회귀하면 성능도 같이 회귀한다.
 """
 
+import asyncio
 import ssl
 import threading
 
 import httpx
 import pytest
 
+from app.rag import config
 from app.rag.retrieval import embed
 from app.rag.store import db, opensearch_client, pool
 
@@ -121,6 +123,13 @@ def test_opensearch_connect_still_makes_new_clients():
 
 
 # --- Postgres: 풀 + 폴백 ---
+
+
+def test_async_pool_rejects_missing_rag_database_url(monkeypatch):
+    """설정 누락은 연결 실패로 삼키지 않고 lifespan까지 전파한다."""
+    monkeypatch.setenv("RAG_DATABASE_URL", "")
+    with pytest.raises(config.RagDatabaseConfigurationError):
+        asyncio.run(pool.open_pools())
 
 def test_connection_falls_back_when_pool_unavailable(monkeypatch):
     """🔴 풀 기동에 실패해도 검색은 계속돼야 한다 — 1회성 연결로 저하될 뿐."""

@@ -112,7 +112,14 @@ class _Writer:
         deadline = time.monotonic() + _FLUSH_INTERVAL_SEC
         while len(batch) < _BATCH_SIZE:
             if self.flush_now.is_set():
-                break  # flush 요청 — 창을 다 안 기다리고 즉시 내보낸다
+                try:
+                    item = self.q.get_nowait()
+                except queue.Empty:
+                    break
+                if item is _STOP:
+                    return batch, True
+                batch.append(item)
+                continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break

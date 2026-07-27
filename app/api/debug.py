@@ -26,16 +26,21 @@ def _error(status: int, code: str, message: str) -> HTTPException:
 
 
 def require_debug_enabled() -> None:
-    """디버그 라우터 전체 게이트 — 프로덕션에서는 기본 차단한다.
+    """디버그 라우터 전체 게이트 — 기본 차단(fail-closed), 명시적 opt-in에서만 허용.
 
-    debug 라우트(RAG 단계별 실행·연결 상태·로그·HTTP 프록시)는 내부 구현과
-    로그를 노출하므로 운영 환경에 열려선 안 된다. APP_ENV=production이면 막고,
-    그 외(로컬/개발)에서는 허용한다. DEBUG_ENDPOINTS_ENABLED=true로 강제 허용 가능.
+    debug 라우트(RAG 단계별 실행·연결 상태·로그·HTTP 프록시)는 모델명·의존성 도달성·
+    파이프라인 로그·raw 예외 등 내부 구현을 노출하므로 기본적으로 닫혀 있어야 한다.
+
+    과거엔 `APP_ENV=='production'`일 때만 막았는데(fail-open), APP_ENV는 실제 안전 여부의
+    **대리 지표**일 뿐이라 env 미설정·staging·오설정 배포에서 라우터가 무인증으로 열렸다
+    (RPA-290). 이제 게이트가 읽는 신호를 동작의 안전 여부와 일치시킨다 — `DEBUG_ENDPOINTS_ENABLED
+    =true`라는 명시적 opt-in에서만 허용하고, 그 외(미설정 포함)는 전부 차단한다. 이는 아래
+    http-request 프록시가 이미 쓰는 opt-in 패턴(DEBUG_HTTP_CLIENT_ENABLED)과 동일하다.
+    로컬은 .env의 DEBUG_ENDPOINTS_ENABLED=true로 켠다.
     """
     if os.getenv("DEBUG_ENDPOINTS_ENABLED", "").lower() == "true":
         return
-    if os.getenv("APP_ENV", "development").lower() == "production":
-        raise _error(403, "DEBUG_DISABLED", "디버그 엔드포인트는 이 환경에서 비활성화되어 있습니다.")
+    raise _error(403, "DEBUG_DISABLED", "디버그 엔드포인트는 이 환경에서 비활성화되어 있습니다.")
 
 
 router = APIRouter(tags=["debug"], dependencies=[Depends(require_debug_enabled)])
@@ -303,43 +308,27 @@ def rag_logs_recent(limit: int = 100) -> dict:
 
 
 @router.get("/api/rag/debug/status")
-def rag_debug_status() -> dict:
-    """DB/OpenSearch/임베딩/리랭커 실시간 연결 상태 — 로컬 개발 중 코드가 실제로 각 서비스에
-    잘 붙어 있는지 한눈에 점검하기 위한 디버그 전용 엔드포인트."""
-    from app.rag import config
-    from app.rag.store import db, opensearch_client
+def rag_debug_status(probe: bool = False) -> dict:
+    """DB/OpenSearch/임베딩/리랭커 상태 — 각 서비스 도달성·설정 점검 (로컬/디버그 전용).
 
-    status: dict = {}
+    ⚠️ 기본은 키 설정 여부(api_key_configured)만 본다 — 키가 있어도 무효·egress 차단이면 검색은
+    죽는데 여기선 초록으로 보인다("가짜 초록불", RPA-232). `?probe=1`은 실제 임베딩 호출 + pgvector
+    쿼리까지 태워 원인 단계를 `live_probe`로 확인한다.
 
-    try:
-        conn = db.connect()
-        conn.close()
-        status["database"] = {"reachable": True}
-    except Exception as e:
-        status["database"] = {"reachable": False, "error": str(e)}
+    판정 로직은 admin 엔드포인트와 **공유**한다(app/services/rag_diagnostics) — debug/admin 판정이
+    갈리지 않게. **운영 진단은 인증된 POST /api/admin/rag/probe를 쓴다**(이 debug 경로는 로컬용)."""
+    from app.services import rag_diagnostics
 
-    try:
-        client = opensearch_client.connect()
-        health = client.cluster.health(request_timeout=3)
-        status["opensearch"] = {
-            "reachable": True,
-            "host": config.OPENSEARCH_HOST,
-            "cluster_status": health.get("status"),
-        }
-    except Exception as e:
-        status["opensearch"] = {
-            "reachable": False,
-            "host": config.OPENSEARCH_HOST,
-            "error": str(e),
-        }
+    status = rag_diagnostics.service_status()
+    if not probe:
+        return status
 
-    status["embedding"] = {
-        "provider": config.EMBEDDING_PROVIDER,
-        "model": config.EMBEDDING_MODEL,
-        "api_key_configured": bool(config.VOYAGE_API_KEY if config.EMBEDDING_PROVIDER == "voyage" else config.OPENAI_API_KEY),
-    }
-    status["reranker"] = {
-        "model": config.RERANK_MODEL,
-        "api_key_configured": bool(config.VOYAGE_API_KEY),
-    }
+    # probe=1은 외부 임베딩 API 실호출 + DB 쿼리라 비용/부하가 든다 — 디버그 라우터 게이트
+    # (require_debug_enabled) 위에 추가 opt-in을 요구한다(http 프록시의 DEBUG_HTTP_CLIENT_ENABLED와 동형).
+    if os.getenv("DEBUG_RAG_PROBE_ENABLED", "").lower() != "true":
+        raise _error(
+            403, "PROBE_DISABLED",
+            "probe=1은 DEBUG_RAG_PROBE_ENABLED=true가 필요합니다(외부 API 비용·부하 발생).",
+        )
+    status["live_probe"] = rag_diagnostics.run_live_probe()
     return status

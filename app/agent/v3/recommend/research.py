@@ -18,8 +18,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ..orchestrator.jsonio import chat_json
-from ..retrieval import get_retriever
-from ..verify.catalog import get_catalog
 from ..verify.checker import derive_session_registry
 from .stream import emit
 
@@ -32,6 +30,10 @@ ACTION_SOURCE_TYPES = ["action_schema", "bot_example"]
 _SEARCH_LIMIT = 5
 _MAX_UNITS = 8           # 기능 단위 상한 — 질의 폭주 방지
 _MAX_MENU_ACTIONS = 14   # Dossier 액션 메뉴 상한 (스펙 포함이라 토큰 비용이 큼)
+# 사용자 제공 카탈로그의 메뉴 상한 — 검색으로 좁힐 수 없어 전량을 싣지만, 프롬프트가
+# 무한정 커지는 것은 막는다. 검색 경로보다 훨씬 넉넉하다(실제 카탈로그는 보통 수십 개라
+# 이 값에 닿지 않고, 닿으면 잘린 사실을 프롬프트·로그·진행 메시지 셋 다에 남긴다).
+_MAX_USER_MENU_ACTIONS = 200
 _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
 
 
@@ -145,15 +147,86 @@ def _expand_queries(spec: dict) -> list[_ResearchUnit]:
     ]
 
 
-async def build_dossier(spec: dict, sink: list[dict]) -> dict:
+def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
+    params = ", ".join(
+        f"{p['name']}({p.get('type')}{', 필수' if p.get('required') else ''})"
+        for p in spec_dict.get("parameters", [])
+    )
+    rt = spec_dict.get("return_type")
+    # 스펙 미상(params_unknown 행)을 '없음'으로 표기하면 파라미터가 정말 없는 액션과
+    # 구분이 안 돼 composer가 스펙 확인을 건너뛴다 — '미상'으로 구분 표기한다.
+    unknown = spec_dict.get("parameters") is None
+    return (
+        f"- {pkg}/{act} «{spec_dict.get('label') or act}»"
+        + (f" → 리턴 {rt}" if rt else "")
+        + f"\n    파라미터: {params or ('미상 — get_action_schema로 확인' if unknown else '없음')}"
+    )
+
+
+def _whole_catalog_dossier(ctx) -> dict:
+    """검색기가 없는 경로(사용자 제공 카탈로그)의 Dossier — 전량이 곧 메뉴다 (RPA-285).
+
+    어휘가 수십 개 규모라 검색으로 좁힐 이유가 없고, 좁히면 오히려 사용자가 준 액션이
+    메뉴에서 누락돼 composer가 "카탈로그에 없다"고 오판한다. 그래서 검색 경로의 상한
+    (_MAX_MENU_ACTIONS=14)은 여기 적용하지 않는다.
+
+    다만 무제한은 아니다 — 사용자가 수천 개짜리 카탈로그를 붙여넣으면 시스템 프롬프트가
+    통째로 부풀어 지연·비용이 폭증하고 컨텍스트 한도에 걸린다(Qodo 리뷰). 안전 상한을 두되
+    **잘렸다는 사실을 조용히 넘기지 않는다**: 잘린 액션은 composer가 영영 못 쓰므로,
+    사용자가 그 사실을 알아야 카탈로그를 추려 다시 줄 수 있다.
+
+    카탈로그 전체를 한 번 훑고 슬라이스한다. 상한 뒤로 순회를 끊으면 몇 개가 잘렸는지 셀 수
+    없어 "조용히 자르지 않는다"는 목적이 깨진다 — 그리고 이 카탈로그는 LLM 구조화 출력에서
+    나와 출력 토큰 한도가 곧 크기 상한이라(현실적으로 수백 개) 순회 비용은 같은 턴의 LLM
+    호출보다 몇 자릿수 아래다. 비싼 쪽(_menu_block 문자열 조립)만 상한 안에서 돈다.
+    """
+    rows = [
+        (s.get("package"), s.get("action"), s)
+        for s in ctx.catalog.iter_action_schemas()
+        if s.get("package") and s.get("action")
+    ]
+    selected = rows[:_MAX_USER_MENU_ACTIONS]
+    actions = [(pkg, act) for pkg, act, _ in selected]
+    blocks = [_menu_block(pkg, act, spec_dict) for pkg, act, spec_dict in selected]
+
+    total = len(rows)
+    dropped = total - len(actions)
+    if dropped:
+        logger.warning(
+            "사용자 카탈로그가 상한을 초과 — %d개 중 %d개만 메뉴에 실었다(나머지 %d개는 사용 불가)",
+            total, len(actions), dropped,
+        )
+        blocks.append(
+            f"\n[주의] 제공된 카탈로그가 커서 앞의 {len(actions)}개만 실었다. "
+            f"{dropped}개는 이번 설계에 쓸 수 없으니, 필요한 액션이 빠졌다면 answer에서 알려라."
+        )
+    message = f"제공된 카탈로그 {len(actions)}개 액션을 후보로 사용"
+    if dropped:
+        message += f" (상한 초과로 {dropped}개 제외)"
+    emit({"event": "stage", "stage": "searching", "message": message})
+    return {
+        "menu": "\n".join(blocks) or "(제공된 액션 없음)",
+        "actions": actions,
+        "background": "",
+        "dropped": dropped,
+    }
+
+
+async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     """Capability Dossier를 만든다: {menu: str, actions: [(pkg, act)], background: str}.
 
     - 기능 단위별 이중 질의 병렬 검색(action_schema/bot_example) → (pkg, act) 후보 집계
     - 상위 후보의 카탈로그 스펙 프리페치 → 파라미터까지 담긴 액션 메뉴 텍스트
     - 배경 지식: 목표 문장으로 doc_page 1회 검색 (전체 문서 적재 가정 — 없으면 빈 결과)
+
+    ctx(CatalogContext)가 어휘 출처를 나른다 — 검색기가 없으면 카탈로그 전량을 메뉴로
+    쓴다(사용자 제공 카탈로그 경로).
     """
-    retriever = get_retriever()
-    catalog = get_catalog()
+    if not ctx.searchable:
+        return _whole_catalog_dossier(ctx)
+
+    retriever = ctx.retriever
+    catalog = ctx.catalog
     units = _expand_queries(spec)
 
     queries: list[str] = []
@@ -186,21 +259,6 @@ async def build_dossier(spec: dict, sink: list[dict]) -> dict:
                 key = (pkg, act)
                 best[key] = max(best.get(key, 0.0), h.get("score") or 0.0)
     ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_MENU_ACTIONS]
-
-    def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
-        params = ", ".join(
-            f"{p['name']}({p.get('type')}{', 필수' if p.get('required') else ''})"
-            for p in spec_dict.get("parameters", [])
-        )
-        rt = spec_dict.get("return_type")
-        # 스펙 미상(params_unknown 행)을 '없음'으로 표기하면 파라미터가 정말 없는 액션과
-        # 구분이 안 돼 composer가 스펙 확인을 건너뛴다 — '미상'으로 구분 표기한다.
-        unknown = spec_dict.get("parameters") is None
-        return (
-            f"- {pkg}/{act} «{spec_dict.get('label') or act}»"
-            + (f" → 리턴 {rt}" if rt else "")
-            + f"\n    파라미터: {params or ('미상 — get_action_schema로 확인' if unknown else '없음')}"
-        )
 
     blocks: list[str] = []
     menu_actions: list[tuple[str, str]] = []

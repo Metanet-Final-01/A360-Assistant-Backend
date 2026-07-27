@@ -10,12 +10,13 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import delete, func, select
@@ -28,7 +29,8 @@ from app.core import config
 from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
-from app.schemas import ProgressEvent, Recommendation
+from app.schemas import AnalysisResult, ProgressEvent, Recommendation
+from app.schemas.analysis import normalize_constraints
 from app.services import alerts, budget
 from app.services.assurance_evidence import persist_output_receipt
 from app.services.output_assurance import (
@@ -113,6 +115,40 @@ def get_session(
 ) -> dict:
     """세션 상세(메타)."""
     return _session_out(_owned_session_or_404(session_id, db, user))
+
+
+# 세션이 가질 수 있는 solution 값의 상한 — 자유 문자열을 그대로 받으면 컬럼(String(50))을
+# 넘기거나 오타가 세션에 굳어 흐름도 생성 경로가 통째로 갈린다. 길이·문자만 좁게 검증한다
+# (알려진 목록으로 제한하지는 않는다 — 새 솔루션을 코드 배포 없이 받을 수 있어야 한다).
+_SOLUTION_RE = re.compile(r"^[a-z0-9][a-z0-9 ._-]{0,48}$")
+
+
+class SessionPatch(BaseModel):
+    """세션 부분 수정 — 지금은 solution만."""
+
+    solution: str
+
+
+@router.patch("/{session_id}")
+def patch_session(
+    session_id: str,
+    payload: SessionPatch,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """세션의 solution을 바꾼다 (RPA-285).
+
+    타 솔루션 모드는 대화에서 카탈로그가 확인되면 **자동으로** 확정된다. 자동 확정은
+    마찰이 없는 대신 오탐 가능성이 있어, 사용자가 스스로 되돌릴 수단이 반드시 있어야 한다
+    — 이 엔드포인트가 그 수단이다("a360"으로 PATCH하면 원복). 프론트 대응은 RPA-286.
+    """
+    session = _owned_session_or_404(session_id, db, user)  # 소유권 검사
+    solution = (payload.solution or "").strip().lower()
+    if not _SOLUTION_RE.match(solution):
+        raise HTTPException(status_code=422, detail="solution 형식이 올바르지 않습니다")
+    session.solution = solution
+    db.commit()
+    return _session_out(session)
 
 
 @router.delete("/{session_id}", status_code=204)
@@ -258,7 +294,7 @@ def _save_recommendation(
     source: str, parent_version: int | None, change_summary: str | None = None,
     request_id: str | None = None, requested_agent_version: str | None = None,
     resolved_agent_version: str | None = None, agent_registry_snapshot: Any = None,
-    producer_advisory: Any = None,
+    producer_advisory: Any = None, expected_constraints: list[str] | None = None,
 ) -> dict:
     """새 추천안 버전을 저장한다 (version은 세션 내 max+1). 새 세션 사용(스트리밍 후에도 안전).
 
@@ -277,6 +313,7 @@ def _save_recommendation(
         resolved_agent_version=resolved_agent_version,
         agent_registry_snapshot=agent_registry_snapshot,
         producer_advisory=producer_advisory,
+        expected_constraints=tuple(normalize_constraints(expected_constraints or [])),
     )
     try:
         observation = observe_recommendation_candidate(payload, boundary_context)
@@ -423,6 +460,9 @@ def save_edited_recommendation(
         source=payload.source, parent_version=payload.parent_version if payload.parent_version is not None else base.version,
         change_summary=payload.change_summary,
         request_id=_current_request_id(),
+        expected_constraints=(
+            ((base.payload or {}).get("spec") or {}).get("constraints") or []
+        ),
     )
     return saved
 
@@ -431,12 +471,19 @@ def save_edited_recommendation(
 def export_recommendation(
     session_id: str,
     version: int,
+    fmt: str = Query(
+        "json",
+        alias="format",
+        pattern="^(json|docx)$",
+        description="내보내기 형식 — json(기계 교환·재적재, 기본) | docx(사람이 읽는 서식 문서, FR-17)",
+    ),
     db: Session = Depends(get_db),
     user: models.User | None = Depends(get_optional_user),
-) -> JSONResponse:
-    """확정된 추천안(흐름도)을 다운로드용 JSON으로 내보낸다 (FR-17).
+) -> Response:
+    """확정된 추천안(흐름도)을 다운로드용으로 내보낸다 (FR-17).
 
-    지정 버전의 Recommendation 페이로드를 메타 봉투에 담아 attachment로 반환한다.
+    - format=json(기본): Recommendation 페이로드를 메타 봉투에 담은 JSON — 기계 교환·재적재용.
+    - format=docx: 담당자가 검토·공유·결재에 쓸 Word 서식 문서(흐름·근거·변수·전제·질문카드).
     라우트는 4세그먼트라 /recommendations·/recommendations/latest와 충돌하지 않는다.
     """
     session = _owned_session_or_404(session_id, db, user)
@@ -450,17 +497,123 @@ def export_recommendation(
         raise HTTPException(
             404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
         )
+    exported_at = datetime.now(timezone.utc).isoformat()
+    if fmt == "docx":
+        # 무거운 렌더러(python-docx)는 docx 경로에서만 로드한다 — JSON 경로 import 비용 0.
+        from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+        try:
+            content = build_recommendation_docx(
+                row.payload,
+                session_id=str(session.id),
+                version=row.version,
+                source=row.source,
+                exported_at=exported_at,
+            )
+        except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로 (Qodo #421)
+            logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+            raise HTTPException(
+                500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+            ) from exc
+        filename = f"recommendation-{session.id}-v{row.version}.docx"
+        return Response(
+            content=content,
+            media_type=DOCX_MEDIA_TYPE,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     envelope = {
         "schema_version": "1.0",
         "session_id": str(session.id),
         "recommendation_version": row.version,
         "source": row.source,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": exported_at,
         "recommendation": row.payload,
     }
     filename = f"recommendation-{session.id}-v{row.version}.json"
     return JSONResponse(
         content=envelope,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+_MAX_FLOW_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — 캡처 흐름도 PNG 한 장이면 충분
+
+
+def _sniff_image_kind(data: bytes) -> str | None:
+    """매직 바이트로 PNG/JPEG만 통과시킨다 — content-type 헤더는 위조 가능하니 바이트로 판정."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    return None
+
+
+@router.post("/{session_id}/recommendations/{version}/export/docx")
+async def export_recommendation_docx(
+    session_id: str,
+    version: int,
+    flow_image: UploadFile | None = File(
+        None, description="프론트가 캡처한 흐름도 이미지(PNG/JPEG, 선택) — 있으면 문서에 임베드"
+    ),
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> Response:
+    """추천안을 Word(.docx) 서식 문서로 내보낸다 — 프론트 캡처 흐름도 임베드 지원 (FR-17, RPA-296).
+
+    `GET .../export?format=docx`는 데이터만 담은 문서다. 흐름도(FR-18)는 프론트가 트리에서
+    그리므로 백엔드가 서버에서 캡처할 수 없다 — 프론트가 캡처한 PNG/JPEG를 multipart로 보내면
+    이 POST가 "추천 흐름"에 그대로 임베드한다. 이미지 없이 불러도 데이터 문서로 동작한다.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    row = db.execute(
+        select(models.RecommendationVersion).where(
+            models.RecommendationVersion.session_id == session.id,
+            models.RecommendationVersion.version == version,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
+        )
+    image_bytes: bytes | None = None
+    if flow_image is not None:
+        # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413. UploadFile은 반드시 닫는다.
+        try:
+            data = await flow_image.read(_MAX_FLOW_IMAGE_BYTES + 1)
+        finally:
+            await flow_image.close()
+        if len(data) > _MAX_FLOW_IMAGE_BYTES:
+            raise HTTPException(
+                413, detail={"code": "IMAGE_TOO_LARGE", "message": "흐름도 이미지가 너무 큽니다(최대 8MB)."}
+            )
+        if _sniff_image_kind(data) is None:
+            raise HTTPException(
+                400, detail={"code": "INVALID_IMAGE", "message": "흐름도 이미지는 PNG/JPEG만 허용됩니다."}
+            )
+        image_bytes = data
+
+    from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+    try:
+        # 렌더는 CPU/IO 바운드(python-docx ZIP 저장·이미지 파싱) → 이벤트 루프 밖 threadpool에서 (Qodo).
+        content = await run_in_threadpool(
+            build_recommendation_docx,
+            row.payload,
+            session_id=str(session.id),
+            version=row.version,
+            source=row.source,
+            exported_at=datetime.now(timezone.utc).isoformat(),
+            flow_image=image_bytes,
+        )
+    except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로
+        logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+        raise HTTPException(
+            500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+        ) from exc
+    filename = f"recommendation-{session.id}-v{row.version}.docx"
+    return Response(
+        content=content,
+        media_type=DOCX_MEDIA_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -493,6 +646,7 @@ def _get_agent_turn():
           "updated_recommendation": {...} | None,   # type=="recommendation"
           "change_summary": str | None,             # type=="recommendation"
           "compact": {...} | None,                  # type=="compact" (고정 섹션 JSON)
+          "detected_solution": str | None,          # 타 솔루션 카탈로그 감지 시 (RPA-285)
       }
     agent가 stream_agent_turn을 export하는 순간 이 라우트는 코드 변경 없이 활성화된다.
     """
@@ -669,6 +823,32 @@ def _validate_compact_payload(cp) -> None:
             raise ValueError("compact verbatim 항목은 {kind, content} 객체여야 합니다")
 
 
+def _apply_detected_solution(session_id: uuid.UUID, detected: str) -> str | None:
+    """감지된 솔루션을 세션에 확정한다. 실제로 바꿨으면 그 값, 아니면 None (RPA-285).
+
+    이미 a360이 아닌 세션은 건드리지 않는다 — 사용자가 PATCH로 정했거나 이전 턴에 확정된
+    값이 감지 결과보다 우선한다(오탐이 사용자 선택을 덮어쓰면 되돌려도 다시 뒤집힌다).
+    실패는 삼킨다: solution 확정은 부가 기능이라 이것 때문에 턴 산출을 잃으면 안 된다.
+    """
+    from app.db import SessionLocal
+
+    if not _SOLUTION_RE.match(detected):
+        logger.warning("감지된 solution 형식이 올바르지 않아 무시합니다: %r", detected[:60])
+        return None
+    try:
+        with SessionLocal() as db:
+            session = db.get(models.AnalysisSession, session_id)
+            if session is None or session.solution != "a360":
+                return None
+            session.solution = detected
+            db.commit()
+            logger.info("세션 %s solution 확정: %s", session_id, detected)
+            return detected
+    except Exception:  # noqa: BLE001 — 확정 실패가 턴 저장을 깨뜨리지 않게
+        logger.exception("세션 solution 확정 실패 (무시)")
+        return None
+
+
 def _save_compact(session_id: uuid.UUID, payload: dict) -> str:
     """대화 압축본을 session_compacts에 저장한다 (append-only — 최신 행이 다음 턴에 주입된다)."""
     from app.db import SessionLocal
@@ -709,7 +889,7 @@ def _persist_chat_turn(
 
 def _persist_turn_result(
     session_id: uuid.UUID, rec_analysis_id: uuid.UUID | None, document_id: uuid.UUID | None,
-    user_message: str, result: dict,
+    user_message: str, result: dict, expected_constraints: list[str] | None = None,
 ) -> dict:
     """반환 결과를 저장하고, 프론트에 줄 최종 done.data를 만든다.
 
@@ -743,6 +923,12 @@ def _persist_turn_result(
     ar = result.get("analysis_result")
     rec = result.get("updated_recommendation")
 
+    if ar is not None:
+        candidate = dict(ar) if isinstance(ar, dict) else ar
+        if isinstance(candidate, dict):
+            candidate["constraints"] = normalize_constraints(candidate.get("constraints"))
+        ar = AnalysisResult.model_validate(candidate).model_dump(mode="json")
+
     # 선언한 type의 산출물이 실제로 있어야 한다 (없으면 성공 done 대신 error)
     if rtype == "analysis" and ar is None:
         raise ValueError("type=analysis인데 analysis_result가 없습니다")
@@ -755,6 +941,16 @@ def _persist_turn_result(
         "sources": result.get("sources") or [],
         "session_id": str(session_id),
     }
+
+    # 세션 solution 자동 확정 (RPA-285) — 에이전트가 대화에서 타 솔루션 카탈로그를 확인하면
+    # 그 신호를 올린다. 세션 시작 시점에 "어떤 RPA 쓰세요?"를 묻지 않아 마찰이 없는 대신,
+    # 오탐 시 사용자가 PATCH /api/sessions/{id}로 되돌릴 수 있어야 한다(프론트는 RPA-286).
+    # 이미 a360이 아닌 세션은 건드리지 않는다 — 사용자가 명시적으로 정한 값이 이긴다.
+    detected = result.get("detected_solution")
+    if detected:
+        applied = _apply_detected_solution(session_id, detected)
+        if applied:
+            out["solution"] = applied
 
     # 분석본 — non-null이면 저장 (type 무관). 저장할 파싱 완료 문서가 없으면 계약 위반.
     new_analysis_id = None
@@ -780,6 +976,9 @@ def _persist_turn_result(
             resolved_agent_version=result.get("resolved_agent_version"),
             agent_registry_snapshot=_agent_registry_snapshot(),
             producer_advisory=result.get("violations"),
+            expected_constraints=(
+                ar.get("constraints", []) if ar is not None else expected_constraints
+            ),
         )
         out.update(saved)  # id, version, parent_version, source, change_summary, created_at
         out["recommendation"] = rec
@@ -863,7 +1062,8 @@ def _read_intake_gauge(session_id: uuid.UUID) -> dict | None:
 
     정준환의 intake 태깅(purpose="intake", RPA-73) 기준 — 이 호출엔 history+compact가 절삭
     없이 실리므로 input_tokens가 "대화 누적분"의 충실한 대리값이다. 임계는 env로 조정한다.
-    llm_usage는 관측 DB(RPA-90)에 쌓이므로 같은 곳에서 읽는다 (미설정 시 앱 DB 폴백).
+    llm_usage는 관측 DB(RPA-90)에 쌓이므로 같은 곳에서 읽는다. 관측 불가 시 호출부가
+    게이지만 생략하며 서비스 DB를 대신 읽지 않는다.
     """
     from app.core.observability_db import observability_sessionmaker
 
@@ -1293,6 +1493,11 @@ async def agent_turn(
         # targets 좌표로 결정론 수행한다 (백엔드는 흐름도 구조를 해석하지 않는다).
         agent_context["card_values"] = payload.card_values or {}
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
+    expected_constraints = normalize_constraints(
+        (agent_context.get("analysis") or {}).get("constraints")
+        if isinstance(agent_context.get("analysis"), dict)
+        else []
+    )
 
     # 턴 노드 타임라인 관측(RPA-105) — 스트림을 지나는 stage/error/done을 버퍼링해 턴
     # 종료 시 일괄 적재. request_id는 미들웨어가 심은 ContextVar에서 (같은 요청 묶음 키).
@@ -1388,7 +1593,12 @@ async def agent_turn(
                 persistence_result["_backend_request_id"] = turn_request_id
                 persistence_result["_backend_requested_agent_version"] = payload.agent_version
                 final = _persist_turn_result(
-                    session_key, rec_analysis_id, document_id, message, persistence_result
+                    session_key,
+                    rec_analysis_id,
+                    document_id,
+                    message,
+                    persistence_result,
+                    expected_constraints=expected_constraints,
                 )
                 # 대화 누적 게이지 — compact 턴은 intake가 없어 갱신 안 함(다음 대화 턴에서 압축값 반영).
                 # best-effort: 게이지 조회 실패가 정상 응답을 error로 바꾸지 않게 한다.

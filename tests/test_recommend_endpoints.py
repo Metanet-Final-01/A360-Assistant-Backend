@@ -138,6 +138,61 @@ def test_save_edited_creates_new_version(monkeypatch):
     assert saved["row"].source == "drag" and saved["row"].change_summary == "Task1 액션 교체"
 
 
+def test_save_edited_passes_base_constraints_to_output_boundary(monkeypatch):
+    captured = {}
+    base_payload = _valid_recommendation()
+    base_payload["spec"] = {"constraints": ["승인 전 외부 발송 금지"]}
+    base = _row(2, payload=base_payload)
+
+    def _capture(*args, **kwargs):
+        captured["expected_constraints"] = kwargs["expected_constraints"]
+        return {"version": 3}
+
+    monkeypatch.setattr(sessions_api, "_save_recommendation", _capture)
+    session = SimpleNamespace(id=SID, user_id=None)
+    _override(FakeDB(session=session, versions=[base]))
+
+    edited = _valid_recommendation()
+    edited["spec"] = {"constraints": ["승인 전 외부 발송 금지"]}
+    with TestClient(app) as c:
+        response = c.post(
+            f"/api/sessions/{SID}/recommendations",
+            json={"recommendation": edited},
+        )
+
+    assert response.status_code == 201
+    assert captured["expected_constraints"] == ["승인 전 외부 발송 금지"]
+
+
+def test_persist_turn_normalizes_analysis_constraints_before_storage(monkeypatch):
+    captured = {}
+
+    def _save_analysis(_session_id, _document_id, result):
+        captured["analysis"] = result
+        return AID
+
+    monkeypatch.setattr(sessions_api, "_save_analysis", _save_analysis)
+    monkeypatch.setattr(sessions_api, "_persist_chat_turn", lambda *args, **kwargs: None)
+
+    result = sessions_api._persist_turn_result(
+        SID,
+        None,
+        uuid.uuid4(),
+        "분석해줘",
+        {
+            "type": "analysis",
+            "answer": "완료",
+            "analysis_result": {
+                "steps": [],
+                "constraints": ["  승인 전\n외부 발송 금지  "] * 25,
+            },
+        },
+    )
+
+    assert captured["analysis"]["constraints"] == ["승인 전 외부 발송 금지"] * 20
+    assert result["analysis_result"] == captured["analysis"]
+
+
 def test_save_recommendation_records_failed_business_outcome(monkeypatch, caplog):
     caplog.set_level("INFO", logger="app.api.sessions")
 

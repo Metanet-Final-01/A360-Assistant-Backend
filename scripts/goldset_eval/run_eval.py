@@ -96,7 +96,7 @@ async def _run_case(entry: dict, goldset: Path, case_out: Path, timeout: float, 
     from app.agent.v3 import analyze, recommend
     from app.services.parser import parse_document
 
-    from .gold import load_case, merged_sequence
+    from .gold import load_case, merged_boilerplate, merged_sequence
     from .metrics import score_case
     from .notation import CanonAction
 
@@ -169,7 +169,7 @@ async def _run_case(entry: dict, goldset: Path, case_out: Path, timeout: float, 
 
     # 5) 채점 — (A) 액션 시퀀스 F1 + (B) 문서 요구사항 커버리지(정답 봇 독립)
     pred_seq = _pred_sequence(recommendation)
-    score = score_case(pred_seq, gold_seq, kb_canons)
+    score = score_case(pred_seq, gold_seq, kb_canons, merged_boilerplate(flows))
     pred_canons = [CanonAction(p, a) for p, a in pred_seq]
     score["structure_gold"] = {**flows[0].structure, "flows": len(flows)}
     score["structure_pred"] = _pred_structure(recommendation, pred_canons)
@@ -196,6 +196,10 @@ async def _run_case(entry: dict, goldset: Path, case_out: Path, timeout: float, 
         "precision": score["action"]["precision"],
         "recall": score["action"]["recall"],
         "recall_achv": score["action_achievable"]["recall"],
+        "recall_core": score["action_core"]["recall"],
+        "f1_core": score["action_core"]["f1"],
+        "n_gold_core": score["action_core"]["n_gold_core"],
+        "n_gold_boiler": score["action_core"]["n_gold_boilerplate"],
         "pkg_f1": score["package"]["f1"],
         "order": score["order_score"],
         "kb_gaps": len(score["kb_gaps"]),
@@ -208,7 +212,8 @@ async def _run_case(entry: dict, goldset: Path, case_out: Path, timeout: float, 
     return row
 
 
-_AGG_KEYS = ("precision", "recall", "recall_achv", "f1", "pkg_f1", "order",
+_AGG_KEYS = ("precision", "recall", "recall_achv", "recall_core", "f1", "f1_core",
+             "n_gold_core", "n_gold_boiler", "pkg_f1", "order",
              "coverage", "cov_covered", "cov_total", "n_pred", "n_matched", "kb_gaps",
              "flow_confidence", "cards", "analyze_sec", "recommend_sec")
 
@@ -254,8 +259,8 @@ def _fmt(v) -> str:
 
 def _write_report(out_dir: Path, rows: list[dict], meta: dict) -> None:
     ok = [r for r in rows if "error" not in r]
-    cols = ["index", "bot_name", "n_gold", "n_pred", "n_matched",
-            "precision", "recall", "f1", "coverage", "cov_covered", "cov_total",
+    cols = ["index", "bot_name", "n_gold", "n_gold_core", "n_gold_boiler", "n_pred", "n_matched",
+            "precision", "recall", "recall_core", "f1", "coverage", "cov_covered", "cov_total",
             "pkg_f1", "order", "flow_confidence", "recommend_sec"]
     lines = [
         f"# 골드셋 평가 리포트 — {meta['tag']}",
@@ -280,12 +285,19 @@ def _write_report(out_dir: Path, rows: list[dict], meta: dict) -> None:
             "## 매크로 평균",
             f"- **문서 요구사항 커버리지(A, 정답봇 독립): {_fmt(mean('coverage'))}** — 성긴 문서엔 성긴 요구, 미명시 접착제 무감점",
             f"- action P/R/F1: {_fmt(mean('precision'))} / {_fmt(mean('recall'))} / {_fmt(mean('f1'))}",
+            f"- **실업무 재현율(보일러플레이트 제외): {_fmt(mean('recall_core'))}** · 실업무 F1: {_fmt(mean('f1_core'))}",
             f"- 달성가능 재현율(KB gap 제외): {_fmt(mean('recall_achv'))}",
             f"- package F1: {_fmt(mean('pkg_f1'))} · 순서 보존: {_fmt(mean('order'))}",
             "",
             "> 커버리지=문서가 명시한 작업의 달성률(covered+0.5·partial)/total. F1=정답 봇 액션",
             "> 시퀀스와의 문자열 매칭. 문서가 성길수록 둘의 격차가 크며, 그 격차가 곧 '정답 봇이",
             "> 문서 없이 채운 구현량'이다.",
+            ">",
+            "> **실업무 재현율**은 Bot Store 제출 규약 보일러플레이트(봇 이름·벤더명 확인, 로그",
+            "> 폴더 생성, 30일 로그 정리, 오류 로깅, 스냅샷)를 정답에서 뺀 재현율이다. 이건",
+            "> 마켓 심사 요건이라 업무정의서에도 공식 문서에도 없어 에이전트가 만들어낼 근거가",
+            "> 없다 — 실측 528개 중 180개(34%). `recall`은 기존 기준선과의 비교용,",
+            "> `recall_core`는 실제 실력 측정용으로 나란히 본다.",
         ]
     # KB gap 롤업 (repeat>1이면 rep 하위 폴더까지 — rglob)
     gap_counter: dict[str, int] = {}

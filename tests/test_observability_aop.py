@@ -95,7 +95,10 @@ def test_audit_records_mutating_success_only(mini_app, monkeypatch):
         def add(self, row): saved.append(row)
         def commit(self): pass
 
-    monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker",
+        lambda: lambda: _FakeDB(),
+    )
     monkeypatch.setattr("app.models.AuditLog", lambda **kw: SimpleNamespace(**kw))
 
     @mini_app.post("/do")
@@ -125,7 +128,10 @@ def test_audit_records_failed_mutation(mini_app, monkeypatch):
         def add(self, row): saved.append(row)
         def commit(self): pass
 
-    monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker",
+        lambda: lambda: _FakeDB(),
+    )
     monkeypatch.setattr("app.models.AuditLog", lambda **kw: SimpleNamespace(**kw))
 
     @mini_app.post("/fail")
@@ -162,7 +168,10 @@ def test_audit_captures_user_from_jwt(mini_app, monkeypatch):
         def commit(self): pass
 
     uid = uuid.uuid4()
-    monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker",
+        lambda: lambda: _FakeDB(),
+    )
     monkeypatch.setattr("app.models.AuditLog", lambda **kw: SimpleNamespace(**kw))
     # JWT 디코드를 목킹 — 미들웨어가 Authorization에서 user_id를 뽑는지
     monkeypatch.setattr("app.core.security.decode_access_token", lambda tok: str(uid))
@@ -203,7 +212,10 @@ def test_metric_records_all_requests_normalized(mini_app, monkeypatch):
         def add(self, row): saved.append(row)
         def commit(self): pass
 
-    monkeypatch.setattr("app.db.SessionLocal", lambda: _FakeDB())
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker",
+        lambda: lambda: _FakeDB(),
+    )
     monkeypatch.setattr("app.models.AuditLog", lambda **kw: SimpleNamespace(**kw))
 
     sid = uuid.uuid4()

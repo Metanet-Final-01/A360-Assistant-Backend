@@ -20,6 +20,7 @@ from .. import config
 from ..recommend.stream import emit
 from .render import analysis_brief, context_signals, flow_outline, render_compact
 from .state import TYPE_ANSWER, TurnState
+from ..catalog_context import A360
 from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources, tool_calls_data
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,8 @@ async def qa_node(state: TurnState) -> dict:
     emit({"event": "stage", "stage": "reading", "message": "질문 이해 중"})
     sink: list[dict] = []
     # KB는 A360 전용 — 타 솔루션 세션엔 툴을 바인딩하지 않는다 (컨텍스트로만 답변).
-    tools = build_kb_tools(sink) if (state.get("solution") or "a360") == "a360" else []
+    # KB는 A360 전용이라 타 솔루션 세션에는 바인딩하지 않는다(질문은 툴 없이 답한다).
+    tools = build_kb_tools(sink) if (state.get("solution") or A360) == A360 else []
     llm = _make_llm()
     runnable = llm.bind_tools(tools) if tools else llm
     # 근거 가드: 사실 조회형이면 첫 턴을 도구 호출로 강제한다(tool_choice="required").

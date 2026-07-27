@@ -74,6 +74,34 @@ def test_anonymous_denied(monkeypatch):
     assert r.status_code == 403
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/admin/llm-usage/stats",
+        "/api/admin/audit-logs",
+        "/api/admin/metrics-daily",
+        "/api/admin/usage-daily",
+        "/api/admin/turn-events",
+        "/api/admin/request-metrics",
+        "/api/admin/rag-events",
+    ],
+)
+def test_anonymous_denied_before_observability_db_access(monkeypatch, path):
+    """관측 DB 장애 여부와 무관하게 무인증 요청은 먼저 403으로 차단한다."""
+    monkeypatch.delenv("OPS_API_KEY", raising=False)
+    app.dependency_overrides[admin_api.get_optional_user] = lambda: None
+
+    def unavailable_obs_db():
+        raise AssertionError("authentication must run before observability DB access")
+
+    app.dependency_overrides[get_obs_db] = unavailable_obs_db
+    with TestClient(app) as c:
+        r = c.get(path)
+
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "FORBIDDEN"
+
+
 def test_is_admin_user_passes(monkeypatch):
     """is_admin=True 사용자는 통과 — 인가는 서버 속성으로 판정."""
     monkeypatch.delenv("OPS_API_KEY", raising=False)
