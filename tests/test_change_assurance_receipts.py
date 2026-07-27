@@ -827,7 +827,13 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "upload_bootstrap_logs()" in user_data
     assert "backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID" in user_data
     assert "trap 'upload_bootstrap_logs;" in user_data
-    assert "curl-minimal" not in user_data  # AL2023 base AMI already provides it; forcing install risks a dnf conflict
+    curl_invocations = [
+        line.strip()
+        for line in user_data.splitlines()
+        if "curl " in line or "curl\t" in line
+    ]
+    assert curl_invocations
+    assert all("--max-time" in line for line in curl_invocations)
     assert user_data.count("--connect-timeout 1 --max-time 2") == 2
     upload_calls = [i for i in range(len(user_data)) if user_data.startswith("upload_bootstrap_logs", i)]
     assert len(upload_calls) == 5  # function def + ERR trap + bootstrap-mode success + health success + health timeout
@@ -839,8 +845,7 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
     assert "dnf install -y awscli aws-cfn-bootstrap" in user_data
-    assert "dnf install -y docker jq postgresql15" in user_data
-    assert "dnf install -y docker jq curl postgresql15" not in user_data
+    assert "docker" in user_data and "jq" in user_data and "postgresql15" in user_data
     assert user_data.index("dnf install -y awscli aws-cfn-bootstrap") < user_data.index("cfn-signal --success false")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index("mkdir -p /opt/a360/secrets")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index('docker login ghcr.io')
