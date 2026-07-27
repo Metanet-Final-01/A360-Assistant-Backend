@@ -21,7 +21,11 @@ from app.services.assurance_evidence import (
     persist_change_receipt,
     receipt_integrity,
 )
-from assurance.change.foundation import AssuranceError, canonical_digest
+from assurance.change.foundation import (
+    ALLOWED_SOURCE_EVENTS,
+    AssuranceError,
+    canonical_digest,
+)
 from assurance.change.transport import load_change_envelope, validate_change_envelope
 from scripts.publish_change_assurance import publish, source_from_event, writer_url
 from tests.test_change_assurance import _load_scenarios, _run_scenario
@@ -504,6 +508,12 @@ def test_transport_accepts_review_triggered_follow_up_record(tmp_path):
     facts = validate_change_envelope(envelope)
 
     assert facts["source"]["event"] == "pull_request_review"
+
+
+def test_writer_source_event_schema_uses_shared_contract():
+    schema = writer_api.ChangePublisherSource.model_json_schema()
+
+    assert set(schema["properties"]["event"]["enum"]) == set(ALLOWED_SOURCE_EVENTS)
 
 
 def test_publisher_accepts_one_sha_resolved_pull_request_when_event_list_is_empty():
