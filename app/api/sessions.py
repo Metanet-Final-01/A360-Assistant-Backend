@@ -537,6 +537,7 @@ def export_recommendation(
 
 
 _MAX_FLOW_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — 캡처 흐름도 PNG 한 장이면 충분
+_MAX_FLOW_IMAGE_COUNT = 20  # 페이지 분할 흐름도 최대 장수 (RPA-334) — 초과 시 413 TOO_MANY_IMAGES
 
 
 def _sniff_image_kind(data: bytes) -> str | None:
@@ -552,8 +553,12 @@ def _sniff_image_kind(data: bytes) -> str | None:
 async def export_recommendation_docx(
     session_id: str,
     version: int,
-    flow_image: UploadFile | None = File(
-        None, description="프론트가 캡처한 흐름도 이미지(PNG/JPEG, 선택) — 있으면 문서에 임베드"
+    flow_images: list[UploadFile] = File(
+        default=[],
+        description=(
+            "프론트가 캡처한 흐름도 이미지들(PNG/JPEG, 0~20장, 선택) — 같은 필드명 반복 파트. "
+            "각 장이 별도 페이지에 순서대로 임베드됨 (RPA-334)"
+        ),
     ),
     db: Session = Depends(get_db),
     user: models.User | None = Depends(get_optional_user),
@@ -575,22 +580,33 @@ async def export_recommendation_docx(
         raise HTTPException(
             404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
         )
-    image_bytes: bytes | None = None
-    if flow_image is not None:
-        # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413. UploadFile은 반드시 닫는다.
-        try:
-            data = await flow_image.read(_MAX_FLOW_IMAGE_BYTES + 1)
-        finally:
-            await flow_image.close()
-        if len(data) > _MAX_FLOW_IMAGE_BYTES:
-            raise HTTPException(
-                413, detail={"code": "IMAGE_TOO_LARGE", "message": "흐름도 이미지가 너무 큽니다(최대 8MB)."}
-            )
-        if _sniff_image_kind(data) is None:
-            raise HTTPException(
-                400, detail={"code": "INVALID_IMAGE", "message": "흐름도 이미지는 PNG/JPEG만 허용됩니다."}
-            )
-        image_bytes = data
+    # 흐름도 이미지(0~N장)를 장마다 크기·매직바이트로 검증한다. 한 장이라도 실패면 즉시 중단하되,
+    # 예외 경로에서도 모든 UploadFile 핸들을 닫는다(finally) — 리소스 누수 방지.
+    if len(flow_images) > _MAX_FLOW_IMAGE_COUNT:
+        raise HTTPException(
+            413,
+            detail={
+                "code": "TOO_MANY_IMAGES",
+                "message": f"흐름도 이미지는 최대 {_MAX_FLOW_IMAGE_COUNT}장까지 첨부할 수 있습니다.",
+            },
+        )
+    image_bytes_list: list[bytes] = []
+    try:
+        for image in flow_images:
+            # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413.
+            data = await image.read(_MAX_FLOW_IMAGE_BYTES + 1)
+            if len(data) > _MAX_FLOW_IMAGE_BYTES:
+                raise HTTPException(
+                    413, detail={"code": "IMAGE_TOO_LARGE", "message": "흐름도 이미지가 너무 큽니다(최대 8MB)."}
+                )
+            if _sniff_image_kind(data) is None:
+                raise HTTPException(
+                    400, detail={"code": "INVALID_IMAGE", "message": "흐름도 이미지는 PNG/JPEG만 허용됩니다."}
+                )
+            image_bytes_list.append(data)
+    finally:
+        for image in flow_images:
+            await image.close()
 
     from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
 
@@ -603,7 +619,7 @@ async def export_recommendation_docx(
             version=row.version,
             source=row.source,
             exported_at=datetime.now(timezone.utc).isoformat(),
-            flow_image=image_bytes,
+            flow_images=image_bytes_list,
         )
     except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로
         logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
