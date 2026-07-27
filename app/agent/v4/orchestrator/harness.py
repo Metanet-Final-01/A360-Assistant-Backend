@@ -215,21 +215,77 @@ def _flow_packages(flow: dict) -> set[str]:
     return pkgs
 
 
-def repair_spec_excerpts(flow: dict, catalog: CatalogLookup, exclude: set[tuple[str, str]]) -> str:
-    """'삽입' 수리에 필요한 액션 스펙 — 위반 목록에는 없는 어휘를 동봉한다 (처방 3).
+# 흐름도가 이미 쓰는 패키지에서 surgeon에게 열어 줄 업무 액션 상한. 실측 케이스는
+# 6패키지 91개(Excel advanced 59 · Email 16 · Browser 8 …)로 ≈5k 토큰이라 그대로 담긴다.
+# 상한은 패키지를 널리 건드린 흐름도(10패키지 × 50액션)에서 프롬프트가 터지는 것만 막는다.
+_MAX_REPAIR_BUSINESS_ACTIONS = 120
 
-    surgeon은 스펙에 없는 표기를 못 쓴다(환각 방지 규칙). 그런데 세션 누수(R8)·가짜
-    반복(R14)의 수리는 흐름도에 **아직 없는** opener/closer·Loop 이터레이터·Try/Catch를
-    삽입해야 한다 — 위반 액션 발췌만으로는 재료가 없어 정직한 무연산으로 끝난다(0374
-    JIRA 봇 실측). research.structural_complement를 재사용해 카탈로그 직조회로 공급한다.
+
+def _business_repair_actions(
+    flow: dict, catalog: CatalogLookup, violations: list[dict] | None
+) -> list[tuple[str, str]]:
+    """흐름도가 **이미 쓰는 패키지**의 업무 액션 — 잘못 고른 액션을 갈아끼울 재료.
+
+    범위를 '이미 쓰는 패키지'로 묶는 이유: 흐름도는 이미 그 제품 계열에 커밋했고, 같은
+    패키지 안에서의 재선택은 세션 핸들·구조 가정을 깨지 않는다. 카탈로그 전량(1,200개)을
+    열면 프롬프트가 터지는 것은 물론이고 surgeon이 제품을 갈아타 R17(세션 핸들 패키지
+    불일치)을 스스로 만든다.
+
+    상한에 걸리면 **위반이 걸린 패키지를 먼저** 남긴다 — 어휘가 가장 아쉬운 곳이 거기다.
+    잘리는 것은 조용히 넘기지 않고 로그로 남긴다(`_whole_catalog_dossier`와 같은 규약).
+    """
+    pkgs = _flow_packages(flow)
+    if not pkgs:
+        return []
+    hot = {v.get("package") for v in violations or [] if v.get("package")}
+    rows = [
+        (s.get("package"), s.get("action"))
+        for s in catalog.iter_action_schemas()
+        if s.get("package") in pkgs and s.get("action")
+    ]
+    # 위반 패키지 우선, 그 안에서는 카탈로그 순서(결정론).
+    rows.sort(key=lambda pa: 0 if pa[0] in hot else 1)
+    if len(rows) > _MAX_REPAIR_BUSINESS_ACTIONS:
+        logger.info("수리 어휘가 상한을 넘어 %d개 중 %d개만 싣는다(위반 패키지 우선)",
+                    len(rows), _MAX_REPAIR_BUSINESS_ACTIONS)
+    return rows[:_MAX_REPAIR_BUSINESS_ACTIONS]
+
+
+def repair_spec_excerpts(
+    flow: dict,
+    catalog: CatalogLookup,
+    exclude: set[tuple[str, str]],
+    violations: list[dict] | None = None,
+) -> str:
+    """수리에 필요한 액션 스펙 — 위반 목록에는 없는 어휘를 동봉한다 (처방 3).
+
+    surgeon은 스펙에 없는 표기를 못 쓴다(환각 방지 규칙). 그래서 **여기 없는 어휘로만
+    풀리는 위반은 구조적으로 수리 불가**다. 두 종류를 싣는다.
+
+    **1) 구조 보완** — 세션 누수(R8)·가짜 반복(R14)의 수리는 흐름도에 아직 없는
+    opener/closer·Loop 이터레이터·Try/Catch를 삽입해야 한다. 위반 액션 발췌만으로는
+    재료가 없어 정직한 무연산으로 끝난다(0374 JIRA 봇 실측).
+
+    **2) 흐름도가 이미 쓰는 패키지의 업무 액션** (RPA-298 추가). 1)만 있던 동안 수리
+    어휘는 45개 **전부 세션·제어 흐름**이었고 업무 액션이 0개였다 — 실측 산출물에서
+    `Excel advanced/Format cell`(환각) blocker가 매 라운드 목록 맨 위에 뜨는데도 갈아끼울
+    표기가 없어 무연산으로 끝났고, 무개선 2라운드에 루프가 종료됐다. 100점짜리 blocker가
+    목적 함수를 점유한 채 **고칠 수단이 구조적으로 없는** 상태였다.
+
+    ⚠️ 이걸 연다고 모든 R1이 풀리지는 않는다. 그 실측 건은 `Excel advanced`에 서식 액션
+    자체가 없어(59개 전수 확인) 어떤 어휘를 줘도 못 고친다 — 그건 결함이 아니라 제약이라
+    질문 카드로 올려야 할 종류다(별건).
     """
     blocks: list[str] = []
-    for pkg, act in structural_complement(catalog, _flow_packages(flow)):
-        if (pkg, act) in exclude:
+    seen: set[tuple[str, str]] = set(exclude)
+    for pkg, act in list(structural_complement(catalog, _flow_packages(flow))) + \
+            _business_repair_actions(flow, catalog, violations):
+        if (pkg, act) in seen:
             continue
         spec = catalog.get_action_schema(pkg, act)
         if spec is None:
             continue
+        seen.add((pkg, act))
         blocks.append(_spec_block(pkg, act, spec))
     return "\n".join(blocks)
 
@@ -447,7 +503,7 @@ def refine_flow(
         work = annotate_ids(copy.deepcopy(current))
         outline = render_outline(work)
         excerpts, excerpt_keys = _spec_excerpts(current_violations, catalog)
-        repair_menu = repair_spec_excerpts(current, catalog, excerpt_keys)
+        repair_menu = repair_spec_excerpts(current, catalog, excerpt_keys, current_violations)
         # 슬롯 목적은 아웃라인 바로 뒤에 붙인다 — surgeon이 노드 id를 읽는 그 자리에서
         # "이 자리는 무엇을 하려던 자리인가"가 같이 보여야 재선택이 선택지가 된다(§5.2-C).
         # spec 인자가 없으면 흐름도에 동봉된 spec을 쓴다(edit 경로는 spec을 흐름도에 싣고 온다).
@@ -456,7 +512,9 @@ def refine_flow(
             f"[흐름도 아웃라인]\n{outline}{purposes}\n\n"
             f"[고칠 문제들 (심각도순)]\n{_findings_lines(round_findings)}\n\n"
             f"[스펙 발췌]\n{excerpts}"
-            + (f"\n\n[수리용 액션 스펙 — 세션 여닫기·반복·분기·예외 처리를 삽입(insert/wrap)할 때 이 표기 사용]\n{repair_menu}"
+            + (f"\n\n[수리용 액션 스펙 — 삽입(insert/wrap)·교체(update)에 쓸 수 있는 표기. "
+               f"세션 여닫기·반복·분기·예외 처리 + 이 흐름도가 이미 쓰는 패키지의 업무 액션. "
+               f"여기 없는 표기는 쓰지 말 것]\n{repair_menu}"
                if repair_menu else "")
         )
         try:

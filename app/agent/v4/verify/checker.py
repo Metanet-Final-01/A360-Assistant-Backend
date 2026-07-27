@@ -972,11 +972,24 @@ def run_structure_checks(
         하며, 사이에 낀 일반 액션은 보호도 안 되고 구조도 깨진다 → Try의 children으로
         옮기라는 수리 지시가 된다.
       - Catch/Finally가 Try 블록에 붙어 있지 않음 (직전 형제가 Try/Catch가 아님).
-      - Try 본문(children)이 비어 있음 (warning — 보호 대상 없는 장식 Try).
+      - Try 본문(children)이 비어 있음.
     R14 (Loop 구조):
       - Continue/Break가 Loop 본문(조상) 밖에서 사용됨 (error) — Continue를 '반복 처리'로
         오용하면 반복 없이 지나간다.
-      - Loop 컨테이너의 본문이 비어 있음 (warning) — 반복할 액션이 밖에 있다는 신호.
+      - Loop 컨테이너의 본문이 비어 있음 — 반복할 액션이 밖에 있다는 신호.
+
+    ## 빈 본문은 warning이 아니다 (RPA-298, 실측)
+
+    둘 다 원래 `severity="warning"`이었다. 그런데 warning은 `_error_findings`가 걸러
+    **교정 목적 함수에 아예 안 들어간다** — surgeon이 손댈 이유가 없다는 뜻이다.
+    실측 산출물에서 Error handler Try/Catch/Finally 세 칸이 본문 없이 떠 있고 본업 전체가
+    그 밖에 있었는데, 위반은 warning 하나로 조용히 지나갔다. **예외 처리가 있다고 표시된
+    채로 실제로는 아무것도 보호하지 않는다** — 장식이 아니라 실행 의미가 깨진 상태다.
+    빈 Loop도 같다: 반복할 액션이 밖에 있으면 N번 돌 일이 한 번만 돈다.
+
+    규칙 기본값(major)을 그대로 쓰게 두어 수리 대상에 넣는다. 중간 상태로 빈 컨테이너가
+    잠깐 생기는 것을 벌하지 않느냐 — surgeon의 `wrap`은 감쌀 형제를 함께 지정해 본문이
+    처음부터 채워지므로, 빈 컨테이너는 '수리 중간'이 아니라 '수리가 안 끝난' 상태다.
     """
     violations: list[Violation] = []
 
@@ -1007,7 +1020,7 @@ def run_structure_checks(
                         violations.append(Violation(
                             "R13", loc,
                             "Try 본문(children)이 비어 있습니다 — 보호할 작업을 Try 안에 넣으세요.",
-                            package=pkg, action=act, step_id=step_id, severity="warning",
+                            package=pkg, action=act, step_id=step_id,
                         ))
                 elif role in ("catch", "finally"):
                     prev = actions[idx - 1] if idx > 0 else None
@@ -1039,7 +1052,7 @@ def run_structure_checks(
                     violations.append(Violation(
                         "R14", loc,
                         "Loop 본문(children)이 비어 있습니다 — 반복할 액션들을 Loop 안에 넣으세요.",
-                        package=pkg, action=act, step_id=step_id, severity="warning",
+                        package=pkg, action=act, step_id=step_id,
                     ))
 
             child_depth = loop_depth + (
