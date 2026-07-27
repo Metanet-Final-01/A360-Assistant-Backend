@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from .evidence import validate_manifest, validate_report
-from .foundation import AssuranceError, GIT_SHA, SCHEMA_VERSION, canonical_bytes, digest_bytes
+from .foundation import (
+    ALLOWED_SOURCE_EVENTS,
+    AssuranceError,
+    GIT_SHA,
+    SCHEMA_VERSION,
+    canonical_bytes,
+    digest_bytes,
+)
 from .schema_validation import SchemaValidationError, validate_json_schema
 
 
@@ -130,7 +137,7 @@ def _validate_source(source: Any) -> dict[str, Any]:
     if source.get("workflow_name") != "Change Assurance (Observe)":
         raise AssuranceError("publisher workflow is not authoritative")
     if (
-        source.get("event") not in {"pull_request", "pull_request_review"}
+        source.get("event") not in ALLOWED_SOURCE_EVENTS
         or source.get("conclusion") != "success"
     ):
         raise AssuranceError("publisher source is not a successful pull request workflow")

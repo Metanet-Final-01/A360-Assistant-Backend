@@ -147,7 +147,7 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 
 | 키 | 내용 |
 |---|---|
-| `solution` | 라우팅 키 (세션 확정값, 기본 `"a360"`) — 에이전트가 전용 그래프를 고른다 |
+| `solution` | 어휘 출처 키 (세션 확정값, 기본 `"a360"`) — `"a360"`이면 DB 적재 카탈로그+하이브리드 검색기, 그 외면 대화에서 추출한 사용자 카탈로그(검색기 없음). **파이프라인은 하나이고 카탈로그만 갈린다**(RPA-285). 세션 확정은 자동(에이전트의 `detected_solution`) 또는 `PATCH /api/sessions/{id}` |
 | `operation` | `"chat"` \| `"compact"` \| `"fill_cards"` — 버튼발 결정론 신호(LLM 라우터 우회). `compact`는 압축 노드 직행, **`fill_cards`는 v3 전용**(v1·v2는 조용히 무시 — 아래 ⚠️) |
 | `card_values` | `operation="fill_cards"`일 때만 — `{card_id: 값}`. 에이전트(v3)가 카드의 `targets` 좌표로 결정론 적용한다(**백엔드는 흐름도 구조를 해석하지 않는다** — 원본을 그대로 넘긴다). ⚠️ **여기 담긴 값은 추천 payload에 기록되어 버전으로 영속 저장된다** — 민감정보 제약은 아래 질문 카드 절 참고 |
 | `agent_version` | 에이전트 구현 버전 (`"v1"` \| `"v2"` \| `"v3"` \| 없음). 없으면 env `AGENT_VERSION`. 백엔드가 `AgentTurnRequest`로 받아 실어 보내고, 진입점이 이 키로 버전 그래프를 고른다. 사용 가능 목록·기본값은 `app.agent.available_versions()`/`default_version()`이 정한다(백엔드가 `GET /api/agent/versions`로 노출, RPA-167) |
@@ -167,6 +167,9 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
 ```
 - **비-null 산출물은 type과 무관하게 모두 저장**한다(분석 선행 후 흐름도 턴의 참조 무결성). 백엔드가
   `updated_recommendation`을 저장 후 응답엔 `recommendation`+버전 메타로 노출한다.
+- `detected_solution`(선택, RPA-285): 대화에서 타 솔루션 카탈로그가 확인되면 그 이름(못 밝혔으면 `"other"`).
+  백엔드가 **세션이 아직 `a360`일 때만** 이 값으로 `session.solution`을 확정한다 — 사용자가 명시적으로
+  정한 값이 감지보다 우선한다. 오탐 되돌리기는 `PATCH /api/sessions/{id}` `{"solution": "a360"}`.
 
 #### 질문 카드 (v3) — `updated_recommendation` 안의 필드
 

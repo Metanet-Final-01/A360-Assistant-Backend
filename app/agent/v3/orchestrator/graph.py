@@ -191,6 +191,8 @@ def _done_data(state: dict) -> dict:
         "change_summary": state.get("change_summary"),
         "compact": state.get("compact_out"),
         "violations": state.get("violations") or [],
+        # 세션 solution 확정 신호 (RPA-285) — 없으면 None이라 기존 소비자에 영향 없다.
+        "detected_solution": state.get("detected_solution"),
         "artifacts": [
             {"task": a.get("task"), "type": a.get("type"), "answer": a.get("answer")}
             for a in (state.get("artifacts") or [])

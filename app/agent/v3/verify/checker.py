@@ -28,7 +28,7 @@ v3 신설 (run_flow_checks가 통합 실행):
   R11 변수 타입 정합 — $var$ 참조 파라미터의 기대 타입과 변수 타입 불일치
   R12 표준 골격 적합성 — 예외 처리 부재·Finally 밖 세션 닫기          (warning)
   R15 attended 함정 — 트리거 자동 실행 흐름의 대화형 액션             (warning)
-  R16 플랫폼 — Windows 미지원(macOS 전용) 패키지 사용                (warning)
+  R16 플랫폼 — 대상 OS(spec.assumptions) 미지원 패키지 사용          (warning)
 
 R9~R11의 원료는 스키마 확장 필드 produces/consumes(app/schemas/recommendation.py의
 VarRef)다. composer 명시가 1차이고 `$var$` 파싱이 교차 보정한다 — 흐름도에 produces
@@ -979,6 +979,42 @@ def run_structure_checks(steps: list[dict]) -> list[Violation]:
 # 사람 개입이 필수인 대화형 패키지 — 무인 실행에서 봇을 무기한 멈춘다 (표기 정규화 비교).
 _ATTENDED_PACKAGES = frozenset({"messagebox", "prompt"})
 
+# 대상 OS를 못 읽었을 때의 기본값 — 초보자 기본 환경 가정(RPA-210 취지 유지).
+DEFAULT_TARGET_OS = "windows"
+
+# 전제 문장에서 OS를 집는 키워드. spec_builder는 "실행 환경: <OS> 러너 (<근거>)" 형식을
+# 쓰지만(prompts/spec_builder.md), LLM 산출이라 표기 흔들림에 관대하게 본다.
+_OS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # macOS를 먼저 본다 — "macOS"에도 "os"가 들어가듯 부분일치 충돌을 피하려면 더 구체적인
+    # 쪽을 앞에 둬야 한다.
+    ("macos", ("macos", "mac os", "osx", "맥os", "맥 os", "매킨토시")),
+    ("windows", ("windows", "win32", "윈도우", "윈도")),
+)
+# 전제 목록에서 '실행 환경'을 말하는 줄인지 — 아무 줄에서나 OS 단어를 줍지 않기 위한 게이트
+# ("Windows 공유폴더 경로 사용" 같은 전제를 대상 OS로 오독하지 않게).
+_ENV_LINE_MARKERS = ("실행 환경", "실행환경", "러너", "runner", "os:")
+
+
+def target_os(flow: dict) -> str:
+    """이 흐름도가 어느 OS를 대상으로 설계됐는지 (RPA-282).
+
+    출처는 흐름도에 동봉된 채점 기준(flow["spec"].assumptions)이다 — spec_builder가 대화·문서에서
+    뽑아 항상 한 줄 남기고, 사용자가 "맥OS로 바꿔줘"라고 하면 edit의 set_flow가 그 줄을 교체한다.
+    읽을 수 없으면 DEFAULT_TARGET_OS — 전제가 없던 기존 흐름도의 판정을 바꾸지 않는다.
+    """
+    spec = flow.get("spec")
+    assumptions = (spec.get("assumptions") or []) if isinstance(spec, dict) else []
+    for line in assumptions:
+        if not isinstance(line, str):
+            continue
+        low = line.lower()
+        if not any(m in low for m in _ENV_LINE_MARKERS):
+            continue
+        for os_key, words in _OS_KEYWORDS:
+            if any(w in low for w in words):
+                return os_key
+    return DEFAULT_TARGET_OS
+
 
 def run_environment_checks(flow: dict, catalog: CatalogLookup) -> list[Violation]:
     """실행 환경 정합 검사 (R15~R16) — 둘 다 warning: 경고하되 수리를 강제하지 않는다.
@@ -986,12 +1022,15 @@ def run_environment_checks(flow: dict, catalog: CatalogLookup) -> list[Violation
     R15 (attended 함정): 흐름도에 실행 트리거(flow.trigger)가 붙어 있으면 사실상 무인
         실행인데, Message box/Prompt 같은 대화형 액션은 사람이 없을 때 봇을 무기한
         멈춘다 (A360 attended 전용 성격 — 조사 §5.2).
-    R16 (플랫폼): 카탈로그 platform 메타(등기부 로스터 실측)가 windows=False인 패키지
-        (Apple 계열 등)는 Windows 러너에서 실행 불가 — 초보자 기본 환경을 Windows로
-        가정하고 경고만 한다(차단 아님, 사용자 환경을 모르므로).
+    R16 (플랫폼): 카탈로그 platform 메타(등기부 로스터 실측)가 대상 OS를 지원하지 않는
+        패키지는 그 러너에서 실행 불가 — 경고만 한다(차단 아님, 메타가 불완전할 수 있으므로).
+        대상 OS는 흐름도의 전제(spec.assumptions)에서 읽는다 — 사용자가 "맥OS로 바꿔줘"라고
+        하면 경고 방향도 함께 뒤집힌다(RPA-282). 전제가 없으면 Windows 가정(기존 동작).
     """
     violations: list[Violation] = []
     has_trigger = bool(flow.get("trigger"))
+    os_key = target_os(flow)
+    os_label = "macOS" if os_key == "macos" else "Windows"
 
     def walk(actions: list[dict], path: str, step_id: str | None) -> None:
         for idx, a in enumerate(actions):
@@ -1007,11 +1046,14 @@ def run_environment_checks(flow: dict, catalog: CatalogLookup) -> list[Violation
                 ))
             spec = catalog.get_action_schema(pkg, act) if pkg and act else None
             platform = (spec or {}).get("platform")
-            if isinstance(platform, dict) and platform.get("windows") is False:
+            # 대상 OS 키가 명시적으로 False일 때만 경고한다 — 키가 없으면(메타 미수집) 침묵,
+            # '모름 → 침묵' 원칙(R2~R5의 params_unknown과 같은 취지).
+            if isinstance(platform, dict) and platform.get(os_key) is False:
                 violations.append(Violation(
                     "R16", loc,
-                    f"'{pkg}' 패키지는 Windows를 지원하지 않습니다(macOS 전용) — Windows "
-                    "러너에서는 이 액션이 실행되지 않습니다. 대상 환경을 확인해 주세요.",
+                    f"'{pkg}' 패키지는 {os_label}를 지원하지 않습니다 — 이 흐름도의 대상 환경이 "
+                    f"{os_label} 러너라 해당 액션이 실행되지 않습니다. 대상 환경이나 액션을 "
+                    "확인해 주세요.",
                     package=pkg, action=act, step_id=step_id, severity="warning",
                 ))
             walk(a.get("children") or [], f"{loc}.children", step_id)

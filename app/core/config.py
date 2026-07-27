@@ -70,9 +70,11 @@ REGISTRY: dict[str, EnvSpec] = {
     "DATABASE_USERNAME": EnvSpec("a360_admin", group="db", dynamic=True, doc="앱 DB 사용자"),
     "DATABASE_PASSWORD": EnvSpec("", group="db", secret=True, dynamic=True, doc="앱 DB 비밀번호"),
     "OBSERVABILITY_DATABASE_URL": EnvSpec("", group="db", secret=True, dynamic=True,
-        doc="관측 전용 공유 DB(RPA-90). 미설정 시 앱 DB 폴백. conftest가 테스트별로 격리"),
+        warn_if_unset=True,
+        doc="관측 전용 DB(RPA-90). 프로덕션 필수, 미설정 시 관측 unavailable(서비스 DB 폴백 금지)"),
     "RAG_DATABASE_URL": EnvSpec(None, group="db", secret=True, dynamic=True,
-        doc="RAG 코퍼스 DB(RPA-132). 미설정 시 DATABASE_* 폴백"),
+        warn_if_unset=True,
+        doc="RAG 코퍼스 전용 DB(RPA-132). 프로덕션 필수, 미설정 시 기동 실패"),
 
     # --- 인증/보안 ---
     "JWT_SECRET": EnvSpec("", group="auth", secret=True, warn_if_unset=True,
@@ -133,8 +135,13 @@ REGISTRY: dict[str, EnvSpec] = {
     "RAG_EVENT_QUEUE": EnvSpec("", group="rag", dynamic=True,
         doc="rag_events 배치 큐 토글 (RPA-221). 테스트가 동기 모드로 전환"),
     "RAG_CACHE_ENABLED": EnvSpec("", group="rag", dynamic=True, doc="RAG 검색 캐시 토글 (RPA-211)"),
-    "RAG_CACHE_TTL_SECONDS": EnvSpec("3600", cast=int, group="rag", doc="검색 캐시 TTL(초)"),
-    "RAG_CACHE_MAXSIZE": EnvSpec("2048", cast=int, group="rag", doc="검색 캐시 항목 상한"),
+    "RAG_CACHE_TTL_SECONDS": EnvSpec("3600", cast=int, group="rag",
+                                     doc="검색 캐시 TTL(초). Redis+ingest bust 배선된 배포만 86400 권장 (RPA-274)"),
+    "RAG_CACHE_MAXSIZE": EnvSpec("2048", cast=int, group="rag", doc="검색 캐시 항목 상한(인프로세스 전용)"),
+    "REDIS_URL": EnvSpec("", group="rag", secret=True, dynamic=True,
+                         doc="RAG 캐시 공유 백엔드 (RPA-274). 미설정=인프로세스. URL에 비밀번호가 실릴 수 있어 secret"),
+    "RAG_CACHE_PENDING_TTL_SECONDS": EnvSpec("21600", cast=int, group="rag",
+        doc="실패한 ingest의 캐싱 차단 한도(초) — pending 마커 만료 (RPA-274). 그 안에 재실행이 운영 계약"),
     "GITHUB_TOKEN": EnvSpec(None, group="rag", secret=True, doc="패키지 JAR 수집용 GitHub 토큰"),
     "CR_URL": EnvSpec("", group="rag", doc="Control Room URL (패키지 수집)"),
     "CR_USERNAME": EnvSpec("", group="rag", doc="Control Room 사용자"),
@@ -189,6 +196,7 @@ REGISTRY: dict[str, EnvSpec] = {
         group="app", doc="Vercel 해시 배포 URL 허용 정규식"),
     "DEBUG_ENDPOINTS_ENABLED": EnvSpec("", group="debug", doc="디버그 엔드포인트 토글"),
     "DEBUG_HTTP_CLIENT_ENABLED": EnvSpec("", group="debug", doc="디버그 HTTP 클라이언트 토글"),
+    "DEBUG_RAG_PROBE_ENABLED": EnvSpec("", group="debug", doc="RAG 검색 도달성 프로브(/api/rag/debug/status?probe=1) 토글 — 외부 API 비용 유발이라 별도 opt-in (RPA-232)"),
 }
 
 

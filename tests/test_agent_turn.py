@@ -476,7 +476,9 @@ def test_read_intake_gauge_ratio_and_recommend(monkeypatch):
         def __exit__(self, *a): return False
         def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: 75000)
 
-    monkeypatch.setattr("app.db.SessionLocal", _S)
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker", lambda: _S
+    )
     monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", "100000")
     # 임계도 명시한다 — 기본 WARN_RATIO에 암묵적으로 기대면 재보정(RPA-172) 때 무관한
     # 이 테스트가 깨진다. 여기서 검증할 건 ratio 계산과 임계 비교지 기본값이 아니다.
@@ -499,7 +501,9 @@ def test_read_intake_gauge_invalid_limit_falls_back(monkeypatch):
         def __exit__(self, *a): return False
         def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: tokens)
 
-    monkeypatch.setattr("app.db.SessionLocal", _S)
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker", lambda: _S
+    )
     for bad in ("abc", "0", "-5", ""):
         monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", bad)
         g = sessions_api._read_intake_gauge(SID)
@@ -512,7 +516,9 @@ def test_read_intake_gauge_none_when_no_intake(monkeypatch):
         def __exit__(self, *a): return False
         def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: None)
 
-    monkeypatch.setattr("app.db.SessionLocal", _S)
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker", lambda: _S
+    )
     assert sessions_api._read_intake_gauge(SID) is None
 
 
@@ -657,7 +663,9 @@ def test_gauge_includes_compact_required(monkeypatch):
         def __exit__(self, *a): return False
         def execute(self, stmt): return SimpleNamespace(scalar_one_or_none=lambda: 130000)
 
-    monkeypatch.setattr("app.db.SessionLocal", _S)
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker", lambda: _S
+    )
     monkeypatch.setenv("TURN_GAUGE_LIMIT_TOKENS", "100000")
     monkeypatch.setenv("TURN_GAUGE_HARD_RATIO", "1.0")
     g = sessions_api._read_intake_gauge(SID)

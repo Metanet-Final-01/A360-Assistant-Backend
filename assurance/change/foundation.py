@@ -12,10 +12,15 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 SCHEMA_VERSION = "1.0"
+SourceEvent = Literal["pull_request", "pull_request_review"]
+ALLOWED_SOURCE_EVENTS: frozenset[SourceEvent] = frozenset({
+    "pull_request",
+    "pull_request_review",
+})
 CONTROL_ORDER = ("CH-01", "CH-02", "CH-04", "CH-06", "CH-11", "CH-12")
 SEVERITY_RANK = {"unknown": 5, "low": 1, "medium": 2, "high": 3, "critical": 4}
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")

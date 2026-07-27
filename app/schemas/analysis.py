@@ -2,6 +2,25 @@
 
 from pydantic import BaseModel, Field
 
+MAX_CONSTRAINTS = 20
+MAX_CONSTRAINT_CHARS = 500
+
+
+def normalize_constraints(values: object) -> list[str]:
+    """비신뢰 제약 목록을 프롬프트에 싣기 전 결정론적 상한으로 정규화한다."""
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = " ".join(value.split()).strip()
+        if text:
+            normalized.append(text[:MAX_CONSTRAINT_CHARS])
+        if len(normalized) >= MAX_CONSTRAINTS:
+            break
+    return normalized
+
 
 class SourceEvidence(BaseModel):
     """이 단계가 문서 어디에서 나왔는지 (근거 제시용)."""
@@ -33,6 +52,10 @@ class AnalysisResult(BaseModel):
     document_title: str | None = None
     summary: str = Field("", description="비개발자용 한 문단 업무 요약")
     steps: list[WorkStep]
+    constraints: list[str] = Field(
+        default_factory=list,
+        description="문서나 사용자 발화에 명시된 자동화 제약·필수 조건",
+    )
     ambiguities: list[str] = Field(
         default_factory=list,
         description="문서만으로 확정 못 한 항목 — 챗봇 재질의 후보 (FR-16)",

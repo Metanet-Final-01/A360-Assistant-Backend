@@ -12,19 +12,33 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
+from app.core import config
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 
-def _normalize_sqlalchemy_url(url: str) -> str:
-    """libpq 형식(postgresql://)을 SQLAlchemy psycopg 드라이버 형식으로 맞춘다.
+def normalize_sqlalchemy_url(url: str) -> str:
+    """libpq 형식(postgresql://)을 SQLAlchemy psycopg(v3) 드라이버 형식으로 맞춘다.
 
-    Neon 콘솔이 주는 문자열은 `postgresql://`라 그대로 붙이면 SQLAlchemy가 psycopg2를 찾는다.
-    이미 드라이버가 명시된 URL(`postgresql+psycopg://`)은 건드리지 않는다.
+    Neon 콘솔·RDS·CloudFormation이 조립해 주는 문자열은 `postgresql://`라 그대로 붙이면
+    SQLAlchemy 2.0이 기본 DBAPI인 psycopg2를 찾는데, 이 이미지엔 psycopg(v3)만 설치돼 있어
+    `ModuleNotFoundError: No module named 'psycopg2'`로 첫 연결에서 죽는다. 드라이버를 명시해
+    psycopg(v3)로 보낸다.
+
+    - `postgres://`(스킴 축약형 — Heroku·일부 콘솔)도 정규화한다: SQLAlchemy 2.0은 이 스킴을
+      아예 거부하므로 그대로 두면 못 뜬다.
+    - 이미 드라이버가 명시된 URL(`postgresql+psycopg://` 등)이나 다른 방언(sqlite 등)은 불변.
+    - 빈 문자열은 그대로 통과한다 — 호출부의 "미설정=unavailable" 판정을 깨지 않기 위함이다.
+
+    ⚠️ 앱 DB(아래 `_database_url`)와 관측 DB(app/core/observability_db.py)가 **이 함수를 공유**한다.
+       복사하면 한쪽만 고쳐져 갈린다(CONVENTIONS §9). 관측 경로에 이 정규화가 없어 RDS 전환 후
+       관측 쓰기가 조용히 전부 실패했다 (RPA-322).
     """
-    if url.startswith("postgresql://"):
-        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    for scheme in ("postgresql://", "postgres://"):
+        if url.startswith(scheme):
+            return "postgresql+psycopg://" + url[len(scheme):]
     return url
 
 
@@ -35,13 +49,16 @@ def _database_url() -> str:
     #    env를 지워도 이미 늦다 — 격리는 tests/conftest.py **최상단**에서 import 전에 한다.
     shared = os.getenv("APP_DATABASE_URL", "").strip()
     if shared:
-        return _normalize_sqlalchemy_url(shared)
+        return normalize_sqlalchemy_url(shared)
 
-    host = os.getenv("DATABASE_HOST", "localhost")
-    port = os.getenv("DATABASE_PORT", "5432")
-    name = os.getenv("DATABASE_NAME", "a360")
-    user = os.getenv("DATABASE_USERNAME", "a360_admin")
-    password = os.getenv("DATABASE_PASSWORD", "")
+    # 조각 기본값은 레지스트리(config.py)가 단일 진실 공급원 — literal 중복 제거 (RPA-294).
+    # config.*는 접근 시점에 os.getenv를 타므로 import 시점 호출(engine 생성) 타이밍은 불변이고,
+    # 빈 문자열은 선언 기본값으로 저하해 빈 host로 URL이 깨지는 것도 막는다.
+    host = config.DATABASE_HOST
+    port = config.DATABASE_PORT
+    name = config.DATABASE_NAME
+    user = config.DATABASE_USERNAME
+    password = config.DATABASE_PASSWORD
     # 자격증명은 URL 인코딩한다 — RDS 자동생성 비밀번호의 '%'·'@'·':'·'/' 등이
     # URL을 깨뜨리는 것(호스트 오파싱·인증 실패)을 막는다 (RPA-51).
     return f"postgresql+psycopg://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}/{name}"

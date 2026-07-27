@@ -13,6 +13,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from app import models
+from app.core import config
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -135,7 +136,7 @@ def _issue_tokens(
     from datetime import datetime, timedelta, timezone
 
     refresh = create_refresh_token(user_id)
-    expire_days = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "14"))
+    expire_days = config.REFRESH_TOKEN_EXPIRE_DAYS  # 레지스트리 cast(int) 적용 — literal 중복 제거 (RPA-294)
     db.add(
         models.RefreshToken(
             user_id=user_id,

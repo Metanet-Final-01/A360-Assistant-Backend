@@ -288,7 +288,7 @@ def test_cost_usd_none_when_no_price(monkeypatch):
     assert llm.cost_usd(1_000_000, 0, "text-embedding-3-small") == 0.02
 
 
-# --- 프롬프트 캐시 (RPA-199) — 미반영이 실청구 대비 4.7배 과대계상의 주원인 ---
+# --- 프롬프트 캐시 (RPA-199) — 미반영이 실청구 대비 과대계상(계정 합산 1.21배)의 주원인 ---
 
 def _chat_prices(monkeypatch, cached_price="0.075"):
     """챗 모델 단가 3종을 세팅한다. cached_price=None이면 캐시 단가 미설정(구 동작)."""

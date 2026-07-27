@@ -267,6 +267,7 @@ async def _compose_candidate(
     document: str | None,
     sink: list[dict],
     sem: asyncio.Semaphore,
+    ctx,
 ) -> dict | None:
     """페르소나 하나로 후보 흐름도를 생성한다. 실패 시 None (부분 실패 격리)."""
     from ..orchestrator.render import analysis_brief
@@ -275,8 +276,9 @@ async def _compose_candidate(
 
     persona = (_PROMPT_DIR / persona_file).read_text(encoding="utf-8")
     llm = _make_llm()
-    tools = build_kb_tools(sink, source_types=SEARCH_SOURCE_TYPES)
-    runnable = llm.bind_tools(tools)
+    # 검색할 KB가 없으면(사용자 제공 카탈로그) 스펙 조회 툴만 준다 — 메뉴에 전량이 실려 있다.
+    tools = build_kb_tools(sink, ctx, source_types=SEARCH_SOURCE_TYPES)
+    runnable = llm.bind_tools(tools) if tools else llm
     usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_generate")]}
 
     background = f"\n\n[배경 지식 (공식 문서 발췌)]\n{dossier['background']}" if dossier.get("background") else ""
@@ -296,7 +298,7 @@ async def _compose_candidate(
     parse_retried = False
 
     for _ in range(_COMPOSE_MAX_TURNS):
-        target = runnable if tool_rounds < _ESCAPE_HATCH_ROUNDS else llm
+        target = runnable if (tools and tool_rounds < _ESCAPE_HATCH_ROUNDS) else llm
         try:
             async with sem:
                 ai = await target.ainvoke(msgs, config=usage_config)
@@ -327,16 +329,15 @@ async def _compose_candidate(
 # verify 스택 — 후보별 L0/L1 → L2 → L3
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict, sem: asyncio.Semaphore):
+async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict, sem: asyncio.Semaphore, ctx):
     """후보 하나에 검증 스택을 돌려 CandidateReport를 만든다. L2/L3 실패는 신호 결측일 뿐."""
     from ..orchestrator.harness import collect_violations, from_violations_dicts
     from ..orchestrator.judge import CandidateReport
     from ..verify import findings as F
-    from ..verify.catalog import get_catalog
     from ..verify.semantic import run_semantic_check
     from ..verify.simulate import run_simulation
 
-    violations = collect_violations(flow, get_catalog())
+    violations = collect_violations(flow, ctx.catalog)
     fnd, _cards = from_violations_dicts(violations)
 
     coverage = None
@@ -383,7 +384,7 @@ async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict,
 # 파이프라인 본체
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict:
+async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=None) -> dict:
     """spec → research → compose×N → verify → judge → refine → finalize.
 
     반환: {"recommendation": Recommendation dict, "violations": list[dict]}.
@@ -397,18 +398,20 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
         from_violations_dicts,
         refine_flow,
     )
+    from ..catalog_context import a360_context
     from ..orchestrator.judge import judge_candidates
     from ..verify import findings as F
-    from ..verify.catalog import get_catalog
     from ..verify.semantic import run_semantic_check
     from .research import build_dossier
 
+    # ctx 미지정은 a360 기본 — 기존 호출부(테스트 포함) 호환 (RPA-285).
+    ctx = ctx or a360_context()
     analysis = _to_dict(analysis)
     sink: list[dict] = []
     sem = asyncio.Semaphore(config.MAX_LLM_CONCURRENCY)
 
     # [2] research — 조사 선행·공유
-    dossier = await build_dossier(spec, sink)
+    dossier = await build_dossier(spec, sink, ctx)
 
     # [3] compose ×N — 문서 기반이면 문서 충실 페르소나까지 3후보
     personas = [(c, n, f) for c, n, f, needs_doc in _PERSONAS if document or not needs_doc]
@@ -419,7 +422,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
     emit_candidates_frame(cand_status, f"{len(personas)}가지 설계 관점으로 후보 생성 중")
 
     composed = await asyncio.gather(*(
-        _compose_candidate(c, f, spec, dossier, analysis, document, sink, sem)
+        _compose_candidate(c, f, spec, dossier, analysis, document, sink, sem, ctx)
         for c, n, f in personas
     ))
     flows: list[tuple[str, str, dict]] = []
@@ -437,7 +440,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
 
     # [4] verify 스택 — 후보별 병렬
     reports = await asyncio.gather(*(
-        _verify_candidate(c, n, flow, spec, sem) for c, n, flow in flows
+        _verify_candidate(c, n, flow, spec, sem, ctx) for c, n, flow in flows
     ))
     for r in reports:
         st = next(s for s in cand_status if s["id"] == r.candidate_id)
@@ -460,7 +463,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
     # [6] refine — 정적 위반 + L2/L3 발견 + 이식 지시를 surgeon 패치로
     extra = [f for f in winner.findings if f.layer in ("L2", "L3")] + verdict["transplant_findings"]
     refined = await asyncio.to_thread(
-        refine_flow, winner.flow, get_catalog(), extra_findings=extra, purpose="turn_generate"
+        refine_flow, winner.flow, ctx.catalog, extra_findings=extra, purpose="turn_generate"
     )
     flow, violations = refined["flow"], refined["violations"]
 
@@ -489,7 +492,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict) -> dict
         findings_final += F.from_coverage(coverage)
 
     # 질문 카드 — R3 + unknowns + assumptions (결정론) → 문구 다듬기 (no-fail LLM 1회)
-    cards = cards_mod.build_cards(flow, spec, r3_cards, get_catalog())
+    cards = cards_mod.build_cards(flow, spec, r3_cards, ctx.catalog)
     if cards:
         async with sem:
             cards = await asyncio.to_thread(cards_mod.polish_card_wording, cards)

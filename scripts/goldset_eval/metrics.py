@@ -84,7 +84,19 @@ def score_case(
     pred_raw: list[tuple[str, str]],
     gold_raw: list[tuple[str, str]],
     kb_canons: list[CanonAction],
+    gold_boilerplate: list[bool] | None = None,
 ) -> dict:
+    """예측 시퀀스를 정답과 대조해 액션 지표를 낸다.
+
+    재현율을 세 가지로 낸다 — 분모가 달라서다:
+      action            전체 정답 대비 (기존 기준선과 비교 가능)
+      action_achievable KB에 동치가 있는 정답만 (검색으로 도달 가능한 것)
+      action_core       Bot Store 제출 규약 보일러플레이트를 뺀 '실업무'만
+    셋을 나란히 보면 "못 만든 것"과 "만들 수 없었던 것"이 갈린다.
+
+    gold_boilerplate는 gold_raw와 같은 길이·순서의 표시(gold.merged_boilerplate).
+    없으면 action_core는 action과 같아진다.
+    """
     pred = [CanonAction(p, a) for p, a in pred_raw]
     gold = [CanonAction(p, a) for p, a in gold_raw]
     match = greedy_match(pred, gold)
@@ -117,6 +129,16 @@ def score_case(
     n_gold_achv = sum(achievable_flags)
     n_match_achv = sum(1 for j in matched_gold if achievable_flags[j])
 
+    # 실업무(보일러플레이트 제외) — 표시가 길이까지 맞을 때만 쓴다. 어긋나면 조용히
+    # 전량을 실업무로 보고 넘어간다(지표 하나 때문에 채점 전체를 죽이지 않는다).
+    core_flags = (
+        [not b for b in gold_boilerplate]
+        if gold_boilerplate is not None and len(gold_boilerplate) == len(gold)
+        else [True] * len(gold)
+    )
+    n_gold_core = sum(core_flags)
+    n_match_core = sum(1 for j in matched_gold if core_flags[j])
+
     return {
         "n_pred": len(pred),
         "n_gold": len(gold),
@@ -125,6 +147,11 @@ def score_case(
         "action_achievable": {
             **_prf(n_match_achv, len(pred), n_gold_achv),
             "n_gold_achievable": n_gold_achv,
+        },
+        "action_core": {
+            **_prf(n_match_core, len(pred), n_gold_core),
+            "n_gold_core": n_gold_core,
+            "n_gold_boilerplate": len(gold) - n_gold_core,
         },
         "package": package_prf(pred, gold),
         "order_score": order_score(match),

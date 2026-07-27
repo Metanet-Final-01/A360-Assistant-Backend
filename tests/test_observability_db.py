@@ -1,12 +1,14 @@
 """관측 전용 DB 분리 테스트 (RPA-90).
 
 핵심 계약:
-- OBSERVABILITY_DATABASE_URL 미설정 → 앱 SessionLocal 폴백 (기존 로컬 개발·테스트 호환)
+- OBSERVABILITY_DATABASE_URL 미설정 → unavailable (서비스 DB 폴백 금지)
 - 설정 → 별도 엔진의 세션 팩토리 (앱 DB와 분리)
 - 관측 DB 장애·미설정이 쓰기 호출(record_usage/_record_audit)을 실패시키지 않음
 """
 
 from types import SimpleNamespace
+
+import pytest
 
 import app.core.observability_db as obs
 
@@ -17,13 +19,47 @@ def _reset_singleton():
     obs._url_cached = None
 
 
-def test_fallback_to_app_sessionlocal_when_unset(monkeypatch):
-    """URL 미설정이면 앱 SessionLocal을 호출 시점에 참조한다 — monkeypatch 호환 계약."""
+def test_unset_url_never_falls_back_to_app_database(monkeypatch):
+    """URL 미설정은 명시적 unavailable이며 앱 SessionLocal을 절대 참조하지 않는다."""
     monkeypatch.delenv("OBSERVABILITY_DATABASE_URL", raising=False)
     _reset_singleton()
-    sentinel = object()
-    monkeypatch.setattr("app.db.SessionLocal", sentinel)
-    assert obs.observability_sessionmaker() is sentinel
+    with pytest.raises(obs.ObservabilityUnavailableError):
+        obs.observability_sessionmaker()
+
+
+def test_admin_dependency_returns_503_when_unconfigured(monkeypatch):
+    """관리자 관측 조회는 빈 결과나 서비스 DB 데이터 대신 표준 503을 반환한다."""
+    from app.core.errors import AppError
+
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "")
+    _reset_singleton()
+    dependency = obs.get_obs_db()
+    with pytest.raises(AppError) as exc:
+        next(dependency)
+    assert exc.value.status_code == 503
+    assert exc.value.code == "OBSERVABILITY_UNAVAILABLE"
+
+
+def test_admin_dependency_returns_503_when_connection_fails(monkeypatch):
+    """URL은 있어도 DB가 내려간 경우 raw 500이나 드라이버 오류를 노출하지 않는다."""
+    from app.core.errors import AppError
+
+    closed = []
+
+    class _Session:
+        def connection(self):
+            raise RuntimeError("driver detail must stay private")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(obs, "observability_sessionmaker", lambda: lambda: _Session())
+    dependency = obs.get_obs_db()
+    with pytest.raises(AppError) as exc:
+        next(dependency)
+    assert exc.value.status_code == 503
+    assert exc.value.code == "OBSERVABILITY_UNAVAILABLE"
+    assert closed == [True]
 
 
 def test_separate_engine_when_url_set(monkeypatch):
@@ -55,6 +91,45 @@ def test_engine_rebuilt_on_url_change(monkeypatch):
         _reset_singleton()
 
 
+def test_normalize_shared_url_helper():
+    """공유 정규화 함수: 드라이버 미지정·축약형은 psycopg(v3)로, 이미 명시된 건 불변 (RPA-322).
+
+    앱 DB와 관측 DB가 이 한 함수를 공유한다 — 복사하면 한쪽만 고쳐져 갈린다(CONVENTIONS §9).
+    """
+    from app.db import normalize_sqlalchemy_url
+
+    assert normalize_sqlalchemy_url("postgresql://h:5432/d") == "postgresql+psycopg://h:5432/d"
+    # postgres:// 축약형(Heroku·일부 콘솔) — SQLAlchemy 2.0이 거부하므로 정규화 대상
+    assert normalize_sqlalchemy_url("postgres://h:5432/d") == "postgresql+psycopg://h:5432/d"
+    # 이미 드라이버가 명시됐거나 다른 방언은 불변
+    assert normalize_sqlalchemy_url("postgresql+psycopg://h/d") == "postgresql+psycopg://h/d"
+    assert normalize_sqlalchemy_url("sqlite:///:memory:") == "sqlite:///:memory:"
+    # 빈 문자열은 통과 — "미설정=unavailable" 판정을 깨지 않는다
+    assert normalize_sqlalchemy_url("") == ""
+
+
+def test_libpq_url_selects_psycopg_v3_driver_not_psycopg2(monkeypatch):
+    """CloudFormation이 주는 postgresql://(드라이버 미지정)를 psycopg(v3) 엔진으로 뜬다 (RPA-322).
+
+    정규화가 없으면 SQLAlchemy 2.0이 기본 DBAPI psycopg2를 고르는데, 이 이미지엔 psycopg(v3)만
+    있어 관측 DB 연결이 ModuleNotFoundError로 죽고 관측 쓰기가 조용히 전부 유실된다. URL 문자열만
+    (대리 지표) 보지 않고 **엔진이 실제로 무슨 드라이버로 떴는지**까지 본다 — 이게 동작이 읽는 값.
+    """
+    monkeypatch.setenv(
+        "OBSERVABILITY_DATABASE_URL",
+        "postgresql://u:pw@obs-host:5432/a360_obs?sslmode=require",
+    )
+    _reset_singleton()
+    try:
+        # 단일 chokepoint에서 스킴에 드라이버가 박힌다
+        assert obs.observability_url().startswith("postgresql+psycopg://")
+        # create_engine은 연결 없이 방언을 결정한다 — driver가 psycopg2면 프로덕션에서 죽는다
+        engine = obs.observability_sessionmaker().kw["bind"]
+        assert engine.dialect.driver == "psycopg"
+    finally:
+        _reset_singleton()
+
+
 def test_ensure_schema_noop_when_unset(monkeypatch):
     """URL 미설정이면 스키마 보장은 no-op(False) — 앱 DB는 Alembic이 관리한다."""
     monkeypatch.delenv("OBSERVABILITY_DATABASE_URL", raising=False)
@@ -71,6 +146,42 @@ def test_ensure_schema_survives_bad_url(monkeypatch):
     _reset_singleton()
     try:
         assert obs.ensure_observability_schema() is False
+    finally:
+        _reset_singleton()
+
+
+def test_ensure_schema_uses_short_best_effort_lock_timeout(monkeypatch):
+    """관측 DB 락 경합이 앱 기동을 앱 마이그레이션 제한(120초)만큼 막지 않는다."""
+    from app.db import OBS_SCHEMA_LOCK_KEY
+
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "sqlite:///:memory:")
+    _reset_singleton()
+    lock_calls = []
+
+    class _Lock:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            return False
+
+    def _capture_lock(url, key, *, timeout=None):
+        lock_calls.append((url, key, timeout))
+        return _Lock()
+
+    metadata = SimpleNamespace(create_all=lambda bind: None)
+    monkeypatch.setattr("app.db.pg_advisory_lock", _capture_lock)
+    monkeypatch.setattr(obs, "_observability_metadata", lambda: metadata)
+    monkeypatch.setattr(obs, "_apply_observability_indexes", lambda *args: None)
+    try:
+        assert obs.ensure_observability_schema() is True
+        assert lock_calls == [
+            (
+                "sqlite:///:memory:",
+                OBS_SCHEMA_LOCK_KEY,
+                "5s",
+            )
+        ]
     finally:
         _reset_singleton()
 
@@ -102,3 +213,16 @@ def test_record_usage_uses_observability_session(monkeypatch):
     monkeypatch.setattr("app.models.LlmUsage", lambda **kw: SimpleNamespace(**kw))
     record_usage(purpose="intake", model="m", input_tokens=10, output_tokens=2)
     assert len(saved) == 1 and saved[0].purpose == "intake"
+
+
+def test_record_usage_is_best_effort_without_observability_url(monkeypatch):
+    """관측 미설정은 기록만 유실시키고 LLM 호출자나 서비스 DB에 영향을 주지 않는다."""
+    from app.core.llm import record_usage
+
+    monkeypatch.setenv("OBSERVABILITY_DATABASE_URL", "")
+    _reset_singleton()
+    monkeypatch.setattr(
+        "app.db.SessionLocal",
+        lambda: (_ for _ in ()).throw(AssertionError("service DB fallback used")),
+    )
+    record_usage(purpose="intake", model="m", input_tokens=10, output_tokens=2)
