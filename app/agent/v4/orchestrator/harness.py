@@ -290,6 +290,68 @@ def repair_spec_excerpts(
     return "\n".join(blocks)
 
 
+# 라운드 기록에 실을 연산 수 상한 — turn_events.detail은 4,000자를 넘으면 통째로 preview
+# 마커로 대체돼(sessions._tev) 구조가 사라진다. 연산은 라운드당 보통 1~5개다.
+_MAX_LOGGED_OPS = 12
+
+
+def _op_digest(ops) -> list[dict]:
+    """surgeon 연산을 관측용으로 축약한다 — '무엇을 어디에 하려 했나'만 남긴다.
+
+    파라미터 값·라벨 같은 자유 텍스트는 싣지 않는다: 사용자 업무 내용이 섞일 수 있고
+    (turn_events는 관측 DB로 나간다) 부피도 크다. 진단에 필요한 것은 **연산 종류와 대상**이다.
+    """
+    out: list[dict] = []
+    for op in (ops or [])[:_MAX_LOGGED_OPS]:
+        row = {"op": op.op}
+        if op.target:
+            row["target"] = op.target
+        if op.targets:
+            row["targets"] = op.targets[:4]
+        if op.anchor:
+            row["anchor"] = op.anchor
+        if op.package or op.action_name:
+            row["to"] = f"{op.package or '?'}/{op.action_name or '?'}"
+        if op.action:
+            row["insert"] = f"{op.action.get('package') or '?'}/{op.action.get('action') or '?'}"
+        if op.container:
+            row["wrap_in"] = f"{op.container.get('package') or '?'}/{op.container.get('action') or '?'}"
+        if op.parameters:
+            row["params"] = [p.get("name") for p in op.parameters if isinstance(p, dict)][:6]
+        out.append(row)
+    return out
+
+
+def _rule_counts(findings: list[Finding]) -> dict[str, int]:
+    """남은 결함을 규칙별 개수로 — '무엇이 안 고쳐졌나'를 한 줄로 본다."""
+    counts: dict[str, int] = {}
+    for f in _error_findings(findings):
+        key = f.rule or f.layer or "?"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _emit_round(round_no: int, outcome: str, **data) -> None:
+    """교정 라운드 하나의 결과를 관측 이벤트로 남긴다 (LLM 0회, 결정론).
+
+    ## 왜 필요한가 (실측, 2026-07-27)
+
+    산출물에 R17(세션 핸들 패키지 불일치) blocker가 남았는데, 그 수리에 필요한 `Email`
+    어휘는 수리 메뉴에 이미 있었다. 그런데 **surgeon이 시도조차 안 했는지, 시도했는데
+    적용이 실패했는지, 적용됐는데 가중합이 안 줄어 폐기됐는지 알 방법이 없었다** —
+    로그는 컨테이너 재시작으로 날아가고, turn_events에는 라운드 정보가 아예 없었다.
+
+    원인을 못 짚으면 고칠 수도 없다. 라운드마다 '무엇을 시도했고 왜 그렇게 끝났나'를
+    남긴다. `emit`의 data는 sessions._tev가 turn_events.detail(JSON)로 적재한다.
+    """
+    emit({
+        "event": "stage",
+        "stage": "refining",
+        "message": f"교정 라운드 {round_no} — {outcome}",
+        "data": {"round": round_no, "outcome": outcome, **data},
+    })
+
+
 def _findings_lines(findings: list[Finding]) -> str:
     order = {"blocker": 0, "major": 1, "minor": 2, "warning": 3}
     ranked = sorted(findings, key=lambda f: order.get(f.severity, 1))[:_MAX_FINDINGS_IN_PROMPT]
@@ -498,6 +560,7 @@ def refine_flow(
     extras_pending = bool(_error_findings(list(extra_findings or [])))
     repaired = False
     no_improve = 0
+    round_no = 0  # max_rounds=0(교정 끄기)이면 루프가 안 돌아 아래 요약이 참조할 값이 없다
 
     for round_no in range(1, max_rounds + 1):
         work = annotate_ids(copy.deepcopy(current))
@@ -525,9 +588,15 @@ def refine_flow(
             )
         except (ValueError, RuntimeError) as e:
             logger.warning("surgeon 라운드 %d 출력 실패 — 현재본 유지: %s", round_no, e)
+            _emit_round(round_no, "llm_error", weight=current_weight,
+                        remaining=_rule_counts(round_findings), error=str(e)[:200])
             break
         if not ops.operations:  # 고칠 방법이 없다는 정직한 신호 — 가짜 성공 방지
             logger.info("surgeon 라운드 %d: 연산 없음 — 종료", round_no)
+            # 🔴 진단상 가장 중요한 종료 사유다 — "고칠 방법이 없다"는 뜻이라, 남은 규칙이
+            # 무엇인지가 곧 '수리 어휘가 부족한 지점'이다.
+            _emit_round(round_no, "no_ops", weight=current_weight,
+                        remaining=_rule_counts(round_findings))
             break
 
         applied, errors = apply_edit_ops(work, ops.operations)
@@ -537,6 +606,10 @@ def refine_flow(
         renumber(work)
         if applied == 0:
             no_improve += 1
+            _emit_round(round_no, "apply_failed", weight=current_weight,
+                        ops=_op_digest(ops.operations), proposed=len(ops.operations),
+                        errors=[e[:120] for e in errors[:5]],
+                        remaining=_rule_counts(round_findings))
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
             continue
@@ -547,7 +620,11 @@ def refine_flow(
         new_weight = weight(_error_findings(new_findings + new_gaps))
         # 회귀 가드 — 정적 가중합이 줄었을 때만 채택. 이식 지시가 걸려 있는 라운드는
         # '정적 악화 없음(<=)'까지 허용한다 (이식은 정적 신호에 안 잡히는 개선이므로).
+        digest = _op_digest(ops.operations)
         if new_weight < current_weight or (extras_pending and new_weight <= current_weight):
+            _emit_round(round_no, "accepted", weight_before=current_weight, weight_after=new_weight,
+                        ops=digest, applied=applied, errors=[e[:120] for e in errors[:5]],
+                        remaining=_rule_counts(new_findings + new_gaps))
             current, current_violations = work, new_violations
             current_weight = new_weight
             repaired = True
@@ -561,9 +638,32 @@ def refine_flow(
         else:
             logger.info("surgeon 라운드 %d: 가중합 %d→%d 개선 없음 — 폐기",
                         round_no, current_weight, new_weight)
+            # 🔴 폐기는 "고쳤는데 되돌렸다"는 뜻이다. 무엇을 시도했는지(ops)와 가중합이
+            # 어떻게 움직였는지가 같이 있어야 "삽입이 부수 위반을 만들어 상쇄됐다" 같은
+            # 진짜 원인을 판별할 수 있다.
+            _emit_round(round_no, "discarded", weight_before=current_weight, weight_after=new_weight,
+                        ops=digest, applied=applied,
+                        remaining=_rule_counts(new_findings + new_gaps))
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
+
+    # 루프가 어떻게 끝났는지를 한 줄로 남긴다 — 라운드 기록만 있으면 "8라운드를 다 썼나,
+    # 무개선으로 일찍 빠졌나"가 안 보인다(둘은 처방이 정반대다: 예산 부족 vs 수리 불능).
+    final_findings, _ = from_violations_dicts(current_violations)
+    final_gaps = completeness_findings(current, spec) if spec is not None else []
+    emit({
+        "event": "stage", "stage": "refining",
+        "message": (f"교정 종료 — 위반 {len(current_violations)}건 · 가중합 {current_weight}"
+                    + ("" if repaired else " (한 라운드도 채택되지 않음)")),
+        "data": {
+            "rounds_used": round_no,
+            "max_rounds": max_rounds,
+            "repaired": repaired,
+            "final_weight": current_weight,
+            "remaining": _rule_counts(final_findings + final_gaps),
+        },
+    })
 
     # 최종 폴백 — 예산을 다 쓰고도 남은 미해결 must 요구는 자리표시자로 남긴다 (§5-H).
     # 조용히 빠뜨리는 것은 선택지가 아니다.
