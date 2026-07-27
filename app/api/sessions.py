@@ -538,6 +538,7 @@ def export_recommendation(
 
 _MAX_FLOW_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — 캡처 흐름도 PNG 한 장이면 충분
 _MAX_FLOW_IMAGE_COUNT = 20  # 페이지 분할 흐름도 최대 장수 (RPA-334) — 초과 시 413 TOO_MANY_IMAGES
+_MAX_FLOW_IMAGES_TOTAL_BYTES = 48 * 1024 * 1024  # 흐름도 합계 상한 48MB (RPA-334, Qodo #445) — 다중 이미지 메모리 폭증 차단
 
 
 def _sniff_image_kind(data: bytes) -> str | None:
@@ -580,20 +581,23 @@ async def export_recommendation_docx(
         raise HTTPException(
             404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
         )
-    # 흐름도 이미지(0~N장)를 장마다 크기·매직바이트로 검증한다. 한 장이라도 실패면 즉시 중단하되,
-    # 예외 경로에서도 모든 UploadFile 핸들을 닫는다(finally) — 리소스 누수 방지.
-    if len(flow_images) > _MAX_FLOW_IMAGE_COUNT:
-        raise HTTPException(
-            413,
-            detail={
-                "code": "TOO_MANY_IMAGES",
-                "message": f"흐름도 이미지는 최대 {_MAX_FLOW_IMAGE_COUNT}장까지 첨부할 수 있습니다.",
-            },
-        )
+    # 흐름도 이미지(0~N장)를 장마다 크기·매직바이트로 검증하고 합계 용량까지 바운드한다.
+    # 개수 초과 포함 **모든 예외 경로에서** UploadFile 핸들을 닫는다(finally) — 검증(개수 초과)을
+    # try 밖에서 raise하면 그 경로만 close를 놓친다(Qodo #445). 다중 이미지는 최악 20×8MB로
+    # 메모리를 20배 키우므로 누적 합계 상한으로도 막는다(단일 이미지 8MB → 다중 48MB로 바운드).
     image_bytes_list: list[bytes] = []
     try:
+        if len(flow_images) > _MAX_FLOW_IMAGE_COUNT:
+            raise HTTPException(
+                413,
+                detail={
+                    "code": "TOO_MANY_IMAGES",
+                    "message": f"흐름도 이미지는 최대 {_MAX_FLOW_IMAGE_COUNT}장까지 첨부할 수 있습니다.",
+                },
+            )
+        total_bytes = 0
         for image in flow_images:
-            # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413.
+            # MAX+1까지만 읽어 장당 메모리를 바운드한다 — 초과면 413.
             data = await image.read(_MAX_FLOW_IMAGE_BYTES + 1)
             if len(data) > _MAX_FLOW_IMAGE_BYTES:
                 raise HTTPException(
@@ -602,6 +606,15 @@ async def export_recommendation_docx(
             if _sniff_image_kind(data) is None:
                 raise HTTPException(
                     400, detail={"code": "INVALID_IMAGE", "message": "흐름도 이미지는 PNG/JPEG만 허용됩니다."}
+                )
+            total_bytes += len(data)
+            if total_bytes > _MAX_FLOW_IMAGES_TOTAL_BYTES:
+                raise HTTPException(
+                    413,
+                    detail={
+                        "code": "IMAGES_TOO_LARGE",
+                        "message": "흐름도 이미지 총 용량이 너무 큽니다(최대 48MB).",
+                    },
                 )
             image_bytes_list.append(data)
     finally:

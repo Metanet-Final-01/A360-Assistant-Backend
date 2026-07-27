@@ -314,3 +314,22 @@ def test_export_docx_post_rejects_too_many_images():
         r = c.post(f"/api/sessions/{SID}/recommendations/1/export/docx", files=files)
     assert r.status_code == 413
     assert r.json()["detail"]["code"] == "TOO_MANY_IMAGES"
+
+
+def test_export_docx_post_rejects_oversized_total(monkeypatch):
+    """장별 8MB 이하라도 합계가 상한을 넘으면 413 IMAGES_TOO_LARGE (RPA-334, Qodo #445 메모리 폭증)."""
+    # 합계 상한을 한 장 크기로 낮춰 2장이면 합계 초과하도록(테스트에 48MB를 만들지 않기 위함).
+    monkeypatch.setattr(sessions_api, "_MAX_FLOW_IMAGES_TOTAL_BYTES", len(_png_bytes()))
+    session = SimpleNamespace(id=SID, user_id=None)
+    row = SimpleNamespace(id=uuid.uuid4(), version=1, source="drag", payload=_rec())
+    _override(FakeDB(session=session, row=row))
+    with TestClient(app) as c:
+        r = c.post(
+            f"/api/sessions/{SID}/recommendations/1/export/docx",
+            files=[
+                ("flow_images", ("a.png", _png_bytes(), "image/png")),
+                ("flow_images", ("b.png", _png_bytes(), "image/png")),
+            ],
+        )
+    assert r.status_code == 413
+    assert r.json()["detail"]["code"] == "IMAGES_TOO_LARGE"
