@@ -41,13 +41,25 @@ def _error_digest(err: Exception) -> str:
     return "JSON 구문 오류"  # JSONDecodeError 위치정보도 굳이 노출하지 않는다
 
 
+def _call_digest(meta: dict) -> str:
+    """왜 깨졌나를 가르는 최소 신호 — 값·원문은 여전히 안 싣는다.
+
+    `finish_reason == "length"`면 **잘림**이라 처방이 다르다(부피를 줄이게 하거나 상한을
+    올린다). 이게 없으면 실패가 전부 "JSON 구문 오류" 한 줄로 뭉쳐, 프롬프트를 키우는 변경
+    뒤에 surgeon이 잘리기 시작해도 원인을 못 짚는다.
+    """
+    reason = meta.get("finish_reason")
+    return f"finish_reason={reason}, {meta.get('content_chars')}자"
+
+
 def chat_json(messages: list[dict], *, purpose: str, model_cls: type[T]) -> T:
     """JSON mode로 LLM을 호출해 model_cls로 검증한다. 위반 시 1회 교정, 재실패면 ValueError.
 
     사용량은 core.llm.chat이 purpose로 귀속 기록한다 — 오케스트레이터의 모든 구조화
     호출이 usage 기록 경로를 타야 하는 계약(링 게이지)의 이행 지점이다.
     """
-    raw = llm.chat(messages, purpose=purpose, response_format=_RESPONSE_FORMAT)
+    meta: dict = {}
+    raw = llm.chat(messages, purpose=purpose, response_format=_RESPONSE_FORMAT, meta=meta)
     try:
         return _parse(raw, model_cls)
     except (json.JSONDecodeError, ValidationError) as first_error:
@@ -64,9 +76,16 @@ def chat_json(messages: list[dict], *, purpose: str, model_cls: type[T]) -> T:
                 ),
             },
         ]
-        repaired = llm.chat(repair_messages, purpose=purpose, response_format=_RESPONSE_FORMAT)
+        meta2: dict = {}
+        repaired = llm.chat(repair_messages, purpose=purpose,
+                            response_format=_RESPONSE_FORMAT, meta=meta2)
         try:
             return _parse(repaired, model_cls)
         except (json.JSONDecodeError, ValidationError) as second_error:
             # 예외 체인(로그)에는 원본이 남지만 메시지 문자열에는 원문 값을 싣지 않는다.
-            raise ValueError(f"{purpose} 출력 파싱 실패(교정 후에도): {_error_digest(second_error)}") from second_error
+            # finish_reason·길이는 값이 아니라 **호출 결과의 형태**라 실어도 된다 — 없으면
+            # 잘림과 문법 오류가 같은 문구로 뭉쳐 다음 사고에서 또 추측만 하게 된다.
+            raise ValueError(
+                f"{purpose} 출력 파싱 실패(교정 후에도): {_error_digest(second_error)} "
+                f"[{_call_digest(meta2)}]"
+            ) from second_error

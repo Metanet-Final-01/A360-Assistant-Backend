@@ -20,13 +20,15 @@ catalog는 CatalogLookup 프로토콜이면 무엇이든 된다: 호출부가 Ca
 """
 
 import copy
+import json
 import logging
+import time
 from pathlib import Path
 
 from ..recommend.research import structural_complement
 from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
-from ..verify.checker import derive_session_registry, run_flow_checks
+from ..verify.checker import derive_session_registry, run_flow_checks, spec_param_names
 from ..verify.coverage_det import (
     completeness_findings,
     conflated_slots,
@@ -318,9 +320,28 @@ def _op_digest(ops) -> list[dict]:
         if op.container:
             row["wrap_in"] = f"{op.container.get('package') or '?'}/{op.container.get('action') or '?'}"
         if op.parameters:
-            row["params"] = [p.get("name") for p in op.parameters if isinstance(p, dict)][:6]
+            # 이름을 `params_sent`로 부른다 — 예전 이 키(`params`)는 "모델이 보냈지만 update가
+            # 무시한 이름"이었고 지금은 "실제로 병합된 이름"이다. 같은 이름을 유지하면 과거·신규
+            # turn_events를 같은 질의로 읽을 때 조용히 틀린다(실측 표가 이 필드로 관찰됐다).
+            row["params_sent"] = [p.get("name") for p in op.parameters if isinstance(p, dict)][:6]
         out.append(row)
     return out
+
+
+def spec_param_lookup(catalog: CatalogLookup | None):
+    """`(package, action) -> frozenset[str] | None` 콜백. 카탈로그가 없으면 None(정리 안 함).
+
+    update가 표기를 갈아끼울 때 옛 파라미터를 걷어내는 기준이며, **R2가 쓰는 바로 그 집합**을
+    돌려준다(checker.spec_param_names). 두 곳이 각자 스펙을 읽으면 "걷어냈는데 R2가 남는다"가
+    생긴다. 가드를 함수 안에 두는 이유는 규칙 하나가 호출부마다 흩어지지 않게 하기 위함이다.
+    """
+    if catalog is None:
+        return None
+
+    def lookup(package: str, action: str):
+        return spec_param_names(catalog.get_action_schema(package, action))
+
+    return lookup
 
 
 def _rule_counts(findings: list[Finding]) -> dict[str, int]:
@@ -330,6 +351,33 @@ def _rule_counts(findings: list[Finding]) -> dict[str, int]:
         key = f.rule or f.layer or "?"
         counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items()))
+
+
+# 라운드 기록 detail의 총 길이 예산. sessions._tev는 detail JSON이 4,000자를 넘으면 잘라
+# 붙이는 게 아니라 **통째로** {_truncated, size, preview}로 대체한다 — 구조가 사라져 진단이
+# 불가능해진다. 필드별 상한([:120]·[:5])만으로는 총량을 못 막아서 합산 예산을 따로 둔다.
+_ROUND_DETAIL_BUDGET = 3500
+# 예산 초과 시 버리는 순서(뒤에서부터 버린다) — 앞쪽이 진단에 더 중요하다.
+_ROUND_TRIM_ORDER = (
+    "errors", "dropped", "param_prune", "param_prune_reverted", "ops", "remaining",
+)
+
+
+def _fit_round_detail(data: dict) -> dict:
+    """라운드 detail을 총 길이 예산 안으로 줄인다. **줄인 사실을 남긴다**(조용한 절단 금지)."""
+    if len(json.dumps(data, ensure_ascii=False)) <= _ROUND_DETAIL_BUDGET:
+        return data
+    trimmed: list[str] = []
+    out = dict(data)
+    for key in _ROUND_TRIM_ORDER:
+        if key not in out:
+            continue
+        out.pop(key)
+        trimmed.append(key)
+        out["_budget_trimmed"] = trimmed
+        if len(json.dumps(out, ensure_ascii=False)) <= _ROUND_DETAIL_BUDGET:
+            break
+    return out
 
 
 def _emit_round(round_no: int, outcome: str, **data) -> None:
@@ -349,7 +397,7 @@ def _emit_round(round_no: int, outcome: str, **data) -> None:
         "event": "stage",
         "stage": "refining",
         "message": f"교정 라운드 {round_no} — {outcome}",
-        "data": {"round": round_no, "outcome": outcome, **data},
+        "data": _fit_round_detail({"round": round_no, "outcome": outcome, **data}),
     })
 
 
@@ -368,6 +416,113 @@ def _findings_lines(findings: list[Finding]) -> str:
 def _error_findings(findings: list[Finding]) -> list[Finding]:
     """교정을 강제하는 findings — warning은 감점·앵커용일 뿐 수리 대상이 아니다."""
     return [f for f in findings if f.severity != "warning"]
+
+
+# ── 폐기 라운드 되먹임 (RPA-298 항목 C) ──────────────────────────────────────
+#
+# 실측(2026-07-27): 라운드 4는 **이미 있는** 파라미터 이름 12개를 다시 넣었고(가중합 210→210),
+# 라운드 5는 action_name 없이 package만 바꾸는 update 12개를 냈다(210→210). 프롬프트가 직전과
+# 바이트 단위로 같았기 때문이다 — 무엇을 이미 시도했고 왜 안 됐는지가 어디에도 없었다.
+_MAX_FEEDBACK_ATTEMPTS = 2   # _STOP_AFTER_NO_IMPROVE(2)가 실질 상한이라 사실상 전체다(방어용)
+_MAX_FEEDBACK_SHAPES = 6
+_MAX_BANNED_NOTATIONS = 8
+
+_ATTEMPT_REASON = {
+    "discarded": "가중합이 줄지 않아 되돌림",
+    "no_effect": "적용했지만 흐름도가 한 글자도 안 바뀜",
+    "all_dropped": "전부 카탈로그에 없는 표기라 무시됨",
+    "apply_failed": "대상 노드를 못 찾아 하나도 적용 안 됨",
+}
+
+
+def _op_shape(op) -> str:
+    """연산 하나를 '무엇을 어떤 모양으로' — 대상 id는 뺀다(같은 모양을 묶기 위해).
+
+    파라미터는 **이름만** 싣는다. 값·라벨은 사용자 업무 내용이라 프롬프트에도 관측에도
+    올리지 않는다(_op_digest와 같은 규약).
+    """
+    if op.op == "update":
+        bits = []
+        if op.package or op.action_name:
+            bits.append(f"표기→{op.package or '?'}/{op.action_name or '?'}")
+        if op.parameters:
+            names = [str(p.get("name")) for p in op.parameters if isinstance(p, dict) and p.get("name")]
+            bits.append("파라미터 " + ", ".join(names[:4]))
+        if op.label is not None:
+            bits.append("라벨 변경")
+        return "update " + (" · ".join(bits) or "(바꿀 값 없음)")
+    if op.op == "set_params":
+        names = [str(p.get("name")) for p in (op.parameters or []) if isinstance(p, dict) and p.get("name")]
+        return "set_params " + (", ".join(names[:4]) or "(빈 목록)")
+    if op.op == "insert":
+        spec = op.action or {}
+        return f"insert {spec.get('package') or '?'}/{spec.get('action') or '?'}"
+    if op.op == "wrap":
+        spec = op.container or {}
+        return f"wrap in {spec.get('package') or '?'}/{spec.get('action') or '?'}"
+    return op.op
+
+
+def _attempt_lines(operations) -> list[str]:
+    """같은 모양의 연산을 한 줄로 묶는다 — 라운드 5의 update 12건이 12줄을 먹지 않게."""
+    groups: dict[str, int] = {}
+    for op in operations or []:
+        shape = _op_shape(op)
+        groups[shape] = groups.get(shape, 0) + 1
+    items = list(groups.items())
+    lines = [f"{s} ×{n}" if n > 1 else s for s, n in items[:_MAX_FEEDBACK_SHAPES]]
+    rest = items[_MAX_FEEDBACK_SHAPES:]
+    if rest:
+        lines.append(f"… 외 {len(rest)}종(총 {sum(n for _, n in rest)}건)")
+    return lines
+
+
+def _rule_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    """이 라운드가 **새로 만든** 위반만 — 원래 있던 것은 [고칠 문제들]에 이미 있다."""
+    return {k: v - before.get(k, 0) for k, v in sorted(after.items()) if v > before.get(k, 0)}
+
+
+def _feedback_block(attempts: list[dict], banned: list[str]) -> str:
+    """직전 라운드가 왜 반영되지 않았는지를 프롬프트 **맨 뒤**에 붙인다.
+
+    ## 왜 맨 뒤인가
+    아웃라인·findings·스펙 발췌·수리 어휘는 라운드 사이에 거의 그대로다. 가변 블록을 뒤에
+    두면 앞 전체가 프리픽스 캐시에 적중한다. 중간에 끼우면 뒤따르는 수리 어휘(수천 토큰)가
+    통째로 캐시에서 빠진다 — llm.py가 cached_tokens를 단가에 반영하므로 추정이 아니라 요금이다.
+
+    ## 무엇을 안 싣는가
+    남은 findings 전체(이미 [고칠 문제들]에 있다 — 중복하면 '내가 만든 것'과 '원래 있던 것'이
+    뒤섞인다), 파라미터 값·라벨 원문, 폐기 라운드의 결과 흐름도.
+
+    ## 헤더는 attempts가 있을 때만
+    banned는 한 번 채워지면 채택 뒤에도 남는다. 그것만으로 "되돌려졌다" 헤더를 렌더하면
+    **채택된 라운드 직후마다** 모델이 "네 수정은 반영 안 됐다"를 읽는다 — 막으려던 병리를
+    정반대로 재생산한다. 그래서 두 블록을 분리한다.
+    """
+    parts: list[str] = []
+    if attempts:
+        parts.append(
+            "[직전 시도 — 흐름도에 반영되지 않았다]\n"
+            "위 아웃라인은 아래 시도들이 **적용되기 전** 상태다. 같은 연산을 그대로 다시 내지 마라."
+        )
+        for a in attempts[-_MAX_FEEDBACK_ATTEMPTS:]:
+            head = f"- 라운드 {a['round']} ({_ATTEMPT_REASON.get(a['outcome'], a['outcome'])})"
+            if a.get("before") is not None and a.get("after") is not None:
+                head += f": 가중합 {a['before']} → {a['after']}"
+            parts.append(head)
+            parts.extend(f"    · {ln}" for ln in a.get("lines") or [])
+            if a.get("new_rules"):
+                parts.append(
+                    "    · 이 시도가 새로 만든 위반: "
+                    + ", ".join(f"{k}×{v}" for k, v in a["new_rules"].items())
+                )
+    if banned:
+        shown = banned[:_MAX_BANNED_NOTATIONS]
+        tail = f" 외 {len(banned) - len(shown)}건" if len(banned) > len(shown) else ""
+        parts.append(
+            "[카탈로그에 없어 무시된 표기 — 다시 쓰지 마라]\n" + ", ".join(shown) + tail
+        )
+    return ("\n\n" + "\n\n".join(parts)) if parts else ""
 
 
 # 슬롯 목적 블록의 상한 — 프롬프트 예산 보호. findings 상한(15)과 같은 자릿수로 둔다.
@@ -503,6 +658,8 @@ def refine_flow(
     max_rounds: int = MAX_REFINE_ROUNDS,
     purpose: str = "verify",
     spec: dict | None = None,
+    deadline_mono: float | None = None,
+    prune_params: bool = True,
 ) -> dict:
     """findings(정적 위반 + 누락 + 심판/L2/L3 지시)를 surgeon EditOps 패치로 반복 교정한다.
 
@@ -522,6 +679,20 @@ def refine_flow(
     반대로 **정직한 재분해는 통과한다** — 2중 뭉갬(20)을 쪼개다 부수 위반 1건(10)이
     생겨도 가중합은 준다(뭉갬을 요구당 1건으로 세는 이유, coverage_det 참조).
     spec을 안 주면 완성도 항이 0이라 기존 동작 그대로다(하위호환).
+
+    **prune_params=False면 update가 표기를 갈아끼워도 옛 파라미터를 걷어내지 않는다.**
+    사용자가 대화로 준 카탈로그(UserCatalogAction)는 파라미터를 **일부만** 설명했을 때
+    `parameters`가 부분 목록으로 잡힌다 — 그 상태로 정리하면 설명 안 한 파라미터가
+    `value_source="user"`까지 포함해 결정론으로 삭제되고, 편집 경로에는 회귀 가드도 복원
+    경로도 없다(generate.UserCatalogAction.as_spec이 이미 경고해 둔 자리다). checker가 같은
+    데이터로 R2를 내는 것과는 다른 문제다 — **보고는 무시할 수 있지만 삭제는 되돌릴 수 없다.**
+
+    **deadline_mono(time.monotonic 기준)를 주면 라운드를 시작하기 전에 접는다.** 호출부의
+    하드 컷(graph.generate_flow_two_phase)은 타임아웃 시 교정 결과를 통째로 버리고 초안을
+    확정하므로, 라운드 1~7이 채택한 성과까지 사라진다. 지금까지 이게 안 터진 이유는
+    _STOP_AFTER_NO_IMPROVE(2)가 2라운드 만에 빼줬기 때문인데, update가 파라미터를 적용하게
+    되면서 라운드가 생산적이 되어 8라운드를 실제로 쓰게 됐다 — 여기서 먼저 접어야
+    **채택된 현재본을 들고 정상 종료**한다. 하드 컷은 이중 안전망으로 그대로 둔다.
 
     반환: {"flow", "violations", "repaired"}.
     """
@@ -562,8 +733,18 @@ def refine_flow(
     repaired = False
     no_improve = 0
     round_no = 0  # max_rounds=0(교정 끄기)이면 루프가 안 돌아 아래 요약이 참조할 값이 없다
+    spec_params = spec_param_lookup(catalog) if prune_params else None
+    exists = lambda p, a: catalog.get_action_schema(p, a) is not None  # noqa: E731
+    attempts: list[dict] = []   # 반영되지 않은 직전 라운드들 — 채택되면 비운다
+    banned: list[str] = []      # 카탈로그에 없어 무시된 표기 — 라운드를 넘겨 누적한다
 
     for round_no in range(1, max_rounds + 1):
+        if deadline_mono is not None and time.monotonic() >= deadline_mono:
+            # 라운드를 **시작하기 전에** 접는다 — 채택된 current를 들고 정상 종료하기 위함.
+            _emit_round(round_no, "budget_exhausted", weight=current_weight,
+                        remaining=_rule_counts(round_findings))
+            round_no -= 1  # 이 라운드는 돌지 않았다 — 요약의 rounds_used가 부풀지 않게
+            break
         work = annotate_ids(copy.deepcopy(current))
         outline = render_outline(work)
         excerpts, excerpt_keys = _spec_excerpts(current_violations, catalog)
@@ -580,7 +761,10 @@ def refine_flow(
                f"세션 여닫기·반복·분기·예외 처리 + 이 흐름도가 이미 쓰는 패키지의 업무 액션. "
                f"여기 없는 표기는 쓰지 말 것]\n{repair_menu}"
                if repair_menu else "")
+            # 되먹임은 **맨 뒤**에 — 앞 전체가 프리픽스 캐시에 적중하게(_feedback_block 참조).
+            + _feedback_block(attempts, banned)
         )
+        fed_back = min(len(attempts), _MAX_FEEDBACK_ATTEMPTS)
         try:
             ops = chat_json(
                 [{"role": "system", "content": _SURGEON_PROMPT},
@@ -589,14 +773,14 @@ def refine_flow(
             )
         except (ValueError, RuntimeError) as e:
             logger.warning("surgeon 라운드 %d 출력 실패 — 현재본 유지: %s", round_no, e)
-            _emit_round(round_no, "llm_error", weight=current_weight,
+            _emit_round(round_no, "llm_error", weight=current_weight, fed_back=fed_back,
                         remaining=_rule_counts(round_findings), error=str(e)[:200])
             break
         if not ops.operations:  # 고칠 방법이 없다는 정직한 신호 — 가짜 성공 방지
             logger.info("surgeon 라운드 %d: 연산 없음 — 종료", round_no)
             # 🔴 진단상 가장 중요한 종료 사유다 — "고칠 방법이 없다"는 뜻이라, 남은 규칙이
             # 무엇인지가 곧 '수리 어휘가 부족한 지점'이다.
-            _emit_round(round_no, "no_ops", weight=current_weight,
+            _emit_round(round_no, "no_ops", weight=current_weight, fed_back=fed_back,
                         remaining=_rule_counts(round_findings))
             break
 
@@ -605,33 +789,72 @@ def refine_flow(
         # 판정은 `work`(id가 붙은 사본) 기준이어야 update의 target 조회가 맞는다.
         proposed = len(ops.operations)
         operations, dropped = drop_unknown_action_ops(
-            work, ops.operations, lambda p, a: catalog.get_action_schema(p, a) is not None
+            work, ops.operations, exists, banned_out=banned
         )
         if dropped:
             logger.info("surgeon 라운드 %d: 환각 표기 연산 %d개 제외 — %s",
                         round_no, len(dropped), dropped)
+        rules_before = _rule_counts(round_findings)
         if not operations:
             # 낼 것이 전부 환각이었다 — 연산 없음과 같은 상태다(가짜 성공 방지).
             _emit_round(round_no, "all_dropped", weight=current_weight, proposed=proposed,
-                        dropped=[d[:120] for d in dropped[:5]],
-                        remaining=_rule_counts(round_findings))
+                        fed_back=fed_back, dropped=[d[:120] for d in dropped[:5]],
+                        remaining=rules_before)
+            attempts.append({"round": round_no, "outcome": "all_dropped",
+                             "lines": _attempt_lines(ops.operations)})
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
             continue
 
-        applied, errors = apply_edit_ops(work, operations)
+        prune_log: list[dict] = []  # 라운드마다 새로 — 폐기된 라운드의 정리는 반영되지 않는다
+        applied, errors = apply_edit_ops(
+            work, operations, spec_params=spec_params, prune_log=prune_log
+        )
         if errors:
             logger.info("surgeon 라운드 %d: 연산 %d개 적용, 실패 %s", round_no, applied, errors)
         strip_ids(work)
         renumber(work)
+        digest = _op_digest(operations)
+        drop_note = [d[:120] for d in dropped[:5]]
         if applied == 0:
             no_improve += 1
             _emit_round(round_no, "apply_failed", weight=current_weight,
-                        ops=_op_digest(operations), proposed=proposed,
-                        dropped=[d[:120] for d in dropped[:5]],
+                        ops=digest, proposed=proposed, fed_back=fed_back, dropped=drop_note,
+                        errors=[e[:120] for e in errors[:5]], remaining=rules_before)
+            attempts.append({"round": round_no, "outcome": "apply_failed",
+                             "lines": _attempt_lines(operations)})
+            if no_improve >= _STOP_AFTER_NO_IMPROVE:
+                break
+            continue
+
+        if work == current:
+            # 🔴 순효과 0 — 연산은 '적용'됐는데 흐름도가 한 글자도 안 바뀌었다. 실측 라운드
+            # 4·5가 정확히 여기다(이미 있는 파라미터를 다시 넣기 / action_name 없는 update).
+            #
+            # 예전에는 이 배치가 재검증까지 가서 new_weight == current_weight가 되고,
+            # extras_pending이 살아 있으면 `<=`로 **채택**돼 repaired=True가 섰다 — 바뀌지도
+            # 않은 흐름도로 L2 재채점·L3 재실행이 돌았다. 결과 비교로 그 앞에서 끊는다.
+            #
+            # 술어(연산별 '무효과 판정')가 아니라 **결과 동일성**을 보는 이유: 술어는 적용부의
+            # 필드 집합을 손으로 베껴야 해서, 적용부가 늘 때마다(예: update의 parameters)
+            # 조용히 어긋난다 — 고칠 수 있는 연산을 무효과로 오판해 버리게 된다.
+            # (edit.py의 _is_noop_edit이 같은 방식으로 이미 검증된 선례다.)
+            #
+            # extras_pending은 **소진하지 않는다** — 이식 지시가 실제로 반영된 적이 없다.
+            #
+            # ⚠ 라운드 1은 놓칠 수 있다: renumber가 order를 1..N으로 정규화하는데 들어온
+            # 흐름도가 그 형태가 아니면 무효과여도 달라 보인다. 채택 이후의 current는 항상
+            # 정규화된 상태라 라운드 2부터는 정확하다. 놓치는 방향(연산을 살려 둔다)이
+            # 보수적이라 수용한다 — 반대로 오탐하면 고칠 수 있는 패치를 버린다.
+            _emit_round(round_no, "no_effect", weight=current_weight, applied=applied,
+                        proposed=proposed, fed_back=fed_back, ops=digest, dropped=drop_note,
                         errors=[e[:120] for e in errors[:5]],
-                        remaining=_rule_counts(round_findings))
+                        extras_pending=extras_pending, remaining=rules_before)
+            attempts.append({"round": round_no, "outcome": "no_effect",
+                             "before": current_weight, "after": current_weight,
+                             "lines": _attempt_lines(operations)})
+            no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
             continue
@@ -642,18 +865,20 @@ def refine_flow(
         new_weight = weight(_error_findings(new_findings + new_gaps))
         # 회귀 가드 — 정적 가중합이 줄었을 때만 채택. 이식 지시가 걸려 있는 라운드는
         # '정적 악화 없음(<=)'까지 허용한다 (이식은 정적 신호에 안 잡히는 개선이므로).
-        digest = _op_digest(operations)
-        drop_note = [d[:120] for d in dropped[:5]]
+        rules_after = _rule_counts(new_findings + new_gaps)
         if new_weight < current_weight or (extras_pending and new_weight <= current_weight):
             _emit_round(round_no, "accepted", weight_before=current_weight, weight_after=new_weight,
-                        ops=digest, applied=applied, proposed=proposed, dropped=drop_note,
-                        errors=[e[:120] for e in errors[:5]],
-                        remaining=_rule_counts(new_findings + new_gaps))
+                        ops=digest, applied=applied, proposed=proposed, fed_back=fed_back,
+                        dropped=drop_note, errors=[e[:120] for e in errors[:5]],
+                        param_prune=prune_log[:6], remaining=rules_after)
             current, current_violations = work, new_violations
             current_weight = new_weight
             repaired = True
             no_improve = 0
             extras_pending = False  # 이식 지시는 1회 반영으로 소진 — 반복 강제하면 진동한다
+            # 채택됐으니 '반영 안 됐다'는 되먹임을 비운다. 안 비우면 노드 id가 renumber로
+            # 다시 매겨진 뒤에도 옛 좌표를 근거로 얘기해 **틀린 자리**를 가리킨다.
+            attempts.clear()
             emit_flow_frame(current, current_violations, f"교정 라운드 {round_no} 적용")
             # 이후 라운드는 잔여 정적 위반 + 잔여 완성도 항(누락·뭉갬)만 (extra는 1회성)
             round_findings = new_findings + new_gaps
@@ -665,9 +890,18 @@ def refine_flow(
             # 🔴 폐기는 "고쳤는데 되돌렸다"는 뜻이다. 무엇을 시도했는지(ops)와 가중합이
             # 어떻게 움직였는지가 같이 있어야 "삽입이 부수 위반을 만들어 상쇄됐다" 같은
             # 진짜 원인을 판별할 수 있다.
+            # param_prune은 `_reverted`로 낸다 — work를 버리므로 그 정리는 **일어나지 않은
+            # 사실**이다. 그대로 실으면 다음 프롬프트가 아웃라인과 모순되는 상태를 말한다.
             _emit_round(round_no, "discarded", weight_before=current_weight, weight_after=new_weight,
-                        ops=digest, applied=applied, proposed=proposed, dropped=drop_note,
-                        remaining=_rule_counts(new_findings + new_gaps))
+                        ops=digest, applied=applied, proposed=proposed, fed_back=fed_back,
+                        dropped=drop_note, param_prune_reverted=prune_log[:6],
+                        remaining=rules_after)
+            attempts.append({
+                "round": round_no, "outcome": "discarded",
+                "before": current_weight, "after": new_weight,
+                "lines": _attempt_lines(operations),
+                "new_rules": _rule_delta(rules_before, rules_after),
+            })
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
@@ -710,7 +944,13 @@ def from_violations_dicts(violations: list[dict]) -> tuple[list[Finding], list[d
     return fs, [c.as_dict() for c in cards]
 
 
-def verify_and_repair(flow: dict, catalog: CatalogLookup, *, spec: dict | None = None) -> dict:
+def verify_and_repair(
+    flow: dict,
+    catalog: CatalogLookup,
+    *,
+    spec: dict | None = None,
+    prune_params: bool = True,
+) -> dict:
     """흐름도를 검수하고 위반이 있으면 surgeon refine 루프로 교정한다 (v2 시그니처 유지).
 
     edit 경로·타 솔루션(generate_other) 경로가 이 관문을 그대로 쓴다.
@@ -718,7 +958,8 @@ def verify_and_repair(flow: dict, catalog: CatalogLookup, *, spec: dict | None =
     ⚠️ edit 경로에서 spec을 넘길 때는 "이 단계 빼주세요"가 요구 삭제까지 동반해야 한다
     (설계 §6.1의 set_spec 연산). 요구가 남은 채 액션만 지우면 누락 blocker가 그 액션을
     도로 넣는다 — 그래서 여기 기본값은 None이다.
+    prune_params는 A360 카탈로그일 때만 켠다 — 사용자 제공 카탈로그에서의 위험은 refine_flow 참조.
     반환: {"flow": dict, "violations": list[dict], "repaired": bool}.
     """
     emit({"event": "stage", "stage": "verifying", "message": "흐름도 최종 검수 중"})
-    return refine_flow(flow, catalog, spec=spec)
+    return refine_flow(flow, catalog, spec=spec, prune_params=prune_params)

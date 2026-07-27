@@ -14,6 +14,8 @@
 짚으면 고칠 수도 없다. 이 파일은 라운드마다 **결정론으로** 남기는 기록을 고정한다.
 """
 
+import json
+
 import pytest
 
 from app.agent.v4.orchestrator import harness
@@ -39,6 +41,9 @@ def summary(events):
 
 
 class _Catalog:
+    # ⚠ 모든 표기에 `parameters: []`를 준다 = "파라미터 없는 액션 확정". 표기를 갈아끼우는
+    # update가 오면 _retarget_params가 그 노드의 파라미터를 **전부** 걷는다. 아래 픽스처는
+    # 파라미터가 없어 무해하지만, 파라미터 있는 흐름도를 새로 쓸 거면 스텁을 함께 고쳐야 한다.
     def get_action_schema(self, pkg, act):
         return {"package": pkg, "action": act, "parameters": []}
 
@@ -172,10 +177,68 @@ def test_연산_요약에_자유_텍스트를_싣지_않는다():
     )])
     blob = repr(digest)
     assert "내부시스템" not in blob and "증권 버튼 클릭" not in blob
-    assert digest[0]["params"] == ["URL"], "이름만 남긴다 — 무엇을 건드렸나는 알아야 한다"
+    # 키 이름이 `params`가 아니라 `params_sent`인 이유: 예전 이 필드는 "모델이 보냈지만
+    # update가 무시한 이름"이었고 지금은 "실제로 병합된 이름"이다(RPA-298 항목 A).
+    # 같은 이름을 유지하면 과거·신규 turn_events를 같은 질의로 읽을 때 조용히 틀린다.
+    assert digest[0]["params_sent"] == ["URL"], "이름만 남긴다 — 무엇을 건드렸나는 알아야 한다"
 
 
 def test_연산_수에_상한이_있다():
     """detail이 4,000자를 넘으면 sessions._tev가 통째로 preview 마커로 바꿔 구조가 사라진다."""
     ops = [EditOp(op="remove", target=f"n{i}") for i in range(50)]
     assert len(harness._op_digest(ops)) == harness._MAX_LOGGED_OPS
+
+
+def test_라운드_기록이_총_길이_예산_안에_들어간다(events, monkeypatch):
+    """🔴 필드별 상한([:120]·[:5])만으로는 **총량**을 못 막는다.
+
+    sessions._tev는 detail JSON이 4,000자를 넘으면 잘라 붙이는 게 아니라 통째로
+    {_truncated, size, preview}로 대체한다 — ops·dropped·errors·param_prune이 한 라운드에
+    다 실리면 진단 근거가 **한꺼번에** 사라진다.
+    """
+    harness._emit_round(
+        1, "discarded", weight_before=100, weight_after=200,
+        ops=[{"op": "update", "target": f"n{i}", "to": "패키지이름/액션이름" * 5} for i in range(12)],
+        dropped=["x" * 120] * 5, errors=["y" * 120] * 5,
+        param_prune_reverted=[{"node": f"n{i}", "to": "P/A", "dropped": ["Title"]} for i in range(6)],
+        remaining={"R2": 15},
+    )
+
+    (e,) = [x for x in events if "round" in (x.get("data") or {})]
+    assert len(json.dumps(e["data"], ensure_ascii=False)) <= harness._ROUND_DETAIL_BUDGET
+    assert e["data"]["outcome"] == "discarded", "종료 사유는 마지막까지 남는다"
+    assert e["data"]["weight_after"] == 200, "가중합 이동도 마지막까지 남는다"
+
+
+def test_예산_절단은_잘린_키를_밝힌다(events):
+    """조용한 절단 금지 — 무엇이 빠졌는지 안 밝히면 '그건 없었다'로 읽힌다."""
+    harness._emit_round(1, "discarded", ops=[{"op": "x", "pad": "가" * 400}] * 12,
+                        errors=["e" * 120] * 5, remaining={"R2": 1})
+
+    (e,) = [x for x in events if "round" in (x.get("data") or {})]
+    assert e["data"]["_budget_trimmed"], "무엇을 버렸는지 남긴다"
+
+
+# ── 예산 인지 종료 (RPA-298 항목 D) ──────────────────────────────────────────
+
+def test_예산이_다하면_채택된_현재본을_들고_정상_종료한다(events, monkeypatch):
+    """🔴 바깥 하드 컷(generate_flow_two_phase)은 타임아웃 시 2상 결과를 **통째로 버리고**
+    초안을 확정한다 — 라운드 1~7이 채택한 성과까지 함께 사라진다.
+
+    지금까지 안 터진 이유는 _STOP_AFTER_NO_IMPROVE(2)가 2라운드 만에 빼줬기 때문이고,
+    update가 파라미터를 적용하게 되면서 라운드가 생산적이 되어 그 전제가 깨졌다.
+    루프가 **라운드를 시작하기 전에** 접으면 현재본을 들고 정상 종료한다.
+    """
+    def boom(*a, **k):
+        raise AssertionError("예산이 없으면 surgeon을 부르지 않는다")
+
+    monkeypatch.setattr(harness, "chat_json", boom)
+    monkeypatch.setattr(harness, "collect_violations", lambda *a, **k: [_viol("R1")])
+
+    out = harness.refine_flow(_flow(), _Catalog(), max_rounds=8, deadline_mono=0.0)
+
+    (r,) = rounds(events)
+    assert r["data"]["outcome"] == "budget_exhausted"
+    assert out["flow"]["steps"], "현재본을 들고 나온다 — 빈 흐름도가 아니다"
+    (s,) = summary(events)
+    assert s["data"]["rounds_used"] == 0, "돌지 않은 라운드를 썼다고 세지 않는다"

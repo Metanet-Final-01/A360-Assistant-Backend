@@ -443,7 +443,13 @@ async def edit_node(state: TurnState) -> dict:
         # 넘길 수 있게 된 전제가 set_spec이다: 사용자가 "이 단계 빼주세요"라고 하면 edit이
         # 액션과 **요구를 함께** 지우므로, 남은 요구가 방금 지운 액션을 도로 부르지 않는다
         # (설계 §6.1). set_spec 없이 이걸 켜면 사용자의 삭제가 검수에 의해 되돌려진다.
-        result = verify_and_repair(flow, ctx.catalog, spec=flow.get("spec"))
+        # prune_params: 표기를 갈아끼운 자리의 옛 파라미터 정리(RPA-298 항목 A)를 **A360
+        # 카탈로그일 때만** 켠다. 사용자가 대화로 준 카탈로그는 파라미터를 일부만 설명했을 때
+        # 스펙이 부분 목록으로 잡히는데, 이 경로에는 회귀 가드도 복원도 없어 설명 안 한
+        # 파라미터가 user 값째로 사라진다(harness.refine_flow 독스트링).
+        result = verify_and_repair(
+            flow, ctx.catalog, spec=flow.get("spec"), prune_params=ctx.is_a360
+        )
     else:
         # 타 솔루션 세션인데 대화에서 카탈로그를 못 찾았다 — 검수 기준이 없어 생략한다
         # (A360 카탈로그로 검수하면 사용자가 준 액션이 전부 R1 위반으로 찍힌다).
