@@ -28,6 +28,7 @@ from app.schemas.recommendation import (
     StepRecommendation,
     VarRef,
 )
+from app.schemas.analysis import normalize_constraints
 from app.services.catalog import get_backend_catalog
 
 SCHEMA_VERSION = "1.0"
@@ -37,7 +38,7 @@ MAX_FINDINGS = 100
 MAX_CATALOG_NAME = 200
 OUTPUT_POLICY = {
     "rollout_mode": "observe",
-    "controls": ["strict_schema", "catalog_closure"],
+    "controls": ["strict_schema", "catalog_closure", "constraints_preserved"],
     "pass_decision": "allow_candidate",
     "fail_decision": "deny",
     "detector_error_decision": "unassured",
@@ -79,6 +80,7 @@ class OutputBoundaryContext:
     agent_registry_snapshot: Any = None
     public_contract_version: str = PUBLIC_CONTRACT_VERSION
     producer_advisory: Any = None
+    expected_constraints: tuple[str, ...] = ()
 
 
 def _canonical(value: Any) -> bytes:
@@ -214,6 +216,40 @@ def _catalog_closure(payload: Any, catalog) -> tuple[str, str, list[dict[str, st
     return ("fail" if findings else "pass"), catalog_digest, findings
 
 
+def _constraints_preserved(
+    payload: Any,
+    expected_constraints: tuple[str, ...],
+) -> tuple[str, list[dict[str, str]]]:
+    """Agent 내부를 해석하지 않고 공개 산출물의 명시 제약 보존만 검사한다."""
+    root = payload if isinstance(payload, dict) else {}
+    spec = root.get("spec")
+    raw_constraints = spec.get("constraints", []) if isinstance(spec, dict) else []
+    actual = normalize_constraints(raw_constraints)
+    expected = normalize_constraints(list(expected_constraints))
+    findings: list[dict[str, str]] = []
+
+    if raw_constraints != actual:
+        findings.append(
+            _finding(
+                "constraints_preserved",
+                "CONSTRAINTS_NOT_NORMALIZED",
+                "recommendation.spec.constraints",
+                "제약은 문자열 목록이며 최대 20개·항목당 500자여야 합니다",
+            )
+        )
+    if actual != expected:
+        code = "CONSTRAINTS_DROPPED" if expected and not actual else "CONSTRAINTS_MISMATCH"
+        findings.append(
+            _finding(
+                "constraints_preserved",
+                code,
+                "recommendation.spec.constraints",
+                "분석 결과의 명시 제약이 추천 산출물에 동일하게 보존되지 않았습니다",
+            )
+        )
+    return ("fail" if findings else "pass"), findings
+
+
 def observe_recommendation_candidate(
     payload: dict,
     context: OutputBoundaryContext,
@@ -250,6 +286,20 @@ def observe_recommendation_candidate(
         finding_count += len(catalog_findings)
     except Exception as exc:  # infrastructure/catalog absence is unassured, not pass
         controls.append({"control_id": "catalog_closure", "status": "error", "error_type": type(exc).__name__})
+
+    try:
+        status, constraint_findings = _constraints_preserved(
+            payload, context.expected_constraints
+        )
+        controls.append({"control_id": "constraints_preserved", "status": status})
+        findings.extend(constraint_findings)
+        finding_count += len(constraint_findings)
+    except Exception as exc:
+        controls.append({
+            "control_id": "constraints_preserved",
+            "status": "error",
+            "error_type": type(exc).__name__,
+        })
 
     statuses = {item["status"] for item in controls}
     expected_controls = set(OUTPUT_POLICY["controls"])

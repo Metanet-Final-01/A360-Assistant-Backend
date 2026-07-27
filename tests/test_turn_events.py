@@ -121,7 +121,9 @@ def _setup_disconnect(monkeypatch, agent_events, disconnect_flags):
     monkeypatch.setattr("starlette.requests.Request.is_disconnected", _fake_dc)
     persists = []
     monkeypatch.setattr(sessions_api, "_persist_turn_result",
-                        lambda *a: persists.append(a) or {"type": "answer", "answer": "x", "sources": []})
+                        lambda *a, **kw: persists.append((a, kw)) or {
+                            "type": "answer", "answer": "x", "sources": [],
+                        })
     monkeypatch.setattr(sessions_api, "_read_intake_gauge", lambda sid: None)
     saves = []
     monkeypatch.setattr(sessions_api, "_save_turn_events",
