@@ -69,20 +69,20 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
-    AllowedPattern: "^$|^https://hooks\\.slack\\.com/\\S+$"
-    ConstraintDescription: SlackWebhookUrl must be empty or an https://hooks.slack.com/... URL without whitespace.
+    AllowedPattern: "^$|^https://hooks\\.slack\\.com/[^\\s\"\\\\]+$"
+    ConstraintDescription: SlackWebhookUrl must be empty or an https://hooks.slack.com/... URL with no whitespace, quotes, or backslashes (it is interpolated into a JSON secret).
     Description: Slack Incoming Webhook for backend alerts (RPA-189/192/324). Empty = alerts disabled.
   AlertGlobalDailyUsd:
     Type: String
     Default: ""
-    AllowedPattern: "^$|^[0-9]+(\\.[0-9]+)?$"
-    ConstraintDescription: AlertGlobalDailyUsd must be empty or a non-negative number.
+    AllowedPattern: "^$|^[0-9]*[1-9][0-9]*(\\.[0-9]+)?$"
+    ConstraintDescription: AlertGlobalDailyUsd must be empty (disabled) or a positive number; 0 is rejected because the app treats <=0 as disabled.
     Description: Daily global LLM cost alert threshold in USD (RPA-324). Empty = that alert disabled.
   Alert5xxDaily:
     Type: String
     Default: ""
-    AllowedPattern: "^$|^[0-9]+(\\.[0-9]+)?$"
-    ConstraintDescription: Alert5xxDaily must be empty or a non-negative number.
+    AllowedPattern: "^$|^[1-9][0-9]*$"
+    ConstraintDescription: Alert5xxDaily must be empty (disabled) or a positive integer count.
     Description: Daily 5xx count alert threshold (RPA-324). Empty = that alert disabled.
   BackendPort:
     Type: Number
