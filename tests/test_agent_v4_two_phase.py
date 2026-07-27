@@ -201,7 +201,7 @@ def test_draft_frame_goes_out_before_refinement_starts(monkeypatch):
     frames = _capture_frames(monkeypatch)
     seen_at_refine: list[list[str]] = []
 
-    async def fake_refine(draft, ctx):
+    async def fake_refine(draft, ctx, **kw):
         seen_at_refine.append(_kinds(frames))  # 정밀화 진입 시점의 프레임 목록
         return {"recommendation": {"steps": []}, "violations": []}
 
@@ -220,7 +220,7 @@ def test_session_is_locked_while_refining_and_unlocked_after(monkeypatch):
     _capture_frames(monkeypatch)
     during: list[bool] = []
 
-    async def fake_refine(draft, ctx):
+    async def fake_refine(draft, ctx, **kw):
         during.append(v4_state.is_refine_locked(sid))
         return {"recommendation": {"steps": []}, "violations": []}
 
@@ -242,7 +242,7 @@ def test_lock_is_held_until_the_backend_persists_the_turn(monkeypatch):
     sid = str(uuid.uuid4())
     _capture_frames(monkeypatch)
 
-    async def fake_refine(draft, ctx):
+    async def fake_refine(draft, ctx, **kw):
         return {"recommendation": {"steps": []}, "violations": []}
 
     _stub_two_phase(monkeypatch, fake_refine)
@@ -289,7 +289,7 @@ def test_escape_hatch_cancels_refinement_and_confirms_the_draft(monkeypatch):
     _capture_frames(monkeypatch)
     monkeypatch.setattr(g, "_REFINE_POLL_SEC", 0.01)
 
-    async def never_ending_refine(draft, ctx):
+    async def never_ending_refine(draft, ctx, **kw):
         await asyncio.sleep(30)
         raise AssertionError("취소됐어야 한다")
 
@@ -322,7 +322,7 @@ def test_escape_hatch_is_not_delayed_by_the_orphan_refine_thread(monkeypatch):
     _capture_frames(monkeypatch)
     monkeypatch.setattr(g, "_REFINE_POLL_SEC", 0.01)
 
-    async def refine_stuck_in_a_thread(draft, ctx):
+    async def refine_stuck_in_a_thread(draft, ctx, **kw):
         await asyncio.to_thread(time.sleep, 2.0)  # 취소해도 이 스레드는 끝까지 돈다
 
     _stub_two_phase(monkeypatch, refine_stuck_in_a_thread)
@@ -350,7 +350,7 @@ def test_outer_cancellation_is_not_reported_as_a_finished_refinement(monkeypatch
     _capture_frames(monkeypatch)
     monkeypatch.setattr(g, "_REFINE_POLL_SEC", 0.01)
 
-    async def never_ending_refine(draft, ctx):
+    async def never_ending_refine(draft, ctx, **kw):
         await asyncio.sleep(30)
 
     _stub_two_phase(monkeypatch, never_ending_refine)
@@ -380,7 +380,7 @@ def test_refine_timeout_keeps_the_draft_and_unlocks(monkeypatch):
     monkeypatch.setattr(g, "_REFINE_POLL_SEC", 0.01)
     monkeypatch.setattr(g, "_REFINE_MIN_BUDGET_SEC", 0.0)  # 아래 0.05초 예산이 '생략' 분기로 새지 않게
 
-    async def slow_refine(draft, ctx):
+    async def slow_refine(draft, ctx, **kw):
         await asyncio.sleep(30)
 
     _stub_two_phase(monkeypatch, slow_refine)
@@ -400,7 +400,7 @@ def test_refine_failure_keeps_the_draft_and_unlocks(monkeypatch):
     sid = str(uuid.uuid4())
     _capture_frames(monkeypatch)
 
-    async def boom(draft, ctx):
+    async def boom(draft, ctx, **kw):
         raise RuntimeError("surgeon 폭발")
 
     _stub_two_phase(monkeypatch, boom)
@@ -421,7 +421,7 @@ def test_refine_is_skipped_when_the_turn_budget_is_already_gone(monkeypatch):
     monkeypatch.setattr(g, "_TURN_SOFT_BUDGET_SEC", 0.0)  # 1상이 예산을 다 쓴 상황 재현
     called: list[int] = []
 
-    async def fake_refine(draft, ctx):
+    async def fake_refine(draft, ctx, **kw):
         called.append(1)
         return {"recommendation": {"steps": []}, "violations": []}
 
@@ -444,7 +444,7 @@ def test_refine_budget_is_measured_from_the_real_turn_deadline(monkeypatch):
     _capture_frames(monkeypatch)
     called: list[int] = []
 
-    async def fake_refine(draft, ctx):
+    async def fake_refine(draft, ctx, **kw):
         called.append(1)
         return {"recommendation": {"steps": []}, "violations": []}
 
@@ -469,7 +469,7 @@ def test_turn_deadline_is_optional_and_defaults_to_the_old_budget(monkeypatch):
     _capture_frames(monkeypatch)
     called: list[int] = []
 
-    async def fake_refine(draft, ctx):
+    async def fake_refine(draft, ctx, **kw):
         called.append(1)
         return {"recommendation": {"steps": []}, "violations": []}
 
@@ -483,7 +483,7 @@ def test_two_phase_return_is_a_superset_of_generate_flow(monkeypatch):
     """refine 키는 **추가**다 — {recommendation, violations}만 읽던 호출부가 안 깨진다."""
     _capture_frames(monkeypatch)
 
-    async def fake_refine(draft, ctx):
+    async def fake_refine(draft, ctx, **kw):
         return {"recommendation": {"steps": []}, "violations": [{"rule": "R2"}]}
 
     _stub_two_phase(monkeypatch, fake_refine)

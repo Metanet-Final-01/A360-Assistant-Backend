@@ -19,6 +19,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from app.core.llm import UsageCallbackHandler
@@ -57,9 +58,19 @@ _PERSONAS: list[tuple[str, str, str, bool]] = [
 
 # 초안 흐름도를 단계별로 '드러내는' 프레임 사이 지연(초) — v2와 동일한 인지적 페이싱.
 _REVEAL_DELAY = 0.18
-# 후보별 compose 예산: escape hatch 툴콜 ≤2회 + 파싱 재출력 1회를 담는 총 왕복 상한.
+# 후보별 compose 예산: escape hatch 툴콜 ≤2회 + 최초 출력 1회 + 파싱 재출력 ≤2회 = 5.
 _COMPOSE_MAX_TURNS = 5
 _ESCAPE_HATCH_ROUNDS = 2
+_COMPOSE_PARSE_RETRIES = 2
+# 출력 턴에 거는 JSON mode. ⚠ OpenAI는 json_object 모드에서 메시지에 'json' 문자열을 요구한다 —
+# 사용자 메시지의 "Recommendation JSON"이 그 조건을 채우고 있다(프롬프트를 손대면 400).
+_JSON_RESPONSE_FORMAT = {"type": "json_object"}
+# 툴 바인딩 + JSON mode 병용은 **미확인 조합**이라 켜지 않는다. 잘못되면 모든 compose 첫
+# 호출이 400이고, 툴이 억제되면 표기 환각이 늘어 R1 → 사전 검증 폐기로 교정 라운드를 태운다.
+_JSON_MODE_WITH_TOOLS = False
+# compose 전용 purpose. "turn_generate"는 spec 빌더·심판·surgeon(라운드당 1회, 최대 8회)이
+# 함께 쓴다 — surgeon이 표본을 지배해 "compose 실패가 후보 부피와 함께 가는가"가 희석된다.
+_COMPOSE_PURPOSE = "turn_generate_compose"
 # recommend 검색은 액션 후보 메뉴용 — 문서 페이지·패키지 개요 오염을 막는다.
 SEARCH_SOURCE_TYPES = ["action_schema", "bot_example"]
 
@@ -85,6 +96,10 @@ _TURN_RESERVE_SEC = 60.0
 _TURN_SOFT_BUDGET_SEC = 840.0
 _REFINE_TIMEOUT_SEC = 420.0
 _REFINE_MIN_BUDGET_SEC = 30.0
+# 교정 루프가 **새 라운드를 시작하지 않고 접는** 여유분. 라운드 하나는 surgeon 1회 + 재검수라
+# 이보다 짧은 잔여로 시작하면 하드 컷에 걸려 그 라운드가 통째로 버려진다 — 그리고 하드 컷은
+# 2상 결과 전체(그때까지 채택된 라운드 포함)를 버리므로 손실이 라운드 하나로 끝나지 않는다.
+_REFINE_ROUND_RESERVE_SEC = 45.0
 # 취소·타임아웃 확인 주기. 탈출구 버튼의 체감 반응 속도가 이 값이다(0.5초면 즉시로 느껴진다).
 _REFINE_POLL_SEC = 0.5
 
@@ -209,18 +224,114 @@ def _coerce_flow(obj: dict) -> dict:
     return obj
 
 
-def _parse_flow(content: str) -> dict:
-    """LLM 최종 출력에서 Recommendation 흐름도 dict를 뽑는다 (코드펜스 내성)."""
+# compose 파싱 실패의 원인 구분 (RPA-298 항목 B). 처방이 정반대라 뭉치면 안 된다:
+# 잘림에는 "부피를 줄여 다시" + 깨진 본문 제거가 맞고, 문법 오류에는 "네가 쓴 걸 보고 고쳐라"가
+# 맞다 — 문법 오류에 본문을 지우면 모델이 자기 실수를 볼 수 없어 **현행보다 나빠진다**.
+PARSE_TRUNCATED = "truncated"   # 상한·예산 소진으로 중간에서 끊김
+PARSE_SYNTAX = "syntax"         # 끝까지 나왔는데 문법이 깨짐(미이스케이프 따옴표 등)
+PARSE_SHAPE = "shape"           # 파싱은 됐는데 최상위 모양이 아님(steps 없음)
+PARSE_NO_JSON = "no_json"       # 본문에 JSON 객체가 아예 없음
+
+
+class ComposeParseError(ValueError):
+    """compose 출력 파싱 실패 — `kind`로 원인을 구분한다.
+
+    ValueError를 상속하는 것이 계약이다: 호출부의 `except ValueError`는 `_coerce_flow`가
+    예상 못 한 형태에 내는 ValueError도 함께 받아야 한다. 좁히면 그게 asyncio.gather 밖으로
+    전파돼 **후보 하나의 실패가 턴 전체를 죽인다**(부분 실패 격리의 붕괴).
+    """
+
+    def __init__(self, message: str, kind: str = PARSE_SYNTAX):
+        super().__init__(message)
+        self.kind = kind
+
+
+def _scan_json(text: str) -> tuple[int, bool]:
+    """텍스트를 한 번 훑어 (미닫힌 괄호 수, 문자열 안에서 끝났는가)를 돌려준다.
+
+    `rfind("}")`나 예외 문구 매칭으로는 잘림과 문법 오류를 못 가른다 — 값 안에 중괄호가
+    섞이면 문자열 한가운데를 문서 끝으로 잡고, 오류 문구는 파이썬·모델 버전에 따라 달라진다.
+    문자열 안에서 끝났다는 것은 **따옴표가 안 닫혔다**는 뜻이라, 미닫힌 괄호가 있어도
+    잘림이 아니라 문법 오류다(이스케이프 안 된 `"` 하나가 뒤 전체를 문자열로 뒤집는다).
+    """
+    depth = 0
+    in_str = False
+    escaped = False
+    for ch in text:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+    return depth, in_str
+
+
+def _classify_parse_failure(text: str, finish_reason: str | None) -> str:
+    """왜 깨졌나. finish_reason이 1순위다 — 괄호 균형만 보면 상한 절단을 놓친다."""
+    if finish_reason == "length":
+        return PARSE_TRUNCATED
+    if not text.strip():
+        return PARSE_NO_JSON
+    depth, in_str = _scan_json(text)
+    return PARSE_TRUNCATED if (depth > 0 and not in_str) else PARSE_SYNTAX
+
+
+# 잘린 출력에서 '설계 뼈대'만 뽑는 정규식 — 값은 짧게 잘라 담고, 개행·이스케이프가 든 값은
+# 애초에 안 잡는다(문자열 경계를 다시 추측하지 않기 위해).
+_SKELETON_KEYS = re.compile(r'"(step_id|label|package|action)"\s*:\s*"([^"\\\n]{0,60})"')
+_MAX_SKELETON_ENTRIES = 120
+
+
+def _salvage_skeleton(text: str) -> str:
+    """잘린 출력에서 단계·액션 표기만 등장 순서대로 뽑아 한 줄씩 렌더한다.
+
+    잘림 재시도에 **깨진 12KB 본문 대신** 이걸 싣는다. 본문을 통째로 지우면 모델 문맥에
+    '그대로 둘 설계'가 없어져 "설계는 유지하고 부피만 줄여라"가 무의미해지고(첫 시도와 같은
+    조건), 본문을 그대로 되돌려주면 긴 출력을 예시로 각인시키면서 입력비까지 문다.
+
+    ⚠ 이 결과물은 **후보로 승격하지 않는다.** req_id를 든 액션이 잘려 나간 복구본은 요구당
+    blocker(100)를 만들어 회귀 가드의 비교축을 오염시키고, `_recover_identity`가 만든
+    Step 스캐폴드는 사전 검증(drop_unknown_action_ops)에 걸려 구조적으로 수리 불가다.
+    여기서는 오직 '모델에게 자기 설계를 상기시키는 메모'로만 쓴다.
+    """
+    lines: list[str] = []
+    for key, value in _SKELETON_KEYS.findall(text):
+        lines.append(f"{key}={value}")
+        if len(lines) >= _MAX_SKELETON_ENTRIES:
+            lines.append("… (이하 생략)")
+            break
+    return " / ".join(lines)
+
+
+def _parse_flow(content: str, finish_reason: str | None = None) -> dict:
+    """LLM 최종 출력에서 Recommendation 흐름도 dict를 뽑는다 (코드펜스 내성).
+
+    실패는 ComposeParseError(ValueError)로 던지고 `kind`에 원인을 실는다 — 호출부가
+    원인별로 다른 재시도를 보내야 하기 때문이다(§B).
+    """
     text = (content or "").strip()
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1 or end < start:
-        raise ValueError("JSON 객체를 찾지 못함")
+        # 여는 중괄호는 있는데 닫는 게 없다 = 잘림. 둘 다 없으면 애초에 JSON을 안 냈다.
+        kind = PARSE_TRUNCATED if (start != -1 or finish_reason == "length") else PARSE_NO_JSON
+        raise ComposeParseError("JSON 객체를 찾지 못함", kind)
     try:
         obj = json.loads(text[start : end + 1])
     except json.JSONDecodeError as e:
-        raise ValueError(f"JSON 파싱 실패: {e}") from e
+        raise ComposeParseError(
+            f"JSON 파싱 실패: {e}", _classify_parse_failure(text, finish_reason)
+        ) from e
     if not isinstance(obj, dict) or "steps" not in obj:
-        raise ValueError("최상위에 steps 키가 있는 JSON 객체가 아님")
+        raise ComposeParseError("최상위에 steps 키가 있는 JSON 객체가 아님", PARSE_SHAPE)
     return _coerce_flow(obj)
 
 
@@ -284,6 +395,44 @@ def _render_spec_block(spec: dict) -> str:
 # compose — 페르소나 후보 생성 (Dossier 주입 + escape hatch ≤2회)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _compose_retry_message(kind: str, err: str) -> str:
+    """원인별 재시도 지시. 잘림과 문법 오류는 처방이 정반대다(§B)."""
+    if kind == PARSE_TRUNCATED:
+        return (
+            "출력이 끝까지 나오지 않았다(JSON이 중간에서 끊겼다). 위에 남긴 뼈대가 네가 방금 "
+            "설계한 흐름이다 — **설계는 그대로 두고 부피만 줄여** 완전한 JSON 하나로 다시 출력하라.\n"
+            "줄이는 방법: rationale 40자 이내, description 50자 이내, label 20자 이내, "
+            "들여쓰기·줄바꿈 없는 compact JSON.\n"
+            "⚠ 단계·액션·필수 파라미터를 **빼서** 줄이지 마라. 줄이는 것은 설명 문구뿐이다."
+        )
+    if kind == PARSE_NO_JSON:
+        return "JSON 객체를 하나도 출력하지 않았다. 코드펜스·설명 없이 Recommendation JSON 객체 하나만 출력하라."
+    if kind == PARSE_SHAPE:
+        return (
+            f"출력이 Recommendation 모양이 아니다({err}). 최상위에 steps 배열이 있는 "
+            "JSON 객체 하나만, 코드펜스·설명 없이 다시 출력하라."
+        )
+    return (
+        f"위 출력의 JSON 문법이 깨졌다({err}). 네가 방금 쓴 출력을 보고 그 자리를 고쳐라 — "
+        "문자열 값 안의 큰따옴표는 \\\" 로, 줄바꿈은 \\n 으로 이스케이프해야 한다. "
+        "설계는 그대로 두고, 코드펜스·설명 없이 JSON 객체 하나만 다시 출력하라."
+    )
+
+
+def _emit_compose_failure(cid: str, kind: str, **data) -> None:
+    """compose 후보 실패를 관측 이벤트로 남긴다.
+
+    ⚠ message는 **중립적인 사람 말**이다. `stage` 메시지는 프론트가 assistantMessage.stages에
+    쌓아 화면에 표시하므로, truncated·no_json 같은 진단 문구가 그대로 사용자에게 나간다.
+    진단축은 data에만 싣는다 — 컨테이너 재시작으로 로그가 날아가도 turn_events에는 남는다.
+    """
+    emit({
+        "event": "stage", "stage": "composing",
+        "message": f"후보 {cid}를 다시 정리하는 중",
+        "data": {"candidate": cid, "kind": kind, **{k: v for k, v in data.items() if v is not None}},
+    })
+
+
 async def _compose_candidate(
     cid: str,
     persona_file: str,
@@ -305,7 +454,10 @@ async def _compose_candidate(
     # 검색할 KB가 없으면(사용자 제공 카탈로그) 스펙 조회 툴만 준다 — 메뉴에 전량이 실려 있다.
     tools = build_kb_tools(sink, ctx, source_types=SEARCH_SOURCE_TYPES)
     runnable = llm.bind_tools(tools) if tools else llm
-    usage_config = {"callbacks": [UsageCallbackHandler(purpose="turn_generate")]}
+    # 출력 턴 전용 — 상한은 bind **한 곳에서만** 준다. 생성자(ChatOpenAI(max_tokens=…))와
+    # 병용하면 langchain의 개명 지점이 두 곳이라 리팩터 한 번에 생성자 값이 bind를 덮는다.
+    llm_json = llm.bind(response_format=_JSON_RESPONSE_FORMAT)
+    usage_config = {"callbacks": [UsageCallbackHandler(purpose=_COMPOSE_PURPOSE)]}
 
     background = f"\n\n[배경 지식 (공식 문서 발췌)]\n{dossier['background']}" if dossier.get("background") else ""
     # 용례 블록 — 액션 '목록'이 아니라 '조합 패턴'을 보여준다 (RPA-298). 어휘(메뉴)만 주면
@@ -328,33 +480,59 @@ async def _compose_candidate(
     )
     msgs: list = [SystemMessage(content=system), HumanMessage(content=user)]
     tool_rounds = 0
-    parse_retried = False
+    parse_attempts = 0
 
     for _ in range(_COMPOSE_MAX_TURNS):
-        target = runnable if (tools and tool_rounds < _ESCAPE_HATCH_ROUNDS) else llm
+        # 탐색(escape hatch)과 출력을 가른다. 예전 조건은 `tool_rounds < 2`뿐이라, 모델이 툴을
+        # 한 번도 안 부르면 **재출력 턴까지 툴을 달고** 나갔다 — 재시도의 일은 출력이지
+        # 조사가 아니다. 출력 턴에는 JSON mode를 건다(문법이 깨질 여지 자체를 줄인다).
+        exploring = bool(tools) and tool_rounds < _ESCAPE_HATCH_ROUNDS and parse_attempts == 0
+        if not exploring:
+            target = llm_json
+        elif _JSON_MODE_WITH_TOOLS:
+            target = runnable.bind(response_format=_JSON_RESPONSE_FORMAT)
+        else:
+            target = runnable
         try:
             async with sem:
                 ai = await target.ainvoke(msgs, config=usage_config)
         except Exception as e:  # noqa: BLE001 — 후보 하나의 인프라 실패는 N 강등
             logger.warning("후보 %s compose 호출 실패: %s", cid, e)
+            _emit_compose_failure(cid, "llm_error", error=type(e).__name__)
             return None
         msgs.append(ai)
         if getattr(ai, "tool_calls", None):
             tool_rounds += 1
             msgs.extend(execute_tool_calls(tools, ai))
             continue
+
+        finish_reason = (getattr(ai, "response_metadata", None) or {}).get("finish_reason")
+        content = ai.content if isinstance(ai.content, str) else str(ai.content or "")
         try:
-            return _parse_flow(ai.content)
+            return _parse_flow(content, finish_reason)
         except ValueError as e:
-            if parse_retried:
-                logger.warning("후보 %s 파싱 재실패 — 탈락: %s", cid, e)
+            # `except ValueError` 그대로 — _coerce_flow가 내는 ValueError까지 여기서 받아야
+            # 후보 하나의 실패로 끝난다(ComposeParseError로 좁히면 턴 전체가 죽는다).
+            kind = getattr(e, "kind", PARSE_SYNTAX)
+            parse_attempts += 1
+            _emit_compose_failure(
+                cid, kind, attempt=parse_attempts, finish_reason=finish_reason,
+                content_chars=len(content),
+                output_tokens=(getattr(ai, "usage_metadata", None) or {}).get("output_tokens"),
+            )
+            if parse_attempts > _COMPOSE_PARSE_RETRIES:
+                logger.warning("후보 %s 파싱 재실패(%s) — 탈락: %s", cid, kind, e)
                 return None
-            parse_retried = True
-            msgs.append(HumanMessage(content=(
-                f"출력이 올바른 Recommendation JSON이 아니다({e}). "
-                "코드펜스·설명 없이 JSON 객체 하나만 다시 출력하라."
-            )))
+            logger.info("후보 %s 파싱 실패(%s) — 재시도 %d", cid, kind, parse_attempts)
+            if kind == PARSE_TRUNCATED:
+                # 깨진 본문을 **설계 뼈대로 갈아끼운다** — 12KB 재전송도, 문맥 삭제도 아니다.
+                msgs[-1] = AIMessage(content=(
+                    "[직전 출력은 길이 초과로 끊겨 생략함. 내가 설계한 뼈대만 남긴다]\n"
+                    + _salvage_skeleton(content)
+                ))
+            msgs.append(HumanMessage(content=_compose_retry_message(kind, str(e))))
     logger.warning("후보 %s compose 예산 소진 — 탈락", cid)
+    _emit_compose_failure(cid, "budget_exhausted", attempt=parse_attempts)
     return None
 
 
@@ -549,13 +727,17 @@ async def draft_flow(analysis: Any, document: str | None, spec: dict, ctx=None) 
     )
 
 
-async def refine_draft(draft: DraftResult, ctx=None) -> dict:
+async def refine_draft(draft: DraftResult, ctx=None, *, deadline_mono: float | None = None) -> dict:
     """2상 — refine → finalize. 초안을 교정하고 근거·신뢰도·질문 카드를 합성한다.
 
     반환은 `generate_flow`의 반환 그대로다: {"recommendation": ..., "violations": ...}.
     이 상만 따로 재실행해도 되도록 draft를 **읽기만** 한다 — 교정 대상 흐름은 deepcopy로
     떠서 쓴다. 안 그러면 refine이 무개선일 때 finalize의 제자리 변형(needs_input·spec 주입)이
     draft.flow에 새어, 재시도 시 입력이 이미 오염돼 있다.
+
+    deadline_mono를 주면 교정 루프가 **라운드를 시작하기 전에** 접는다 — 바깥 하드 컷은
+    2상 결과를 통째로 버리고 초안을 확정하므로, 그때까지 채택된 라운드의 성과도 함께
+    사라진다(generate_flow_two_phase의 REFINE_TIMEOUT 분기).
     """
     from ..catalog_context import a360_context
     from ..orchestrator import cards as cards_mod
@@ -588,6 +770,7 @@ async def refine_draft(draft: DraftResult, ctx=None) -> dict:
     refined = await asyncio.to_thread(
         refine_flow, copy.deepcopy(draft.flow), ctx.catalog,
         extra_findings=extra, purpose="turn_generate", spec=spec,
+        deadline_mono=deadline_mono,
     )
     flow, violations = refined["flow"], refined["violations"]
 
@@ -803,7 +986,12 @@ async def generate_flow_two_phase(
     )
 
     t0 = time.monotonic()
-    task = asyncio.create_task(refine_draft(draft, ctx))
+    # 교정 루프에 데드라인을 **알려 준다**. 아래 하드 컷은 out을 None으로 두고 초안을
+    # 확정하므로, 그때까지 채택된 라운드의 성과까지 통째로 버려진다. 루프가 스스로 접으면
+    # 채택된 현재본을 들고 정상 종료한다 — 하드 컷은 이중 안전망으로 그대로 남는다.
+    task = asyncio.create_task(
+        refine_draft(draft, ctx, deadline_mono=t0 + budget - _REFINE_ROUND_RESERVE_SEC)
+    )
     status, reason = REFINE_DONE, None
     out: dict | None = None
     persist_pending = False  # 잠금을 백엔드 저장까지 넘겼는가 (아래 finally에서 확정)
