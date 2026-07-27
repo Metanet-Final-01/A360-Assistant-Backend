@@ -591,6 +591,71 @@ async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict,
     )
 
 
+def _emit_candidate_scorecard(reports, verdict: dict, attempted: int) -> None:
+    """후보별 채점 결과를 **관측에 남는 형태**로 남긴다 (RPA-298).
+
+    ## 왜 필요한가 (실측, 2026-07-27)
+
+    같은 업무를 5분 간격으로 두 번 돌렸는데 1상 산출물이 가중합 196과 1319로 6.7배 갈렸다.
+    교정은 1319를 256까지만 끌어내렸다 — **나쁜 출발점은 교정으로 복구되지 않는다.** 그러니
+    재현성의 지렛대는 refine이 아니라 1상인데, 정작 다음 질문에 답할 수 없었다:
+
+        후보 셋이 다 나빴나?  아니면 좋은 후보가 있는데 심판이 다른 걸 골랐나?
+
+    두 원인은 처방이 정반대다(전자는 조사·compose, 후자는 심판). 그런데 후보 요약과 심판
+    점수판은 `partial` 이벤트라 sessions._tev가 **의도적으로** turn_events에서 제외한다
+    (볼륨 때문 — 흐름도 트리가 통째로 실리므로 옳은 결정이다).
+
+    그래서 여기서 **스칼라만** stage로 한 번 더 낸다. 흐름도·근거·이유 문장을 싣지 않으므로
+    부피 문제에 걸리지 않고, 한 번의 실행으로 위 질문이 닫힌다.
+    """
+    from ..verify.findings import weight as _weight
+
+    totals = {
+        s.get("candidate_id"): s.get("total")
+        for s in (verdict.get("verdict") or {}).get("scores") or []
+        if isinstance(s, dict)
+    }
+    win_id = getattr(verdict.get("winner"), "candidate_id", None)
+    rows = []
+    for r in reports:
+        # getattr 기본값을 쓰는 이유: 관측이 산출 경로를 죽이면 안 된다. 리포트 모양이
+        # 바뀌거나(테스트 대역·미래 필드) 한 필드가 비어도 그 턴 전체가 실패하는 것보다
+        # 그 칸만 비는 편이 낫다 — core.llm._log_llm_failure와 같은 원칙.
+        errs = [f for f in getattr(r, "findings", None) or [] if f.severity != "warning"]
+        det = getattr(r, "deterministic_score", None)
+        rows.append({
+            "id": getattr(r, "candidate_id", None),
+            "persona": getattr(r, "persona", ""),
+            "weight": _weight(errs),
+            "blockers": sum(1 for f in errs if f.severity == "blocker"),
+            "must_coverage": getattr(r, "must_coverage", None),
+            "sim_pass_rate": getattr(r, "sim_pass_rate", None),
+            "gate_failures": len(getattr(r, "gate_failures", None) or []),
+            "det": det() if callable(det) else None,
+            "judge": totals.get(getattr(r, "candidate_id", None)),
+            "won": getattr(r, "candidate_id", None) == win_id,
+        })
+    rows.sort(key=lambda x: x["weight"])
+    best = rows[0] if rows else {}
+    emit({
+        "event": "stage", "stage": "verifying",
+        "message": f"후보 {len(rows)}개 채점 — 승자 {win_id}",
+        "data": {
+            "candidates": rows,
+            "winner": win_id,
+            # 몇 개를 내보내 몇 개가 살아왔나 — 후보 하나만 살면 심판은 고를 것이 없고
+            # 합의(agreement) 항도 통째로 꺼진다. 그 턴의 '경쟁'은 없었던 것이다.
+            "attempted": attempted,
+            "survived": len(rows),
+            # 승자가 가중합 최소 후보였나. 아니라면 심판이 다른 축(커버리지·반증)을 우선했다는
+            # 뜻이고, 그 판단이 옳았는지를 이 한 줄로 되짚을 수 있다.
+            "winner_is_lightest": bool(best) and best.get("won") is True,
+            "weight_spread": [rows[0]["weight"], rows[-1]["weight"]] if rows else [],
+        },
+    })
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2상 구조 — 초안(draft) / 정밀화(refine) 사이의 전달 계약 (설계 §6.3)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -699,6 +764,11 @@ async def draft_flow(analysis: Any, document: str | None, spec: dict, ctx=None) 
     verdict = await asyncio.to_thread(judge_candidates, spec, list(reports), document=document)
     winner = verdict["winner"]
     emit_verdict_frame(verdict["verdict"], f"후보 {winner.candidate_id} 선택")
+    # 심판 프레임은 partial이라 관측에 안 남는다 — 스칼라만 따로 남긴다(재현성 진단).
+    try:
+        _emit_candidate_scorecard(reports, verdict, attempted=len(personas))
+    except Exception:  # noqa: BLE001 — 관측 실패가 산출을 죽이면 안 된다
+        logger.warning("후보 채점 관측 실패 — 산출은 계속한다", exc_info=True)
 
     # 승자 트리 점진 노출 — '자라나는 흐름도' 경험은 승자 확정 이후부터 (v2 계승).
     steps = winner.flow.get("steps") or []
