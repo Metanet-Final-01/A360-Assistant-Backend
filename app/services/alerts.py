@@ -242,7 +242,7 @@ def check_health(now: datetime | None = None) -> bool:
             title, text = "백엔드 정상 복귀", "• 모든 의존성 ok"
 
         # 🔴 status를 **그대로** 전이 토큰으로 쓴다 (CodeRabbit #263).
-        # degraded/unhealthy를 둘 다 FIRING으로 뭉개면 `_should_notify`가 "같은 상태"로 보고
+        # degraded/unhealthy를 둘 다 FIRING으로 뭉개면 `_is_due`가 "같은 상태"로 보고
         # 쿨다운에 걸린다 → **degraded 중에 앱 DB가 죽어 unhealthy가 돼도 알림이 안 간다.**
         # 가장 알려야 할 악화가 묻히는 것이다. healthy/degraded/unhealthy를 구분하면
         # degraded→unhealthy가 전이로 잡혀 즉시 critical이 나간다.
@@ -266,10 +266,11 @@ def _obs_session():
     return observability_sessionmaker()()
 
 
-def _should_notify(key: str, status: str, now: datetime) -> bool:
-    """이 알림을 지금 보낼까? **전이면 보내고, 이어지면 쿨다운 주기로만 보낸다.**
+def _is_due(row, status: str, now: datetime, cd: timedelta) -> bool:
+    """이 알림을 지금 보낼 차례인가? **전이면 보내고, 이어지면 쿨다운 주기로만 보낸다.**
 
-    한 프리미티브로 두 가지를 판단한다:
+    (원자 선점 `_claim_send`의 순수 판정부 — 옛 `_should_notify`의 로직 그대로. row는 잠근 상태로
+    넘어온다.) 두 가지를 판단한다:
       - **상태가 바뀜** → 항상 보낸다. 사람이 "터졌다"/"악화됐다"/"끝났다"를 알아야 한다.
       - 같은 비정상이 이어짐 → 쿨다운이 지났을 때만("아직도 터져 있다"). 안 그러면 도배.
       - 같은 OK가 이어짐 → 안 보낸다. 정상은 뉴스가 아니다.
@@ -278,30 +279,68 @@ def _should_notify(key: str, status: str, now: datetime) -> bool:
        악화가 잡힌다. `check_health`는 "degraded"/"unhealthy"를 그대로 넘긴다: 둘 다 FIRING으로
        뭉개면 degraded→unhealthy가 "같은 상태"가 돼 **쿨다운에 묻힌다**(CodeRabbit #263).
        여기선 OK가 아닌 값이면 전부 "비정상"으로 다루고, 값이 다르면 전이로 본다.
-
-    ⚠️ 상태를 **DB에서** 읽는다. 인메모리면 재시작·멀티워커에서 각자 "처음"이라 중복 발송한다.
-       "스로틀했다"는 주장은 그 저장소를 모든 발신자가 공유할 때만 참이다.
     """
+    prev_status = row.status if row is not None else None
+    last_sent = row.last_sent_at if row is not None else None
+
+    if prev_status is None:
+        # 이 key를 처음 본다. firing이면 알리고, **ok면 침묵** — 기록이 없다는 건 터진 적이
+        # 없다는 뜻이고, 기동할 때마다 "정상입니다" 슬랙이 오면 아무도 안 본다.
+        return status != OK
+
+    if prev_status == status:
+        if status == OK:
+            return False  # 정상이 이어짐 — 알릴 것 없음
+        if not cd:
+            return False  # 재알림 끔 — 전이 때만
+        if last_sent is not None and (now - _aware(last_sent)) < cd:
+            return False  # 쿨다운 중
+    return True
+
+
+def _claim_send(key: str, status: str, detail: str, now: datetime) -> bool:
+    """발송 슬롯을 **원자적으로 선점**한다 — 승자만 True. **발송 전에** 선점을 커밋한다 (RPA-192).
+
+    왜 이렇게: 옛 `notify`는 판정(_should_notify)과 기록(_record)을 별도 트랜잭션으로 해서
+      ① 판정↔기록 사이에 다른 워커가 통과하면 **둘 다 발송**(멀티워커 중복),
+      ② 발송 실패 시 last_sent를 안 남겨 다음 호출이 쿨다운 없이 **재발송 폭주**(슬랙 죽으면 429
+         경로가 매 요청 5초씩).
+    선점을 발송 전에 커밋하면 둘 다 막힌다.
+
+    동시성: 기존 key는 `SELECT ... FOR UPDATE`로 직렬화한다(짧은 트랜잭션 — 슬랙 POST는 커밋 뒤라
+    락 밖). 진 워커는 잠금이 풀린 뒤 이미 갱신된 last_sent를 보고 not-due로 물러난다. 첫 발생
+    (행 없음)은 FOR UPDATE로 못 막으므로, 동시 INSERT는 PK 충돌(IntegrityError)로 한쪽만 성공한다.
+
+    ⚠️ 트레이드오프(RPA-192 결정): 선점 후 발송이 실패해도 last_sent=now가 남아 **다음 쿨다운까지
+    재시도 안 함** — '중복 발송'보다 '실패 시 쿨다운까지 누락'을 택했다(별도 last_attempt_at 컬럼
+    없이). health는 5분마다 재평가되고 firing이면 다음 쿨다운 주기에 다시 잡힌다.
+    """
+    from sqlalchemy.exc import IntegrityError
+
     from app import models
 
+    cd = _cooldown()
     with _obs_session() as db:
-        row = db.get(models.AlertState, key)
-        prev_status = row.status if row else None
-        last_sent = row.last_sent_at if row else None
-
-        if prev_status is None:
-            # 이 key를 처음 본다. firing이면 알리고, **ok면 침묵** — 기록이 없다는 건 터진 적이
-            # 없다는 뜻이고, 기동할 때마다 "정상입니다" 슬랙이 오면 아무도 안 본다.
-            return status != OK
-
-        if prev_status == status:
-            if status == OK:
-                return False  # 정상이 이어짐 — 알릴 것 없음
-            cd = _cooldown()
-            if not cd:
-                return False  # 재알림 끔 — 전이 때만
-            if last_sent is not None and (now - _aware(last_sent)) < cd:
-                return False  # 쿨다운 중
+        # 있으면 행을 잠근다 — 동시 워커는 여기서 직렬화된다(없으면 잠글 게 없어 아래 INSERT가 조정).
+        row = db.get(models.AlertState, key, with_for_update=True)
+        if not _is_due(row, status, now, cd):
+            return False
+        if row is None:
+            row = models.AlertState(key=key, status=status)
+            row.detail = detail[:4000]
+            row.last_sent_at = now
+            db.add(row)
+            try:
+                db.commit()
+            except IntegrityError:
+                # 동시 워커가 먼저 만들었다 — 그 워커가 선점했으니 물러난다.
+                db.rollback()
+                return False
+            return True
+        row.status = status
+        row.detail = detail[:4000]
+        row.last_sent_at = now  # 선점: 발송 前에 커밋 → 실패해도 백오프(재발송 폭주 차단)
+        db.commit()
         return True
 
 
@@ -318,7 +357,7 @@ def _fallback_should_notify(key: str, status: str, now: datetime) -> bool:
     ⚠️ `(key, status)`별 시각만 저장하면 안 된다 (CodeRabbit #263 2차). 그 방식은
        `FIRING → OK → FIRING`이 쿨다운 안에 오면 두 번째 FIRING이 첫 번째의 타임스탬프에
        걸려 **새 장애를 반복으로 오인해 삼킨다.** 복구됐다가 다시 터진 건 새 사건이다.
-       그래서 DB 쪽 `_should_notify`와 같은 규칙을 쓴다: 전이면 보내고, 같은 비정상이
+       그래서 DB 쪽 `_is_due`와 같은 규칙을 쓴다: 전이면 보내고, 같은 비정상이
        이어지면 쿨다운, 처음 본 OK는 침묵(정상은 뉴스가 아니다).
 
     ⚠️ 인메모리라 한계가 명확하다: 재시작하면 초기화되고, 워커 N개면 최대 N배 발송된다.
@@ -346,22 +385,6 @@ def _fallback_should_notify(key: str, status: str, now: datetime) -> bool:
 def _aware(dt: datetime) -> datetime:
     """naive로 돌아온 값(드라이버·DB 설정에 따라)을 UTC로 간주해 비교 가능하게."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
-
-
-def _record(key: str, status: str, detail: str, now: datetime, sent: bool) -> None:
-    """상태를 갱신한다. 보내지 않았어도 status는 기록해야 다음 전이를 판단할 수 있다."""
-    from app import models
-
-    with _obs_session() as db:
-        row = db.get(models.AlertState, key)
-        if row is None:
-            row = models.AlertState(key=key, status=status)
-            db.add(row)
-        row.status = status
-        row.detail = detail[:4000]
-        if sent:
-            row.last_sent_at = now
-        db.commit()
 
 
 def _post(alert: Alert) -> bool:
@@ -402,35 +425,28 @@ def notify(alert: Alert, status: str = FIRING, now: datetime | None = None) -> b
         return False  # 미설정=비활성 — 기존 동작 그대로
 
     now = now or datetime.now(timezone.utc)
+    detail = json.dumps({"title": alert.title, "text": alert.text}, ensure_ascii=False)
 
-    # 🔴 상태 DB가 죽어도 **발송은 해야 한다** (CodeRabbit #263).
-    # 상태 조회 실패로 알림을 접으면, 하필 "관측 DB가 죽었다"를 알려야 할 때 침묵한다 —
-    # 자기모순이다. 도배 방지(상태)는 **부가 기능**이고 통지가 본질이다.
-    # 그래서 DB 장애 시엔 프로세스 로컬 폴백 스로틀로 최소한의 도배만 막고 **보낸다**.
+    # **발송 전에 원자적으로 선점한다** — 승자만 발송한다(멀티워커 중복·실패 재시도 폭주 차단, RPA-192).
+    # 🔴 상태 DB가 죽어도 **발송은 해야 한다** (CodeRabbit #263): 상태로 도배 방지하는 건 부가
+    # 기능이고 통지가 본질이라, 하필 "관측 DB가 죽었다"를 알려야 할 때 침묵하면 자기모순이다.
+    # 그래서 선점(DB) 실패 시엔 프로세스 로컬 폴백 스로틀로 최소한만 막고 보낸다.
     try:
-        should = _should_notify(alert.key, status, now)
-        state_ok = True
+        won = _claim_send(alert.key, status, detail, now)
     except Exception as e:  # noqa: BLE001 — 상태 DB 장애
-        logger.warning("알림 상태 조회 실패 — key=%s error=%s (폴백 스로틀로 발송 시도)",
+        logger.warning("알림 선점 실패 — key=%s error=%s (폴백 스로틀로 발송 시도)",
                        alert.key, type(e).__name__)
-        should, state_ok = _fallback_should_notify(alert.key, status, now), False
+        won = _fallback_should_notify(alert.key, status, now)
 
-    if not should:
+    if not won:
         return False
 
     # _post는 자체 fail-open이지만 여기서도 감싼다 — 그 구현에 기대면, 누가 _post를 바꾸는
     # 순간 알림이 서비스를 죽인다. "관측 실패는 서비스를 죽이지 않는다"는 notify 전체의 계약이다.
     # (sessions.py에서 빌더가 try 밖이라 429가 500이 된 것과 같은 교훈 — CodeRabbit #258.)
+    # ⚠️ 선점은 이미 커밋됐다(발송 실패해도 백오프 유지) — 성공/실패로 상태를 되돌리지 않는다.
     try:
-        sent = _post(alert)
+        return _post(alert)
     except Exception as e:  # noqa: BLE001
         logger.warning("알림 발송 실패 — key=%s error=%s", alert.key, type(e).__name__)
-        sent = False
-
-    if state_ok:
-        try:
-            _record(alert.key, status, json.dumps(
-                {"title": alert.title, "text": alert.text}, ensure_ascii=False), now, sent)
-        except Exception as e:  # noqa: BLE001 — 기록 실패가 발송을 무르지 않는다
-            logger.warning("알림 상태 기록 실패 — key=%s error=%s", alert.key, type(e).__name__)
-    return sent
+        return False

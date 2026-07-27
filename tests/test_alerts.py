@@ -54,8 +54,9 @@ def state(monkeypatch):
     class _DB:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def get(self, model, key): return store.get(key)
+        def get(self, model, key, with_for_update=None): return store.get(key)
         def add(self, row): store[row.key] = row
+        def rollback(self): pass
         def commit(self): pass
 
     monkeypatch.setattr(alerts, "_obs_session", lambda: _DB())
@@ -178,7 +179,7 @@ def test_state_survives_module_reload(sent, state):
     class _DB:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def get(self, model, key): return state.get(key)
+        def get(self, model, key, with_for_update=None): return state.get(key)
         def add(self, row): state[row.key] = row
         def commit(self): pass
 
@@ -187,6 +188,52 @@ def test_state_survives_module_reload(sent, state):
     alerts.notify(_alert(), alerts.FIRING, NOW + timedelta(minutes=1))
 
     assert len(sent) == 1, "재시작 후 같은 사유로 또 보냈다 — 상태가 프로세스 안에 있다"
+
+
+# --- 동시성: 원자적 선점 (RPA-192) ---
+
+def test_concurrent_workers_send_once(monkeypatch):
+    """두 워커가 동시에 같은 firing을 처리해도 **한 번만** 발송한다 (RPA-192).
+
+    실제 멀티프로세스 대신, `_post` **도중**(=선점 커밋 직후, 발송 중)에 두 번째 워커가 도착한
+    상황을 **재진입**으로 재현한다. 선점을 발송 前에 커밋하므로 두 번째 워커는 이미 선점된 상태를
+    보고 발송하지 않는다.
+
+    ⚠️ 이빨: 옛 방식(판정→발송→기록)은 기록이 발송 **뒤**라, 재진입한 두 번째 워커의 판정이
+       아직 기록 안 된 상태를 보고 통과 → **2번 발송**. 원자 선점을 되돌리면 이 테스트가 sent==2로
+       FAILED (`scripts/prove_teeth.py` 대상).
+    """
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", HOOK)
+    calls: list = []
+    reentered = {"done": False}
+
+    def _post_then_reenter(alert):
+        calls.append(alert)
+        if not reentered["done"]:  # 첫 발송 도중에 도착한 두 번째 워커
+            reentered["done"] = True
+            alerts.notify(_alert(), alerts.FIRING, NOW)  # 재진입 — 이미 선점됐어야 함
+        return True
+
+    monkeypatch.setattr(alerts, "_post", _post_then_reenter)
+    alerts.notify(_alert(), alerts.FIRING, NOW)
+
+    assert len(calls) == 1, f"동시 워커가 {len(calls)}번 발송했다 — 원자 선점이 안 듣는다"
+
+
+def test_failed_send_backs_off_no_retry_storm(monkeypatch, state):
+    """발송이 계속 실패해도 **매 호출 재발송하지 않는다** (RPA-192 ②).
+
+    옛 방식은 발송 실패 시 last_sent를 안 남겨, 429 경로가 매 요청 슬랙을 다시 두드렸다(죽어 있으면
+    매 요청 5초). 선점이 발송 前 last_sent를 커밋하므로 쿨다운 내 재호출은 발송을 시도하지 않는다.
+    """
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", HOOK)
+    attempts = []
+    monkeypatch.setattr(alerts, "_post", lambda a: (attempts.append(a), False)[1])  # 슬랙 죽음
+
+    for i in range(10):  # 429 경로가 요청마다 알림 시도하는 상황
+        alerts.notify(_alert(), alerts.FIRING, NOW + timedelta(seconds=i))
+
+    assert len(attempts) == 1, f"발송 실패가 이어지는데 {len(attempts)}번 재시도했다 — 폭주"
 
 
 # --- 배치 임계 알림 (롤업 직후) ---
@@ -212,7 +259,7 @@ def agg(monkeypatch, state):
             def execute(self, stmt, params=None):
                 return _R(cost if "usage_daily" in str(stmt).lower() else e5)
             # 알림 상태 저장소 — dict 하나로 전이·쿨다운이 실제로 동작하게 한다
-            def get(self, model, key): return state.get(key)
+            def get(self, model, key, with_for_update=None): return state.get(key)
             def add(self, row): state[row.key] = row
             def commit(self): pass
 
