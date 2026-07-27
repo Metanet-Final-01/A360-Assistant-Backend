@@ -198,8 +198,18 @@ def _png_bytes() -> bytes:
     return buf.getvalue()
 
 
-def test_export_docx_post_embeds_flow_image():
-    """POST + 캡처 PNG → docx에 흐름도 이미지가 실제로 임베드되고, 데이터 섹션도 함께 담긴다."""
+def _page_break_count(doc) -> int:
+    """문서의 명시적 페이지 나눔(<w:br w:type="page"/>) 개수 — 장 사이 나눔을 검증한다."""
+    from docx.oxml.ns import qn
+
+    return sum(
+        1 for br in doc.element.body.iter(qn("w:br"))
+        if br.get(qn("w:type")) == "page"
+    )
+
+
+def test_export_docx_post_embeds_multiple_flow_images():
+    """POST + 캡처 PNG 여러 장 → 각 장이 임베드되고 장 **사이**에만 페이지 나눔이 들어간다 (RPA-334)."""
     from io import BytesIO
 
     from docx import Document
@@ -210,7 +220,11 @@ def test_export_docx_post_embeds_flow_image():
     with TestClient(app) as c:
         r = c.post(
             f"/api/sessions/{SID}/recommendations/5/export/docx",
-            files={"flow_image": ("flow.png", _png_bytes(), "image/png")},
+            files=[
+                ("flow_images", ("flow1.png", _png_bytes(), "image/png")),
+                ("flow_images", ("flow2.png", _png_bytes(), "image/png")),
+                ("flow_images", ("flow3.png", _png_bytes(), "image/png")),
+            ],
         )
     assert r.status_code == 200
     assert r.headers["content-type"].startswith(
@@ -218,9 +232,33 @@ def test_export_docx_post_embeds_flow_image():
     )
     assert "v5.docx" in r.headers["content-disposition"]
     doc = Document(BytesIO(r.content))
-    assert len(doc.inline_shapes) >= 1  # 흐름도 이미지가 임베드됨
+    assert len(doc.inline_shapes) == 3            # 세 장 모두 임베드
+    assert _page_break_count(doc) == 2            # 장 사이에만(첫 장 앞·마지막 장 뒤엔 없음)
     blob = "\n".join(p.text for p in doc.paragraphs)
-    assert "Excel_MS / OpenWorkbook" in blob  # 데이터 섹션도 함께 렌더
+    assert "흐름도 (1/3)" in blob and "흐름도 (3/3)" in blob  # 장 번호 캡션
+    assert "Excel_MS / OpenWorkbook" in blob      # 데이터 섹션도 함께 렌더
+
+
+def test_export_docx_post_single_image_no_page_break():
+    """1장이면 페이지 나눔 없이 기존과 동일하게 임베드하고 캡션은 번호 없음(하위호환) (RPA-334)."""
+    from io import BytesIO
+
+    from docx import Document
+
+    session = SimpleNamespace(id=SID, user_id=None)
+    row = SimpleNamespace(id=uuid.uuid4(), version=5, source="agent", payload=_rec_rich())
+    _override(FakeDB(session=session, row=row))
+    with TestClient(app) as c:
+        r = c.post(
+            f"/api/sessions/{SID}/recommendations/5/export/docx",
+            files=[("flow_images", ("flow.png", _png_bytes(), "image/png"))],
+        )
+    assert r.status_code == 200
+    doc = Document(BytesIO(r.content))
+    assert len(doc.inline_shapes) == 1
+    assert _page_break_count(doc) == 0
+    blob = "\n".join(p.text for p in doc.paragraphs)
+    assert "흐름도 (편집 화면 기준)" in blob  # 단일 장 캡션은 번호 없음
 
 
 def test_export_docx_post_without_image_is_data_doc():
@@ -250,14 +288,48 @@ def test_docx_trigger_empty_title_does_not_crash():
 
 
 def test_export_docx_post_rejects_non_image():
-    """PNG/JPEG 매직바이트가 아니면 400 — content-type만 이미지라고 우겨도 차단."""
+    """여러 장 중 하나라도 PNG/JPEG 매직바이트가 아니면 400 — 장마다 개별 검증 (RPA-334)."""
     session = SimpleNamespace(id=SID, user_id=None)
     row = SimpleNamespace(id=uuid.uuid4(), version=1, source="drag", payload=_rec())
     _override(FakeDB(session=session, row=row))
     with TestClient(app) as c:
         r = c.post(
             f"/api/sessions/{SID}/recommendations/1/export/docx",
-            files={"flow_image": ("evil.txt", b"not really an image", "image/png")},
+            files=[
+                ("flow_images", ("ok.png", _png_bytes(), "image/png")),
+                ("flow_images", ("evil.txt", b"not really an image", "image/png")),
+            ],
         )
     assert r.status_code == 400
     assert r.json()["detail"]["code"] == "INVALID_IMAGE"
+
+
+def test_export_docx_post_rejects_too_many_images():
+    """이미지 개수가 상한(20장)을 넘으면 413 TOO_MANY_IMAGES (RPA-334)."""
+    session = SimpleNamespace(id=SID, user_id=None)
+    row = SimpleNamespace(id=uuid.uuid4(), version=1, source="drag", payload=_rec())
+    _override(FakeDB(session=session, row=row))
+    files = [("flow_images", (f"f{i}.png", _png_bytes(), "image/png")) for i in range(21)]
+    with TestClient(app) as c:
+        r = c.post(f"/api/sessions/{SID}/recommendations/1/export/docx", files=files)
+    assert r.status_code == 413
+    assert r.json()["detail"]["code"] == "TOO_MANY_IMAGES"
+
+
+def test_export_docx_post_rejects_oversized_total(monkeypatch):
+    """장별 8MB 이하라도 합계가 상한을 넘으면 413 IMAGES_TOO_LARGE (RPA-334, Qodo #445 메모리 폭증)."""
+    # 합계 상한을 한 장 크기로 낮춰 2장이면 합계 초과하도록(테스트에 48MB를 만들지 않기 위함).
+    monkeypatch.setattr(sessions_api, "_MAX_FLOW_IMAGES_TOTAL_BYTES", len(_png_bytes()))
+    session = SimpleNamespace(id=SID, user_id=None)
+    row = SimpleNamespace(id=uuid.uuid4(), version=1, source="drag", payload=_rec())
+    _override(FakeDB(session=session, row=row))
+    with TestClient(app) as c:
+        r = c.post(
+            f"/api/sessions/{SID}/recommendations/1/export/docx",
+            files=[
+                ("flow_images", ("a.png", _png_bytes(), "image/png")),
+                ("flow_images", ("b.png", _png_bytes(), "image/png")),
+            ],
+        )
+    assert r.status_code == 413
+    assert r.json()["detail"]["code"] == "IMAGES_TOO_LARGE"

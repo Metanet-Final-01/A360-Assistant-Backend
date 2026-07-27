@@ -87,16 +87,18 @@ def build_recommendation_docx(
     version: int,
     source: str | None,
     exported_at: str,
-    flow_image: bytes | None = None,
+    flow_images: list[bytes] | None = None,
 ) -> bytes:
     """저장된 추천안 payload(dict 또는 Recommendation)를 .docx 바이트로 렌더한다.
 
     payload는 저장 시 Recommendation으로 검증된 것이지만, 여기서도 model_validate로 타입을
     확보한다(구조가 깨졌으면 ValidationError로 드러난다 — 호출부가 처리).
 
-    flow_image: 프론트가 캡처한 흐름도 PNG/JPEG 바이트(선택, RPA-296). 있으면 "추천 흐름"
-    머리 아래에 임베드한다 — UI 렌더를 그대로 문서에 싣기 위함. 흐름도는 프론트(FR-18)가
-    트리에서 그리므로 백엔드가 서버에서 캡처할 수 없어, 호출부가 이미지를 넘겨준다.
+    flow_images: 프론트가 캡처한 흐름도 PNG/JPEG 바이트 목록(선택, RPA-296·RPA-334). 있으면
+    "추천 흐름" 머리 아래에 순서대로 임베드하되 장 **사이**에 페이지 나눔을 넣어 각 장을 새
+    페이지에 싣는다(긴 흐름도를 페이지 단위로 나눠 캡처해 오기 때문). 흐름도는 프론트(FR-18)가
+    트리에서 그리므로 백엔드가 서버에서 캡처할 수 없어, 호출부가 이미지 목록을 넘겨준다.
+    0장이면 이미지 없이 데이터 문서로 동작한다(하위호환).
     """
     rec = payload if isinstance(payload, Recommendation) else Recommendation.model_validate(payload)
 
@@ -155,14 +157,21 @@ def build_recommendation_docx(
 
     # 추천 흐름 — 본문
     doc.add_heading("추천 흐름", level=1)
-    if flow_image:
-        # 프론트가 캡처한 UI 흐름도를 시각 요약으로 먼저 싣고, 아래에 단계별 텍스트를 잇는다.
+    # 프론트가 캡처한 UI 흐름도를 시각 요약으로 먼저 싣고, 아래에 단계별 텍스트를 잇는다.
+    # 긴 흐름도는 페이지 높이 단위로 여러 장 캡처해 오므로 장 **사이**에만 페이지 나눔을 넣어
+    # 각 장을 새 페이지에서 시작하게 한다 — Word는 페이지보다 큰 인라인 그림을 이어 그리지 않고
+    # 경계에서 잘라버린다(RPA-334). 첫 장 앞·마지막 장 뒤엔 넣지 않는다(뒤 텍스트와 붙어도 무방).
+    total = len(flow_images) if flow_images else 0
+    for idx, image in enumerate(flow_images or []):
+        if idx > 0:
+            doc.add_page_break()
         try:
-            doc.add_picture(BytesIO(flow_image), width=Inches(6.3))
-            doc.add_paragraph().add_run("흐름도 (편집 화면 기준)").italic = True
-        except Exception:  # noqa: BLE001 — 이미지가 깨져도 문서 생성 자체는 죽이지 않는다
-            logger.warning("흐름도 이미지 임베드 실패 — 문구로 대체", exc_info=True)
-            doc.add_paragraph("(흐름도 이미지를 표시할 수 없습니다.)")
+            doc.add_picture(BytesIO(image), width=Inches(6.3))
+            caption = "흐름도 (편집 화면 기준)" if total == 1 else f"흐름도 ({idx + 1}/{total})"
+            doc.add_paragraph().add_run(caption).italic = True
+        except Exception:  # noqa: BLE001 — 한 장이 깨져도 문서 생성·다른 장은 죽이지 않는다
+            logger.warning("흐름도 이미지 임베드 실패 — 문구로 대체 (%d/%d)", idx + 1, total, exc_info=True)
+            doc.add_paragraph(f"(흐름도 이미지를 표시할 수 없습니다. {idx + 1}/{total})")
     if not rec.steps:
         doc.add_paragraph("(흐름 단계가 없습니다.)")
     for i, step in enumerate(rec.steps, start=1):
