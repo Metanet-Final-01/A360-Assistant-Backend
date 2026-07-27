@@ -130,6 +130,25 @@ _RULE_SEVERITY = {
 }
 
 
+# 규칙별 수리 힌트 — surgeon 프롬프트의 [고칠 문제들] 줄에 붙는다.
+#
+# 실측(2026-07-27): R18 5건이 4라운드에 걸쳐 **한 번도** 수리되지 않았다. surgeon은 매 라운드
+# 시도했지만 `update`에 package만 주고 action_name을 빼서, 결과 표기가 `Microsoft 365 Excel/Step`
+# ·`Recorder/Step`·`Browser/Step`·`Email/Step`이 됐다 — 전부 없는 액션이라 사전 검증이 버렸다
+# (라운드별 5·2·5·4건, 총 16건). 규칙 설명만으로는 그 함정이 안 보인다: 모델은 "패키지를
+# 바꿨다"고 생각하지 자기가 없는 표기를 **만들고 있다**고 인식하지 못한다.
+_FIX_HINT: dict[str, str] = {
+    "R18": (
+        "`update`로 package와 action_name을 **둘 다** 지정하세요. package만 바꾸면 옛 액션 "
+        "이름이 그대로 남아 `Microsoft 365 Excel/Step` 같은 없는 표기가 되어 통째로 무시됩니다"
+    ),
+    "R17": (
+        "핸들을 연 패키지에서 같은 일을 하는 액션을 골라 `update` — 여기서도 package와 "
+        "action_name을 둘 다 주세요"
+    ),
+}
+
+
 def from_violations(violations: list) -> tuple[list[Finding], list]:
     """checker Violation 목록 → (Finding 목록, 카드 후보 R3 위반 목록).
 
@@ -168,6 +187,7 @@ def from_violations(violations: list) -> tuple[list[Finding], list]:
                 location=d.get("location"),
                 step_id=d.get("step_id"),
                 message=d.get("message", ""),
+                fix_hint=_FIX_HINT.get(rule),
             )
         )
     return findings, card_candidates

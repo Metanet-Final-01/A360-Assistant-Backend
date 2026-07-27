@@ -150,6 +150,44 @@ def test_환각_update는_동봉한_파라미터째_버려진다():
     assert kept == [] and len(dropped) == 1
 
 
+def test_반쪽_교체는_안_준_필드를_지목한다():
+    """🔴 실측 2026-07-27 — R18 5건이 4라운드 동안 한 번도 수리되지 않은 이유.
+
+        라운드1  dropped: Microsoft 365 Excel/Step ×4, Email/Step
+        라운드2  dropped: Browser/Step ×2
+        라운드3  dropped: Recorder/Step ×2, Microsoft 365 Excel/Step ×3
+        라운드4  dropped: Recorder/Step ×3, Microsoft 365 Excel/Step
+        ops:     {"op":"update", "to":"Microsoft 365 Excel/?", "target":"n10"}
+
+    surgeon이 구획(Step)을 실제 액션으로 갈아끼우려고 **package만** 바꿨고, 옛 액션 이름
+    `Step`이 그대로 남아 없는 표기가 됐다. "카탈로그에 없는 표기"라는 사유만 돌려주면 모델은
+    **자기가 그 표기를 만들었다는 것을 모른다** — 안 준 필드를 지목해야 다음 라운드가 달라진다.
+    """
+    ops = [EditOp(op="update", target="n1", package="Excel advanced")]  # action은 Paste cell로 남는다
+    _, dropped = drop_unknown_action_ops(_flow(), ops, _exists)
+
+    assert "action_name도 함께" in dropped[0]
+    assert "Excel advanced/Paste cell" in dropped[0]
+
+
+def test_반대_방향도_지목한다():
+    ops = [EditOp(op="update", target="n2", action_name="Paste cell")]  # package는 Excel advanced
+    _, dropped = drop_unknown_action_ops(_flow(), ops, _exists)
+
+    assert "package도 함께" in dropped[0]
+
+
+def test_살아남은_반쪽_교체에는_사유를_붙이지_않는다():
+    """반쪽 교체 자체는 정상이다 — R17 수리(핸들을 연 패키지로 package만 교체)가 그 형태다.
+
+    판정은 '결과 표기가 실재하는가'만 하고, 사유는 **이미 버려지기로 정해진** 연산에만 붙인다.
+    """
+    ops = [EditOp(op="update", target="n2", action_name="Close action in Excel advanced package")]
+    kept, dropped = drop_unknown_action_ops(_flow(), ops, _exists)
+
+    assert kept == ops and dropped == []
+
+
 def test_같은_대상에_update가_둘이면_뒤의_판정이_앞의_효과를_본다():
     """🔴 사전 검증은 **아무 연산도 적용되기 전** 흐름도로 판정한다 — 같은 노드에 update가
     둘 오면 뒤의 판정이 앞의 효과를 못 본다.

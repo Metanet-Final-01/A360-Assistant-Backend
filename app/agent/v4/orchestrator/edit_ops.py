@@ -731,6 +731,31 @@ def op_notations(
     return []
 
 
+def half_update_reason(op: EditOp) -> str | None:
+    """표기를 **반쪽만** 바꾼 update인가 — 그렇다면 왜 깨졌는지 한 줄로.
+
+    ## 왜 따로 이름 붙이나 (실측, 2026-07-27)
+
+    R18(비실행 구획이 요구 담당) 5건이 4라운드에 걸쳐 한 번도 수리되지 않았다. surgeon은 매
+    라운드 시도했지만 `update`에 package만 주고 action_name을 빼서, 남아 있던 옛 액션 이름과
+    합쳐져 `Microsoft 365 Excel/Step`·`Recorder/Step`·`Browser/Step`·`Email/Step`이 됐다 —
+    전부 없는 표기라 여기서 버려졌다(라운드별 5·2·5·4건, 총 16건).
+
+    "카탈로그에 없는 표기"라는 사유만 돌려주면 모델은 **자기가 그 표기를 만들었다는 것을
+    모른다**. 안 준 필드를 지목해야 다음 라운드가 달라진다.
+
+    ⚠ 반쪽 교체 자체는 정상이다 — R17 수리(핸들을 연 패키지로 package만 교체)가 그 형태다.
+    그래서 이 함수는 판정을 하지 않고 **이미 버려지기로 정해진 연산의 사유만** 만든다.
+    """
+    if op.op != "update":
+        return None
+    if op.package and not op.action_name:
+        return "package만 바꿔 옛 액션 이름이 그대로 남았다 — action_name도 함께 줘야 한다:"
+    if op.action_name and not op.package:
+        return "action_name만 바꿔 옛 패키지가 그대로 남았다 — package도 함께 줘야 한다:"
+    return None
+
+
 def drop_unknown_action_ops(
     flow: dict,
     ops: list[EditOp],
@@ -785,7 +810,8 @@ def drop_unknown_action_ops(
         bad = [(p, a) for p, a in notations if not exists(p, a)]
         if bad:
             dropped.append(
-                f"op[{i}] {op.op}: 카탈로그에 없는 표기 {', '.join(f'{p}/{a}' for p, a in bad)}"
+                f"op[{i}] {op.op}: {half_update_reason(op) or '카탈로그에 없는 표기'} "
+                + ", ".join(f"{p}/{a}" for p, a in bad)
             )
             if banned_out is not None:
                 for p, a in bad:

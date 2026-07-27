@@ -43,6 +43,7 @@ from .edit_ops import (
     annotate_ids,
     apply_edit_ops,
     drop_unknown_action_ops,
+    half_update_reason,
     render_outline,
     renumber,
     strip_ids,
@@ -482,7 +483,17 @@ def _rule_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]
     return {k: v - before.get(k, 0) for k, v in sorted(after.items()) if v > before.get(k, 0)}
 
 
-def _feedback_block(attempts: list[dict], banned: list[str]) -> str:
+# 반쪽 교체로 버려진 적이 있으면 붙는 주의 문구. 규칙 설명(fix_hint)만으로는 모자랐다 —
+# 실측에서 4라운드 연속 같은 실수가 나왔고, 금지 표기 목록에 `Microsoft 365 Excel/Step`이
+# 실려 있는데도 반복했다. 모델은 자기가 그 표기를 **만들고 있다**는 것을 모른다.
+_HALF_UPDATE_NOTE = (
+    "※ 위 표기들은 `update`에 package만 주고 action_name을 빼서 **네가 만든 것**이다. "
+    "옛 액션 이름이 그대로 남아 합쳐진 결과다. 액션을 갈아끼울 때는 package와 action_name을 "
+    "반드시 **둘 다** 주고, 이름은 [수리용 액션 스펙]에서 그대로 복사해라."
+)
+
+
+def _feedback_block(attempts: list[dict], banned: list[str], half_update: bool = False) -> str:
     """직전 라운드가 왜 반영되지 않았는지를 프롬프트 **맨 뒤**에 붙인다.
 
     ## 왜 맨 뒤인가
@@ -519,9 +530,10 @@ def _feedback_block(attempts: list[dict], banned: list[str]) -> str:
     if banned:
         shown = banned[:_MAX_BANNED_NOTATIONS]
         tail = f" 외 {len(banned) - len(shown)}건" if len(banned) > len(shown) else ""
-        parts.append(
-            "[카탈로그에 없어 무시된 표기 — 다시 쓰지 마라]\n" + ", ".join(shown) + tail
-        )
+        block = "[카탈로그에 없어 무시된 표기 — 다시 쓰지 마라]\n" + ", ".join(shown) + tail
+        if half_update:
+            block += "\n" + _HALF_UPDATE_NOTE
+        parts.append(block)
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
 
 
@@ -737,6 +749,7 @@ def refine_flow(
     exists = lambda p, a: catalog.get_action_schema(p, a) is not None  # noqa: E731
     attempts: list[dict] = []   # 반영되지 않은 직전 라운드들 — 채택되면 비운다
     banned: list[str] = []      # 카탈로그에 없어 무시된 표기 — 라운드를 넘겨 누적한다
+    half_update_seen = False    # 반쪽 교체로 버려진 적이 있는가 — 한 번 켜지면 유지한다
 
     for round_no in range(1, max_rounds + 1):
         if deadline_mono is not None and time.monotonic() >= deadline_mono:
@@ -762,7 +775,7 @@ def refine_flow(
                f"여기 없는 표기는 쓰지 말 것]\n{repair_menu}"
                if repair_menu else "")
             # 되먹임은 **맨 뒤**에 — 앞 전체가 프리픽스 캐시에 적중하게(_feedback_block 참조).
-            + _feedback_block(attempts, banned)
+            + _feedback_block(attempts, banned, half_update_seen)
         )
         fed_back = min(len(attempts), _MAX_FEEDBACK_ATTEMPTS)
         try:
@@ -794,6 +807,12 @@ def refine_flow(
         if dropped:
             logger.info("surgeon 라운드 %d: 환각 표기 연산 %d개 제외 — %s",
                         round_no, len(dropped), dropped)
+            # 버려진 것 중에 '반쪽 교체'가 있었나. 살아남은 반쪽 교체(R17 수리 등)는 정상이라
+            # 세지 않는다 — 버려진 것만 봐야 "네가 만든 표기다"라는 말이 참이 된다.
+            kept_ids = {id(o) for o in operations}
+            half_update_seen = half_update_seen or any(
+                id(o) not in kept_ids and half_update_reason(o) for o in ops.operations
+            )
         rules_before = _rule_counts(round_findings)
         if not operations:
             # 낼 것이 전부 환각이었다 — 연산 없음과 같은 상태다(가짜 성공 방지).

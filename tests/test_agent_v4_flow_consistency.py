@@ -197,6 +197,27 @@ def test_실행되는_액션은_대상이_아니다():
     assert run_scaffold_checks(steps) == []
 
 
+def test_R18_수리_힌트가_반쪽_교체를_경고한다():
+    """🔴 실측 2026-07-27 — R18 5건이 4라운드 동안 한 번도 수리되지 않았다.
+
+    surgeon은 매 라운드 시도했지만 `update`에 package만 주고 action_name을 빼서, 결과 표기가
+    `Microsoft 365 Excel/Step`·`Recorder/Step`·`Browser/Step`·`Email/Step`이 됐다 — 전부 없는
+    액션이라 사전 검증이 버렸다(라운드별 5·2·5·4건, 총 16건).
+
+    규칙 이름과 메시지만으로는 그 함정이 안 보인다. 힌트는 [고칠 문제들] 줄에 그대로 붙어
+    나가므로(harness._findings_lines), 여기서 함정을 짚어야 라운드가 달라진다.
+    """
+    from app.agent.v4.orchestrator.harness import from_violations_dicts
+
+    findings, _ = from_violations_dicts([
+        {"rule": "R18", "location": "actions[0]", "message": "구획이 요구를 담당", "step_id": "s"}
+    ])
+    (f,) = findings
+
+    assert f.fix_hint and "action_name" in f.fix_hint
+    assert "package" in f.fix_hint
+
+
 def test_R18은_A360_밖에서도_돈다():
     """'이름만 적고 액션을 안 만들었다'는 어느 솔루션에서나 결함이라 게이트 밖이다."""
     import inspect

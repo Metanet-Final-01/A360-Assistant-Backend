@@ -222,6 +222,32 @@ def test_금지_표기만_남으면_되돌려졌다는_헤더가_안_나온다(b
     assert "[직전 시도" not in bench.prompts[1], "그런데 '되돌려졌다'는 아니다"
 
 
+def test_반쪽_교체로_버려지면_왜_그런지까지_알려준다(bench):
+    """🔴 실측 2026-07-27 — 금지 표기 목록에 `Microsoft 365 Excel/Step`이 실려 있는데도
+    surgeon이 4라운드 연속 같은 실수를 했다.
+
+    표기만 나열하면 모델은 "그 표기를 쓰지 말라"로만 읽는다. 자기가 **package만 주는 바람에
+    그 표기를 만들고 있다**는 것을 모르기 때문이다. 안 준 필드를 짚어 줘야 달라진다.
+    """
+    half = EditOp(op="update", target="n1", package="Email")  # action은 stepAction으로 남는다
+    bench([[half], [_swap()]], [[_viol("R7")], [_viol("R7")], [_viol("R7")]])
+
+    assert "Email/stepAction" in bench.prompts[1]
+    assert "action_name" in bench.prompts[1], "안 준 필드를 지목한다"
+
+
+def test_살아남은_반쪽_교체에는_주의가_안_붙는다(bench):
+    """반쪽 교체 자체는 정상이다(R17 수리). 멀쩡한 연산에 "네가 만든 것"이라고 하면 안 된다."""
+    ok = EditOp(op="update", target="n1", action_name="assign", package="String")
+    bad = EditOp(op="insert", anchor="n1", position="after",
+                 action={"package": "없는패키지", "action": "없는액션"})
+    bench([[ok, bad], [_swap()]],
+          [[_viol("R7"), _viol("R8")], [_viol("R7")], [_viol("R7")]])
+
+    assert "없는패키지/없는액션" in bench.prompts[1]
+    assert "네가 만든 것" not in bench.prompts[1]
+
+
 def test_금지_표기_수집이_결정론이다():
     """set 순회로 모으면 PYTHONHASHSEED에 따라 순서가 달라지고, 그 순서가 절단 대상을 정하며,
     그게 **프롬프트 본문에 실린다** — 같은 입력에 프로세스마다 다른 프롬프트가 나간다.
