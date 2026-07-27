@@ -7,7 +7,7 @@
 """
 
 from fastapi import APIRouter
-from starlette.concurrency import run_in_threadpool
+from fastapi.concurrency import run_in_threadpool  # fastapi 재-export (starlette 직접 의존 회피, Qodo #424)
 
 from app.services.catalog import get_backend_catalog
 

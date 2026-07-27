@@ -68,6 +68,22 @@ def test_list_package_catalog_groups_sorts_and_flags_containers(monkeypatch):
     assert "parameters" not in if_action                      # params_unknown → parameters 생략
 
 
+def test_package_labels_cached_across_calls(monkeypatch):
+    """패키지 라벨 조회는 캐시된다 — 매 요청 DB 히트 금지 (Qodo #424)."""
+    cat = BackendCatalog()
+    calls = {"n": 0}
+
+    def _load():
+        calls["n"] += 1
+        return {"Excel_MS": "Excel 고급"}
+
+    monkeypatch.setattr(cat, "iter_action_schemas", lambda: iter(_SPECS))
+    monkeypatch.setattr(cat, "_load_package_labels", _load)
+    cat.list_package_catalog()
+    cat.list_package_catalog()
+    assert calls["n"] == 1  # 두 번째 호출은 캐시 — DB 재조회 없음
+
+
 def test_catalog_packages_endpoint(monkeypatch):
     fake = SimpleNamespace(list_package_catalog=lambda: [
         {"package": "Excel_MS", "label": "Excel 고급",

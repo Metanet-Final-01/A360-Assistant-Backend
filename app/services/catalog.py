@@ -117,15 +117,18 @@ class BackendCatalog:
     def __init__(self) -> None:
         self._index: dict[tuple[str, str], dict] | None = None
         self._triggers: list[dict] | None = None
+        self._package_labels: dict[str, str] | None = None  # 편집기 카탈로그용 (RPA-313)
         # 벽시계(time.time)가 아니라 monotonic — NTP 보정으로 시계가 뒤로 가도 TTL 판정이
         # 음수가 되어 영구 stale/영구 fresh로 깨지지 않게. 미적재는 0.0(항상 stale로 판정되나
         # _index is None이 먼저 걸린다).
         self._index_loaded_at = 0.0
         self._triggers_loaded_at = 0.0
+        self._package_labels_loaded_at = 0.0
         # 백그라운드 재적재 진행 플래그 — 같은 캐시를 여러 스레드가 동시에 재적재하지 않게
         # (stale-while-revalidate, RPA-225).
         self._reloading_index = False
         self._reloading_triggers = False
+        self._reloading_package_labels = False
         self._lock = threading.Lock()
 
     @staticmethod
@@ -181,6 +184,15 @@ class BackendCatalog:
             return
         self._triggers = loaded
         self._triggers_loaded_at = time.monotonic()
+
+    def _reload_package_labels(self) -> None:
+        """백그라운드 패키지 라벨 재적재. 실패 시 옛 라벨 유지 + loaded_at 백오프."""
+        loaded = self._load_package_labels()
+        if loaded is None:  # 일시 실패 — 옛 라벨 유지, 다음 TTL까지 백오프
+            self._package_labels_loaded_at = time.monotonic()
+            return
+        self._package_labels = loaded
+        self._package_labels_loaded_at = time.monotonic()
 
     def _load(self) -> dict[tuple[str, str], dict]:
         # 지연 임포트 — 카탈로그를 실제로 쓸 때만 DB(psycopg)에 의존하게 한다.
@@ -376,14 +388,14 @@ class BackendCatalog:
 
         `[{package, label, actions: [{action, label, isContainer, parameters?}]}]`.
         - package/action은 **카탈로그 machine명**(추천 payload의 package/action과 동일 표기).
-        - 액션은 캐시된 인덱스(iter_action_schemas)에서, 패키지 라벨은 package_overview에서(저빈도 조회).
+        - 액션은 캐시된 인덱스(iter_action_schemas), 패키지 라벨도 캐시(_get_package_labels) — 매 요청 DB 히트 없음.
         - isContainer는 checker.CONTAINER_ACTIONS(컨테이너 여부의 단일 출처)를 따른다.
         - params_unknown 액션은 parameters 키를 생략한다 — '스키마 미상'과 '파라미터 0개'를 구분.
         """
         # 컨테이너 판정의 단일 출처를 재사용한다(중복 정의 시 드리프트). 지연 import로 순환 회피.
         from app.agent.v1.verify.checker import CONTAINER_ACTIONS
 
-        labels = self._load_package_labels()
+        labels = self._get_package_labels()
         grouped: dict[str, list[dict]] = {}
         for spec in self.iter_action_schemas():
             pkg, act = spec.get("package"), spec.get("action")
@@ -408,10 +420,28 @@ class BackendCatalog:
             for pkg in sorted(grouped)
         ]
 
-    def _load_package_labels(self) -> dict[str, str]:
+    def _get_package_labels(self) -> dict[str, str]:
+        """캐시된 {package_name: 표시라벨} — 인덱스와 같은 TTL·stale-while-revalidate (RPA-313, Qodo #424).
+
+        편집기 카탈로그가 매 요청마다 package_overview를 DB에서 다시 읽지 않게 캐싱한다.
+        """
+        if self._package_labels is None:
+            with self._lock:  # 첫 적재는 동기 (트리거·인덱스와 대칭)
+                if self._package_labels is None:
+                    loaded = self._load_package_labels()
+                    if loaded is None:  # 첫 적재 실패 — 캐싱 않고 이번엔 machine명 폴백, 다음 호출 재시도
+                        return {}
+                    self._package_labels = loaded
+                    self._package_labels_loaded_at = time.monotonic()
+            return self._package_labels
+        if self._is_stale(self._package_labels_loaded_at):
+            self._start_reload("_reloading_package_labels", self._reload_package_labels)
+        return self._package_labels
+
+    def _load_package_labels(self) -> dict[str, str] | None:
         """package_overview에서 {package_name: 표시라벨}. title 형식은 '{label} 패키지'(merge.py 생성).
 
-        실패해도 카탈로그를 못 주면 안 되므로 빈 dict로 저하한다 — 소비처가 package_name으로 폴백.
+        DB 실패는 **None**(실패 신호 — 호출부가 캐싱 않고 옛 값 유지/재시도), 정상은 dict(빈 값 포함).
         """
         from app.rag.store import db
 
@@ -431,7 +461,7 @@ class BackendCatalog:
                 conn.close()
         except Exception:  # noqa: BLE001 — 라벨 조회 실패가 카탈로그 전체를 막으면 안 된다
             logger.warning("package_overview 라벨 조회 실패 — 패키지명으로 폴백", exc_info=True)
-            return {}
+            return None
         out: dict[str, str] = {}
         for package_name, title in rows:
             label = (title or "").removesuffix(" 패키지").strip()
