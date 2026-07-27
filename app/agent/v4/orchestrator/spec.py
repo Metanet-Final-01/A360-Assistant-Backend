@@ -138,6 +138,74 @@ def merge_glue_requirements(d: dict, raw: list) -> int:
     return added
 
 
+# 분석 단계 수 상한 — 단계가 이보다 많으면 1:1 보정을 하지 않는다. 분석이 비정상적으로
+# 잘게 쪼개진 경우(파싱 사고 등)에 요구가 수십 건으로 부풀어 채점 기준이 무너지는 것을 막는다.
+MAX_ANCHORED_MUSTS = 15
+
+
+def anchor_musts_to_analysis(
+    spec: dict, analysis: dict | None, *, from_document: bool = False
+) -> list[str]:
+    """분석 단계에 must 요구가 없으면 그 단계로 채운다. 채운 단계 id들을 돌려준다.
+
+    ## 왜 결정론이 필요한가 (실측, 2026-07-27)
+
+    같은 업무정의서로 3회 돌렸더니 **분석은 매번 7단계로 같은데** must 요구가 5·7·5로
+    갈렸다(두 번은 두 단계를 한 요구로 뭉쳤다). 채점은 "must 요구 중 몇 개가 충족됐나"라서
+    분모가 달라지면 실행 간 비교가 성립하지 않는다:
+
+        must 5에서 1건 누락 → 0.8      must 7에서 1건 누락 → 0.857
+
+    그리고 must_coverage는 심판 결정론 점수의 50% 가중치·하드 게이트·flow_confidence에
+    전부 들어간다. **요구를 뭉친 실행이 같은 결함으로도 더 높은 점수를 받는다** — 이 상태로는
+    어떤 개선을 넣어도 측정할 수 없다.
+
+    프롬프트로도 못을 박았지만(spec_builder.md) 개수 규칙을 모델 재량에 남겨 두는 것이
+    바로 그 흔들림의 원인이었으므로, 여기서 결정론으로 닫는다.
+
+    ## 왜 '창작'이 아닌가
+
+    빠진 단계의 요구 문장을 **분석 단계에서 그대로 가져온다.** 분석은 이미 같은 입력(문서·
+    대화)에서 뽑은 사실이라, 없던 것을 지어내는 게 아니라 앞 단계의 사실을 뒤로 나르는 것이다.
+    `source`도 분석의 출처를 따른다(문서가 있으면 doc, 없으면 chat).
+
+    ## 대가
+
+    자연스러운 흐름도가 두 단계를 액션 하나로 처리하면 이제 **뭉갬(conflation) major**가
+    뜬다. 그건 숨겨야 할 오탐이 아니라 "액션 하나가 업무 둘을 한다"는 정직한 신호이고,
+    surgeon에게는 이미 재분해 패턴이 있다. 반대로 뭉친 채 두면 그 사실이 **점수에 유리하게**
+    사라진다 — 결함을 성공으로 세는 쪽이 더 나쁘다.
+    """
+    steps = [s for s in (analysis or {}).get("steps") or [] if isinstance(s, dict) and s.get("step_id")]
+    if not steps or len(steps) > MAX_ANCHORED_MUSTS:
+        if steps:
+            logger.info("분석 단계 %d개 — 상한(%d) 초과라 must 1:1 보정을 건너뛴다",
+                        len(steps), MAX_ANCHORED_MUSTS)
+        return []
+
+    reqs = spec.setdefault("requirements", [])
+    covered = {
+        r.get("step_id") for r in reqs
+        if isinstance(r, dict) and r.get("priority", "must") == "must" and r.get("step_id")
+    }
+    source = "doc" if from_document else "chat"
+    added: list[str] = []
+    for s in steps:
+        sid = s["step_id"]
+        if sid in covered:
+            continue
+        name = " ".join(str(s.get("name") or "").split())
+        desc = " ".join(str(s.get("description") or "").split())
+        text = f"{name} — {desc}" if name and desc and desc != name else (name or desc)
+        if not text:
+            continue  # 이름도 설명도 없는 단계는 나를 것이 없다
+        # req_id는 비워 둔다 — 아래 결정론 재부여 루프가 순번을 매긴다(앵커 무결성).
+        reqs.append({"req_id": "", "text": text[:300], "priority": "must",
+                     "source": source, "step_id": sid})
+        added.append(sid)
+    return added
+
+
 def build_flow_spec(state: dict, document: str | None) -> dict:
     """턴 컨텍스트 → FlowSpec dict (LLM 1회 + jsonio 교정 1회).
 
@@ -176,6 +244,12 @@ def build_flow_spec(state: dict, document: str | None) -> dict:
     # FlowSpec 필드 밖의 키를 '미지 필드'로 집어낸다. 승격만 하고 키는 지운다.
     glue_raw = d.pop("glue_requirements", None) or []
     n_glue = merge_glue_requirements(d, glue_raw) if is_a360 else 0
+    # must 요구 입도를 분석 단계에 고정한다 — 프롬프트만으로는 5·7·5로 흔들렸다.
+    # 접착제 승격 **뒤에** 부른다: 접착제는 should라 must 집합을 건드리지 않지만, 순서를
+    # 뒤집으면 아래 req_id 재부여가 두 번 돌아야 한다.
+    anchored = anchor_musts_to_analysis(
+        d, state.get("analysis"), from_document=bool((document or "").strip())
+    )
     # req_id 결정론 보정 — LLM이 빠뜨리거나 중복 내면 순번으로 다시 부여한다 (앵커 무결성).
     # 대체값(req-N)이 기존 명시 id와 또 충돌할 수 있어, 비어 있는 번호까지 전진시킨다.
     explicit = {r.get("req_id") for r in d.get("requirements") or [] if r.get("req_id")}
@@ -189,8 +263,22 @@ def build_flow_spec(state: dict, document: str | None) -> dict:
             rid = f"req-{counter}"
             r["req_id"] = rid
         seen.add(rid)
-    caption = f"요구사항 {len(d.get('requirements') or [])}건 정형화"
+    reqs = d.get("requirements") or []
+    musts = sum(1 for r in reqs if r.get("priority", "must") == "must")
+    n_steps = len([s for s in (state.get("analysis") or {}).get("steps") or [] if isinstance(s, dict)])
+    caption = f"요구사항 {len(reqs)}건 정형화 (필수 {musts}건)"
     if n_glue:
-        caption += f" (문서 무명시 구현 접착제 {n_glue}건 도출 포함)"
+        caption += f" · 접착제 {n_glue}건 도출"
+    if anchored:
+        caption += f" · 분석 단계 {len(anchored)}건 보정"
+        logger.info("must 요구 입도 보정 — 분석 단계 %s가 요구에 없어 채웠다", anchored)
     emit_spec_frame(d, caption)
+    # spec 프레임은 partial이라 관측에 안 남는다(볼륨) — 채점 분모를 재는 스칼라만 stage로.
+    # 🔴 `anchored`가 곧 "모델이 분석 단계를 뭉쳤다"는 신호이자 프롬프트 규칙이 먹히는지를
+    # 재는 축이다. 이 숫자가 0으로 수렴해야 규칙이 자리를 잡은 것이다.
+    emit({
+        "event": "stage", "stage": "analyzing", "message": caption,
+        "data": {"musts": musts, "shoulds": len(reqs) - musts, "glue": n_glue,
+                 "analysis_steps": n_steps, "anchored": anchored},
+    })
     return d

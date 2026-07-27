@@ -139,6 +139,12 @@ class SpecRequirement(BaseModel):
     text: str
     priority: Literal["must", "should"] = "must"
     source: Literal["doc", "chat", "inferred"] = "chat"
+    # 이 요구가 업무 분석의 어느 단계에서 왔나. must 요구의 **입도를 고정**하는 앵커다
+    # (RPA-298): 같은 문서로 3회 실행했더니 분석은 매번 7단계로 같은데 must 요구가
+    # 5·7·5로 갈렸고, 그러면 must_coverage의 **분모**가 달라져 실행 간 점수 비교가
+    # 성립하지 않는다(심판 결정론 점수의 50%, 하드 게이트, flow_confidence가 전부 이 값을 탄다).
+    # should·접착제 요구는 단계에 매이지 않으므로 None이다.
+    step_id: str | None = Field(None, description="대응하는 업무 분석 단계 id (must 요구만)")
 
 
 class SpecUnknown(BaseModel):
