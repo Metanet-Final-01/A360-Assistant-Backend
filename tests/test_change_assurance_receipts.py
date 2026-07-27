@@ -338,8 +338,12 @@ def test_writer_endpoint_rejects_admin_or_wrong_bearer(monkeypatch):
     assert response.json()["detail"]["code"] == "INVALID_ASSURANCE_WRITER"
 
 
-def test_writer_endpoint_accepts_only_validated_envelope(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_event", ["pull_request", "pull_request_review"])
+def test_writer_endpoint_accepts_only_validated_envelope(
+    tmp_path, monkeypatch, source_event
+):
     envelope = _envelope(tmp_path)
+    envelope["source"]["event"] = source_event
     expected = {
         "status": "persisted",
         "receipt_digest": "sha256:" + "a" * 64,
@@ -367,6 +371,30 @@ def test_writer_endpoint_accepts_only_validated_envelope(tmp_path, monkeypatch):
     assert response.status_code == 201
     assert response.json() == expected
     assert captured == {"payload": envelope, "db": fake_db}
+
+
+def test_writer_endpoint_rejects_unsupported_source_event(tmp_path, monkeypatch):
+    envelope = _envelope(tmp_path)
+    envelope["source"]["event"] = "push"
+    called = False
+
+    def persist(payload, db):
+        nonlocal called
+        called = True
+
+    monkeypatch.setenv("ASSURANCE_WRITER_TOKEN", "w" * 32)
+    monkeypatch.setenv("ASSURANCE_WRITER_REPOSITORY", envelope["source"]["repository"])
+    monkeypatch.setattr(writer_api, "persist_change_receipt", persist)
+    app.dependency_overrides[get_db] = lambda: object()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/internal/assurance/change-receipts",
+            headers={"Authorization": "Bearer " + "w" * 32},
+            json=envelope,
+        )
+
+    assert response.status_code == 422
+    assert called is False
 
 
 def test_writer_endpoint_rejects_a_different_repository(tmp_path, monkeypatch):

@@ -29,7 +29,7 @@ class ChangePublisherSource(BaseModel):
     workflow_name: Literal["Change Assurance (Observe)"]
     workflow_run_id: int = Field(ge=1)
     run_attempt: int = Field(ge=1)
-    event: Literal["pull_request"]
+    event: Literal["pull_request", "pull_request_review"]
     conclusion: Literal["success"]
     head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     pull_request_number: int = Field(ge=1)
