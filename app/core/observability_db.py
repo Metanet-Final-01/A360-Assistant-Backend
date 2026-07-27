@@ -37,7 +37,15 @@ class ObservabilityUnavailableError(RuntimeError):
 
 
 def observability_url() -> str:
-    return os.getenv("OBSERVABILITY_DATABASE_URL", "").strip()
+    # 앱 DB와 **공유**하는 정규화 (RPA-322) — CloudFormation이 조립한 `postgresql://`(드라이버
+    # 미지정)를 `postgresql+psycopg://`로 맞춰, SQLAlchemy가 미설치된 psycopg2를 찾다 죽는 걸
+    # 막는다. 이 정규화가 없어 RDS 전환 후 관측 쓰기가 조용히 전부 유실됐다. 빈 문자열은 그대로
+    # 통과해 아래 호출부의 "미설정=unavailable" 판정을 유지한다.
+    # (지연 import: app/core 계층에서 app.db를 모듈 로드 시점에 끌어오지 않으려는 기존 관례 —
+    #  ensure_observability_schema의 pg_advisory_lock import와 동일.)
+    from app.db import normalize_sqlalchemy_url
+
+    return normalize_sqlalchemy_url(os.getenv("OBSERVABILITY_DATABASE_URL", "").strip())
 
 
 def _build(url: str):
