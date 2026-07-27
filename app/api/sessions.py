@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import delete, func, select
@@ -471,12 +471,19 @@ def save_edited_recommendation(
 def export_recommendation(
     session_id: str,
     version: int,
+    fmt: str = Query(
+        "json",
+        alias="format",
+        pattern="^(json|docx)$",
+        description="내보내기 형식 — json(기계 교환·재적재, 기본) | docx(사람이 읽는 서식 문서, FR-17)",
+    ),
     db: Session = Depends(get_db),
     user: models.User | None = Depends(get_optional_user),
-) -> JSONResponse:
-    """확정된 추천안(흐름도)을 다운로드용 JSON으로 내보낸다 (FR-17).
+) -> Response:
+    """확정된 추천안(흐름도)을 다운로드용으로 내보낸다 (FR-17).
 
-    지정 버전의 Recommendation 페이로드를 메타 봉투에 담아 attachment로 반환한다.
+    - format=json(기본): Recommendation 페이로드를 메타 봉투에 담은 JSON — 기계 교환·재적재용.
+    - format=docx: 담당자가 검토·공유·결재에 쓸 Word 서식 문서(흐름·근거·변수·전제·질문카드).
     라우트는 4세그먼트라 /recommendations·/recommendations/latest와 충돌하지 않는다.
     """
     session = _owned_session_or_404(session_id, db, user)
@@ -490,17 +497,123 @@ def export_recommendation(
         raise HTTPException(
             404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
         )
+    exported_at = datetime.now(timezone.utc).isoformat()
+    if fmt == "docx":
+        # 무거운 렌더러(python-docx)는 docx 경로에서만 로드한다 — JSON 경로 import 비용 0.
+        from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+        try:
+            content = build_recommendation_docx(
+                row.payload,
+                session_id=str(session.id),
+                version=row.version,
+                source=row.source,
+                exported_at=exported_at,
+            )
+        except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로 (Qodo #421)
+            logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+            raise HTTPException(
+                500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+            ) from exc
+        filename = f"recommendation-{session.id}-v{row.version}.docx"
+        return Response(
+            content=content,
+            media_type=DOCX_MEDIA_TYPE,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     envelope = {
         "schema_version": "1.0",
         "session_id": str(session.id),
         "recommendation_version": row.version,
         "source": row.source,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": exported_at,
         "recommendation": row.payload,
     }
     filename = f"recommendation-{session.id}-v{row.version}.json"
     return JSONResponse(
         content=envelope,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+_MAX_FLOW_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — 캡처 흐름도 PNG 한 장이면 충분
+
+
+def _sniff_image_kind(data: bytes) -> str | None:
+    """매직 바이트로 PNG/JPEG만 통과시킨다 — content-type 헤더는 위조 가능하니 바이트로 판정."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    return None
+
+
+@router.post("/{session_id}/recommendations/{version}/export/docx")
+async def export_recommendation_docx(
+    session_id: str,
+    version: int,
+    flow_image: UploadFile | None = File(
+        None, description="프론트가 캡처한 흐름도 이미지(PNG/JPEG, 선택) — 있으면 문서에 임베드"
+    ),
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> Response:
+    """추천안을 Word(.docx) 서식 문서로 내보낸다 — 프론트 캡처 흐름도 임베드 지원 (FR-17, RPA-296).
+
+    `GET .../export?format=docx`는 데이터만 담은 문서다. 흐름도(FR-18)는 프론트가 트리에서
+    그리므로 백엔드가 서버에서 캡처할 수 없다 — 프론트가 캡처한 PNG/JPEG를 multipart로 보내면
+    이 POST가 "추천 흐름"에 그대로 임베드한다. 이미지 없이 불러도 데이터 문서로 동작한다.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    row = db.execute(
+        select(models.RecommendationVersion).where(
+            models.RecommendationVersion.session_id == session.id,
+            models.RecommendationVersion.version == version,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
+        )
+    image_bytes: bytes | None = None
+    if flow_image is not None:
+        # MAX+1까지만 읽어 메모리를 바운드한다 — 초과면 413. UploadFile은 반드시 닫는다.
+        try:
+            data = await flow_image.read(_MAX_FLOW_IMAGE_BYTES + 1)
+        finally:
+            await flow_image.close()
+        if len(data) > _MAX_FLOW_IMAGE_BYTES:
+            raise HTTPException(
+                413, detail={"code": "IMAGE_TOO_LARGE", "message": "흐름도 이미지가 너무 큽니다(최대 8MB)."}
+            )
+        if _sniff_image_kind(data) is None:
+            raise HTTPException(
+                400, detail={"code": "INVALID_IMAGE", "message": "흐름도 이미지는 PNG/JPEG만 허용됩니다."}
+            )
+        image_bytes = data
+
+    from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+    try:
+        # 렌더는 CPU/IO 바운드(python-docx ZIP 저장·이미지 파싱) → 이벤트 루프 밖 threadpool에서 (Qodo).
+        content = await run_in_threadpool(
+            build_recommendation_docx,
+            row.payload,
+            session_id=str(session.id),
+            version=row.version,
+            source=row.source,
+            exported_at=datetime.now(timezone.utc).isoformat(),
+            flow_image=image_bytes,
+        )
+    except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로
+        logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+        raise HTTPException(
+            500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+        ) from exc
+    filename = f"recommendation-{session.id}-v{row.version}.docx"
+    return Response(
+        content=content,
+        media_type=DOCX_MEDIA_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
