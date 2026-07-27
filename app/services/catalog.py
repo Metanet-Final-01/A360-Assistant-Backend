@@ -434,12 +434,14 @@ class BackendCatalog:
                 self._start_reload("_reloading_package_labels", self._reload_package_labels)
             return cached
         loaded = self._load_package_labels()  # 락 밖 DB 조회
-        if loaded is None:  # 첫 적재 실패 — 캐싱 않고 machine명 폴백, 다음 호출 재시도
-            return {}
+        # 실패(None)여도 빈 dict를 캐시한다 — 매 요청이 실패한 DB를 재조회하며 두드리지 않게(백오프,
+        # Qodo #424). loaded_at을 지금으로 두면 다음 TTL 경계의 stale-reload가 복구를 시도한다.
+        # 그동안은 machine명 폴백(라벨은 코스메틱이라 허용). _reload는 실패 시 옛 값을 유지한다.
+        result = loaded if loaded is not None else {}
         with self._lock:  # 저장만 짧게 락
-            self._package_labels = loaded
+            self._package_labels = result
             self._package_labels_loaded_at = time.monotonic()
-        return loaded
+        return result
 
     def _load_package_labels(self) -> dict[str, str] | None:
         """package_overview에서 {package_name: 표시라벨}. title 형식은 '{label} 패키지'(merge.py 생성).
