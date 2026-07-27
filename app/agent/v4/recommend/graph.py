@@ -609,10 +609,11 @@ def _emit_candidate_scorecard(reports, verdict: dict, attempted: int) -> None:
     그래서 여기서 **스칼라만** stage로 한 번 더 낸다. 흐름도·근거·이유 문장을 싣지 않으므로
     부피 문제에 걸리지 않고, 한 번의 실행으로 위 질문이 닫힌다.
     """
+    from ..orchestrator.judge import flow_action_count as _flow_action_count
     from ..verify.findings import weight as _weight
 
-    totals = {
-        s.get("candidate_id"): s.get("total")
+    scores = {
+        s.get("candidate_id"): s
         for s in (verdict.get("verdict") or {}).get("scores") or []
         if isinstance(s, dict)
     }
@@ -624,17 +625,21 @@ def _emit_candidate_scorecard(reports, verdict: dict, attempted: int) -> None:
         # 그 칸만 비는 편이 낫다 — core.llm._log_llm_failure와 같은 원칙.
         errs = [f for f in getattr(r, "findings", None) or [] if f.severity != "warning"]
         det = getattr(r, "deterministic_score", None)
+        cid = getattr(r, "candidate_id", None)
         rows.append({
-            "id": getattr(r, "candidate_id", None),
+            "id": cid,
             "persona": getattr(r, "persona", ""),
             "weight": _weight(errs),
             "blockers": sum(1 for f in errs if f.severity == "blocker"),
+            "actions": _flow_action_count(getattr(r, "flow", None) or {}),
             "must_coverage": getattr(r, "must_coverage", None),
             "sim_pass_rate": getattr(r, "sim_pass_rate", None),
             "gate_failures": len(getattr(r, "gate_failures", None) or []),
             "det": det() if callable(det) else None,
-            "judge": totals.get(getattr(r, "candidate_id", None)),
-            "won": getattr(r, "candidate_id", None) == win_id,
+            "judge": (scores.get(cid) or {}).get("total"),
+            # 폭주 게이트로 자격에서 빠졌으면 그 사유 — 승자가 왜 그 후보가 아닌지의 근거다.
+            "blowup": (scores.get(cid) or {}).get("blowup"),
+            "won": cid == win_id,
         })
     rows.sort(key=lambda x: x["weight"])
     best = rows[0] if rows else {}

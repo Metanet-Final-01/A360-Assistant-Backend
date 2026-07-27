@@ -648,22 +648,99 @@ def _transplant_findings(
 # 판정 본체
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── 폭주 게이트 (RPA-298) ────────────────────────────────────────────────────
+#
+# 실측 2026-07-27 14:22: 심판이 **액션 108개짜리 중복 흐름도**를 골랐다.
+#
+#     C  가중합 192 · 커버리지 0.857 · blocker 0
+#     A  가중합 462 · 커버리지 1.000 · blocker 0   ← 승자, R7(세션 미개방 사용) 39건
+#
+# A는 같은 Excel advanced 블록 48개가 통째로 두 번 반복된 흐름도였다(다른 후보는 30·36개).
+# 그런데 `deterministic_score`의 위반 항 `1/(1+w/20)`이 **포화**한다:
+#
+#     w=20 → 0.500    w=100 → 0.167    w=192 → 0.094    w=462 → 0.041
+#
+# 192와 462의 차이는 점수에서 0.053 × 0.3 = 0.016뿐인데, 커버리지 1.0 vs 0.857 차이는
+# 0.143 × 0.5 = 0.072로 **4.5배**다. 가중합이 100을 넘으면 위반 축이 판별을 멈추고,
+# "요구를 (중복해서) 다 커버했다"가 이긴다.
+#
+# 점수 함수를 재설계하는 대신 자격 게이트를 하나 둔다 — 커버리지가 아무리 좋아도 부피가
+# 폭주한 후보는 승자가 될 수 없다. 비율로 재는 이유: 절대 임계는 업무 규모에 따라 달라지지만
+# "다른 후보의 N배"는 같은 업무·같은 spec 안의 상대 비교라 규모에 안 휘둘린다.
+_BLOWUP_WEIGHT_RATIO = 2.0
+_BLOWUP_ACTION_RATIO = 2.5
+# 바닥값 — 작은 수에서 비율은 잡음이다(20 vs 45는 2.25배지만 실질 차이가 아니다).
+_BLOWUP_WEIGHT_FLOOR = 60
+_BLOWUP_ACTION_FLOOR = 40
+
+
+def _error_weight(report: CandidateReport) -> int:
+    """이 후보의 검수 가중합 — deterministic_score가 쓰는 것과 같은 축."""
+    return weight([f for f in report.findings if f.severity != "warning"])
+
+
+def flow_action_count(flow: dict) -> int:
+    """흐름도의 액션 수(컨테이너 children 포함) — 중복 생성의 가장 값싼 신호."""
+    total = 0
+
+    def walk(actions) -> None:
+        nonlocal total
+        for a in actions or []:
+            if isinstance(a, dict):
+                total += 1
+                walk(a.get("children"))
+
+    for step in (flow or {}).get("steps") or []:
+        if isinstance(step, dict):
+            walk(step.get("actions"))
+    return total
+
+
+def blowup_excluded(reports: list[CandidateReport]) -> dict[str, str]:
+    """부피가 폭주한 후보 → 제외 사유. 커버리지로 구제되지 않는 유일한 게이트다.
+
+    전원이 걸리면 **아무도 빼지 않는다** — 비교 기준(최경량 후보)이 자기 자신이 되어
+    판정이 무의미해지고, 어차피 그중 하나는 골라야 한다.
+    """
+    if len(reports) < 2:
+        return {}
+    weights = {r.candidate_id: _error_weight(r) for r in reports}
+    actions = {r.candidate_id: flow_action_count(r.flow) for r in reports}
+    min_w, min_a = min(weights.values()), min(actions.values())
+
+    out: dict[str, str] = {}
+    for r in reports:
+        cid = r.candidate_id
+        w, a = weights[cid], actions[cid]
+        if w >= _BLOWUP_WEIGHT_FLOOR and w >= min_w * _BLOWUP_WEIGHT_RATIO:
+            out[cid] = f"검수 가중합 {w} (최경량 후보 {min_w})"
+        elif a >= _BLOWUP_ACTION_FLOOR and a >= min_a * _BLOWUP_ACTION_RATIO:
+            out[cid] = f"액션 {a}개 (최소 후보 {min_a}개) — 중복 생성 의심"
+    return {} if len(out) >= len(reports) else out
+
+
 def _pick_eligible(
     reports: list[CandidateReport], refuted: dict[str, bool]
 ) -> list[CandidateReport]:
-    """승자 자격이 있는 후보 — 게이트를 두 겹으로 완화하며 내려간다.
+    """승자 자격이 있는 후보 — 게이트를 겹겹이 완화하며 내려간다.
 
+    ⓪ **폭주 게이트** — 다른 후보 대비 가중합·액션 수가 폭주한 후보는 여기서 빠진다.
+       이 게이트만 **완화 대상이 아니다**(전원이 걸릴 때만 무효화). 아래 층들은 "그래도
+       하나는 골라야 한다"는 이유로 완화되는데, 폭주 후보는 그 완화의 수혜자가 되면
+       안 된다 — 커버리지가 좋다는 이유로 뽑히는 것이 정확히 막으려는 사고다.
     ① L2 하드 게이트(must missing)도 없고 확증된 치명 결함도 없는 후보
     ② 없으면 L2 게이트만 통과한 후보 (반증 게이트는 포기 — 레거시와 같은 자격 기준)
     ③ 그것도 없으면 전원 (최악 중 최선)
     반증 게이트를 L2 게이트보다 **먼저 포기**하는 이유: L2는 결정론 신호고 반증은 LLM
     판정이다. 둘 다 못 만족시킬 때 믿을 것은 결정론 쪽이다.
     """
-    clean = [r for r in reports if not r.gate_failures and not refuted.get(r.candidate_id)]
+    blown = blowup_excluded(reports)
+    pool = [r for r in reports if r.candidate_id not in blown] or list(reports)
+    clean = [r for r in pool if not r.gate_failures and not refuted.get(r.candidate_id)]
     if clean:
         return clean
-    gate_ok = [r for r in reports if not r.gate_failures]
-    return gate_ok or list(reports)
+    gate_ok = [r for r in pool if not r.gate_failures]
+    return gate_ok or pool
 
 
 def _refutation_reason(win_row: dict, rows: list[dict], eligible: set[str]) -> str:
@@ -699,8 +776,14 @@ def _refutation_reason(win_row: dict, rows: list[dict], eligible: set[str]) -> s
             f"후보 {wid}는 반증 지적 {win_row['charges']}건을 안고도 요구 커버리지·검수·"
             f"시뮬레이션 우위로 종합 {win_row['total']}점을 냈습니다."
         )
-    if excluded:
-        head += f" 후보 {', '.join(excluded)}는 확증된 치명 결함 또는 요구 누락으로 자격에서 제외됐습니다."
+    # 폭주 제외와 결함 제외는 사용자에게 다른 사실이다 — "결함이 있었다"와 "너무 컸다"를
+    # 한 문장으로 뭉치면 어느 쪽도 정확하지 않다.
+    blown = [r["candidate_id"] for r in others if r.get("blowup")]
+    gated = [c for c in excluded if c not in blown]
+    if blown:
+        head += f" 후보 {', '.join(blown)}는 검수 결함·규모가 다른 후보 대비 과도해 제외됐습니다."
+    if gated:
+        head += f" 후보 {', '.join(gated)}는 확증된 치명 결함 또는 요구 누락으로 자격에서 제외됐습니다."
     return head
 
 
@@ -763,6 +846,9 @@ def _judge_by_refutation(
         })
 
     by_id = {r.candidate_id: r for r in reports}
+    blown = blowup_excluded(reports)
+    for row in rows:  # 왜 빠졌는지가 점수판·관측에 남아야 사후에 되짚을 수 있다
+        row["blowup"] = blown.get(row["candidate_id"])
     eligible = {r.candidate_id for r in _pick_eligible(reports, refuted)}
     win_row = max((row for row in rows if row["candidate_id"] in eligible), key=lambda row: row["total"])
     winner = by_id[win_row["candidate_id"]]
