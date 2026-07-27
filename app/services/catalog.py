@@ -23,6 +23,66 @@ import time
 
 logger = logging.getLogger(__name__)
 
+
+def _param_names(spec: dict) -> tuple | None:
+    """스펙의 파라미터 이름 집합 (정렬된 튜플). 스펙 미상이면 None — 비교 대상에서 뺀다.
+
+    논리 중복 판정의 기준이다(RPA-287). 파라미터 '집합'만 보는 이유는 검수 R2/R3가 이름
+    존재 여부로 판정하기 때문이다 — 라벨·설명이 달라도 이름이 같으면 검수 결과는 같다.
+
+    이름을 str로 강제한다: schema는 수집 파이프라인(LLM 보강 포함)이 만든 외부 데이터라
+    name이 문자열이 아닐 수 있는데, 그러면 sorted()가 TypeError로 죽고 **카탈로그 적재
+    전체가 무너진다**(모든 액션이 '카탈로그에 없음'이 돼 R1이 전부 환각으로 오판). 이 모듈이
+    이미 지키는 '한 행의 비정상 데이터가 전체 적재를 깨뜨리지 않는다'는 원칙과 같은 취지다.
+    지문은 비교용이라 문자열화해도 판정력이 유지된다(다른 값은 다른 문자열이 된다).
+    """
+    if spec.get("params_unknown"):
+        return None
+    return tuple(sorted(
+        str(p["name"]) for p in (spec.get("parameters") or [])
+        if isinstance(p, dict) and p.get("name")
+    ))
+
+
+def _scalar_default(default):
+    """카탈로그 default의 typed-value 봉투를 사람이 쓸 값으로 푼다 (RPA-313).
+
+    카탈로그 default는 `{"type": T, "<값키>": v}` 봉투이고, v가 또 봉투일 수 있다
+    (예: SESSION → `{"type":"SESSION","sessionName":{"type":"STRING","string":"Default"}}`).
+    단일 값 봉투는 재귀로 언랩하고, 다중 키(EXCEPTION 등)·리스트·스칼라는 그대로 둔다.
+    """
+    if not isinstance(default, dict) or "type" not in default:
+        return default
+    others = [(k, v) for k, v in default.items() if k != "type"]
+    if len(others) == 1:  # 단일 값 봉투 → 재귀 언랩
+        return _scalar_default(others[0][1])
+    return default  # 다중 키(EXCEPTION 등) → 구조 유지(프론트가 판단)
+
+
+def _public_param(p: dict) -> dict:
+    """카탈로그 파라미터 스펙 → 편집기 피커용 공개 형태 (RPA-313).
+
+    default는 typed-value 봉투라 _scalar_default로 정규화한다. options는 {label,value}만 추린다.
+    """
+    out: dict = {
+        "name": p.get("name"),
+        "label": p.get("label") or p.get("name"),
+        "type": p.get("type"),
+        "required": bool(p.get("required")),
+    }
+    if p.get("description"):
+        out["description"] = p["description"]
+    opts = p.get("options")
+    if isinstance(opts, list) and opts:
+        out["options"] = [
+            {"label": o.get("label"), "value": o.get("value")}
+            for o in opts if isinstance(o, dict)
+        ]
+    default = _scalar_default(p.get("default"))
+    if default is not None:
+        out["default"] = default
+    return out
+
 # 인메모리 카탈로그 캐시의 재적재 주기 (RPA-225).
 # 왜 필요한가: 이 캐시는 최초 1회 적재 후 갱신 경로가 없어, 적재(ingest)로 액션이
 # 추가돼도 이미 떠 있는 프로세스는 **영원히** 옛 카탈로그를 봤다. 다중 인스턴스(ASG)면
@@ -57,15 +117,18 @@ class BackendCatalog:
     def __init__(self) -> None:
         self._index: dict[tuple[str, str], dict] | None = None
         self._triggers: list[dict] | None = None
+        self._package_labels: dict[str, str] | None = None  # 편집기 카탈로그용 (RPA-313)
         # 벽시계(time.time)가 아니라 monotonic — NTP 보정으로 시계가 뒤로 가도 TTL 판정이
         # 음수가 되어 영구 stale/영구 fresh로 깨지지 않게. 미적재는 0.0(항상 stale로 판정되나
         # _index is None이 먼저 걸린다).
         self._index_loaded_at = 0.0
         self._triggers_loaded_at = 0.0
+        self._package_labels_loaded_at = 0.0
         # 백그라운드 재적재 진행 플래그 — 같은 캐시를 여러 스레드가 동시에 재적재하지 않게
         # (stale-while-revalidate, RPA-225).
         self._reloading_index = False
         self._reloading_triggers = False
+        self._reloading_package_labels = False
         self._lock = threading.Lock()
 
     @staticmethod
@@ -122,6 +185,15 @@ class BackendCatalog:
         self._triggers = loaded
         self._triggers_loaded_at = time.monotonic()
 
+    def _reload_package_labels(self) -> None:
+        """백그라운드 패키지 라벨 재적재. 실패 시 옛 라벨 유지 + loaded_at 백오프."""
+        loaded = self._load_package_labels()
+        if loaded is None:  # 일시 실패 — 옛 라벨 유지, 다음 TTL까지 백오프
+            self._package_labels_loaded_at = time.monotonic()
+            return
+        self._package_labels = loaded
+        self._package_labels_loaded_at = time.monotonic()
+
     def _load(self) -> dict[tuple[str, str], dict]:
         # 지연 임포트 — 카탈로그를 실제로 쓸 때만 DB(psycopg)에 의존하게 한다.
         from app.rag.store import db
@@ -133,24 +205,41 @@ class BackendCatalog:
         try:
             with conn.cursor() as cur:
                 cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
+                # ORDER BY 없이는 (pkg, act) 중복 시 어느 행을 채택할지가 DB 반환 순서에
+                # 달려 빌드·프로세스마다 스펙이 흔들린다 — 재현 가능한 순서로 고정한다.
+                # parent_id를 chunk_index보다 앞에 두어 같은 문서의 청크가 붙어 있게 한다.
                 cur.execute(
                     """
-                    SELECT package_name, action_name, metadata
+                    SELECT package_name, action_name, metadata, parent_id
                     FROM rag_documents
                     WHERE source_type = 'action_schema'
                       AND package_name IS NOT NULL
                       AND action_name IS NOT NULL
+                    ORDER BY package_name, action_name, parent_id, chunk_index, id
                     """
                 )
                 rows = cur.fetchall()
         finally:
             conn.close()
 
-        for package_name, action_name, metadata in rows:
+        # 논리 중복 관측 — 같은 (pkg, act)에 **파라미터 집합이 서로 다른** 행이 있는가.
+        #
+        # 판정 기준을 parent_id(출처 문서)가 아니라 파라미터 집합으로 둔다. parent_id는
+        # 나중에 추가된 nullable 컬럼이라 레거시 행이 전부 NULL이고, 그러면 서로 다른
+        # 문서도 None == None으로 같아 보여 관측이 조용히 무력화된다(Qodo 리뷰).
+        # 게다가 우리가 실제로 걱정하는 피해는 '출처가 둘'이 아니라 '채택 행에 따라
+        # 파라미터가 달라져 검수 R2/R3가 오판하는 것'이라, 파라미터 집합이 더 정확한 신호다
+        # (출처가 둘이어도 파라미터가 같으면 무해하다). parent_id는 추적 정보로만 싣는다.
+        adopted_parent: dict[tuple[str, str], str | None] = {}
+        adopted_params: dict[tuple[str, str], tuple | None] = {}
+        conflicts: dict[tuple[str, str], dict] = {}
+
+        for row in rows:
+            # 컬럼 수에 관대하게 언팩 — parent_id 없이 3튜플을 주는 기존 스텁/구 호출부와 호환.
+            package_name, action_name, metadata = row[0], row[1], row[2]
+            parent_id = row[3] if len(row) > 3 else None
             key = (package_name, action_name)
-            if key in index and not index[key].get("params_unknown"):
-                # 청킹으로 (pkg, act)당 여러 행이 있을 수 있으나 metadata.schema는 동일 — 첫 행이면 충분.
-                continue
+
             if isinstance(metadata, str):  # jsonb는 dict로 오지만 드라이버 차이에 방어적으로
                 try:
                     metadata = json.loads(metadata)
@@ -159,24 +248,53 @@ class BackendCatalog:
             # 최상위가 dict가 아니면(배열·문자열·깨진 JSON) schema 없음으로 처리 — 한 행의
             # 비정상 metadata가 전체 적재를 AttributeError로 무너뜨리지 않게 한다.
             schema = metadata.get("schema") if isinstance(metadata, dict) else None
-            if not isinstance(schema, dict):
+            if isinstance(schema, dict):
+                # package/action을 상위 키로 부여해 문서화된 스펙 형태와 맞춘다
+                # (schema에는 두 키가 없으므로 덮어쓰지 않는다).
+                spec = {"package": package_name, "action": action_name, **schema}
+                if spec.get("parameters") is None:
+                    # v2 보강은 '파라미터 미상'을 schema.parameters=None으로 기록한다 — 키를
+                    # 제거해 schema 없는 행과 같은 params_unknown 형태로 정규화한다. None인 채로
+                    # 흘리면 v1/v2 검수의 spec.get("parameters", [])가 None을 받아 순회에서 깨진다.
+                    spec.pop("parameters", None)
+                    spec["params_unknown"] = True
+            else:
                 # schema 없는 행도 어휘로는 실존한다(v2 문서 카탈로그의 보강 미도달 행 —
                 # --enrich 생략 빌드면 액션의 ~92%). parameters 키를 아예 두지 않아
                 # 소비처(.get("parameters"))가 '스펙 미상'(None)을 '파라미터 없음'([])과
-                # 구분하게 한다. 같은 키의 schema 보유 행이 나중에 오면 위에서 덮어쓴다.
-                index.setdefault(key, {"package": package_name, "action": action_name, "params_unknown": True})
-                continue
-            # package/action을 상위 키로 부여해 문서화된 스펙 형태와 맞춘다
-            # (schema에는 두 키가 없으므로 덮어쓰지 않는다).
-            spec = {"package": package_name, "action": action_name, **schema}
-            if spec.get("parameters") is None:
-                # v2 보강은 '파라미터 미상'을 schema.parameters=None으로 기록한다 — 키를
-                # 제거해 schema 없는 행과 같은 params_unknown 형태로 정규화한다. None인 채로
-                # 흘리면 v1/v2 검수의 spec.get("parameters", [])가 None을 받아 순회에서 깨진다.
-                spec.pop("parameters", None)
-                spec["params_unknown"] = True
-            index[key] = spec
+                # 구분하게 한다.
+                spec = {"package": package_name, "action": action_name, "params_unknown": True}
 
+            params = _param_names(spec)
+            # 채택 규칙: 스펙 미상 자리에는 나중에 온 실스펙이 들어온다. 이미 실스펙이 있으면
+            # 정렬 순서상 앞선 그 행을 유지한다.
+            existing = index.get(key)
+            if existing is None or existing.get("params_unknown"):
+                index[key] = spec
+                adopted_parent[key], adopted_params[key] = parent_id, params
+                continue
+
+            # 버려지는 행이다. 파라미터 집합이 채택본과 다르면 그 차이가 곧 검수 오판의 씨앗이다.
+            if params is not None and adopted_params.get(key) is not None and params != adopted_params[key]:
+                c = conflicts.setdefault(key, {"sources": set(), "param_sets": set()})
+                c["sources"].update({str(adopted_parent.get(key)), str(parent_id)})
+                c["param_sets"].update({adopted_params[key], params})
+
+        for (package_name, action_name), c in sorted(conflicts.items()):
+            # 채택 행이 바뀌면 검수(R2/R3)가 실존 파라미터를 '스펙에 없음'으로 오판할 수
+            # 있다 — 수집 쪽에서 이름 정규화를 고칠 때까지 발현 여부를 로그로 관측한다.
+            # 실제로 채택된 출처를 함께 남긴다(어느 행이 이겼는지 모르면 추적이 안 된다).
+            logger.warning(
+                "카탈로그 논리 중복 — (%s, %s)에 파라미터 집합이 다른 행이 %d종. "
+                "채택: parent_id=%s (파라미터 %d개). 관련 출처: %s. "
+                "나머지 행의 파라미터는 인덱스에 없어 검수가 오판할 수 있다",
+                package_name,
+                action_name,
+                len(c["param_sets"]),
+                adopted_parent.get((package_name, action_name)),
+                len(adopted_params.get((package_name, action_name)) or ()),
+                sorted(c["sources"]),
+            )
         logger.info("BackendCatalog 적재 완료: 액션 스펙 %d개", len(index))
         return index
 
@@ -264,6 +382,97 @@ class BackendCatalog:
         테스트 스텁에 없어도 duck-typing 폴백으로 동작하도록 사용처가 getattr로 조회한다.)
         """
         yield from self._ensure_index().values()
+
+    def list_package_catalog(self) -> list[dict]:
+        """전체 카탈로그 — 흐름도 편집기 피커(RPA-313)용.
+
+        `[{package, label, actions: [{action, label, isContainer, parameters?}]}]`.
+        - package/action은 **카탈로그 machine명**(추천 payload의 package/action과 동일 표기).
+        - 액션은 캐시된 인덱스(iter_action_schemas), 패키지 라벨도 캐시(_get_package_labels) — 매 요청 DB 히트 없음.
+        - isContainer는 checker.CONTAINER_ACTIONS(컨테이너 여부의 단일 출처)를 따른다.
+        - params_unknown 액션은 parameters 키를 생략한다 — '스키마 미상'과 '파라미터 0개'를 구분.
+        """
+        # 컨테이너 판정의 단일 출처를 재사용한다(중복 정의 시 드리프트). 지연 import로 순환 회피.
+        from app.agent.v1.verify.checker import CONTAINER_ACTIONS
+
+        labels = self._get_package_labels()
+        grouped: dict[str, list[dict]] = {}
+        for spec in self.iter_action_schemas():
+            pkg, act = spec.get("package"), spec.get("action")
+            if not pkg or not act:
+                continue
+            entry = {
+                "action": act,
+                "label": spec.get("label") or act,
+                "isContainer": (pkg, act) in CONTAINER_ACTIONS,
+            }
+            if not spec.get("params_unknown"):
+                entry["parameters"] = [
+                    _public_param(p) for p in (spec.get("parameters") or []) if isinstance(p, dict)
+                ]
+            grouped.setdefault(pkg, []).append(entry)
+        return [
+            {
+                "package": pkg,
+                "label": labels.get(pkg) or pkg,
+                "actions": sorted(grouped[pkg], key=lambda a: a["action"]),
+            }
+            for pkg in sorted(grouped)
+        ]
+
+    def _get_package_labels(self) -> dict[str, str]:
+        """캐시된 {package_name: 표시라벨} — TTL·stale-while-revalidate (RPA-313, Qodo #424).
+
+        편집기 카탈로그가 매 요청마다 package_overview를 다시 읽지 않게 캐싱한다. 첫 적재 DB 조회는
+        **락 밖에서** 한다 — 공유 _lock을 DB I/O 동안 쥐면 index/trigger 등 다른 카탈로그 작업까지
+        타임아웃만큼 막힌다(Qodo #424). index 로드(무거움)는 double-checked-locking으로 1회만 돌지만,
+        라벨은 싸고 멱등이라 첫 요청 경합 시 중복 조회를 감수하고(마지막 저장 채택) 락은 저장만 짧게 잡는다.
+        """
+        cached = self._package_labels
+        if cached is not None:
+            if self._is_stale(self._package_labels_loaded_at):
+                self._start_reload("_reloading_package_labels", self._reload_package_labels)
+            return cached
+        loaded = self._load_package_labels()  # 락 밖 DB 조회
+        # 실패(None)여도 빈 dict를 캐시한다 — 매 요청이 실패한 DB를 재조회하며 두드리지 않게(백오프,
+        # Qodo #424). loaded_at을 지금으로 두면 다음 TTL 경계의 stale-reload가 복구를 시도한다.
+        # 그동안은 machine명 폴백(라벨은 코스메틱이라 허용). _reload는 실패 시 옛 값을 유지한다.
+        result = loaded if loaded is not None else {}
+        with self._lock:  # 저장만 짧게 락
+            self._package_labels = result
+            self._package_labels_loaded_at = time.monotonic()
+        return result
+
+    def _load_package_labels(self) -> dict[str, str] | None:
+        """package_overview에서 {package_name: 표시라벨}. title 형식은 '{label} 패키지'(merge.py 생성).
+
+        DB 실패는 **None**(실패 신호 — 호출부가 캐싱 않고 옛 값 유지/재시도), 정상은 dict(빈 값 포함).
+        """
+        from app.rag.store import db
+
+        try:
+            conn = db.connect(connect_timeout=_CATALOG_DB_TIMEOUT_SEC)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
+                    cur.execute(
+                        """
+                        SELECT package_name, title FROM rag_documents
+                        WHERE source_type = 'package_overview' AND package_name IS NOT NULL
+                        """
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — 라벨 조회 실패가 카탈로그 전체를 막으면 안 된다
+            logger.warning("package_overview 라벨 조회 실패 — 패키지명으로 폴백", exc_info=True)
+            return None
+        out: dict[str, str] = {}
+        for package_name, title in rows:
+            label = (title or "").removesuffix(" 패키지").strip()
+            if label:
+                out[package_name] = label
+        return out
 
 
 _backend_catalog: BackendCatalog | None = None

@@ -56,7 +56,9 @@ def _gauge_with(monkeypatch, intake_tokens: int) -> dict:
         def execute(self, stmt):
             return SimpleNamespace(scalar_one_or_none=lambda: intake_tokens)
 
-    monkeypatch.setattr("app.db.SessionLocal", _S)
+    monkeypatch.setattr(
+        "app.core.observability_db.observability_sessionmaker", lambda: _S
+    )
     monkeypatch.delenv("TURN_GAUGE_LIMIT_TOKENS", raising=False)
     monkeypatch.delenv("TURN_GAUGE_WARN_RATIO", raising=False)
     monkeypatch.delenv("TURN_GAUGE_HARD_RATIO", raising=False)

@@ -2,19 +2,18 @@
 
 conftest의 _isolate_rag_shared_infra가 실제로 동작해, 개발자 .env에 공유 크레덴셜
 (RAG_DATABASE_URL=Neon, OPENSEARCH_HOST=Bonsai)이 있어도 테스트가 그걸로 연결하지
-않고 로컬로 저하되는지 못박는다. 이 격리가 깨지면(누가 fixture를 지우면) 로컬 pytest가
+않고 명시적인 로컬 URL을 쓰는지 못박는다. 이 격리가 깨지면(누가 fixture를 지우면) 로컬 pytest가
 팀 공유 코퍼스를 오염시킬 수 있으므로 여기서 fail한다.
 """
 
 import app.rag.config as config
 
 
-def test_rag_dsn_falls_back_to_local_not_shared_neon():
-    """RAG_DATABASE_URL이 격리돼 database_dsn()이 공유 Neon이 아니라 로컬 폴백(libpq 키워드형)."""
+def test_rag_dsn_is_explicit_local_not_shared_neon():
+    """RAG_DATABASE_URL이 공유 Neon이 아닌 테스트 전용 로컬 URL로 명시된다."""
     dsn = config.database_dsn()
     assert "neon.tech" not in dsn  # 공유 Neon 코퍼스 아님
-    # RAG_DATABASE_URL이 살아있으면 postgresql://... , 격리돼 폴백이면 libpq 키워드형(host=...)
-    assert dsn.startswith("host="), f"공유 RAG DSN 누수 의심: {dsn[:40]}"
+    assert dsn.startswith("postgresql://") and dsn.endswith("/a360_rag")
 
 
 def test_opensearch_host_isolated_from_bonsai():

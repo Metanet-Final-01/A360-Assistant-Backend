@@ -11,6 +11,8 @@ import binascii
 import logging
 import os
 import secrets
+import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
@@ -30,9 +32,6 @@ from app.services import retrieval_params as rp_service
 from app.services.assurance_evidence import receipt_integrity
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/api/admin", tags=["admin"])
-
 
 def _service_key_ok(request: Request) -> bool:
     """X-API-Key가 OPS_API_KEY와 일치하나 — 머신(M2M) 신원. 사람 로그인 재사용을 대체한다.
@@ -65,6 +64,15 @@ def require_admin(
     raise HTTPException(
         403, detail={"code": "FORBIDDEN", "message": "관리자만 접근할 수 있습니다."}
     )
+
+
+# Router-level dependencies run before endpoint parameter dependencies. This keeps
+# authentication ahead of observability DB connection attempts for every admin route.
+router = APIRouter(
+    prefix="/api/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _parse_since(value: str) -> datetime:
@@ -195,6 +203,19 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
     completeness = completeness if isinstance(completeness, dict) else {}
     human_review = payload.get("human_review")
     human_review = human_review if isinstance(human_review, dict) else None
+    subject = payload.get("subject")
+    subject = subject if isinstance(subject, dict) else {}
+    change_subject = None
+    if row.harness == "change":
+        change_subject = {
+            "repository": subject.get("repository"),
+            "pull_request_number": subject.get("pull_request_number"),
+            "workflow_run_id": subject.get("workflow_run_id"),
+            "run_attempt": subject.get("run_attempt"),
+            "source_event": subject.get("source_event"),
+            "base_sha": subject.get("base_sha"),
+            "head_sha": subject.get("head_sha"),
+        }
     result = {
         "receipt_digest": row.receipt_digest,
         "schema_version": row.schema_version,
@@ -224,6 +245,7 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
         "resolved_agent_version": row.resolved_agent_version,
         "integrity_valid": receipt_integrity(row),
         "human_review": human_review,
+        "change_subject": change_subject,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
     if detail:
@@ -681,3 +703,55 @@ def put_budget_limits(
         "updated_by": row.updated_by,
         "updated_at": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+# ── RAG 검색 경로 진단 (RPA-232/RPA-270) ─────────────────────────────────────────
+# SEARCH_UNAVAILABLE의 원인을 배포에서 확정한다. debug 라우터(SSRF 프록시 포함) 전체를 열지 않고
+# admin 인증(require_admin) 뒤에서만 노출한다. 판정은 app/services/rag_diagnostics 공용 함수.
+#
+# ⚠️ cooldown은 프로세스-로컬(best-effort) — uvicorn 멀티워커/다중 인스턴스에서 전역 보장은 아니다
+#    (AlertState와 같은 인메모리 한계). probe의 1차 방어선은 require_admin 인증이고, cooldown은
+#    한 워커가 우발적으로 연타되는 걸 막는 보조 스로틀이다. 진단용 저빈도 명령이라 분산 rate-limit
+#    (Redis/DB)은 과하다는 판단(codex 수용, 유사 제안 PR#239 거절 전례).
+_probe_cooldown_lock = threading.Lock()
+_probe_last_monotonic = 0.0
+_PROBE_COOLDOWN_SEC = 30.0
+
+
+@router.get("/rag/health")
+def admin_rag_health(_admin: models.User | None = Depends(require_admin)) -> dict:
+    """RAG 검색 경로 상태 요약 — 설정·인프라 도달성만(외부 임베딩 API 실호출 없음).
+
+    실제 임베딩/벡터 도달성은 POST /api/admin/rag/probe로 확인한다(비용 발생).
+    """
+    from app.services import rag_diagnostics
+
+    return rag_diagnostics.service_status()
+
+
+@router.post("/rag/probe")
+def admin_rag_probe(_admin: models.User | None = Depends(require_admin)) -> dict:
+    """검색 critical path 실호출 진단 — 임베딩(캐시 우회)·pgvector·OpenSearch 단계별 도달성.
+
+    POST인 이유: 외부 API 비용이 드는 운영 명령이라 우발적 재호출(GET 프리페치·모니터)을 막고
+    감사 로그에 남긴다. 서버측 cooldown(30초)으로 비용/부하 증폭도 제한한다. 응답은 error_type만
+    (Secret·DSN·host·credential 미노출) — 원문은 서버 로그로만 남는다.
+    """
+    global _probe_last_monotonic
+    now = time.monotonic()
+    with _probe_cooldown_lock:
+        elapsed = now - _probe_last_monotonic
+        if _probe_last_monotonic > 0.0 and elapsed < _PROBE_COOLDOWN_SEC:
+            raise HTTPException(
+                429,
+                detail={
+                    "code": "PROBE_COOLDOWN",
+                    "message": f"probe는 {int(_PROBE_COOLDOWN_SEC)}초 간격으로만 실행할 수 있습니다.",
+                    "retry_after_seconds": round(_PROBE_COOLDOWN_SEC - elapsed, 1),
+                },
+            )
+        _probe_last_monotonic = now
+
+    from app.services import rag_diagnostics
+
+    return rag_diagnostics.run_live_probe()

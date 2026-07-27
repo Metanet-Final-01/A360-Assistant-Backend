@@ -180,3 +180,82 @@ def test_get_latest_analysis_404_when_none():
     with TestClient(app) as c:
         r = c.get(f"/api/sessions/{SID}/analyses/latest")
     assert r.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# solution PATCH·자동 확정 (RPA-285 2단계)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_patch_solution_updates_session():
+    """타 솔루션 모드 자동 확정의 되돌리기 수단 — 오탐이 사용자를 가두면 안 된다."""
+    session = _session(user_id=UID)
+    db = FakeDB(session=session)
+    _override(db, optional_user=SimpleNamespace(id=UID))
+    with TestClient(app) as c:
+        r = c.patch(f"/api/sessions/{SID}", json={"solution": "uipath"})
+    assert r.status_code == 200
+    assert r.json()["solution"] == "uipath"
+    assert session.solution == "uipath" and db.committed
+
+
+def test_patch_solution_normalizes_and_reverts_to_a360():
+    session = _session(user_id=UID)
+    session.solution = "uipath"
+    _override(FakeDB(session=session), optional_user=SimpleNamespace(id=UID))
+    with TestClient(app) as c:
+        r = c.patch(f"/api/sessions/{SID}", json={"solution": "  A360 "})
+    assert r.status_code == 200
+    assert session.solution == "a360"  # 공백 제거 + 소문자화
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "x" * 60, "drop table;", "한글솔루션"])
+def test_patch_solution_rejects_bad_values(bad):
+    """자유 문자열이 세션에 굳으면 생성 경로가 통째로 갈린다 — 형식을 좁게 막는다."""
+    session = _session(user_id=UID)
+    _override(FakeDB(session=session), optional_user=SimpleNamespace(id=UID))
+    with TestClient(app) as c:
+        r = c.patch(f"/api/sessions/{SID}", json={"solution": bad})
+    assert r.status_code == 422
+    assert session.solution == "a360"  # 원본 불변
+
+
+def test_apply_detected_solution_respects_existing_choice(monkeypatch):
+    """사용자가 정한 값이 감지보다 우선 — 오탐이 선택을 덮으면 되돌려도 다시 뒤집힌다."""
+    already = SimpleNamespace(id=SID, solution="uipath")
+
+    class _Ctx:
+        def __enter__(self_inner):
+            return SimpleNamespace(get=lambda m, k: already, commit=lambda: None)
+
+        def __exit__(self_inner, *a):
+            return False
+
+    monkeypatch.setattr("app.db.SessionLocal", lambda: _Ctx())
+    assert sessions_api._apply_detected_solution(SID, "power automate") is None
+    assert already.solution == "uipath"  # 건드리지 않는다
+
+
+def test_apply_detected_solution_sets_a360_session(monkeypatch):
+    fresh = SimpleNamespace(id=SID, solution="a360")
+
+    class _Ctx:
+        def __enter__(self_inner):
+            return SimpleNamespace(get=lambda m, k: fresh, commit=lambda: None)
+
+        def __exit__(self_inner, *a):
+            return False
+
+    monkeypatch.setattr("app.db.SessionLocal", lambda: _Ctx())
+    assert sessions_api._apply_detected_solution(SID, "uipath") == "uipath"
+    assert fresh.solution == "uipath"
+
+
+def test_apply_detected_solution_rejects_malformed_and_survives_db_failure(monkeypatch):
+    """확정은 부가 기능 — 형식 오류나 DB 실패로 턴 산출을 잃으면 안 된다."""
+    assert sessions_api._apply_detected_solution(SID, "'; DROP TABLE x;--") is None
+
+    def boom():
+        raise RuntimeError("DB 다운")
+
+    monkeypatch.setattr("app.db.SessionLocal", boom)
+    assert sessions_api._apply_detected_solution(SID, "uipath") is None

@@ -17,7 +17,7 @@
 - move        : 노드를 anchor 기준 위치로 옮긴다.
 - set_params  : 노드 파라미터를 name 기준 병합/치환한다.
 - update      : 노드의 package/action/label을 바꾼다.
-- set_flow    : 흐름도 수준 notes/variables를 바꾼다.
+- set_flow    : 흐름도 수준 notes/variables와 스펙 전제(spec.assumptions)를 바꾼다.
 
 id는 프롬프트에 보여줄 때만 임시로 붙였다가(_annotate_ids) 적용 후 벗긴다(strip_ids) —
 스키마(RecommendedAction)에는 저장하지 않는 관측용 필드다.
@@ -70,6 +70,7 @@ class EditOp(BaseModel):
     label: str | None = None                  # update / split_step(새 단계 라벨)
     notes: str | None = None                  # set_flow
     variables: list[dict] | None = None       # set_flow
+    assumptions: list[str] | None = None      # set_flow: 흐름도 전제 교체 (RPA-282)
     produces: list[dict] | None = None        # set_params/update: 변수 연결 동반 갱신 (v3)
     consumes: list[dict] | None = None        # set_params/update: 변수 연결 동반 갱신 (v3)
     step_id: str | None = None                # split_step/merge_step: 대상 단계
@@ -344,6 +345,20 @@ def _apply_set_flow(flow: dict, op: EditOp) -> bool:
         changed = True
     if op.variables is not None:
         flow["variables"] = op.variables
+        changed = True
+    if op.assumptions is not None:
+        # 전제는 흐름도가 아니라 채점 기준(FlowSpec)에 산다 — recommend가 flow["spec"]으로
+        # 동봉해 두고(graph.py finalize), 이후 턴의 재채점·재생성이 그걸 다시 읽는다.
+        # 여기서 갱신해야 "대상 OS를 바꿔 달라"는 요청이 다음 턴까지 살아남는다 (RPA-282).
+        #
+        # setdefault를 쓰면 안 된다: Recommendation.spec의 기본값이 None이라 model_dump()를
+        # 거친 흐름도는 spec 키가 **None 값으로 존재**하고, setdefault는 키가 있으면 값을
+        # 바꾸지 않는다. 그러면 전제가 조용히 유실될 뿐 아니라 changed가 False로 남아 연산이
+        # '적용 실패'로 기록돼 사용자에게 "반영하지 못했어요"가 나간다.
+        spec = flow.get("spec")
+        if not isinstance(spec, dict):  # None·구버전 잔재·타입 슬립을 모두 정규화
+            flow["spec"] = spec = {}
+        spec["assumptions"] = op.assumptions
         changed = True
     return changed
 

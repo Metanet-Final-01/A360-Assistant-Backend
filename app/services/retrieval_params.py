@@ -11,6 +11,7 @@ config 폴백으로 저하시킨다 — 튜닝 저장소 장애가 검색 가용
 """
 
 import logging
+import threading
 import time
 
 from app.db import SessionLocal
@@ -26,25 +27,55 @@ _CACHE_TTL_SEC = 30.0
 # (monotonic 시각, 파라미터) — None이면 미로드. monotonic이라 시스템 시계 변경에 안 흔들린다.
 _cache: tuple[float, RetrievalParams] | None = None
 
+# 캐시 무효화 세대 — bust_cache()가 올린다. 조회 스레드는 "읽기 시작 시점의 세대"와 저장 직전
+# 세대가 같을 때만 캐시에 쓴다 (RPA-175, budget.py와 동일 기법).
+#
+# 왜 필요한가: 조회가 _read_override()로 옛 행을 읽는 동안 admin PUT이 새 값을 쓰고 bust_cache()를
+# 부르면, 조회 스레드가 그 뒤에 `_cache = (now, 옛값)`을 실행해 **무효화를 되돌린다** — 최대 TTL
+# 30초 동안 변경 전 파라미터가 검색에 적용된다. sync 검색 라우트는 스레드풀에서 병렬로 도므로 실재.
+# 왜 락 직렬화가 아닌가: 락을 DB 조회 전체에 걸면 그동안 모든 검색이 대기한다(hot path). 세대
+# 비교는 짧은 임계구역만 잠그고 조회는 병렬로 둔다 — 최악의 경우 캐시를 한 번 못 채울 뿐이다.
+_lock = threading.Lock()
+_generation = 0
+
 
 def load_active_params() -> RetrievalParams:
     """현재 활성 검색 파라미터. DB 오버라이드가 있으면 그걸, 없으면 .env 기본값을 준다.
 
     TTL 내 재호출은 캐시를 돌려준다. 검색 hot path에서 불리므로 DB 왕복을 최소화한다.
     """
-    global _cache
     now = time.monotonic()
-    if _cache is not None and now - _cache[0] < _CACHE_TTL_SEC:
-        return _cache[1]
-    params = _read_override() or RetrievalParams.from_config()
-    _cache = (now, params)
+    with _lock:
+        cached = _cache
+        gen_at_read = _generation  # 이 조회가 "시작된" 세대 — 저장 직전에 다시 비교한다
+    if cached is not None and now - cached[0] < _CACHE_TTL_SEC:
+        return cached[1]
+    params = _read_override() or RetrievalParams.from_config()  # DB 왕복 — 락 밖에서
+    _store_if_current(gen_at_read, now, params)
     return params
 
 
-def bust_cache() -> None:
-    """캐시 무효화 — admin PUT 직후 호출해 다음 load_active_params()가 DB를 다시 읽게 한다."""
+def _store_if_current(gen_at_read: int, now: float, params: RetrievalParams) -> None:
+    """읽는 동안 무효화가 없었을 때만 캐시에 쓴다 — 무효화를 되돌리지 않기 위해 (RPA-175)."""
     global _cache
-    _cache = None
+    with _lock:
+        if gen_at_read == _generation:
+            _cache = (now, params)
+        else:
+            # 내가 읽는 사이 admin PUT이 값을 바꿨다 — 내 값은 이미 낡았으니 캐시에 넣지 않는다.
+            # 다음 호출이 새 값을 다시 읽는다(한 번의 DB 왕복 손해일 뿐).
+            logger.debug("retrieval_params 캐시 저장 생략 — 조회 중 무효화됨")
+
+
+def bust_cache() -> None:
+    """캐시 무효화 — admin PUT 직후 호출해 다음 load_active_params()가 DB를 다시 읽게 한다.
+
+    세대를 올려, **지금 조회 중인 스레드가 옛 값을 캐시에 되돌려놓는 것**도 함께 막는다.
+    """
+    global _cache, _generation
+    with _lock:
+        _cache = None
+        _generation += 1
 
 
 def _read_override() -> RetrievalParams | None:

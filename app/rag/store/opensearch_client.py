@@ -132,6 +132,15 @@ def bulk_index(client: OpenSearch, documents: list[dict]) -> int:
     return success
 
 
+def refresh_index(client: OpenSearch) -> None:
+    """색인 refresh — bulk 직후의 문서를 검색 가시 상태로 만든다 (RPA-274).
+
+    ingest는 이게 끝난 뒤에야 캐시 세대를 공개한다: refresh 전에 공개하면 새 세대의
+    첫 검색들이 '색인엔 있는데 아직 안 보이는' 문서를 놓친 결과를 캐싱한다.
+    """
+    client.indices.refresh(index=config.OPENSEARCH_INDEX)
+
+
 def _keyword_search_body(query: str, size: int) -> dict:
     return {
         "size": size,

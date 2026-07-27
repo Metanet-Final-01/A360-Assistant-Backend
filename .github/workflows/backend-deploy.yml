@@ -6,23 +6,12 @@ on:
       environment:
         description: "CloudFormation environment"
         required: true
-        type: choice
-        options:
-          - dev
         default: dev
       deploy_stack:
         description: "Deploy CloudFormation stack after image push"
         required: true
         type: boolean
         default: false
-      network_mode:
-        description: "private (NAT Gateway, ~$32-45/mo fixed) or public-lite (no NAT, cheaper short test deploys)"
-        required: true
-        type: choice
-        options:
-          - private
-          - public-lite
-        default: private
       instance_type:
         description: "EC2 instance type for the app Auto Scaling Group"
         required: true
@@ -35,15 +24,20 @@ on:
         description: "Max app instance count"
         required: true
         default: "2"
-      enable_rag_ingest_scheduler:
-        description: "Create EventBridge Scheduler -> SQS nested stack for rag ingest"
+      rag_cache_enabled:
+        description: "Enable shared Redis-backed RAG cache"
         required: true
         type: boolean
-        default: false
-      rag_ingest_schedule_expression:
-        description: "RAG ingest schedule expression. Start with rate(1 minute), then switch to cron(...)."
+        default: true
+      rag_cache_ttl_seconds:
+        description: "RAG cache TTL seconds"
         required: true
-        default: "rate(1 minute)"
+        default: "3600"
+      start_backend_container:
+        description: "Start backend container after EC2 bootstrap. Set false before DB role bootstrap."
+        required: true
+        type: boolean
+        default: true
   push:
     branches:
       - main
@@ -55,7 +49,6 @@ permissions:
 
 env:
   AWS_REGION: ap-northeast-2
-  STACK_NAME: a360-assistant-dev
 
 jobs:
   build:
@@ -90,10 +83,11 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
     runs-on: ubuntu-latest
-    # 현재 STACK_NAME이 dev 전용이다. 이 Environment는 Writer 자격 증명의 보호 경계다.
-    environment: change-assurance-writer
+    environment: backend-deploy-${{ inputs.environment }}
+    env:
+      STACK_NAME: a360-assistant-${{ inputs.environment }}-backend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -102,83 +96,146 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload nested CloudFormation templates
-        id: nested
-        if: inputs.enable_rag_ingest_scheduler == true
-        run: |
-          NESTED_BUCKET="${{ secrets.CFN_ARTIFACT_BUCKET }}"
-          if [ -z "$NESTED_BUCKET" ]; then
-            echo "CFN_ARTIFACT_BUCKET secret is required when enable_rag_ingest_scheduler=true" >&2
-            exit 1
-          fi
-          KEY="cloudformation/${STACK_NAME}/${GITHUB_SHA}/rag-ingest-scheduler-sqs.yaml"
-          aws s3 cp "infra/rag-ingest-scheduler-sqs.yaml" "s3://${NESTED_BUCKET}/${KEY}"
-          echo "rag_scheduler_template_url=https://${NESTED_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${KEY}" >> "$GITHUB_OUTPUT"
-
-      - name: Validate Ops API credential
+      - name: Validate deployment credentials
         env:
           OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
+          ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
         run: |
           if [ -z "$OPS_API_KEY" ]; then
-            echo "OPS_API_KEY secret is required for the deployed Backoffice integration." >&2
+            echo "OPS_API_KEY is missing from the selected GitHub Environment." >&2
             exit 1
           fi
+          if [ -z "$ASSURANCE_WRITER_TOKEN" ]; then
+            echo "ASSURANCE_WRITER_TOKEN is missing from the selected GitHub Environment." >&2
+            exit 1
+          fi
+          if [ -z "$GHCR_READ_TOKEN" ]; then
+            echo "GHCR_READ_TOKEN repository secret is missing." >&2
+            exit 1
+          fi
+
+      - name: Validate OpenSearch host
+        env:
+          OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+        run: |
+          if [ -z "$OPENSEARCH_HOST" ]; then
+            echo "OPENSEARCH_HOST secret is required for deployed RAG search." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$OPENSEARCH_HOST" | grep -Eq '^https?://[^[:space:]]+$'; then
+            echo "OPENSEARCH_HOST must be a non-empty http(s) URL without whitespace." >&2
+            exit 1
+          fi
+          if [ -n "$OPENSEARCH_USERNAME" ] && ! printf '%s' "$OPENSEARCH_USERNAME" | grep -Eq '^[^[:space:]]+$'; then
+            echo "OPENSEARCH_USERNAME must not contain whitespace." >&2
+            exit 1
+          fi
+          if [ -n "$OPENSEARCH_USERNAME" ] && printf '%s' "$OPENSEARCH_USERNAME" | grep -Eq '["\\]'; then
+            echo 'OPENSEARCH_USERNAME must not contain double quotes or backslashes.' >&2
+            exit 1
+          fi
+          if [ -n "$OPENSEARCH_PASSWORD" ] && printf '%s' "$OPENSEARCH_PASSWORD" | grep -Eq '["\\]'; then
+            echo 'OPENSEARCH_PASSWORD must not contain double quotes or backslashes.' >&2
+            exit 1
+          fi
+          case "$OPENSEARCH_PASSWORD" in
+            *$'\r'*|*$'\n'*)
+              echo "OPENSEARCH_PASSWORD must not contain newlines." >&2
+              exit 1
+              ;;
+          esac
+          if [ -n "$OPENSEARCH_USERNAME" ] && [ -z "$OPENSEARCH_PASSWORD" ]; then
+            echo "OPENSEARCH_PASSWORD is required when OPENSEARCH_USERNAME is set." >&2
+            exit 1
+          fi
+          if [ -z "$OPENSEARCH_USERNAME" ] && [ -n "$OPENSEARCH_PASSWORD" ]; then
+            echo "OPENSEARCH_USERNAME is required when OPENSEARCH_PASSWORD is set." >&2
+            exit 1
+          fi
+
+      - name: Validate Slack webhook URL
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            # 값은 SecretsManager의 JSON SecretString에 그대로 보간된다 — 공백/큰따옴표/역슬래시/개행이 있으면
+            # JSON이 깨져 스택 배포가 CloudFormation 단계에서야 실패한다. 여기서 fail-fast로 막는다.
+            if printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '[[:space:]"\\]'; then
+              echo 'SLACK_WEBHOOK_URL must not contain whitespace, double quotes, or backslashes (it is stored in a JSON secret).' >&2
+              exit 1
+            fi
+            case "$SLACK_WEBHOOK_URL" in
+              *$'\r'*|*$'\n'*)
+                echo "SLACK_WEBHOOK_URL must not contain newlines." >&2
+                exit 1
+                ;;
+            esac
+            # CFN AllowedPattern(^$|^https://hooks\.slack\.com/[^\s"\\]+$)과 **동일**하게: 슬래시 뒤
+            # 경로가 최소 1자 있어야 한다. 접두만 보면 'https://hooks.slack.com/'(빈 경로)가 여기선
+            # 통과하고 CFN에서야 실패해 fail-fast가 무너진다(Qodo #439 재리뷰). 가드가 동작을 그대로 읽게.
+            if ! printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '^https://hooks\.slack\.com/.+$'; then
+              echo "SLACK_WEBHOOK_URL must be https://hooks.slack.com/<non-empty path> when set." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Validate RAG cache TTL
+        env:
+          RAG_CACHE_TTL_SECONDS: ${{ inputs.rag_cache_ttl_seconds || '3600' }}
+        run: |
+          if ! printf '%s' "$RAG_CACHE_TTL_SECONDS" | grep -Eq '^[0-9]+$'; then
+            echo "rag_cache_ttl_seconds must contain only digits." >&2
+            exit 1
+          fi
+          if [ "$RAG_CACHE_TTL_SECONDS" -lt 1 ] || [ "$RAG_CACHE_TTL_SECONDS" -gt 604800 ]; then
+            echo "rag_cache_ttl_seconds must be between 1 and 604800." >&2
+            exit 1
+          fi
+          echo "RAG_CACHE_TTL_SECONDS=$RAG_CACHE_TTL_SECONDS" >> "$GITHUB_ENV"
 
       - name: Deploy CloudFormation
         env:
-          P_ENVIRONMENT: ${{ inputs.environment || 'dev' }}
-          P_CONTAINER_IMAGE: ${{ needs.build.outputs.image_uri }}
-          P_FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
-          P_OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          P_VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
-          P_JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          P_GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          P_OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
-          P_ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
-          P_ASSURANCE_WRITER_REPOSITORY: ${{ github.repository }}
-          P_RAG_DATABASE_URL: ${{ secrets.RAG_DATABASE_URL }}
-          P_OBSERVABILITY_DATABASE_URL: ${{ secrets.OBSERVABILITY_DATABASE_URL }}
-          P_APP_DATABASE_URL: ${{ secrets.APP_DATABASE_URL }}
-          P_OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
-          P_OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
-          P_OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
-          P_ENABLE_OPENSEARCH: ${{ vars.ENABLE_OPENSEARCH || 'false' }}
-          P_OPENSEARCH_MODE: ${{ vars.OPENSEARCH_MODE || 'managed' }}
-          P_NETWORK_MODE: ${{ inputs.network_mode || 'public-lite' }}
-          P_INSTANCE_TYPE: ${{ inputs.instance_type || 't3.medium' }}
-          P_DESIRED_CAPACITY: ${{ inputs.desired_capacity || '1' }}
-          P_MAX_CAPACITY: ${{ inputs.max_capacity || '2' }}
-          P_ENABLE_RAG_INGEST_SCHEDULER: ${{ inputs.enable_rag_ingest_scheduler && 'true' || 'false' }}
-          P_RAG_SCHEDULER_TEMPLATE_URL: ${{ steps.nested.outputs.rag_scheduler_template_url }}
-          P_RAG_INGEST_SCHEDULE_EXPRESSION: ${{ inputs.rag_ingest_schedule_expression || 'rate(1 minute)' }}
+          FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
+          ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALERT_GLOBAL_DAILY_USD: ${{ vars.ALERT_GLOBAL_DAILY_USD }}
+          ALERT_5XX_DAILY: ${{ vars.ALERT_5XX_DAILY }}
         run: |
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
             --template-file infra/a360-backend-private.yml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              Environment="$P_ENVIRONMENT" \
-              ContainerImage="$P_CONTAINER_IMAGE" \
-              FrontendOrigins="$P_FRONTEND_ORIGINS" \
-              OpenAiApiKey="$P_OPENAI_API_KEY" \
-              VoyageApiKey="$P_VOYAGE_API_KEY" \
-              JwtSecret="$P_JWT_SECRET" \
-              GithubToken="$P_GHCR_READ_TOKEN" \
-              OpsApiKey="$P_OPS_API_KEY" \
-              AssuranceWriterToken="$P_ASSURANCE_WRITER_TOKEN" \
-              AssuranceWriterRepository="$P_ASSURANCE_WRITER_REPOSITORY" \
-              RagDatabaseUrl="$P_RAG_DATABASE_URL" \
-              ObservabilityDatabaseUrl="$P_OBSERVABILITY_DATABASE_URL" \
-              AppDatabaseUrl="$P_APP_DATABASE_URL" \
-              OpenSearchHost="$P_OPENSEARCH_HOST" \
-              OpenSearchUsername="$P_OPENSEARCH_USERNAME" \
-              OpenSearchPassword="$P_OPENSEARCH_PASSWORD" \
-              EnableOpenSearch="$P_ENABLE_OPENSEARCH" \
-              OpenSearchMode="$P_OPENSEARCH_MODE" \
-              NetworkMode="$P_NETWORK_MODE" \
-              InstanceType="$P_INSTANCE_TYPE" \
-              DesiredCapacity="$P_DESIRED_CAPACITY" \
-              MaxCapacity="$P_MAX_CAPACITY" \
-              EnableRagIngestScheduler="$P_ENABLE_RAG_INGEST_SCHEDULER" \
-              RagIngestSchedulerTemplateUrl="$P_RAG_SCHEDULER_TEMPLATE_URL" \
-              RagIngestScheduleExpression="$P_RAG_INGEST_SCHEDULE_EXPRESSION"
+              Environment="${{ inputs.environment }}" \
+              ContainerImage="${{ needs.build.outputs.image_uri }}" \
+              FrontendOrigins="$FRONTEND_ORIGINS" \
+              OpenAiApiKey="$OPENAI_API_KEY" \
+              VoyageApiKey="$VOYAGE_API_KEY" \
+              JwtSecret="$JWT_SECRET" \
+              ExternalOpenSearchHost="$OPENSEARCH_HOST" \
+              OpenSearchUsername="$OPENSEARCH_USERNAME" \
+              OpenSearchPassword="$OPENSEARCH_PASSWORD" \
+              GithubToken="$GHCR_READ_TOKEN" \
+              OpsApiKey="$OPS_API_KEY" \
+              AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN" \
+              AssuranceWriterRepository="${{ github.repository }}" \
+              SlackWebhookUrl="$SLACK_WEBHOOK_URL" \
+              AlertGlobalDailyUsd="$ALERT_GLOBAL_DAILY_USD" \
+              Alert5xxDaily="$ALERT_5XX_DAILY" \
+              InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
+              DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
+              MaxCapacity="${{ inputs.max_capacity || '2' }}" \
+              RagCacheEnabled="${{ inputs.rag_cache_enabled }}" \
+              RagCacheTtlSeconds="${{ env.RAG_CACHE_TTL_SECONDS }}" \
+              StartBackendContainer="${{ inputs.start_backend_container }}"
