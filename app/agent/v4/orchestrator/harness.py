@@ -40,6 +40,7 @@ from .edit_ops import (
     EditOps,
     annotate_ids,
     apply_edit_ops,
+    drop_unknown_action_ops,
     render_outline,
     renumber,
     strip_ids,
@@ -599,7 +600,27 @@ def refine_flow(
                         remaining=_rule_counts(round_findings))
             break
 
-        applied, errors = apply_edit_ops(work, ops.operations)
+        # 환각 표기를 **적용 전에** 걸러낸다 — 안 그러면 그 하나가 만든 R1(100점)이
+        # 정상 연산까지 끌고 폐기된다(drop_unknown_action_ops 독스트링의 실측).
+        # 판정은 `work`(id가 붙은 사본) 기준이어야 update의 target 조회가 맞는다.
+        proposed = len(ops.operations)
+        operations, dropped = drop_unknown_action_ops(
+            work, ops.operations, lambda p, a: catalog.get_action_schema(p, a) is not None
+        )
+        if dropped:
+            logger.info("surgeon 라운드 %d: 환각 표기 연산 %d개 제외 — %s",
+                        round_no, len(dropped), dropped)
+        if not operations:
+            # 낼 것이 전부 환각이었다 — 연산 없음과 같은 상태다(가짜 성공 방지).
+            _emit_round(round_no, "all_dropped", weight=current_weight, proposed=proposed,
+                        dropped=[d[:120] for d in dropped[:5]],
+                        remaining=_rule_counts(round_findings))
+            no_improve += 1
+            if no_improve >= _STOP_AFTER_NO_IMPROVE:
+                break
+            continue
+
+        applied, errors = apply_edit_ops(work, operations)
         if errors:
             logger.info("surgeon 라운드 %d: 연산 %d개 적용, 실패 %s", round_no, applied, errors)
         strip_ids(work)
@@ -607,7 +628,8 @@ def refine_flow(
         if applied == 0:
             no_improve += 1
             _emit_round(round_no, "apply_failed", weight=current_weight,
-                        ops=_op_digest(ops.operations), proposed=len(ops.operations),
+                        ops=_op_digest(operations), proposed=proposed,
+                        dropped=[d[:120] for d in dropped[:5]],
                         errors=[e[:120] for e in errors[:5]],
                         remaining=_rule_counts(round_findings))
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
@@ -620,10 +642,12 @@ def refine_flow(
         new_weight = weight(_error_findings(new_findings + new_gaps))
         # 회귀 가드 — 정적 가중합이 줄었을 때만 채택. 이식 지시가 걸려 있는 라운드는
         # '정적 악화 없음(<=)'까지 허용한다 (이식은 정적 신호에 안 잡히는 개선이므로).
-        digest = _op_digest(ops.operations)
+        digest = _op_digest(operations)
+        drop_note = [d[:120] for d in dropped[:5]]
         if new_weight < current_weight or (extras_pending and new_weight <= current_weight):
             _emit_round(round_no, "accepted", weight_before=current_weight, weight_after=new_weight,
-                        ops=digest, applied=applied, errors=[e[:120] for e in errors[:5]],
+                        ops=digest, applied=applied, proposed=proposed, dropped=drop_note,
+                        errors=[e[:120] for e in errors[:5]],
                         remaining=_rule_counts(new_findings + new_gaps))
             current, current_violations = work, new_violations
             current_weight = new_weight
@@ -642,7 +666,7 @@ def refine_flow(
             # 어떻게 움직였는지가 같이 있어야 "삽입이 부수 위반을 만들어 상쇄됐다" 같은
             # 진짜 원인을 판별할 수 있다.
             _emit_round(round_no, "discarded", weight_before=current_weight, weight_after=new_weight,
-                        ops=digest, applied=applied,
+                        ops=digest, applied=applied, proposed=proposed, dropped=drop_note,
                         remaining=_rule_counts(new_findings + new_gaps))
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:

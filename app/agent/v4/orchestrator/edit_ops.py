@@ -576,6 +576,94 @@ _APPLIERS = {
 }
 
 
+def _spec_notation(spec) -> tuple[str, str] | None:
+    """액션 스펙 dict에서 (package, action) 표기를 꺼낸다 — 둘 다 있어야 판정할 수 있다."""
+    if not isinstance(spec, dict):
+        return None
+    pkg, act = spec.get("package"), spec.get("action")
+    return (pkg, act) if pkg and act else None
+
+
+def op_notations(flow: dict, op: EditOp) -> list[tuple[str, str]]:
+    """이 연산이 흐름도에 **새로 써 넣을** (package, action) 표기들.
+
+    `update`는 package/action 중 한쪽만 줄 수 있어(둘 다 선택 필드) 대상 노드의 현재 값과
+    합쳐야 결과 표기가 나온다 — 예: package만 바꾸면 action은 그대로 남는다. 그래서 노드를
+    찾아본다. 못 찾으면 어차피 적용도 실패하므로 판정할 것이 없다(빈 목록).
+
+    표기를 안 쓰는 연산(remove/move/set_params/set_flow/…)은 빈 목록이다.
+    """
+    if op.op == "update":
+        if not (op.package or op.action_name):
+            return []  # 라벨·변수만 바꾸는 update — 표기를 건드리지 않는다
+        loc = _locate(flow, op.target)
+        if loc is None:
+            return []
+        node = loc[0][loc[1]]
+        pkg = op.package or node.get("package")
+        act = op.action_name or node.get("action")
+        return [(pkg, act)] if pkg and act else []
+    if op.op == "insert":
+        n = _spec_notation(op.action)
+        return [n] if n else []
+    if op.op == "wrap":
+        out = []
+        for spec in [op.container, *op.siblings_after]:
+            n = _spec_notation(spec)
+            if n:
+                out.append(n)
+        return out
+    return []
+
+
+def drop_unknown_action_ops(flow: dict, ops: list[EditOp], exists) -> tuple[list[EditOp], list[str]]:
+    """카탈로그에 없는 표기를 써 넣는 연산을 **적용 전에** 걸러낸다 (RPA-298).
+
+    ## 왜 필요한가 (실측, 2026-07-27)
+
+    surgeon이 연산 7개를 냈고 7개 다 적용됐다. 그중 하나가 `Excel advanced/Paste cell`인데
+    그 액션은 **없다**(붙여넣기는 Microsoft 365 Excel·Google Sheets에만 있다). 재검수에서
+    R1(blocker, 100점)이 발화해 가중합이 526→556으로 **악화**했고, 회귀 가드가 패치를
+    통째로 폐기했다 — R17을 실제로 고친 연산까지 **좋은 6개가 나쁜 1개에 끌려 죽었다**.
+
+    R1이 하는 것과 **같은 조회**를 사후가 아니라 사전에 한다. 환각 자체를 막지는 못한다
+    (surgeon은 여전히 없는 표기를 제안할 것이다) — 막는 것은 그 하나가 나머지를 죽이는
+    구조다.
+
+    ## 딸린 연산도 함께 버린다
+
+    surgeon은 표기 교체와 파라미터 설정을 **짝으로** 낸다:
+
+        update     n8 → Excel advanced/Paste cell
+        set_params n8 [Source cell selection, Destination cell]
+
+    앞을 버리고 뒤만 남기면 **바뀌지 않은 액션에 다른 액션의 파라미터를 꽂아** R2를 새로
+    만든다. 그래서 버린 연산의 target을 뒤에서 다시 건드리는 연산도 같이 버린다.
+    `anchor`(insert 기준점)는 대상이 그대로 남아 있어 무효가 되지 않으므로 건드리지 않는다.
+
+    `exists(package, action) -> bool`을 주입받는다 — 이 모듈이 카탈로그 타입을 몰라도 되게.
+    """
+    kept: list[EditOp] = []
+    dropped: list[str] = []
+    poisoned: set[str] = set()
+
+    for i, op in enumerate(ops or []):
+        if op.target and op.target in poisoned:
+            dropped.append(f"op[{i}] {op.op}: 앞서 버린 연산과 같은 대상({op.target})이라 함께 제외")
+            continue
+        bad = [(p, a) for p, a in op_notations(flow, op) if not exists(p, a)]
+        if bad:
+            dropped.append(
+                f"op[{i}] {op.op}: 카탈로그에 없는 표기 {', '.join(f'{p}/{a}' for p, a in bad)}"
+            )
+            for t in [op.target, *op.targets]:
+                if t:
+                    poisoned.add(t)
+            continue
+        kept.append(op)
+    return kept, dropped
+
+
 def apply_edit_ops(flow: dict, ops: list[EditOp]) -> tuple[int, list[str]]:
     """연산들을 순서대로 flow에 제자리 적용한다. (적용_수, 실패_사유들)을 반환한다.
 
