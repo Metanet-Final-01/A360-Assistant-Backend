@@ -237,6 +237,29 @@ def test_failed_send_backs_off_no_retry_storm(monkeypatch, state):
     assert len(attempts) == 1, f"발송 실패가 이어지는데 {len(attempts)}번 재시도했다 — 폭주"
 
 
+def test_claim_send_serializes_detail_only_for_winner(monkeypatch):
+    """detail(슬랙 본문 JSON)은 승자일 때만 만든다 (RPA-192 Qodo 리뷰).
+
+    옛 코드는 notify가 매 호출 json.dumps를 미리 만들어 _claim_send에 넘겨, not-due(쿨다운
+    억제 등) 핫패스에서도 직렬화가 돌았다. 이제 lazy builder라 due를 통과한 승자만 호출한다.
+    빌더 호출 횟수로 증명한다 — 대리 지표가 아니라 **실제 직렬화가 몇 번 일어나는지**.
+    """
+    monkeypatch.setenv("ALERT_COOLDOWN_MINUTES", "60")
+    calls = {"n": 0}
+
+    def _build() -> str:
+        calls["n"] += 1
+        return '{"title":"t","text":"x"}'
+
+    # 첫 발생: due → 선점 성공, 빌더 1회
+    assert alerts._claim_send("test:claim", alerts.FIRING, _build, NOW) is True
+    assert calls["n"] == 1
+
+    # 쿨다운(60분) 내 재호출: not-due → 물러나며 직렬화하지 않는다
+    assert alerts._claim_send("test:claim", alerts.FIRING, _build, NOW + timedelta(seconds=30)) is False
+    assert calls["n"] == 1, "not-due인데 detail을 직렬화했다 — 핫패스 낭비(RPA-192 회귀)"
+
+
 # --- 배치 임계 알림 (롤업 직후) ---
 
 @pytest.fixture

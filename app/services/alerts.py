@@ -21,6 +21,7 @@ import math
 import os
 import sys as _sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -298,7 +299,7 @@ def _is_due(row, status: str, now: datetime, cd: timedelta) -> bool:
     return True
 
 
-def _claim_send(key: str, status: str, detail: str, now: datetime) -> bool:
+def _claim_send(key: str, status: str, build_detail: Callable[[], str], now: datetime) -> bool:
     """발송 슬롯을 **원자적으로 선점**한다 — 승자만 True. **발송 전에** 선점을 커밋한다 (RPA-192).
 
     왜 이렇게: 옛 `notify`는 판정(_should_notify)과 기록(_record)을 별도 트랜잭션으로 해서
@@ -325,9 +326,13 @@ def _claim_send(key: str, status: str, detail: str, now: datetime) -> bool:
         row = db.get(models.AlertState, key, with_for_update=True)
         if not _is_due(row, status, now, cd):
             return False
+        # detail(슬랙 본문 JSON)은 승자에게만 필요하다 — not-due는 위에서 이미 물러났으므로
+        # 여기서야 직렬화한다. 옛 코드는 notify가 매 호출 json.dumps를 만들어 쿨다운 억제 같은
+        # 핫패스에서도 낭비했다 (RPA-192 Qodo 리뷰).
+        detail = build_detail()[:4000]
         if row is None:
             row = models.AlertState(key=key, status=status)
-            row.detail = detail[:4000]
+            row.detail = detail
             row.last_sent_at = now
             db.add(row)
             try:
@@ -338,7 +343,7 @@ def _claim_send(key: str, status: str, detail: str, now: datetime) -> bool:
                 return False
             return True
         row.status = status
-        row.detail = detail[:4000]
+        row.detail = detail
         row.last_sent_at = now  # 선점: 발송 前에 커밋 → 실패해도 백오프(재발송 폭주 차단)
         db.commit()
         return True
@@ -425,14 +430,18 @@ def notify(alert: Alert, status: str = FIRING, now: datetime | None = None) -> b
         return False  # 미설정=비활성 — 기존 동작 그대로
 
     now = now or datetime.now(timezone.utc)
-    detail = json.dumps({"title": alert.title, "text": alert.text}, ensure_ascii=False)
+
+    # detail(슬랙 본문 JSON)은 승자 커밋 때만 쓰인다 — lazy builder로 넘겨 _claim_send가 due
+    # 통과 후에만 직렬화하게 한다. not-due 핫패스의 불필요한 json.dumps 제거 (RPA-192 Qodo 리뷰).
+    def _detail() -> str:
+        return json.dumps({"title": alert.title, "text": alert.text}, ensure_ascii=False)
 
     # **발송 전에 원자적으로 선점한다** — 승자만 발송한다(멀티워커 중복·실패 재시도 폭주 차단, RPA-192).
     # 🔴 상태 DB가 죽어도 **발송은 해야 한다** (CodeRabbit #263): 상태로 도배 방지하는 건 부가
     # 기능이고 통지가 본질이라, 하필 "관측 DB가 죽었다"를 알려야 할 때 침묵하면 자기모순이다.
     # 그래서 선점(DB) 실패 시엔 프로세스 로컬 폴백 스로틀로 최소한만 막고 보낸다.
     try:
-        won = _claim_send(alert.key, status, detail, now)
+        won = _claim_send(alert.key, status, _detail, now)
     except Exception as e:  # noqa: BLE001 — 상태 DB 장애
         logger.warning("알림 선점 실패 — key=%s error=%s (폴백 스로틀로 발송 시도)",
                        alert.key, type(e).__name__)
