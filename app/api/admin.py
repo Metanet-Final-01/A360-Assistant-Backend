@@ -17,13 +17,14 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app import models
-from app.api.auth import get_optional_user
+from app.api.auth import _bearer, get_optional_user as _get_optional_user
 from app.core.observability_db import get_obs_db
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.rag.retrieval.params import RetrievalParams
 from app.schemas.budget import BudgetLimitsUpdate
 from app.schemas.retrieval import RetrievalParamsUpdate
@@ -44,6 +45,15 @@ def _service_key_ok(request: Request) -> bool:
         return False
     provided = request.headers.get("X-API-Key", "")
     return bool(provided) and secrets.compare_digest(provided, ops_key)
+
+
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> models.User | None:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    with SessionLocal() as db:
+        return _get_optional_user(credentials=credentials, db=db)
 
 
 def require_admin(

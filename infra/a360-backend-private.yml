@@ -121,6 +121,10 @@ Parameters:
   LogRetentionDays:
     Type: Number
     Default: 14
+  AdminApiAllowedSourceCidrs:
+    Type: CommaDelimitedList
+    Default: 127.0.0.1/32
+    Description: CIDR allowlist for public ALB /api/admin/* forwarding. Set this to the Ops egress NAT public CIDR, for example x.x.x.x/32.
 
 Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
@@ -516,9 +520,8 @@ Resources:
             ContentType: text/plain
             MessageBody: forbidden
 
-  # Ops Server가 X-API-Key(require_admin, fail-closed)로 인증된 상태로 이 경로를
-  # 호출한다. ALB에서 막으면 정당한 요청도 막히므로 앱 레벨 인증에 위임하고 forward한다.
-  HttpAdminBlockRule:
+  # Forward admin API only from explicitly allowed source CIDRs.
+  HttpAdminAllowRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       ListenerArn: !Ref HttpListener
@@ -526,9 +529,27 @@ Resources:
       Conditions:
         - Field: path-pattern
           Values: [/api/admin/*]
+        - Field: source-ip
+          SourceIpConfig:
+            Values: !Ref AdminApiAllowedSourceCidrs
       Actions:
         - Type: forward
           TargetGroupArn: !Ref BackendTargetGroup
+
+  HttpAdminBlockRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 31
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/admin/*]
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: forbidden
 
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -572,9 +593,8 @@ Resources:
             ContentType: text/plain
             MessageBody: forbidden
 
-  # Ops Server가 X-API-Key(require_admin, fail-closed)로 인증된 상태로 이 경로를
-  # 호출한다. ALB에서 막으면 정당한 요청도 막히므로 앱 레벨 인증에 위임하고 forward한다.
-  HttpsAdminBlockRule:
+  # Forward admin API only from explicitly allowed source CIDRs.
+  HttpsAdminAllowRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Condition: HasCertificate
     Properties:
@@ -583,9 +603,28 @@ Resources:
       Conditions:
         - Field: path-pattern
           Values: [/api/admin/*]
+        - Field: source-ip
+          SourceIpConfig:
+            Values: !Ref AdminApiAllowedSourceCidrs
       Actions:
         - Type: forward
           TargetGroupArn: !Ref BackendTargetGroup
+
+  HttpsAdminBlockRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 31
+      Conditions:
+        - Field: path-pattern
+          Values: [/api/admin/*]
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: forbidden
 
   AppAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup

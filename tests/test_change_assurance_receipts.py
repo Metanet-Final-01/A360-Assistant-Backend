@@ -737,15 +737,17 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     ]["UserData"]["Fn::Base64"][1]
 
     assert "ASSURANCE_WRITER_TOKEN" not in str(build_job)
-    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment }}"
+    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment || 'dev' }}"
     assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in deploy_uses
     assert (
         "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
         in deploy_uses
     )
-    assert deploy_job["env"]["STACK_NAME"] == "a360-assistant-${{ inputs.environment }}-backend"
+    assert deploy_job["if"] == "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)"
+    assert deploy_job["env"]["STACK_NAME"] == "a360-assistant-${{ inputs.environment || 'dev' }}-backend"
     assert validate_step["env"]["ASSURANCE_WRITER_TOKEN"] == "${{ secrets.ASSURANCE_WRITER_TOKEN }}"
     assert validate_step["env"]["GHCR_READ_TOKEN"] == "${{ secrets.GHCR_READ_TOKEN }}"
+    assert validate_step["env"]["ADMIN_API_ALLOWED_SOURCE_CIDRS"] == "${{ vars.ADMIN_API_ALLOWED_SOURCE_CIDRS || inputs.admin_api_allowed_source_cidrs || '127.0.0.1/32' }}"
     assert '[ -z "$ASSURANCE_WRITER_TOKEN" ]' in validate_step["run"]
     assert '[ -z "$GHCR_READ_TOKEN" ]' in validate_step["run"]
     deploy_step = next(
@@ -753,11 +755,15 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     )
     assert deploy_step["env"]["OPENSEARCH_USERNAME"] == "${{ secrets.OPENSEARCH_USERNAME }}"
     assert deploy_step["env"]["OPENSEARCH_PASSWORD"] == "${{ secrets.OPENSEARCH_PASSWORD }}"
+    assert deploy_step["env"]["ADMIN_API_ALLOWED_SOURCE_CIDRS"] == "${{ vars.ADMIN_API_ALLOWED_SOURCE_CIDRS || inputs.admin_api_allowed_source_cidrs || '127.0.0.1/32' }}"
+    assert deploy_step["env"]["RAG_CACHE_ENABLED"] == "${{ inputs.rag_cache_enabled }}"
+    assert deploy_step["env"]["START_BACKEND_CONTAINER"] == "${{ inputs.start_backend_container }}"
     assert 'AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN"' in deploy_script
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
     assert 'ExternalOpenSearchHost="$OPENSEARCH_HOST"' in deploy_script
     assert 'OpenSearchUsername="$OPENSEARCH_USERNAME"' in deploy_script
     assert 'OpenSearchPassword="$OPENSEARCH_PASSWORD"' in deploy_script
+    assert 'AdminApiAllowedSourceCidrs="$ADMIN_API_ALLOWED_SOURCE_CIDRS"' in deploy_script
     assert '${{ secrets.OPENSEARCH_USERNAME }}' not in deploy_script
     assert '${{ secrets.OPENSEARCH_PASSWORD }}' not in deploy_script
     assert opensearch_step["env"]["OPENSEARCH_HOST"] == "${{ secrets.OPENSEARCH_HOST }}"
@@ -804,7 +810,9 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert template["Parameters"]["RagCacheEnabled"]["Default"] == "true"
     assert template["Parameters"]["RagCacheEnabled"]["AllowedValues"] == ["true", "false"]
     assert template["Parameters"]["RagCacheTtlSeconds"]["Default"] == 3600
-    assert "RagCacheEnabled=\"${{ inputs.rag_cache_enabled }}\"" in deploy_script
+    assert 'RAG_CACHE_ENABLED="${RAG_CACHE_ENABLED:-true}"' in deploy_script
+    assert 'START_BACKEND_CONTAINER="${START_BACKEND_CONTAINER:-true}"' in deploy_script
+    assert 'RagCacheEnabled="$RAG_CACHE_ENABLED"' in deploy_script
     assert "RagCacheTtlSeconds=\"${{ env.RAG_CACHE_TTL_SECONDS }}\"" in deploy_script
     assert "rag_cache_ttl_seconds" not in deploy_script
     assert rag_cache_ttl_step["env"]["RAG_CACHE_TTL_SECONDS"] == "${{ inputs.rag_cache_ttl_seconds || '3600' }}"
@@ -862,7 +870,7 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     ]["UserData"]["Fn::Base64"][0]
 
     assert "OPS_API_KEY" not in str(build_job)
-    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment }}"
+    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment || 'dev' }}"
     assert validate_step["env"]["OPS_API_KEY"] == "${{ secrets.OPS_API_KEY }}"
     assert '[ -z "$OPS_API_KEY" ]' in validate_step["run"]
     assert "exit 1" in validate_step["run"]
@@ -933,22 +941,36 @@ def test_backend_instance_role_can_read_bootstrap_role_secrets():
     assert "${ProjectName}-${Environment}-RagIngestSecretArn" in policy_text
 
 
-def test_alb_forwards_admin_api_to_backend_target_group():
+def test_alb_forwards_admin_api_only_from_allowed_source_cidrs():
     template = yaml.load(
         (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
         Loader=_CloudFormationLoader,
     )
     resources = template["Resources"]
+    parameter = template["Parameters"]["AdminApiAllowedSourceCidrs"]
 
-    for rule_name in ("HttpAdminBlockRule", "HttpsAdminBlockRule"):
+    assert parameter["Type"] == "CommaDelimitedList"
+    assert parameter["Default"] == "127.0.0.1/32"
+
+    for rule_name in ("HttpAdminAllowRule", "HttpsAdminAllowRule"):
         rule = resources[rule_name]["Properties"]
-        assert rule["Conditions"][0]["Values"] == ["/api/admin/*"]
+        conditions = rule["Conditions"]
+        assert conditions[0]["Field"] == "path-pattern"
+        assert conditions[0]["Values"] == ["/api/admin/*"]
+        assert conditions[1] == {
+            "Field": "source-ip",
+            "SourceIpConfig": {"Values": "AdminApiAllowedSourceCidrs"},
+        }
         action = rule["Actions"][0]
         assert action["Type"] == "forward"
         assert action["TargetGroupArn"] == "BackendTargetGroup"
 
-    # /api/internal/* stays blocked except the one explicitly-forwarded change-receipts path —
-    # this test only asserts the admin rule changed, not that internal blocking regressed.
+    for rule_name in ("HttpAdminBlockRule", "HttpsAdminBlockRule"):
+        rule = resources[rule_name]["Properties"]
+        assert rule["Conditions"][0]["Values"] == ["/api/admin/*"]
+        assert rule["Actions"][0]["Type"] == "fixed-response"
+        assert rule["Actions"][0]["FixedResponseConfig"]["StatusCode"] == "403"
+
     for rule_name in ("HttpInternalBlockRule", "HttpsInternalBlockRule"):
         rule = resources[rule_name]["Properties"]
         assert rule["Conditions"][0]["Values"] == ["/api/internal/*"]
