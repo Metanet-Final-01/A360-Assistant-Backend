@@ -28,6 +28,7 @@ JIRA_RE = re.compile(r"\bRPA-\d+\b", re.IGNORECASE)
 MIRROR_RE = re.compile(r"\bCloses\s+#\d+\b", re.IGNORECASE)
 CHECKBOX_RE = re.compile(r"^\s*-\s*\[([ xX])\]\s*(.+?)\s*$", re.MULTILINE)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+FENCE_RE = re.compile(r"^\s*(?:`{3,}|~{3,}).*$")
 
 
 def _sections(body: str) -> tuple[list[str], dict[str, str]]:
@@ -42,10 +43,11 @@ def _sections(body: str) -> tuple[list[str], dict[str, str]]:
 
 def _meaningful(text: str) -> str:
     text = HTML_COMMENT_RE.sub("", text)
-    text = text.replace("```bash", "").replace("```", "")
     lines = []
     for line in text.splitlines():
         stripped = line.strip()
+        if FENCE_RE.match(stripped):
+            continue
         if stripped in {"", "-", "- Jira:", "- GitHub Issue: Closes #"}:
             continue
         lines.append(stripped)

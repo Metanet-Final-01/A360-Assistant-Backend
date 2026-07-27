@@ -134,6 +134,17 @@ def test_rejects_mismatched_jira_keys_and_unchecked_required_items() -> None:
     assert "체크리스트 미완료: 자가 diff 리뷰" in errors
 
 
+def test_rejects_empty_non_bash_fenced_validation_section() -> None:
+    body = VALID_BODY.replace(
+        "```bash\npytest tests/test_pr_body_lint.py -q\n```",
+        "```sh\n\n```",
+    )
+
+    errors = validate_pr_body(body, "ci: 본문 검사 (RPA-315)")
+
+    assert "'확인 방법' 섹션에 실제 내용을 작성해주세요." in errors
+
+
 def test_workflow_checks_body_on_pr_edits_with_read_only_permissions() -> None:
     workflow = (ROOT / ".github/workflows/pr-title-lint.yml").read_text(
         encoding="utf-8"
@@ -142,4 +153,5 @@ def test_workflow_checks_body_on_pr_edits_with_read_only_permissions() -> None:
     assert "types: [opened, edited, synchronize, reopened]" in workflow
     assert "contents: read" in workflow
     assert "pull-requests: read" in workflow
+    assert "persist-credentials: false" in workflow
     assert "python scripts/validate_pr_body.py" in workflow

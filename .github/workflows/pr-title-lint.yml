@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # PR에서 수정 가능한 검사 코드를 실행하므로 checkout 토큰을
+          # .git/config에 남기지 않는다.
+          persist-credentials: false
 
       - uses: amannn/action-semantic-pull-request@v5
         env:
