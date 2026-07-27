@@ -30,6 +30,7 @@ from ..verify.checker import derive_session_registry, run_flow_checks
 from ..verify.coverage_det import (
     completeness_findings,
     conflated_slots,
+    hollow_requirements,
     missing_requirements,
     slot_req_ids,
 )
@@ -416,11 +417,14 @@ def refine_flow(
 
     # 진행 메시지는 '무엇을 고치는 중인가'를 사람 말로 나눠 보여준다 — 누락과 뭉갬은
     # 사용자가 체감하는 불만이 서로 달라서(빠뜨림 vs 뭉갬) 한 숫자로 합치면 안 읽힌다.
+    # 빈껍데기도 따로 센다: 누락에 합치면 "누락 0건"이 다시 거짓말이 되는 게 아니라
+    # 이번엔 **좌표 없는 숫자**가 되어, 사용자가 어느 자리가 비었는지 알 수 없다.
     n_missing = len(missing_requirements(flow, spec)) if spec is not None else 0
     n_conflated = len(conflated_slots(flow, spec)) if spec is not None else 0
+    n_hollow = len(hollow_requirements(flow, spec)) if spec is not None else 0
     emit({"event": "stage", "stage": "verifying",
           "message": (f"검수 위반 {len(violations)}건 · 요구 누락 {n_missing}건 · "
-                      f"요구 뭉갬 {n_conflated}건 · "
+                      f"요구 뭉갬 {n_conflated}건 · 빈껍데기 {n_hollow}건 · "
                       f"개선 지시 {len(extra_findings or [])}건 교정 중"),
           "data": {"violations": [
               {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}

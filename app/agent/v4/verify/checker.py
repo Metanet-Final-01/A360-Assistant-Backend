@@ -1271,7 +1271,9 @@ def run_scaffold_checks(steps: list[dict]) -> list[Violation]:
 
     ## 오탐 경계
 
-    - **children이 있으면 구획으로 정상**이다(하위 액션을 묶는 용도) — 건너뛴다.
+    - **본문이 실행되면 구획으로 정상**이다(하위 액션을 묶는 용도) — 건너뛴다. children
+      유무가 아니라 `performs_work`로 본다: 구획 안에 구획만 있으면(`Step > Step`)
+      children은 있는데 실행되는 것은 여전히 없다.
     - **req_id가 없으면** 순수 구획 표시라 정상이다 — 건너뛴다. 요구를 담당한다고
       주장할 때만 결함이다.
     - `produces`가 있으면 정황이 더 짙지만(값을 만든다고 주장) 판정 조건에는 넣지
@@ -1281,8 +1283,8 @@ def run_scaffold_checks(steps: list[dict]) -> list[Violation]:
     for loc, step_id, a in _flat_actions(steps):
         if canon_scaffold_package(a.get("package")) is None:
             continue
-        if a.get("children"):
-            continue  # 하위를 묶는 진짜 구획
+        if performs_work(a):
+            continue  # 하위를 묶는 진짜 구획 — 본문이 실행한다
         req_id = a.get("req_id")
         if not req_id:
             continue
@@ -1308,6 +1310,34 @@ def canon_scaffold_package(package) -> str | None:
         return None
     key = re.sub(r"[\s_/.-]+", "", str(package)).lower()
     return key if key in _SCAFFOLD_PACKAGES else None
+
+
+def performs_work(action: dict) -> bool:
+    """이 자리(또는 그 하위)에 **실제로 실행되는 액션**이 하나라도 있는가.
+
+    R18(이 자리가 비었다)과 coverage_det의 빈껍데기 판정(이 요구를 아무도 실행하지 않는다)이
+    같은 개념을 두 번 정의하지 않도록 여기 하나만 둔다 — 구획 지식(`_SCAFFOLD_PACKAGES`)이
+    사는 자리다. 정의가 갈라지면 "R18은 발화하는데 커버리지는 만족"이라는 지금 고치려는
+    바로 그 모순이 다른 모양으로 되돌아온다.
+
+    ## 판정
+
+    구획(Step·Comment)은 **자기 자신은 실행되지 않는다** — 본문이 있으면 본문이 한다.
+    그래서 하위를 재귀로 본다: 구획 안에 구획만 들어 있으면 여전히 아무것도 실행되지 않는다
+    (`Step > Step`). children 유무만 보면 이 중첩을 놓친다.
+
+    ## 왜 구획만 보는가 (오탐 경계)
+
+    본문이 빈 `Loop`·`If`도 실행되는 것은 없지만 여기서는 실행되는 것으로 친다. 그쪽은
+    이미 전용 규칙(빈 본문 검사)이 보고 있고, 무엇보다 이 판정의 소비자인 coverage_det의
+    계약이 **'오탐 0인 신호만'**이다. 표기가 낯설거나 모르는 패키지도 실행되는 것으로 본다 —
+    모름은 침묵이지 고발이 아니다.
+    """
+    if not isinstance(action, dict):
+        return False
+    if canon_scaffold_package(action.get("package")) is None:
+        return True
+    return any(performs_work(c) for c in action.get("children") or [])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

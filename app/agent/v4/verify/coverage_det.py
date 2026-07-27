@@ -12,6 +12,11 @@ blocker**로 올려 넣기/빼기의 무게를 대칭화하는 것이 이 모듈
 교정을 엉뚱한 방향으로 끌고 갔다(아래 `slot_req_ids` 참조) — 그래서 누락 판정과 같은
 자리에서 함께 본다.
 
+**빈껍데기는 구획 뒤에 숨은 누락이다.** req_id는 붙어 있는데 그 자리가 실행되지 않는
+구획(`Step`)이면 배정은 있고 실행은 없다 — 실측에서 "요구 누락 0건"과 R18이 정면으로
+어긋났다(아래 `hollow_requirements` 참조). 이건 셋째 도피로였다: 액션을 지우면 누락
+blocker가 발화하지만, **이름만 남긴 구획으로 바꾸면 아무 신호도 안 났다.**
+
 **왜 LLM이 아니라 결정론인가.** §5.2-B의 2단 판정 중 1단이다 — "슬롯 미배정"은 문자열
 대조로 끝나는 확정 누락이라 오탐이 0이다. "배정됐지만 부적합"은 판단이 필요해 L2
 시맨틱(semantic.py, LLM)이 major로 본다. 오탐 0인 신호만 blocker로 쓴다.
@@ -23,6 +28,7 @@ blocker**로 올려 넣기/빼기의 무게를 대칭화하는 것이 이 모듈
 
 import re
 
+from .checker import performs_work
 from .findings import Finding
 
 # 한 칸에 요구를 여럿 적을 때 모델이 쓰는 구분자 — 콤마·세미콜론·슬래시·파이프·'+'·공백.
@@ -244,11 +250,131 @@ def conflation_findings(flow: dict, spec: dict) -> list[Finding]:
     return out
 
 
-def completeness_findings(flow: dict, spec: dict) -> list[Finding]:
-    """완성도 항 전체 — 누락(blocker) + 뭉갬(major). refine 회귀 가드의 비교축에 들어간다.
+# ─────────────────────────────────────────────────────────────────────────────
+# 빈껍데기 — 담당한다고 주장하는 자리가 아무것도 실행하지 않는 경우 (RPA-298)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 🔴 **왜 필요한가 — 실측(2026-07-27).** 같은 산출물에서 두 지표가 정면으로 어긋났다:
+#
+#     verifying | 검수 위반 20건 · 요구 누락 0건 · 요구 뭉갬 0건
+#     R18 major | '3일치 시세를 순서대로 기록'이 요구 req-4를 담당한다고 돼 있는데
+#                 Step은 실행되지 않는 구획입니다
+#
+# req-4는 **must**("최근 3일치 일별 시세를 엑셀에 입력한다")인데 담당이 `Step` 하나뿐이라
+# 실행되는 것이 없다. 그런데 `_assigned_req_ids`는 req_id가 붙어 있다는 사실만 보므로
+# "누락 0건"이 된다 — 이 모듈이 막으려던 '조용한 삭제'가 **구획 뒤에 숨은** 형태다.
+# 액션을 지우는 것보다 나쁘다: 지우면 누락 blocker가 발화하는데, 이름만 남긴 구획으로
+# 바꾸면 아무 신호도 안 난다. 즉 **검수를 통과하는 삭제 경로가 하나 열려 있었다.**
+#
+# 누락과 별개 함수로 두는 이유는 **고칠 방법이 다르기 때문**이다. 누락의 처방은 "삽입"인데,
+# 빈껍데기에 삽입을 지시하면 이미 요구를 주장하는 구획 옆에 액션이 하나 더 생겨 중복이 된다
+# (`slot_req_ids` 독스트링이 기록한 그 실패 모양). 처방은 "그 자리를 채우거나 대체하라"다.
 
-    둘을 한 함수로 묶는 이유는 소비자(harness)가 항상 함께 쓰기 때문이다: 누락만 재면
-    "액션을 지워 위반을 없애기"가, 뭉갬만 재면 "요구를 떼어 뭉갬을 없애기"가 각각 열린다.
-    두 항이 같은 축에 있어야 양쪽 도피로가 동시에 막힌다.
+def hollow_requirements(flow: dict, spec: dict) -> list[dict]:
+    """담당 자리가 **전부 비실행 구획**인 요구 — 배정은 됐는데 실행되는 것이 없다.
+
+    반환: [{"req_id", "step_id", "location", "label"}] — location은 checker/Violation과
+    같은 트리 경로 표기라 surgeon 프롬프트에서 좌표가 일관된다. 한 요구를 여러 구획이
+    나눠 주장하면 **첫 자리**를 좌표로 준다(수리는 어차피 요구 단위로 한다).
+
+    실행되는 자리가 하나라도 있으면 침묵한다 — 구획과 실제 액션이 같은 요구를 함께 들고
+    있는 것은 정상이다(구획이 묶고 액션이 한다).
+
+    누락(`missing_requirements`)과는 **상호 배타**다: 여기 잡히는 요구는 배정이 있어
+    누락으로는 잡히지 않는다. 그래서 같은 요구가 두 항으로 이중 계상되지 않는다.
     """
-    return coverage_findings(flow, spec) + conflation_findings(flow, spec)
+    reqs = _spec_requirements(spec)
+    if not reqs:
+        return []
+    known = {r["req_id"] for r in reqs}
+    executed: set[str] = set()
+    hollow: dict[str, dict] = {}
+
+    def walk(actions, step_id, base: str) -> None:
+        for i, a in enumerate(actions or []):
+            if not isinstance(a, dict):
+                continue
+            location = f"{base}[{i}]"
+            claimed = [r for r in slot_req_ids(a, known) if r in known]
+            if claimed:
+                if performs_work(a):
+                    executed.update(claimed)
+                else:
+                    for rid in claimed:
+                        hollow.setdefault(rid, {
+                            "req_id": rid,
+                            "step_id": step_id,
+                            "location": location,
+                            "label": a.get("label") or a.get("action") or "",
+                        })
+            walk(a.get("children"), step_id, f"{location}.children")
+
+    for step in flow.get("steps") or []:
+        if isinstance(step, dict):
+            walk(step.get("actions"), step.get("step_id"), "actions")
+
+    # spec 순서를 유지한다 — 사람이 읽는 순서 = 업무 순서.
+    return [hollow[r["req_id"]] for r in reqs
+            if r["req_id"] in hollow and r["req_id"] not in executed]
+
+
+def hollow_findings(flow: dict, spec: dict) -> list[Finding]:
+    """빈껍데기 → must=blocker, should=minor. 누락(`coverage_findings`)과 같은 등급 축.
+
+    **왜 누락과 같은 blocker인가.** 업무가 실행되지 않는다는 점에서 결과가 동일하다.
+    등급을 낮추면 "액션을 지우고 같은 req_id를 든 Step으로 바꾸기"가 가중합을 **낮추는**
+    수가 되어, 이 모듈이 막으려던 삭제 편향이 구획을 경유해 되살아난다.
+
+    등급을 누락과 **같게** 두는 것이 게임 이론상으로도 맞다. 구획을 통째로 지우면
+    빈껍데기(100)가 사라지고 누락(100)이 생겨 가중합이 그대로다 — 회귀 가드가
+    `new_weight < current_weight`를 요구하므로 그 패치는 채택되지 않는다. 값을 낮추면
+    지우기가 이득이 되고, 높이면 반대로 지우기가 이득이 된다(둘 다 도피로다).
+
+    R18(major)과 함께 발화하는데 이중 계상이 아니다 — R18은 **자리**를 짚어 surgeon에게
+    좌표를 주고, 이쪽은 **요구**가 실현되지 않았음을 말한다. 층이 다르고 처방이 다르다.
+    """
+    by_id = {r["req_id"]: r for r in _spec_requirements(spec)}
+    out: list[Finding] = []
+    for slot in hollow_requirements(flow, spec):
+        rid = slot["req_id"]
+        req = by_id[rid]
+        text = str(req.get("text") or "").strip()
+        priority = req.get("priority") or "must"
+        label = slot["label"] or "이 자리"
+        out.append(
+            Finding(
+                layer="L2",
+                severity="minor" if priority == "should" else "blocker",
+                req_id=rid,
+                step_id=slot["step_id"],
+                location=slot["location"],
+                message=(
+                    f"[{rid}] 빈껍데기: 요구 '{text}'를 «{label}»이(가) 담당한다고 돼 있지만 "
+                    f"그 자리는 실행되지 않는 구획이라 아무 일도 일어나지 않습니다."
+                ),
+                fix_hint=(
+                    f"«{label}» 자리를 실제로 실행되는 카탈로그 액션으로 **채우거나 대체**하라 "
+                    f"(구획이라면 그 안에 액션을 넣고, 아니라면 액션으로 바꿔라). "
+                    f"옆에 액션을 새로 추가하지 말 것 — 구획이 같은 req_id를 계속 들고 있어 "
+                    f"중복이 된다. 구획을 지우기만 하는 것도 해결이 아니다 — '{text}'가 즉시 "
+                    f"미배정 blocker가 된다."
+                ),
+            )
+        )
+    return out
+
+
+def completeness_findings(flow: dict, spec: dict) -> list[Finding]:
+    """완성도 항 전체 — 누락(blocker) + 뭉갬(major) + 빈껍데기(blocker).
+    refine 회귀 가드의 비교축에 들어간다.
+
+    셋을 한 함수로 묶는 이유는 소비자(harness)가 항상 함께 쓰기 때문이다: 누락만 재면
+    "액션을 지워 위반을 없애기"가, 뭉갬만 재면 "요구를 떼어 뭉갬을 없애기"가, 빈껍데기를
+    빼면 "액션을 요구만 든 빈 구획으로 바꾸기"가 각각 열린다. 세 항이 같은 축에 있어야
+    도피로가 동시에 막힌다.
+    """
+    return (
+        coverage_findings(flow, spec)
+        + conflation_findings(flow, spec)
+        + hollow_findings(flow, spec)
+    )
