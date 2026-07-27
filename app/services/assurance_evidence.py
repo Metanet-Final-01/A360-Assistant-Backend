@@ -357,6 +357,7 @@ def build_change_receipt(
             "pull_request_number": source["pull_request_number"],
             "workflow_run_id": source["workflow_run_id"],
             "run_attempt": source["run_attempt"],
+            "source_event": source["event"],
             "base_sha": subject["base_sha"],
             "head_sha": subject["head_sha"],
             "run_id": report["run_id"],

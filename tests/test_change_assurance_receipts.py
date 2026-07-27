@@ -106,6 +106,7 @@ def test_valid_change_artifacts_build_content_addressed_receipt(tmp_path):
     serialized = str(row.receipt_payload)
     assert "installed_distributions" not in serialized
     assert "changes" not in serialized
+    assert row.receipt_payload["subject"]["source_event"] == "pull_request"
 
 
 def test_missing_expected_artifact_cannot_be_promoted_to_observed(tmp_path):
@@ -246,12 +247,40 @@ def test_receipt_integrity_detects_change_subject_tampering(tmp_path):
 
 def test_change_receipt_is_visible_through_existing_admin_contract(tmp_path):
     row, _ = build_change_receipt(_envelope(tmp_path))
-    response = _assurance_receipt_out(row, detail=True)
+    response = _assurance_receipt_out(row)
 
     assert response["harness"] == "change"
     assert response["integrity_valid"] is True
     assert response["human_review"]["status"] == "missing"
-    assert response["receipt_payload"]["subject"]["pull_request_number"] == 281
+    assert "receipt_payload" not in response
+    assert response["change_subject"] == {
+        "repository": row.receipt_payload["subject"]["repository"],
+        "pull_request_number": 281,
+        "workflow_run_id": 12345,
+        "run_attempt": 1,
+        "source_event": "pull_request",
+        "base_sha": row.receipt_payload["subject"]["base_sha"],
+        "head_sha": row.receipt_payload["subject"]["head_sha"],
+    }
+
+
+def test_same_pr_follow_up_event_builds_a_distinct_append_only_receipt(tmp_path):
+    initial_envelope = _envelope(tmp_path)
+    follow_up_envelope = deepcopy(initial_envelope)
+    follow_up_envelope["source"]["event"] = "pull_request_review"
+    follow_up_envelope["source"]["workflow_run_id"] = 12346
+
+    initial, _ = build_change_receipt(initial_envelope)
+    follow_up, _ = build_change_receipt(follow_up_envelope)
+
+    initial_subject = initial.receipt_payload["subject"]
+    follow_up_subject = follow_up.receipt_payload["subject"]
+    assert initial_subject["repository"] == follow_up_subject["repository"]
+    assert initial_subject["pull_request_number"] == follow_up_subject["pull_request_number"]
+    assert initial_subject["head_sha"] == follow_up_subject["head_sha"]
+    assert initial_subject["source_event"] == "pull_request"
+    assert follow_up_subject["source_event"] == "pull_request_review"
+    assert initial.receipt_digest != follow_up.receipt_digest
 
 
 def test_exact_change_receipt_retry_is_idempotent(tmp_path):
