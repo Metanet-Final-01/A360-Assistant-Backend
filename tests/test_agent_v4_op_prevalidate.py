@@ -136,6 +136,41 @@ def test_없는_노드를_겨냥한_update는_판정하지_않는다():
     assert op_notations(_flow(), EditOp(op="update", target="없음", package="X")) == []
 
 
+def test_환각_update는_동봉한_파라미터째_버려진다():
+    """표기 교체와 파라미터 설정은 한 연산 안에 함께 온다(update가 parameters를 받는다).
+
+    표기만 걸러내고 파라미터를 남기면 **바뀌지 않은 액션에 다른 액션의 파라미터를 꽂아**
+    R2를 새로 만든다 — 고치려다 다른 결함을 만드는 꼴이다. 연산 단위로 통째 버린다.
+    """
+    kept, dropped = drop_unknown_action_ops(_flow(), [EditOp(
+        op="update", target="n1", package="Excel advanced", action_name="Paste cell",
+        parameters=[{"name": "Source cell selection", "value": "A1"}],
+    )], _exists)
+
+    assert kept == [] and len(dropped) == 1
+
+
+def test_같은_대상에_update가_둘이면_뒤의_판정이_앞의_효과를_본다():
+    """🔴 사전 검증은 **아무 연산도 적용되기 전** 흐름도로 판정한다 — 같은 노드에 update가
+    둘 오면 뒤의 판정이 앞의 효과를 못 본다.
+
+    예전에는 그 결과가 '연산 하나를 헛되이 버림'이었다. 지금은 update가 **판정된 표기 기준으로
+    파라미터를 지우므로**, 사전 검증이 본 적 없는 표기가 삭제 기준이 되면 파괴적이다.
+
+    여기서 n1은 `Microsoft 365 Excel/Paste cell`이다. 첫 연산이 `Excel advanced/Open`으로
+    바꾼 뒤 둘째가 action만 `Paste cell`로 되돌리면 결과는 **없는 표기**가 된다 — 투영이
+    없으면 옛 package로 판정해 통과시킨다.
+    """
+    ops = [
+        EditOp(op="update", target="n1", package="Excel advanced", action_name="Open"),
+        EditOp(op="update", target="n1", action_name="Paste cell"),
+    ]
+    kept, dropped = drop_unknown_action_ops(_flow(), ops, _exists)
+
+    assert [o.action_name for o in kept] == ["Open"]
+    assert "Excel advanced/Paste cell" in dropped[0]
+
+
 # ── 루프 배선 ────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -147,6 +182,9 @@ def events(monkeypatch):
 
 
 class _Catalog:
+    # ⚠ 실재 표기에 `parameters: []`를 준다 = "파라미터 없는 액션 확정". 표기를 갈아끼우는
+    # update가 오면 _retarget_params가 그 노드의 파라미터를 **전부** 걷는다 — 아래 픽스처는
+    # 파라미터가 없어 무해하지만, 파라미터 있는 흐름도를 새로 쓸 거면 스텁을 함께 고쳐야 한다.
     def get_action_schema(self, pkg, act):
         return {"package": pkg, "action": act, "parameters": []} if (pkg, act) in _REAL else None
 

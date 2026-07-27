@@ -184,6 +184,26 @@ def _is_empty(value) -> bool:
     return False
 
 
+def spec_param_names(spec: dict | None) -> frozenset[str] | None:
+    """액션 스펙의 파라미터 이름 집합. None이면 **판정 근거 없음**(스펙 부재 또는 파라미터 미상).
+
+    R2가 '스펙에 없는 파라미터'를 가르는 바로 그 집합이다(_check_parameters). 표기를 갈아끼운
+    뒤 옛 파라미터를 걷어내는 쪽(edit_ops._retarget_params)이 여기서 **같은 집합**을 받아 쓴다 —
+    두 곳이 각자 스펙을 읽으면 "걷어냈는데 R2가 남는다 / 안 걷어냈는데 R2가 없다"가 언젠가 생긴다.
+
+    None을 흘리는 것도 계약이다: params_unknown 행에서 R2가 침묵하듯 걷어내는 쪽도 침묵한다.
+    ⚠ parameters가 **리스트가 아니면** None이다. frozenset()은 '파라미터 없는 액션 확정'이라는
+    정당한 의미를 이미 갖고 있어(그 경우 전량 삭제가 맞다) '모름'과 표현을 공유하면 안 된다 —
+    dict·문자열 슬립에서 빈 집합을 돌려주면 노드 파라미터가 통째로 지워진다.
+    """
+    if not isinstance(spec, dict):
+        return None
+    params = spec.get("parameters")
+    if not isinstance(params, list):
+        return None
+    return frozenset(p["name"] for p in params if isinstance(p, dict) and p.get("name"))
+
+
 def _check_parameters(action: dict, spec: dict, location: str) -> list[Violation]:
     """R2~R5: 파라미터 name·필수·enum·형식 검사. spec이 있는 액션에만 호출된다."""
     violations: list[Violation] = []
@@ -193,7 +213,15 @@ def _check_parameters(action: dict, spec: dict, location: str) -> list[Violation
         # 행) — 존재(R1)만 성립하고 R2~R5는 판정 근거가 없다. R3의 required tri-state와 같은
         # '모름 → 침묵' 원칙. 빈 목록([])은 '파라미터 없음' 확정이므로 아래로 진행해 R2가 잡는다.
         return violations
-    spec_params = {p["name"]: p for p in spec.get("parameters", [])}
+    # ⚠ 계약 변경(2026-07-27): 이름 없는/비-dict 스펙 행을 조용히 건너뛴다. 이전에는
+    # p["name"]이 KeyError를, 비-dict가 TypeError를 던져 run_flow_checks가 **통째로** 죽었다 —
+    # 카탈로그 한 행의 흠이 검수 전체를 무력화하는 쪽이 더 나쁘다. spec["parameters"] 직접
+    # 접근은 위의 `is None` 조기 반환에 기대고 있다(빼면 KeyError가 돌아온다).
+    spec_params = {
+        p["name"]: p
+        for p in spec["parameters"]
+        if isinstance(p, dict) and p.get("name")
+    }
     given = {p.get("name"): p for p in action.get("parameters", []) if p.get("name")}
 
     # R2: 준 파라미터 이름이 스펙에 있는가

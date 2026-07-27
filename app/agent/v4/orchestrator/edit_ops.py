@@ -16,7 +16,8 @@
 - remove      : 노드를 지운다.
 - move        : 노드를 anchor 기준 위치로 옮긴다.
 - set_params  : 노드 파라미터를 name 기준 병합/치환한다.
-- update      : 노드의 package/action/label을 바꾼다.
+- update      : 노드의 package/action/label/parameters를 바꾼다. 표기가 바뀌면 새 스펙에 없는
+                옛 파라미터를 함께 걷어낸다(_retarget_params) — 삭제 연산이 따로 없기 때문이다.
 - set_flow    : 흐름도 수준 notes/variables와 스펙 전제(spec.assumptions)를 바꾼다.
 - set_spec    : 채점 기준(spec)의 요구 목록·목표를 바꾼다 — "그 업무 자체가 필요 없다"는 수정용.
 
@@ -68,7 +69,7 @@ class EditOp(BaseModel):
     container: dict | None = None             # wrap: 새 컨테이너 스펙 {package, action, label?, parameters?}
     siblings_after: list[dict] = Field(default_factory=list)  # wrap: 컨테이너 뒤에 붙일 형제들(Catch/Finally/Else)
     action: dict | None = None                # insert: 새 액션 스펙
-    parameters: list[dict] | None = None      # set_params: {name, value, value_source?} 목록
+    parameters: list[dict] | None = None      # set_params/update: {name, value, value_source?} 목록
     package: str | None = None                # update
     action_name: str | None = None            # update (action 이름 — op 필드와 이름 충돌 회피)
     label: str | None = None                  # update / split_step(새 단계 라벨)
@@ -334,23 +335,99 @@ def _apply_move(flow: dict, op: EditOp) -> bool:
     return True
 
 
+def _merge_params(node: dict, given: list[dict] | None, *, force_llm: bool = False) -> None:
+    """given을 name 기준으로 node["parameters"]에 병합한다(있으면 치환, 없으면 뒤에 추가).
+
+    set_params와 update가 **같은 함수**를 쓴다 — 갈라지면 같은 이름을 어느 연산으로 쓰느냐에
+    따라 value_source 기본값이나 덮어쓰기 규칙이 달라진다.
+
+    기존 항목의 나머지 키(label 등)를 보존한다. 이전 구현은 {name, value, value_source} 3키로
+    **재구성**했는데 ActionParameter에는 label이 있어(schemas/recommendation.py), edit 경로가
+    model_dump()한 흐름도를 넣으면 set_params 한 번에 사람용 라벨이 조용히 사라졌다.
+
+    이름 없는 항목은 순서 그대로 둔다 — R2가 판정 대상에서 제외하는 것(checker: `if p.get("name")`)을
+    여기서 지우거나 하나로 뭉개면 '걷어내는 집합 = R2가 보는 집합' 불변식이 깨진다.
+
+    force_llm=True(update가 실어 온 값)면 value_source를 "llm"으로 고정한다. 사용자 입력은
+    update로 오지 않는다 — LLM이 지어낸 값에 "user"가 붙으면 edit 경로의 _restore_user_values가
+    교정 결과에 그 값을 **다시 고정**해 검수·교정이 영원히 못 건드리는 값이 된다.
+    """
+    if given is None:
+        return
+    current = list(node.get("parameters") or [])
+    index = {
+        p.get("name"): i
+        for i, p in enumerate(current)
+        if isinstance(p, dict) and p.get("name")
+    }
+    for p in given:
+        if not isinstance(p, dict):
+            continue
+        name = p.get("name")
+        if not name:
+            continue
+        source = "llm" if force_llm else (p.get("value_source") or "llm")
+        merged = {"name": name, "value": p.get("value"), "value_source": source}
+        i = index.get(name)
+        if i is None:
+            index[name] = len(current)
+            current.append(merged)
+        else:
+            current[i] = {**current[i], **merged}  # label 등 기존 키 보존
+    node["parameters"] = current
+
+
+def _retarget_params(node: dict, allowed: frozenset[str] | None) -> list[str]:
+    """표기를 갈아끼운 노드에서 **새 스펙에 없는** 파라미터를 걷어내고 걷어낸 이름을 돌려준다.
+
+    ## 왜 필요한가 (실측, 2026-07-27)
+
+    교정 5라운드 뒤 최종 가중합 210 중 **150이 R2 15건**이었고 전부 같은 원인이다: surgeon이
+    `Step/stepAction`을 실제 액션으로 갈아끼웠는데 옛 자리의 `Title` 파라미터가 그대로 남았다.
+    `set_params`는 병합이라 이름을 **지울 수 없고**, surgeon에게는 삭제 연산이 없다 — 어휘에
+    없는 수리를 프롬프트로 요구하던 상태였다. 표기를 바꾼 쪽이 그 자리에서 정리한다.
+
+    ## 왜 '전부 비우기'가 아닌가
+
+    이름이 그대로 이어지는 파라미터(세션 패키지 교체 시의 `session`·`filePath`)까지 날아가고,
+    그 자리에 required R3가 선다. required SESSION/SELECT/VARIABLE의 R3는 질문 카드가 아니라
+    major finding이라 **가중치 이득이 0**이다 — 결함 하나를 다른 결함으로 바꾸는 것뿐이다.
+
+    ## 왜 되돌릴 수 없는가
+
+    `value_source="user"` 값도 함께 지워질 수 있는데 복구 경로가 없다. edit 경로의
+    `_restore_user_values`가 읽는 `collect()`는 **이미 정리된 흐름도**를 훑으므로, 지운 값은
+    애초에 저장 대상에 들어가지 않는다. 그래서 호출 측이 `allowed`를 줄지(=정리할지)를
+    카탈로그 신뢰도로 게이팅한다 — harness.spec_param_lookup 참조.
+
+    allowed가 None이면 아무것도 안 한다: 스펙 부재·params_unknown은 R2가 침묵하는 자리라
+    걷어내는 쪽도 침묵해야 두 판정이 어긋나지 않는다.
+    """
+    if allowed is None:
+        return []
+    kept: list = []
+    dropped: list[str] = []
+    for p in node.get("parameters") or []:
+        if not isinstance(p, dict):
+            kept.append(p)
+            continue
+        name = p.get("name")
+        if not name or name in allowed:  # 이름 없는 항목은 R2가 안 보므로 여기서도 안 건드린다
+            kept.append(p)
+        else:
+            dropped.append(name)
+    if dropped:
+        node["parameters"] = kept
+    return dropped
+
+
 def _apply_set_params(flow: dict, op: EditOp) -> bool:
     loc = _locate(flow, op.target)
     if loc is None or (op.parameters is None and op.produces is None and op.consumes is None):
         return False
     parent, idx = loc
     node = parent[idx]
-    if op.parameters is not None:
-        by_name = {p.get("name"): p for p in (node.get("parameters") or [])}
-        for p in op.parameters:
-            name = p.get("name")
-            if not name:
-                continue
-            by_name[name] = {
-                "name": name, "value": p.get("value"),
-                "value_source": p.get("value_source") or "llm",
-            }
-        node["parameters"] = list(by_name.values())
+    _merge_params(node, op.parameters)
     # 변수 연결(v3) 동반 갱신 — 파라미터가 바뀌면 $var$ 연결도 함께 바뀌는 경우가 잦다.
     if op.produces is not None:
         node["produces"] = [r for r in op.produces if isinstance(r, dict) and r.get("name")]
@@ -359,11 +436,27 @@ def _apply_set_params(flow: dict, op: EditOp) -> bool:
     return True
 
 
-def _apply_update(flow: dict, op: EditOp) -> bool:
+def _apply_update(
+    flow: dict,
+    op: EditOp,
+    *,
+    spec_params=None,
+    prune_log: list[dict] | None = None,
+) -> bool:
+    """노드의 표기·라벨·변수·파라미터를 갱신한다. 표기가 바뀌면 옛 파라미터를 정리한다.
+
+    순서가 중요하다: 표기 → 파라미터 병합 → 새 스펙 기준 정리. 병합을 먼저 해야 surgeon이
+    새 액션용으로 실어 보낸 값이 남고, 정리를 나중에 해야 **새** 표기의 스펙으로 판정된다.
+
+    `spec_params(package, action) -> frozenset[str] | None`을 주입받는다 — 이 모듈이 카탈로그
+    타입을 몰라도 되게(drop_unknown_action_ops의 `exists`와 같은 규약). 안 주면 정리하지
+    않는다: 스펙을 모르는 상태의 삭제는 '모름 → 침묵' 원칙 위반이다.
+    """
     loc = _locate(flow, op.target)
     if loc is None:
         return False
     node = loc[0][loc[1]]
+    before = (node.get("package"), node.get("action"))
     if op.package:
         node["package"] = op.package
     if op.action_name:
@@ -374,9 +467,19 @@ def _apply_update(flow: dict, op: EditOp) -> bool:
         node["produces"] = _var_refs(op.produces)
     if op.consumes is not None:
         node["consumes"] = _var_refs(op.consumes)
+    # update가 실은 값은 LLM 산출이다 — value_source를 강제해 사용자 값으로 위장되지 않게.
+    _merge_params(node, op.parameters, force_llm=True)
+
+    after = (node.get("package"), node.get("action"))
+    if spec_params is not None and after != before and all(after):
+        dropped = _retarget_params(node, spec_params(*after))
+        if dropped and prune_log is not None:
+            prune_log.append({
+                "node": op.target, "to": f"{after[0]}/{after[1]}", "dropped": dropped[:6],
+            })
     return any(
         v is not None
-        for v in (op.package, op.action_name, op.label, op.produces, op.consumes)
+        for v in (op.package, op.action_name, op.label, op.produces, op.consumes, op.parameters)
     )
 
 
@@ -584,24 +687,36 @@ def _spec_notation(spec) -> tuple[str, str] | None:
     return (pkg, act) if pkg and act else None
 
 
-def op_notations(flow: dict, op: EditOp) -> list[tuple[str, str]]:
+def op_notations(
+    flow: dict,
+    op: EditOp,
+    projected: dict[str, tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
     """이 연산이 흐름도에 **새로 써 넣을** (package, action) 표기들.
 
     `update`는 package/action 중 한쪽만 줄 수 있어(둘 다 선택 필드) 대상 노드의 현재 값과
     합쳐야 결과 표기가 나온다 — 예: package만 바꾸면 action은 그대로 남는다. 그래서 노드를
     찾아본다. 못 찾으면 어차피 적용도 실패하므로 판정할 것이 없다(빈 목록).
 
+    `projected`는 **앞선 연산이 이미 바꿔 놓을** 표기다(target → (package, action)). 사전
+    검증은 아무 연산도 적용되기 전 흐름도로 판정하므로, 같은 노드에 update가 둘 이상 오면
+    뒤의 판정이 앞의 효과를 못 본다. 그 결과가 예전에는 '연산 하나를 헛되이 버림'이었지만,
+    이제 update가 **판정된 표기 기준으로 파라미터를 지우므로** 어긋나면 파괴적이다.
+
     표기를 안 쓰는 연산(remove/move/set_params/set_flow/…)은 빈 목록이다.
     """
     if op.op == "update":
         if not (op.package or op.action_name):
-            return []  # 라벨·변수만 바꾸는 update — 표기를 건드리지 않는다
-        loc = _locate(flow, op.target)
-        if loc is None:
-            return []
-        node = loc[0][loc[1]]
-        pkg = op.package or node.get("package")
-        act = op.action_name or node.get("action")
+            return []  # 라벨·변수·파라미터만 바꾸는 update — 표기를 건드리지 않는다
+        base = (projected or {}).get(op.target or "")
+        if base is None:
+            loc = _locate(flow, op.target)
+            if loc is None:
+                return []
+            node = loc[0][loc[1]]
+            base = (node.get("package"), node.get("action"))
+        pkg = op.package or base[0]
+        act = op.action_name or base[1]
         return [(pkg, act)] if pkg and act else []
     if op.op == "insert":
         n = _spec_notation(op.action)
@@ -616,7 +731,13 @@ def op_notations(flow: dict, op: EditOp) -> list[tuple[str, str]]:
     return []
 
 
-def drop_unknown_action_ops(flow: dict, ops: list[EditOp], exists) -> tuple[list[EditOp], list[str]]:
+def drop_unknown_action_ops(
+    flow: dict,
+    ops: list[EditOp],
+    exists,
+    *,
+    banned_out: list[str] | None = None,
+) -> tuple[list[EditOp], list[str]]:
     """카탈로그에 없는 표기를 써 넣는 연산을 **적용 전에** 걸러낸다 (RPA-298).
 
     ## 왜 필요한가 (실측, 2026-07-27)
@@ -642,39 +763,70 @@ def drop_unknown_action_ops(flow: dict, ops: list[EditOp], exists) -> tuple[list
     `anchor`(insert 기준점)는 대상이 그대로 남아 있어 무효가 되지 않으므로 건드리지 않는다.
 
     `exists(package, action) -> bool`을 주입받는다 — 이 모듈이 카탈로그 타입을 몰라도 되게.
+
+    `banned_out` 목록을 주면 실재하지 않던 표기를 "패키지/액션" 문자열로 **연산 순서대로**
+    덧붙인다(이미 들어 있으면 건너뛴다). 호출부가 따로 계산하면 여기의 순차 투영을 다시
+    구현해야 하고, 그러면 두 판정이 어긋나 프롬프트가 "쓰지 마라"고 말하지 않은 표기를
+    실제로는 버리게 된다. set으로 모으면 순회 순서가 프로세스마다 달라져 **프롬프트 본문이
+    비결정론이 된다**(절단 대상이 바뀐다) — 그래서 목록이다.
     """
     kept: list[EditOp] = []
     dropped: list[str] = []
     poisoned: set[str] = set()
+    # 살아남은 update가 만들 표기를 순차로 투영한다 — 같은 노드를 두 번 건드릴 때 뒤의 판정이
+    # 앞의 효과를 보게(op_notations 독스트링). 버려진 연산은 반영하지 않는다(적용되지 않는다).
+    projected: dict[str, tuple[str, str]] = {}
 
     for i, op in enumerate(ops or []):
         if op.target and op.target in poisoned:
             dropped.append(f"op[{i}] {op.op}: 앞서 버린 연산과 같은 대상({op.target})이라 함께 제외")
             continue
-        bad = [(p, a) for p, a in op_notations(flow, op) if not exists(p, a)]
+        notations = op_notations(flow, op, projected)
+        bad = [(p, a) for p, a in notations if not exists(p, a)]
         if bad:
             dropped.append(
                 f"op[{i}] {op.op}: 카탈로그에 없는 표기 {', '.join(f'{p}/{a}' for p, a in bad)}"
             )
+            if banned_out is not None:
+                for p, a in bad:
+                    if f"{p}/{a}" not in banned_out:
+                        banned_out.append(f"{p}/{a}")
             for t in [op.target, *op.targets]:
                 if t:
                     poisoned.add(t)
             continue
+        if op.op == "update" and op.target and notations:
+            projected[op.target] = notations[0]
         kept.append(op)
     return kept, dropped
 
 
-def apply_edit_ops(flow: dict, ops: list[EditOp]) -> tuple[int, list[str]]:
+def apply_edit_ops(
+    flow: dict,
+    ops: list[EditOp],
+    *,
+    spec_params=None,
+    prune_log: list[dict] | None = None,
+) -> tuple[int, list[str]]:
     """연산들을 순서대로 flow에 제자리 적용한다. (적용_수, 실패_사유들)을 반환한다.
 
     한 연산이 실패해도 나머지는 계속 시도한다 — 실패 사유는 재요청 피드백에 쓴다.
     호출 측이 이후 strip_ids/renumber로 정규화한다.
+
+    `spec_params(package, action) -> frozenset[str] | None`을 주면 update가 표기를 갈아끼울 때
+    새 스펙에 없는 옛 파라미터를 정리한다(_retarget_params). 정리 기록은 `prune_log`에 쌓이며
+    **errors가 아니다** — errors에 실으면 edit 경로가 정상 정리를 '미완결'로 보고 사용자에게
+    "반영하지 못했어요"를 내보낸다(edit.py의 _CANT_APPLY 분기).
     """
     applied = 0
     errors: list[str] = []
     for i, op in enumerate(ops):
         try:
-            ok = _APPLIERS[op.op](flow, op)
+            ok = (
+                _apply_update(flow, op, spec_params=spec_params, prune_log=prune_log)
+                if op.op == "update"
+                else _APPLIERS[op.op](flow, op)
+            )
         except Exception as e:  # noqa: BLE001 — 한 연산 실패가 전체를 죽이지 않게
             errors.append(f"op[{i}] {op.op}: 오류 {e}")
             continue
