@@ -37,6 +37,7 @@ v3는 세션 opener/closer를 수기 (package, action) 쌍으로 들고 있었�
 
 import logging
 import re
+import weakref
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -99,8 +100,9 @@ def _has_session_param(spec: dict) -> bool:
     )
 
 
-# 프로세스 캐시 — catalog 객체 id 기준. BackendCatalog가 이미 TTL 캐시라 이중 비용이 없다.
-_CACHE: dict[tuple[int, str], object] = {}
+# 프로세스 캐시 — catalog 객체 **약한 참조** 기준. BackendCatalog가 이미 TTL 캐시라
+# 이중 비용이 없다. 카탈로그가 수거되면 그 항목도 함께 사라진다.
+_CACHE: "weakref.WeakKeyDictionary[object, dict[str, object]]" = weakref.WeakKeyDictionary()
 
 
 def clear_cache() -> None:
@@ -109,10 +111,33 @@ def clear_cache() -> None:
 
 
 def _cached(catalog, key: str, build):
-    ck = (id(catalog), key)
-    if ck not in _CACHE:
-        _CACHE[ck] = build()
-    return _CACHE[ck]
+    """카탈로그별 유도 결과를 캐시한다.
+
+    ⚠ 키는 **객체 자체(약한 참조)**다. 예전에는 `id(catalog)`를 썼는데, CPython은 수거된
+    객체의 주소를 재사용하므로 **새 카탈로그가 죽은 카탈로그의 유도 결과를 그대로 받는다**
+    (재현됨: 같은 주소를 다시 잡은 카탈로그가 남의 제어 흐름 어휘를 돌려줬다).
+
+    이 캐시가 담는 것은 세션 opener/closer 레지스트리·제어 흐름 액션 전량이라, 오염되면
+    R7/R8/R17 판정과 수리 어휘가 통째로 다른 카탈로그의 것이 된다 — 조용한 오답이라
+    캐시 미스보다 훨씬 나쁘다. `OverlayCatalog`처럼 세션마다 만들어졌다 LRU에서 밀려나는
+    객체가 실제로 그 조건을 만든다.
+
+    약한 참조를 못 다는 카탈로그(__slots__에 __weakref__가 없는 등)는 캐시하지 않고 매번
+    만든다 — 느려도 맞다.
+    """
+    try:
+        bucket = _CACHE.get(catalog)
+    except TypeError:  # 해시 불가 — 캐시 대상이 아니다
+        return build()
+    if bucket is None:
+        bucket = {}
+        try:
+            _CACHE[catalog] = bucket
+        except TypeError:  # 약한 참조 불가
+            return build()
+    if key not in bucket:
+        bucket[key] = build()
+    return bucket[key]
 
 
 def derive_session_registry(

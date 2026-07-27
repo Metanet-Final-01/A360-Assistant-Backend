@@ -27,10 +27,58 @@ def _spec(package, action, *, session_param=False):
 
 @pytest.fixture(autouse=True)
 def _clear_derive_cache():
-    """유도 캐시는 catalog 객체 id 기준이라 테스트 간 id 재사용이 오염을 만든다."""
+    """유도 캐시를 앞뒤로 비운다 — 이 파일은 같은 카탈로그 객체에 세대별 스펙을 갈아 끼운다.
+
+    (예전에는 캐시가 catalog 객체 **id** 기준이라 테스트 간 주소 재사용이 오염을 만들어서
+    이 fixture가 그 방어까지 겸했다. 지금은 약한 참조 키라 그 위험은 없다 —
+    `test_유도_캐시는_주소_재사용에_오염되지_않는다` 참조.)
+    """
     derive.clear_cache()
     yield
     derive.clear_cache()
+
+
+def test_유도_캐시는_주소_재사용에_오염되지_않는다():
+    """🔴 조용한 오답 — 새 카탈로그가 **죽은 카탈로그의 어휘**를 그대로 받던 버그.
+
+    캐시 키가 `id(catalog)`였고 CPython은 수거된 객체의 주소를 재사용한다. 이 캐시가 담는
+    것은 세션 opener/closer 레지스트리와 제어 흐름 액션 전량이라, 오염되면 R7/R8/R17 판정과
+    수리 어휘가 통째로 남의 것이 된다. 세션마다 만들어졌다 LRU에서 밀려나는 `OverlayCatalog`가
+    실제로 그 조건을 만든다.
+
+    실측 서명(2026-07-27): 전체 스위트에서만 `Error handler/Try`가 수리 메뉴에서 사라졌다 —
+    파일 단독 실행은 통과해서 원인을 짚기 전까지 '테스트 순서 문제'로 보였다.
+
+    주소 재사용 자체는 재현이 확률적이라, 그것을 **불가능하게 만드는 불변식**을 직접 못
+    박는다: 카탈로그가 죽으면 그 캐시 항목도 함께 죽는다. 남은 항목이 없으면 재사용된
+    주소가 무엇을 가리키든 오염될 것이 없다.
+    """
+    import gc
+
+    dead = _StubCatalog([_spec("Error handler", "errorHandlerTry")])
+    assert derive.derive_structural_actions(dead) == (("Error handler", "errorHandlerTry"),)
+    assert len(derive._CACHE) == 1
+
+    del dead
+    gc.collect()
+    assert len(derive._CACHE) == 0, "카탈로그와 함께 사라져야 주소 재사용이 무해해진다"
+
+    fresh = _StubCatalog([_spec("Loop", "cloudUsingLoopAction")])
+    assert derive.derive_structural_actions(fresh) == (("Loop", "cloudUsingLoopAction"),)
+
+
+def test_약한_참조가_안_되는_카탈로그도_유도된다():
+    """캐시를 못 붙이는 객체(__slots__에 __weakref__ 없음)는 매번 만든다 — 느려도 맞다.
+
+    캐시를 못 다는 것을 예외로 흘리면 그 카탈로그로는 검사가 통째로 죽는다.
+    """
+    class Slotted:
+        __slots__ = ()
+
+        def iter_action_schemas(self):
+            return [_spec("Loop", "cloudUsingLoopAction")]
+
+    assert derive.derive_structural_actions(Slotted()) == (("Loop", "cloudUsingLoopAction"),)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
