@@ -203,6 +203,19 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
     completeness = completeness if isinstance(completeness, dict) else {}
     human_review = payload.get("human_review")
     human_review = human_review if isinstance(human_review, dict) else None
+    subject = payload.get("subject")
+    subject = subject if isinstance(subject, dict) else {}
+    change_subject = None
+    if row.harness == "change":
+        change_subject = {
+            "repository": subject.get("repository"),
+            "pull_request_number": subject.get("pull_request_number"),
+            "workflow_run_id": subject.get("workflow_run_id"),
+            "run_attempt": subject.get("run_attempt"),
+            "source_event": subject.get("source_event"),
+            "base_sha": subject.get("base_sha"),
+            "head_sha": subject.get("head_sha"),
+        }
     result = {
         "receipt_digest": row.receipt_digest,
         "schema_version": row.schema_version,
@@ -232,6 +245,7 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
         "resolved_agent_version": row.resolved_agent_version,
         "integrity_valid": receipt_integrity(row),
         "human_review": human_review,
+        "change_subject": change_subject,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
     if detail:
