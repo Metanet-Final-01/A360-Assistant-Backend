@@ -21,7 +21,11 @@ from app.services.assurance_evidence import (
     persist_change_receipt,
     receipt_integrity,
 )
-from assurance.change.foundation import AssuranceError, canonical_digest
+from assurance.change.foundation import (
+    ALLOWED_SOURCE_EVENTS,
+    AssuranceError,
+    canonical_digest,
+)
 from assurance.change.transport import load_change_envelope, validate_change_envelope
 from scripts.publish_change_assurance import publish, source_from_event, writer_url
 from tests.test_change_assurance import _load_scenarios, _run_scenario
@@ -338,8 +342,12 @@ def test_writer_endpoint_rejects_admin_or_wrong_bearer(monkeypatch):
     assert response.json()["detail"]["code"] == "INVALID_ASSURANCE_WRITER"
 
 
-def test_writer_endpoint_accepts_only_validated_envelope(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_event", ["pull_request", "pull_request_review"])
+def test_writer_endpoint_accepts_only_validated_envelope(
+    tmp_path, monkeypatch, source_event
+):
     envelope = _envelope(tmp_path)
+    envelope["source"]["event"] = source_event
     expected = {
         "status": "persisted",
         "receipt_digest": "sha256:" + "a" * 64,
@@ -367,6 +375,30 @@ def test_writer_endpoint_accepts_only_validated_envelope(tmp_path, monkeypatch):
     assert response.status_code == 201
     assert response.json() == expected
     assert captured == {"payload": envelope, "db": fake_db}
+
+
+def test_writer_endpoint_rejects_unsupported_source_event(tmp_path, monkeypatch):
+    envelope = _envelope(tmp_path)
+    envelope["source"]["event"] = "push"
+    called = False
+
+    def persist(payload, db):
+        nonlocal called
+        called = True
+
+    monkeypatch.setenv("ASSURANCE_WRITER_TOKEN", "w" * 32)
+    monkeypatch.setenv("ASSURANCE_WRITER_REPOSITORY", envelope["source"]["repository"])
+    monkeypatch.setattr(writer_api, "persist_change_receipt", persist)
+    app.dependency_overrides[get_db] = lambda: object()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/internal/assurance/change-receipts",
+            headers={"Authorization": "Bearer " + "w" * 32},
+            json=envelope,
+        )
+
+    assert response.status_code == 422
+    assert called is False
 
 
 def test_writer_endpoint_rejects_a_different_repository(tmp_path, monkeypatch):
@@ -476,6 +508,12 @@ def test_transport_accepts_review_triggered_follow_up_record(tmp_path):
     facts = validate_change_envelope(envelope)
 
     assert facts["source"]["event"] == "pull_request_review"
+
+
+def test_writer_source_event_schema_uses_shared_contract():
+    schema = writer_api.ChangePublisherSource.model_json_schema()
+
+    assert set(schema["properties"]["event"]["enum"]) == set(ALLOWED_SOURCE_EVENTS)
 
 
 def test_publisher_accepts_one_sha_resolved_pull_request_when_event_list_is_empty():
