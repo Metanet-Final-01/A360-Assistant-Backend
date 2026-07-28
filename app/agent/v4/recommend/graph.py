@@ -594,6 +594,54 @@ async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict,
     )
 
 
+# 의미 회귀 허용치 — 부동소수 오차만 무시한다는 뜻이다. 실제 눈금은 훨씬 크다:
+# must_coverage는 요구 1건(7요구면 0.143), 정상경로 통과율은 경로 1개(0.33~0.5)가 최소 단위라
+# 어떤 진짜 하락도 이보다 크다. 즉 이 가드는 "요구 하나를 잃었거나 경로 하나가 깨졌을 때" 문다.
+_SEMANTIC_REGRESSION_EPS = 0.01
+
+
+def semantic_regressions(before: dict, after_cov: float | None, after_sim: float | None) -> list[str]:
+    """교정 전후의 **의미 축**을 비교해 나빠진 축 이름을 돌려준다 (RPA-298).
+
+    ## 왜 필요한가 (실측, 2026-07-28 00:46)
+
+    교정 라운드 1이 가중합을 200 → **0**으로 만들었다. 그런데 산출물은 이랬다:
+
+        Browser/Call a JavaScript function  «증권 클릭»    ← 버튼 클릭을 JS 호출로
+        Loop action for data iteration      «3일 반복»     └ 본문은 Step/Step(비실행)
+        Microsoft 365 Excel/Paste cell      «표 붙여넣기»   ← 복사한 적이 없다
+        Email/Forward                       «메일 보내기»   ← 전달할 원본 메일이 없다
+
+    **데이터를 읽는 액션이 하나도 없다.** surgeon이 R1(없는 표기)을 만나자 "카탈로그에 실재하고
+    필수 파라미터가 적은 아무 액션"으로 갈아끼워 정적 위반을 0으로 만든 것이다.
+
+    라운드별 회귀 가드는 이걸 못 막는다. 그 축이 **정적 위반 + req_id 배정**뿐이라,
+    req_id를 단 채 액션만 바꾸면 두 조건을 모두 만족한다 — "이 액션이 그 요구를 실제로
+    수행하는가"는 어느 축에도 없다. 그걸 보는 L2·L3는 첫 라운드 참고자료로만 실리고
+    가드 축에서는 빠진다(정적 재검증으로 소거를 판정할 수 없으므로).
+
+    그래서 **전체 단위**로 한 번 더 잰다. 교정 뒤 L2/L3 재채점은 이미 돌고 있어(신뢰도 갱신용)
+    LLM 추가 비용이 0이다 — 그 결과를 표시에만 쓰던 것을 판정에도 쓴다.
+
+    ## 되돌림이 손해인 경우
+
+    정적 수리는 잃는다. 그래도 이쪽을 택하는 이유는 두 실패의 무게가 다르기 때문이다:
+    잘못 되돌리면 '위반이 남은 초안'이 나가고, 안 되돌리면 **업무를 하지 않는 봇**이 나간다.
+
+    비교값이 없으면(교정 전 L2/L3가 실패해 None) 판정하지 않는다 — 모름 → 침묵.
+    """
+    out: list[str] = []
+    for axis, before_v, after_v in (
+        ("must_coverage", before.get("must_coverage"), after_cov),
+        ("nominal_pass_rate", before.get("sim_pass_rate"), after_sim),
+    ):
+        if before_v is None or after_v is None:
+            continue
+        if after_v < before_v - _SEMANTIC_REGRESSION_EPS:
+            out.append(axis)
+    return out
+
+
 def _emit_candidate_scorecard(reports, verdict: dict, attempted: int) -> None:
     """후보별 채점 결과를 **관측에 남는 형태**로 남긴다 (RPA-298).
 
@@ -873,6 +921,26 @@ async def refine_draft(draft: DraftResult, ctx=None, *, deadline_mono: float | N
         except Exception as e:  # noqa: BLE001
             logger.warning("최종 L3 재실행 실패 — 승자 통과율 재사용: %s", e)
     must_cov = coverage.must_coverage if coverage is not None else winner_report.get("must_coverage")
+
+    # 의미 회귀 가드 — 교정이 '봇이 업무를 하는가'를 나쁘게 만들었으면 통째로 되돌린다.
+    regressed = semantic_regressions(winner_report, must_cov, sim_rate) if refined["repaired"] else []
+    if regressed:
+        emit({
+            "event": "stage", "stage": "refining",
+            "message": "교정 결과가 요구 충족·실행 가능성을 떨어뜨려 초안으로 되돌렸습니다",
+            "data": {
+                "rolled_back": regressed,
+                "must_coverage": [winner_report.get("must_coverage"), must_cov],
+                "nominal_pass_rate": [winner_report.get("sim_pass_rate"), sim_rate],
+            },
+        })
+        logger.warning("교정 의미 회귀 %s — 초안으로 롤백", regressed)
+        # 교정이 한 번도 채택되지 않은 경로와 **정확히 같은 상태**로 되돌린다.
+        flow = _attach_sources(_coerce_flow(copy.deepcopy(draft.flow)), sink)
+        violations = list(winner_report.get("violations") or [])
+        coverage = None
+        must_cov = winner_report.get("must_coverage")
+        sim_rate = winner_report.get("sim_pass_rate")
 
     findings_final, r3_cards = from_violations_dicts(violations)
     if coverage is not None:
