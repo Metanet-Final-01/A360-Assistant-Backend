@@ -27,7 +27,9 @@ except ImportError:
 from app.core import config as _core  # noqa: E402 — dotenv 로드가 먼저여야 한다
 
 # 이 모듈이 노출하는 키. REGISTRY에 없는 이름을 적으면 접근 시 core가 AttributeError를 낸다.
-_KEYS = frozenset({"OPENAI_API_KEY", "OPENAI_MODEL", "MAX_LLM_CONCURRENCY"})
+_KEYS = frozenset({
+    "OPENAI_API_KEY", "OPENAI_MODEL", "MAX_LLM_CONCURRENCY", "V4_REFINE_MAX_ROUNDS",
+})
 
 
 def __getattr__(name: str):

@@ -26,6 +26,7 @@ import re
 import time
 from pathlib import Path
 
+from .. import config
 from ..recommend.research import structural_complement
 from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
@@ -64,7 +65,23 @@ _SURGEON_PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "surgeon
 # 만에 빠져나오므로 8은 '개선이 계속 나오는 동안만' 소모되는 예산이다. 그럼에도 상한을
 # 두는 이유는 surgeon이 매 라운드 미세 개선을 내며 무한 지연시키는 병리를 막기 위함.
 # 비용: 패치는 라운드당 토큰이 전체 재출력의 1/10이라 8라운드 ≈ v2 재출력 1회 미만.
-MAX_REFINE_ROUNDS = 8
+#
+# ⚠ env `V4_REFINE_MAX_ROUNDS`로 덮을 수 있고 **0이면 교정을 통째로 끈다**(초안 확정,
+# 검수 표시는 유지). 실측 2026-07-28 00:46에서 교정이 순손해를 낸 사례가 나왔기 때문이다 —
+# 라운드 1이 가중합을 200→0으로 만들었지만 산출물은 버튼 클릭이 `Call a JavaScript function`이
+# 되고 데이터를 읽는 액션이 하나도 없는 흐름도였다. 교정의 목적 함수가 '정적 위반 + req_id
+# 배정'뿐이라 req_id를 단 채 아무 액션으로 갈아끼우면 만점이 된다. "교정이 순이득인가"는
+# 열린 질문이고, 코드를 지우기 전에 이 스위치로 잰다.
+def _default_max_rounds() -> int:
+    """교정 라운드 상한 — 접근 시점에 env를 읽는다(테스트·운영 토글이 즉시 반영되게)."""
+    try:
+        return max(0, int(config.V4_REFINE_MAX_ROUNDS))
+    except Exception:  # noqa: BLE001 — 설정 사고가 생성을 막지 않는다
+        logger.warning("V4_REFINE_MAX_ROUNDS 해석 실패 — 기본 8라운드", exc_info=True)
+        return 8
+
+
+MAX_REFINE_ROUNDS = 8  # 문서·하위호환용 기본값. 실제 상한은 _default_max_rounds()가 준다.
 _MAX_FINDINGS_IN_PROMPT = 15
 _STOP_AFTER_NO_IMPROVE = 2  # 연속 무개선 종료 — 진동 방지
 
@@ -733,7 +750,7 @@ def refine_flow(
     catalog: CatalogLookup,
     *,
     extra_findings: list[Finding] | None = None,
-    max_rounds: int = MAX_REFINE_ROUNDS,
+    max_rounds: int | None = None,  # None이면 env(V4_REFINE_MAX_ROUNDS, 기본 8)
     purpose: str = "verify",
     spec: dict | None = None,
     deadline_mono: float | None = None,
@@ -772,8 +789,14 @@ def refine_flow(
     되면서 라운드가 생산적이 되어 8라운드를 실제로 쓰게 됐다 — 여기서 먼저 접어야
     **채택된 현재본을 들고 정상 종료**한다. 하드 컷은 이중 안전망으로 그대로 둔다.
 
+    **max_rounds=0이면 교정을 통째로 건너뛴다** — 초안이 그대로 확정되고 검수 결과는
+    표시용으로만 붙는다(자리표시자 단계는 그대로 붙는다: 미해결 must를 숨기지 않는다).
+    운영 토글은 env `V4_REFINE_MAX_ROUNDS`이며, 그 스위치를 둔 이유는 위 상수 주석 참조.
+
     반환: {"flow", "violations", "repaired"}.
     """
+    if max_rounds is None:
+        max_rounds = _default_max_rounds()
     if spec is not None:
         flow = _strip_placeholder_steps(flow)
     violations = collect_violations(flow, catalog)
@@ -790,6 +813,17 @@ def refine_flow(
     n_missing = len(missing_requirements(flow, spec)) if spec is not None else 0
     n_conflated = len(conflated_slots(flow, spec)) if spec is not None else 0
     n_hollow = len(hollow_requirements(flow, spec)) if spec is not None else 0
+    if max_rounds <= 0:
+        # 교정 끔 — "교정 중"이라고 말하지 않는다. 검수 결과는 그대로 싣고 흐름도만 안 건드린다.
+        logger.info("교정 비활성(V4_REFINE_MAX_ROUNDS=0) — 초안 확정, 검수는 표시용")
+        emit({"event": "stage", "stage": "verifying",
+              "message": (f"검수 완료 — 위반 {len(violations)}건 · 요구 누락 {n_missing}건 · "
+                          f"요구 뭉갬 {n_conflated}건 · 빈껍데기 {n_hollow}건 (교정 없이 확정)"),
+              "data": {"refine_disabled": True, "violations": len(violations),
+                       "missing": n_missing, "conflated": n_conflated, "hollow": n_hollow}})
+        if spec is not None:
+            flow = _placeholder_steps(flow, spec)  # 미해결 must를 숨기지 않는다
+        return {"flow": flow, "violations": violations, "repaired": False}
     emit({"event": "stage", "stage": "verifying",
           "message": (f"검수 위반 {len(violations)}건 · 요구 누락 {n_missing}건 · "
                       f"요구 뭉갬 {n_conflated}건 · 빈껍데기 {n_hollow}건 · "
