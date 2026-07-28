@@ -275,10 +275,13 @@ def test_mixed_observe_and_warn_artifacts_stay_rejected(tmp_path):
     envelope = _envelope(tmp_path, "good_import")
     report = envelope["artifacts"]["assurance-report.json"]
     report["enforcement"]["mode"] = "observe"
-    for reference in envelope["artifacts"]["evidence-index.json"]["artifacts"]:
-        if reference["uri"] == "assurance-report.json":
-            reference["sha256"] = canonical_digest(report)
-            break
+    references = envelope["artifacts"]["evidence-index.json"]["artifacts"]
+    report_reference = next(
+        (reference for reference in references if reference["uri"] == "assurance-report.json"),
+        None,
+    )
+    assert report_reference is not None
+    report_reference["sha256"] = canonical_digest(report)
 
     with pytest.raises(AssuranceError, match="rollout modes do not match"):
         validate_change_envelope(envelope)
