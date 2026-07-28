@@ -202,7 +202,30 @@
               }
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "fail",
+                    "error",
+                    "unassured"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "explanation"
+              ]
+            }
+          }
+        ]
       }
     },
     "evidence_complete": {

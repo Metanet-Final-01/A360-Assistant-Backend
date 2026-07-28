@@ -1072,6 +1072,15 @@ def test_detector_error_receipt_is_nonpassing_and_schema_valid(tmp_path: Path) -
     schema = json.loads(REPORT_SCHEMA.read_text(encoding="utf-8"))
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(report)
 
+    missing_explanation = json.loads(json.dumps(report))
+    missing_explanation["controls"][0].pop("explanation")
+    with pytest.raises(
+        ValidationError, match="'explanation' is a required property"
+    ):
+        Draft202012Validator(
+            schema, format_checker=FormatChecker()
+        ).validate(missing_explanation)
+
 
 def test_cli_error_warns_but_stays_nonblocking(tmp_path: Path, capsys) -> None:
     exit_code = cli_main(
