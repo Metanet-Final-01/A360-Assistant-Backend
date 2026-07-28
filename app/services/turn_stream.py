@@ -247,6 +247,24 @@ async def follow(session_id: str, turn_id: str, after: str, block_ms: int) -> li
         return []
 
 
+async def ended(session_id: str, turn_id: str) -> bool:
+    """이 턴이 **이미 종료 마커로 끝났나**.
+
+    커서가 종료 마커보다 뒤면(형식은 유효한 미래 id 등) `follow`는 영원히 빈손이라 팔로워가
+    끝을 못 본다 — 마지막 엔트리를 직접 보고 종결을 판단한다 (Qodo #455 3차). 조용한 구간에서만
+    호출하므로 hot path 비용이 아니다.
+    """
+    r = _get_client()
+    if r is None:
+        return False
+    try:
+        rows = _rows(await r.xrevrange(_events_key(session_id, turn_id), count=1))
+        return bool(rows) and rows[0][2]
+    except Exception:  # noqa: BLE001
+        logger.warning("turn_stream ended 조회 실패: turn=%s", turn_id, exc_info=True)
+        return False
+
+
 async def exists(session_id: str, turn_id: str) -> bool:
     """버퍼가 아직 살아 있나 — 만료·오타 turn_id를 404로 가르기 위해."""
     r = _get_client()

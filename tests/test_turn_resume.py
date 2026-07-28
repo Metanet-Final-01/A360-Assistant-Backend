@@ -355,3 +355,25 @@ def test_hung_close_does_not_stall_request(monkeypatch, redis_on):
     elapsed = time.perf_counter() - t0
     assert status == 200
     assert elapsed < 15, f"정리가 요청을 {elapsed:.1f}초 붙잡았다 — 시간 제한이 없다"
+
+
+def test_resume_with_cursor_past_end_marker_terminates(monkeypatch, redis_on):
+    """형식은 유효하지만 **종료 마커보다 뒤**인 커서로 붙어도 매달리지 않는다.
+
+    replay는 빈손이고 follow는 그 커서 이후를 기다리는데 마커는 이미 앞에 있다 — 감지 못 하면
+    상한까지(상한 0이면 무기한) heartbeat만 흘린다. 잘못된 형식(400)과 달리 이건 형식이 맞아
+    경계 검증을 통과하므로 별도 종결 조건이 필요하다.
+    """
+    key = turn_stream._events_key(str(SID), "t-past")
+    redis_on.xadd(key, {"sse": 'data: {"event":"token"}\n\n', "end": "0"})
+    redis_on.xadd(key, {"sse": "", "end": "1"})
+    last_ms = int(redis_on.xrange(key)[-1][0].split("-")[0])
+    future = f"{last_ms + 10_000_000}-0"
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    t0 = time.perf_counter()
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/turns/t-past/stream", params={"after": future})
+    elapsed = time.perf_counter() - t0
+    assert r.status_code == 200
+    assert elapsed < 20, f"종료 마커 뒤 커서로 {elapsed:.1f}초 매달렸다 — 종결 조건이 없다"

@@ -1807,6 +1807,11 @@ async def resume_turn_stream(
         while deadline is None or time.monotonic() < deadline:
             rows = await turn_stream.follow(session_key, turn_id, cursor, _RESUME_BLOCK_MS)
             if not rows:
+                # 커서가 종료 마커보다 뒤면(유효한 형식의 미래 id 등) follow는 영원히 빈손이다 —
+                # 마지막 엔트리를 직접 보고 끝났으면 닫는다 (Qodo #455 3차). 형식 검증은 이 경우를
+                # 못 잡는다(형식은 맞다). 조용할 때만 확인하므로 비용도 없다.
+                if await turn_stream.ended(session_key, turn_id):
+                    return
                 # 조용한 구간에도 연결을 살려 둔다 (원 스트림과 같은 이유 — CloudFront 60초 idle).
                 yield _SSE_HEARTBEAT_FRAME
                 continue
