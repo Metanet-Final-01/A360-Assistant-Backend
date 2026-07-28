@@ -78,21 +78,32 @@ def test_version_isolation_v1_plan_v2_agentic():
 
 
 def _declared_meta(version: str) -> dict | None:
-    """`vN/meta.py`가 선언한 VERSION_META를 **코드 실행 없이** 파싱한다 (파일 없으면 None).
+    """`vN/meta.py`가 선언한 VERSION_META를 **코드 실행 없이** 파싱한다 (못 정하면 None).
 
     구현(`registry._meta`)과 **독립된 오라클**이다 — 같은 로더로 기대값을 만들면 로더가 늘 `{}`를
     돌려줘도 통과하는 동어반복이 된다. meta.py는 dict 리터럴이라 ast로 그대로 읽힌다.
+
+    ⚠️ 경로는 프로덕션 `_meta_file()`과 **같은 방식**으로 찾는다(`__path__` 전체 순회, 첫 히트).
+       오라클이 구현과 다른 폴더를 보면 그 자체가 오검증이다 (Qodo #448).
+    ⚠️ 깨진 meta.py에 **예외를 던지지 않는다**: 프로덕션은 그 경우 `{}`로 폴백해 목록을 계속
+       내주는 게 계약이라, 오라클이 크래시하면 테스트가 구현보다 엄격해진다. 기대값을 못 만들면
+       None을 돌려 호출부가 그 버전을 건너뛴다.
     """
     import app.agent
 
-    path = Path(app.agent.__path__[0]) / version / "meta.py"
-    if not path.is_file():
-        return None
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "VERSION_META" for t in node.targets
-        ):
-            return ast.literal_eval(node.value)
+    for root in app.agent.__path__:
+        path = Path(root) / version / "meta.py"
+        if not path.is_file():
+            continue
+        try:
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "VERSION_META" for t in node.targets
+                ):
+                    return ast.literal_eval(node.value)
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError, TypeError):
+            return None  # 프로덕션도 {} 폴백 — 기대값을 못 만들 뿐 실패는 아니다
+        return None  # 파일은 있으나 VERSION_META 선언이 없음
     return None
 
 
