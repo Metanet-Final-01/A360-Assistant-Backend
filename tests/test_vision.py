@@ -73,8 +73,15 @@ def test_extract_page_uses_actual_mime_and_normalizes_output(monkeypatch):
 def test_extract_page_rejects_unsupported_image(monkeypatch):
     monkeypatch.setattr(llm, "chat", lambda *a, **k: "must not run")
 
-    with pytest.raises(ValueError, match="지원되는 이미지 형식"):
+    with pytest.raises(ValueError, match="Unsupported image format at position 1"):
         vision._extract_page([b"unsupported"], None, None)
+
+
+def test_extract_page_rejects_mixed_supported_and_unsupported_images(monkeypatch):
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: "must not run")
+
+    with pytest.raises(ValueError, match="Unsupported image format at position 2"):
+        vision._extract_page([b"\xff\xd8\xffsupported", b"unsupported"], None, None)
 
 
 def test_enrich_stream_event_order_and_merge(monkeypatch):

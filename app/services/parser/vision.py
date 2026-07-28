@@ -48,7 +48,9 @@ def _encode_rendered_page(image) -> bytes:
 
     jpeg_buffer = io.BytesIO()
     image.save(jpeg_buffer, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
-    return min(png_buffer.getvalue(), jpeg_buffer.getvalue(), key=len)
+    if png_buffer.tell() <= jpeg_buffer.tell():
+        return png_buffer.getvalue()
+    return jpeg_buffer.getvalue()
 
 
 def _page_text_chars(page: dict) -> int:
@@ -154,10 +156,10 @@ def _extract_page(blobs: list[bytes], model: str | None, session_id: uuid.UUID |
     from app.core import llm
 
     content_parts: list[dict] = [{"type": "text", "text": _PROMPT}]
-    for blob in blobs:
+    for index, blob in enumerate(blobs, start=1):
         mime_type = _image_mime_type(blob)
         if mime_type is None:
-            continue
+            raise ValueError(f"Unsupported image format at position {index}")
         b64 = base64.b64encode(blob).decode()
         content_parts.append(
             {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}}
