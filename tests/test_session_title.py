@@ -30,3 +30,14 @@ def test_suggest_session_title_uses_only_the_two_latest_user_messages(monkeypatc
     assert "추가 메시지" in captured["messages"][1]["content"]
     assert "이전 메시지" not in captured["messages"][1]["content"]
     assert captured["kwargs"]["purpose"] == "session_title"
+
+
+def test_suggest_session_title_logs_the_error_type_without_message(monkeypatch, caplog):
+    def fail_chat(*args, **kwargs):
+        raise RuntimeError("sensitive failure detail")
+
+    monkeypatch.setattr(session_title.llm, "chat", fail_chat)
+
+    assert session_title.suggest_session_title(["title me"], uuid.uuid4()) is None
+    assert "RuntimeError" in caplog.text
+    assert "sensitive failure detail" not in caplog.text

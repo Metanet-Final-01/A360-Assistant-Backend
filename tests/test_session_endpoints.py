@@ -239,15 +239,23 @@ def test_title_suggestion_updates_from_latest_user_messages(monkeypatch):
         SimpleNamespace(role="user", content="반가워"),
     ]
     db = FakeDB(session=session, messages=messages)
-    monkeypatch.setattr(
-        sessions_api, "suggest_session_title",
-        lambda user_messages, session_id: "반가운 인사",
-    )
+    seen = {}
+
+    def suggest(user_messages, session_id):
+        from app.core.llm import current_usage_context
+
+        seen["context"] = current_usage_context()
+        return "반가운 인사"
+
+    monkeypatch.setattr(sessions_api, "suggest_session_title", suggest)
     result = sessions_api.suggest_title(str(SID), db=db, user=SimpleNamespace(id=UID))
 
     assert result["title"] == "반가운 인사"
     assert result["updated"] is True
     assert session.title == "반가운 인사" and db.committed
+    assert seen["context"].component == "chat"
+    assert seen["context"].user_id == UID
+    assert seen["context"].session_id == SID
 
 
 def test_title_suggestion_keeps_provisional_title_when_context_is_insufficient(monkeypatch):

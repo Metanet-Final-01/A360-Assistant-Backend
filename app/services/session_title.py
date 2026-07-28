@@ -1,9 +1,12 @@
 """Generate concise session titles from user messages only."""
 
+import logging
 import re
 import uuid
 
 from app.core import llm
+
+logger = logging.getLogger(__name__)
 
 _KEEP_TITLE = "__KEEP__"
 _MAX_TITLE_LENGTH = 60
@@ -47,6 +50,11 @@ def suggest_session_title(user_messages: list[str], session_id: uuid.UUID) -> st
             purpose="session_title",
             session_id=session_id,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            "Session title suggestion failed: session=%s error_type=%s",
+            session_id,
+            type(error).__name__,
+        )
         return None
     return normalize_title(response)

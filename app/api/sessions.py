@@ -187,9 +187,12 @@ def suggest_title(
         .order_by(models.ChatMessage.created_at.desc())
         .limit(2)
     ).scalars().all()
-    title = suggest_session_title(
-        [row.content for row in reversed(rows)], session_id=session.id
-    )
+    with usage_context(
+        component="chat", user_id=user.id if user else None, session_id=session.id
+    ):
+        title = suggest_session_title(
+            [row.content for row in reversed(rows)], session_id=session.id
+        )
     if title is None:
         return {**_session_out(session), "updated": False}
 
