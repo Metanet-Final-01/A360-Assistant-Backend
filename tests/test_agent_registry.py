@@ -5,6 +5,7 @@ LLM/DB 없이 검증한다. "v1/v2가 각자 위치에서 온전히 import되고
 위임한다"는 계약과 "버전 추가 시 목록이 코드 수정 없이 반영된다"는 원칙을 CI에서 지킨다.
 """
 
+import ast
 import importlib
 import json
 import subprocess
@@ -76,6 +77,25 @@ def test_version_isolation_v1_plan_v2_agentic():
     assert hasattr(g2, "build_agent_graph")
 
 
+def _declared_meta(version: str) -> dict | None:
+    """`vN/meta.py`가 선언한 VERSION_META를 **코드 실행 없이** 파싱한다 (파일 없으면 None).
+
+    구현(`registry._meta`)과 **독립된 오라클**이다 — 같은 로더로 기대값을 만들면 로더가 늘 `{}`를
+    돌려줘도 통과하는 동어반복이 된다. meta.py는 dict 리터럴이라 ast로 그대로 읽힌다.
+    """
+    import app.agent
+
+    path = Path(app.agent.__path__[0]) / version / "meta.py"
+    if not path.is_file():
+        return None
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "VERSION_META" for t in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    return None
+
+
 def test_available_versions_does_not_import_agent_stacks():
     """목록 조회가 **에이전트 전체 스택을 로드하지 않는다** — 콜드 컨테이너 지연의 원인 (RPA-190).
 
@@ -119,8 +139,13 @@ def test_available_versions_does_not_import_agent_stacks():
     # "안 무겁다"와 "제대로 읽었다"를 **둘 다** 본다.
     assert data["versions"], "버전 목록이 비었다"
     for v in data["versions"]:
-        assert v["label"] != v["id"], f"{v['id']}: meta.py를 못 읽어 label이 id로 폴백했다"
-        assert v["description"], f"{v['id']}: description이 비었다(meta 로드 실패)"
+        declared = _declared_meta(v["id"])
+        if declared is None:
+            continue  # meta.py 없는 버전은 프로덕션이 id 폴백을 허용 — 테스트가 더 엄격하면 안 된다
+        assert v["label"] == (declared.get("label") or v["id"]), f"{v['id']}: label이 meta.py와 다르다"
+        assert v["description"] == (declared.get("description") or ""), (
+            f"{v['id']}: description이 meta.py와 다르다"
+        )
 
 
 def test_dispatcher_keeps_public_symbol():
