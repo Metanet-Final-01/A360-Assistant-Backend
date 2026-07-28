@@ -243,6 +243,8 @@ def validate_change_envelope(envelope: Any) -> dict[str, Any]:
             raise AssuranceError("manifest base SHA does not match the report")
         if manifest.get("subject", {}).get("head_sha") != source["head_sha"]:
             raise AssuranceError("manifest head SHA does not match the workflow source")
+        if manifest.get("policy", {}).get("rollout_mode") != report["enforcement"]["mode"]:
+            raise AssuranceError("change manifest and report rollout modes do not match")
         policy_digest = manifest.get("policy", {}).get("sha256")
         manifest_digest = digests["change-manifest.json"]
         diff_digest = manifest.get("subject", {}).get("diff_sha256")
