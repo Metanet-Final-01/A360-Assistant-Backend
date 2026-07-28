@@ -65,7 +65,15 @@ def _meta_file(version: str) -> Path | None:
     """`vN/meta.py`의 실제 경로 — `_discover()`와 **같은 출처**(패키지 `__path__`)에서 찾는다.
 
     cwd나 상대경로에 기대면 탐색이 보는 폴더와 메타를 읽는 폴더가 갈릴 수 있다.
+
+    🔴 **이름을 `_discover()`와 같은 규칙(`^v\\d+$`)으로 먼저 검증한다** (Qodo #448). 탐색은 그
+    규칙으로 걸러내는데 여기서 안 걸면 둘이 서로 다른 '유효한 버전'을 갖게 된다 — 게다가 이 경로는
+    `_meta()`가 `exec_module`로 **실행**하므로, 검증을 건너뛰면 `..`가 든 값이 흘러들었을 때 의도치
+    않은 파일을 실행할 수 있다. `v`+숫자만 통과시키면 구분자·상위 이동이 원천 봉쇄된다
+    (지금은 호출자가 `_discover()` 결과만 넘기지만, 가드는 호출자의 선의에 기대지 않는다).
     """
+    if not _VERSION_RE.match(version):
+        return None
     for root in sys.modules[__package__].__path__:
         candidate = Path(root) / version / "meta.py"
         if candidate.is_file():

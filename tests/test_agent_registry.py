@@ -77,6 +77,22 @@ def test_version_isolation_v1_plan_v2_agentic():
     assert hasattr(g2, "build_agent_graph")
 
 
+@pytest.mark.parametrize(
+    "bad", ["", "v", "v1x", "..", "../v1", "v1/../v2", "v1/..", "/etc/passwd", "v1.meta"]
+)
+def test_meta_file_rejects_non_version_names(bad):
+    """`vN` 규칙에 안 맞는 이름은 경로를 만들기 전에 막는다 (Qodo #448).
+
+    `_meta()`가 이 경로를 `exec_module`로 **실행**하므로, `_discover()`가 쓰는 규칙(`^v\\d+$`)을
+    여기서도 걸어야 한다 — 안 걸면 둘이 서로 다른 '유효한 버전'을 갖게 되고, 구분자·상위 이동이
+    든 값이 흘러들면 의도치 않은 파일을 실행할 수 있다.
+    """
+    from app.agent.registry import _meta, _meta_file
+
+    assert _meta_file(bad) is None
+    assert _meta(bad) == {}  # 호출부 계약: 못 읽으면 빈 dict(목록 조회는 계속 동작)
+
+
 def _declared_meta(version: str) -> dict | None:
     """`vN/meta.py`가 선언한 VERSION_META를 **코드 실행 없이** 파싱한다 (못 정하면 None).
 
@@ -100,7 +116,10 @@ def _declared_meta(version: str) -> dict | None:
                 if isinstance(node, ast.Assign) and any(
                     isinstance(t, ast.Name) and t.id == "VERSION_META" for t in node.targets
                 ):
-                    return ast.literal_eval(node.value)
+                    declared = ast.literal_eval(node.value)
+                    # 프로덕션 `_meta()`도 `isinstance(meta, dict)`가 아니면 {}로 폴백한다.
+                    # dict가 아니면 기대값을 못 만드는 것이지 실패가 아니다(호출부가 건너뛴다).
+                    return declared if isinstance(declared, dict) else None
         except (OSError, UnicodeDecodeError, SyntaxError, ValueError, TypeError):
             return None  # 프로덕션도 {} 폴백 — 기대값을 못 만들 뿐 실패는 아니다
         return None  # 파일은 있으나 VERSION_META 선언이 없음
