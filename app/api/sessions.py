@@ -1783,7 +1783,15 @@ async def resume_turn_stream(
             detail={"code": "INVALID_CURSOR", "message": "after는 <밀리초>-<시퀀스> 형식이어야 합니다."},
         )
     session_key = str(session.id)
-    if not await turn_stream.exists(session_key, turn_id):
+    try:
+        turn_exists = await turn_stream.exists(session_key, turn_id)
+    except turn_stream.TurnStreamUnavailable as exc:
+        # 버퍼를 못 읽는 것과 "그런 턴이 없다"는 다르다 — 404로 뭉개면 클라이언트가 재시도를 포기한다.
+        raise HTTPException(
+            503,
+            detail={"code": "RESUME_UNAVAILABLE", "message": "재개 버퍼에 접근할 수 없습니다."},
+        ) from exc
+    if not turn_exists:
         raise HTTPException(
             404,
             detail={"code": "TURN_NOT_FOUND", "message": "이어받을 턴이 없습니다(만료되었거나 없음)."},
@@ -1794,32 +1802,46 @@ async def resume_turn_stream(
         # 1) 밀린 구간 따라잡기 — 페이지 단위로 받아 **받는 즉시** 흘린다.
         #    토큰 단위 버퍼라 긴 턴이면 엔트리가 수천 개다. 전량을 리스트로 만들면 첫 바이트까지
         #    지연되고 메모리도 튄다 (Qodo #455).
-        async for entry_id, frame, is_end in turn_stream.replay(session_key, turn_id, after):
-            cursor = entry_id
-            if is_end:
-                return
-            yield f"id: {entry_id}\n{frame}"
-        # 2) 실시간 이어받기 — 끝 마커를 못 본 경우를 대비해 턴 상한으로 바운드한다.
-        #    ⚠️ TURN_MAX_DURATION_SEC=0은 "상한 끔"이 계약이다(_iter_with_heartbeat와 같은 해석).
-        #       그대로 더하면 deadline이 현재시각이라 루프가 한 번도 안 돌아 재개가 죽는다 (Qodo #455).
-        max_sec = _turn_max_sec()
-        deadline = (time.monotonic() + max_sec) if max_sec > 0 else None
-        while deadline is None or time.monotonic() < deadline:
-            rows = await turn_stream.follow(session_key, turn_id, cursor, _RESUME_BLOCK_MS)
-            if not rows:
-                # 커서가 종료 마커보다 뒤면(유효한 형식의 미래 id 등) follow는 영원히 빈손이다 —
-                # 마지막 엔트리를 직접 보고 끝났으면 닫는다 (Qodo #455 3차). 형식 검증은 이 경우를
-                # 못 잡는다(형식은 맞다). 조용할 때만 확인하므로 비용도 없다.
-                if await turn_stream.ended(session_key, turn_id):
-                    return
-                # 조용한 구간에도 연결을 살려 둔다 (원 스트림과 같은 이유 — CloudFront 60초 idle).
-                yield _SSE_HEARTBEAT_FRAME
-                continue
-            for entry_id, frame, is_end in rows:
+        # 🔴 버퍼 오류는 **종결 조건**이다 (Qodo #455 4차). 읽기 헬퍼가 예외를 삼키고 빈 값을 주면
+        #    "아직 새 프레임 없음"과 구분이 안 돼, Redis가 죽은 뒤에도 상한까지(상한 0이면 무기한)
+        #    heartbeat만 흘리고 폴링마다 경고 로그를 쌓는다. 오류를 받으면 error 프레임 하나 주고
+        #    끊어 클라이언트가 재시도하게 한다.
+        try:
+            # 1) 밀린 구간 따라잡기 — 페이지 단위로 받아 **받는 즉시** 흘린다.
+            #    토큰 단위 버퍼라 긴 턴이면 엔트리가 수천 개다. 전량을 리스트로 만들면 첫 바이트까지
+            #    지연되고 메모리도 튄다 (Qodo #455).
+            async for entry_id, frame, is_end in turn_stream.replay(session_key, turn_id, after):
                 cursor = entry_id
                 if is_end:
                     return
                 yield f"id: {entry_id}\n{frame}"
+            # 2) 실시간 이어받기 — 끝 마커를 못 본 경우를 대비해 턴 상한으로 바운드한다.
+            #    ⚠️ TURN_MAX_DURATION_SEC=0은 "상한 끔"이 계약이다(_iter_with_heartbeat와 같은 해석).
+            #       그대로 더하면 deadline이 현재시각이라 루프가 한 번도 안 돌아 재개가 죽는다 (Qodo #455).
+            max_sec = _turn_max_sec()
+            deadline = (time.monotonic() + max_sec) if max_sec > 0 else None
+            while deadline is None or time.monotonic() < deadline:
+                rows = await turn_stream.follow(session_key, turn_id, cursor, _RESUME_BLOCK_MS)
+                if not rows:
+                    # 커서가 종료 마커보다 뒤면(유효한 형식의 미래 id 등) follow는 영원히 빈손이다 —
+                    # 마지막 엔트리를 직접 보고 끝났으면 닫는다 (Qodo #455 3차). 형식 검증은 이 경우를
+                    # 못 잡는다(형식은 맞다). 조용할 때만 확인하므로 비용도 없다.
+                    if await turn_stream.ended(session_key, turn_id):
+                        return
+                    # 조용한 구간에도 연결을 살려 둔다 (원 스트림과 같은 이유 — CloudFront 60초 idle).
+                    yield _SSE_HEARTBEAT_FRAME
+                    continue
+                for entry_id, frame, is_end in rows:
+                    cursor = entry_id
+                    if is_end:
+                        return
+                    yield f"id: {entry_id}\n{frame}"
+        except turn_stream.TurnStreamUnavailable:
+            logger.warning("재개 버퍼 접근 실패 — 스트림 종료: session=%s turn=%s", session_key, turn_id)
+            yield ProgressEvent(
+                event="error", stage="agent", message="재개 스트림이 중단되었습니다 — 다시 시도해주세요."
+            ).to_sse()
+            return
 
     return StreamingResponse(
         sse(),

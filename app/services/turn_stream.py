@@ -50,6 +50,18 @@ _client: Any = None
 _client_url: str | None = None
 
 
+class TurnStreamUnavailable(RuntimeError):
+    """읽기 경로에서 버퍼에 접근하지 못했다 — 호출부가 '데이터 없음'과 구분해야 한다.
+
+    🔴 **쓰기 경로와 읽기 경로는 실패 정책이 다르다** (Qodo #455 4차).
+    - 쓰기(`claim`/`publish`/`close`): 살아 있는 턴 위에서 돈다. 예외를 삼키고 저하한다 —
+      버퍼가 죽었다고 실제 답변 스트림까지 죽이면 안 된다.
+    - 읽기(`replay`/`follow`/`ended`/`exists`): 재구독 엔드포인트가 유일한 소비자다. 여기서
+      삼키면 **오류와 '아직 새 프레임 없음'이 구분되지 않아** 엔드포인트가 조용한 구간으로
+      오해하고 상한까지(상한 0이면 무기한) heartbeat만 흘린다. 그래서 올려서 끝낸다.
+    """
+
+
 def _redis_url() -> str:
     """호출 시점 읽기 — conftest가 빈 문자열로 격리한다(rag_cache와 같은 계약).
 
@@ -216,9 +228,9 @@ async def replay(session_id: str, turn_id: str, after: str | None):
         try:
             min_ = f"({cursor}" if cursor else "-"
             rows = _rows(await r.xrange(key, min=min_, count=_REPLAY_PAGE))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — 읽기 경로는 오류를 숨기지 않는다
             logger.warning("turn_stream replay 실패: turn=%s", turn_id, exc_info=True)
-            return
+            raise TurnStreamUnavailable("replay 실패") from exc
         if not rows:
             return
         for row in rows:
@@ -242,9 +254,9 @@ async def follow(session_id: str, turn_id: str, after: str, block_ms: int) -> li
         if not res:
             return []
         return _rows(res[0][1])
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — 읽기 경로는 오류를 숨기지 않는다
         logger.warning("turn_stream follow 실패: turn=%s", turn_id, exc_info=True)
-        return []
+        raise TurnStreamUnavailable("follow 실패") from exc
 
 
 async def ended(session_id: str, turn_id: str) -> bool:
@@ -260,9 +272,9 @@ async def ended(session_id: str, turn_id: str) -> bool:
     try:
         rows = _rows(await r.xrevrange(_events_key(session_id, turn_id), count=1))
         return bool(rows) and rows[0][2]
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — 읽기 경로는 오류를 숨기지 않는다
         logger.warning("turn_stream ended 조회 실패: turn=%s", turn_id, exc_info=True)
-        return False
+        raise TurnStreamUnavailable("ended 조회 실패") from exc
 
 
 async def exists(session_id: str, turn_id: str) -> bool:
@@ -272,6 +284,6 @@ async def exists(session_id: str, turn_id: str) -> bool:
         return False
     try:
         return bool(await r.exists(_events_key(session_id, turn_id)))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — 읽기 경로는 오류를 숨기지 않는다
         logger.warning("turn_stream exists 실패: turn=%s", turn_id, exc_info=True)
-        return False
+        raise TurnStreamUnavailable("exists 실패") from exc

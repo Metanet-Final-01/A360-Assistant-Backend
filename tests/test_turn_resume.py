@@ -377,3 +377,42 @@ def test_resume_with_cursor_past_end_marker_terminates(monkeypatch, redis_on):
     elapsed = time.perf_counter() - t0
     assert r.status_code == 200
     assert elapsed < 20, f"종료 마커 뒤 커서로 {elapsed:.1f}초 매달렸다 — 종결 조건이 없다"
+
+
+def test_redis_outage_during_resume_ends_stream(monkeypatch, redis_on):
+    """재구독 중 Redis가 죽으면 **빨리 끊고 error 프레임**을 준다 — 조용한 척하지 않는다.
+
+    읽기 헬퍼가 예외를 삼켜 빈 값을 주면 "아직 새 프레임 없음"과 구분이 안 돼, 상한까지
+    (상한 0이면 무기한) heartbeat만 흘리고 폴링마다 경고 로그를 쌓는다 (Qodo #455 4차).
+    """
+    key = turn_stream._events_key(str(SID), "t-outage")
+    redis_on.xadd(key, {"sse": 'data: {"event":"token","message":"BEFORE"}\n\n', "end": "0"})
+
+    async def _boom(*a, **k):
+        raise turn_stream.TurnStreamUnavailable("redis down")
+
+    monkeypatch.setattr(turn_stream, "follow", _boom)
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    t0 = time.perf_counter()
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/turns/t-outage/stream")
+    elapsed = time.perf_counter() - t0
+    assert r.status_code == 200
+    assert "BEFORE" in r.text, "장애 전까지 받은 프레임은 그대로 전달돼야 한다"
+    assert '"event":"error"' in r.text, "버퍼 장애를 알리는 error 프레임이 없다"
+    assert elapsed < 20, f"장애인데 {elapsed:.1f}초 매달렸다 — 조용한 구간으로 오해했다"
+
+
+def test_buffer_error_before_stream_is_503_not_404(monkeypatch, redis_on):
+    """버퍼를 못 읽는 것과 '그런 턴이 없다'는 다르다 — 404로 뭉개면 클라가 재시도를 포기한다."""
+    async def _boom(*a, **k):
+        raise turn_stream.TurnStreamUnavailable("redis down")
+
+    monkeypatch.setattr(turn_stream, "exists", _boom)
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/turns/whatever/stream")
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "RESUME_UNAVAILABLE"
