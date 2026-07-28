@@ -24,7 +24,9 @@ from app.services.assurance_evidence import (
 from assurance.change.foundation import (
     ALLOWED_SOURCE_EVENTS,
     AssuranceError,
+    canonical_bytes,
     canonical_digest,
+    digest_bytes,
 )
 from assurance.change.transport import load_change_envelope, validate_change_envelope
 from scripts.publish_change_assurance import publish, source_from_event, writer_url
@@ -89,6 +91,60 @@ def _envelope(tmp_path, scenario_name: str = "good_import"):
         "pull_request_number": 281,
     }
     return load_change_envelope(output, source=source)
+
+
+def _rewrite_as_legacy_observe_bundle(output: Path) -> None:
+    """Make a checksum-valid pre-Warn artifact bundle for compatibility coverage."""
+    manifest_path = output / "change-manifest.json"
+    report_path = output / "assurance-report.json"
+    integrity_path = output / "evidence-integrity.json"
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    integrity = json.loads(integrity_path.read_text(encoding="utf-8"))
+
+    manifest["policy"]["rollout_mode"] = "observe"
+    manifest_path.write_bytes(canonical_bytes(manifest))
+    manifest_digest = digest_bytes(manifest_path.read_bytes())
+
+    for reference in integrity["evidence"]:
+        if reference["uri"] == "change-manifest.json":
+            reference["sha256"] = manifest_digest
+    integrity_path.write_bytes(canonical_bytes(integrity))
+    integrity_digest = digest_bytes(integrity_path.read_bytes())
+
+    report["enforcement"]["mode"] = "observe"
+    report["manifest_evidence"]["sha256"] = manifest_digest
+    for control in report["controls"]:
+        control.pop("explanation", None)
+        if control["evidence"]["uri"] == "change-manifest.json":
+            control["evidence"]["sha256"] = manifest_digest
+        elif control["evidence"]["uri"] == "evidence-integrity.json":
+            control["evidence"]["sha256"] = integrity_digest
+    report_path.write_bytes(canonical_bytes(report))
+
+    index_path = output / "evidence-index.json"
+    index = {
+        "schema_version": "1.0",
+        "subject_sha": report["subject"]["head_sha"],
+        "artifacts": [
+            {
+                "uri": path.name,
+                "sha256": digest_bytes(path.read_bytes()),
+                "subject_sha": report["subject"]["head_sha"],
+            }
+            for path in sorted(output.glob("*.json"))
+            if path.name != "evidence-index.json"
+        ],
+    }
+    index_path.write_bytes(canonical_bytes(index))
+
+    checksums = [
+        f"{digest_bytes(path.read_bytes()).removeprefix('sha256:')}  {path.name}"
+        for path in sorted(output.glob("*"))
+        if path.is_file() and path.name != "SHA256SUMS"
+    ]
+    (output / "SHA256SUMS").write_text("\n".join(checksums) + "\n", encoding="ascii")
 
 
 @pytest.fixture(autouse=True)
@@ -175,6 +231,60 @@ def test_valid_unassured_report_is_refused_not_promoted(tmp_path):
     assert all(control["reason"] for control in non_passing)
     assert all(control["explanation"]["action"] for control in non_passing)
     assert receipt_integrity(row) is True
+
+
+def test_legacy_observe_report_is_persisted_without_warn_relabeling(tmp_path):
+    scenario = _load_scenarios()["good_import"]
+    scenario["snapshot"] = {}
+    report, output = _run_scenario(tmp_path, scenario)
+    _rewrite_as_legacy_observe_bundle(output)
+
+    envelope = load_change_envelope(output, source={
+        "repository": report["subject"]["repository"],
+        "workflow_name": "Change Assurance (Warn)",
+        "workflow_run_id": 12347,
+        "run_attempt": 1,
+        "event": "pull_request",
+        "conclusion": "success",
+        "head_sha": report["subject"]["head_sha"],
+        "pull_request_number": 283,
+    })
+    row, summary = build_change_receipt(envelope)
+
+    assert row.rollout_mode == "observe"
+    assert row.enforcement_effect == "none"
+    assert summary["assurance_verdict"] == "refused"
+    assert all(
+        control["explanation"] is None
+        for control in row.receipt_payload["controls"]
+        if control["status"] not in {"pass", "not_applicable"}
+    )
+
+
+def test_warn_report_without_explanation_stays_rejected(tmp_path):
+    envelope = _envelope(tmp_path, "good_import")
+    report = envelope["artifacts"]["assurance-report.json"]
+    report["controls"][0]["status"] = "error"
+    report["controls"][0].pop("explanation", None)
+
+    with pytest.raises(AssuranceError, match="contract validation failed"):
+        validate_change_envelope(envelope)
+
+
+def test_mixed_observe_and_warn_artifacts_stay_rejected(tmp_path):
+    envelope = _envelope(tmp_path, "good_import")
+    report = envelope["artifacts"]["assurance-report.json"]
+    report["enforcement"]["mode"] = "observe"
+    references = envelope["artifacts"]["evidence-index.json"]["artifacts"]
+    report_reference = next(
+        (reference for reference in references if reference["uri"] == "assurance-report.json"),
+        None,
+    )
+    assert report_reference is not None
+    report_reference["sha256"] = canonical_digest(report)
+
+    with pytest.raises(AssuranceError, match="rollout modes do not match"):
+        validate_change_envelope(envelope)
 
 
 def test_valid_deny_report_is_preserved_as_deny(tmp_path):

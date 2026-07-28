@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:a360:assurance:change-report:1.0",
-  "title": "A360 Change Assurance Warn report",
+  "title": "A360 Change Assurance report",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -202,30 +202,7 @@
               }
             }
           }
-        },
-        "allOf": [
-          {
-            "if": {
-              "properties": {
-                "status": {
-                  "enum": [
-                    "fail",
-                    "error",
-                    "unassured"
-                  ]
-                }
-              },
-              "required": [
-                "status"
-              ]
-            },
-            "then": {
-              "required": [
-                "explanation"
-              ]
-            }
-          }
-        ]
+        }
       }
     },
     "evidence_complete": {
@@ -263,7 +240,7 @@
       ],
       "properties": {
         "mode": {
-          "const": "warn"
+          "enum": ["observe", "warn"]
         },
         "blocks_merge": {
           "const": false
@@ -272,6 +249,38 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "enforcement": {
+            "properties": {
+              "mode": {"const": "warn"}
+            },
+            "required": ["mode"]
+          }
+        },
+        "required": ["enforcement"]
+      },
+      "then": {
+        "properties": {
+          "controls": {
+            "items": {
+              "if": {
+                "properties": {
+                  "status": {
+                    "enum": ["fail", "error", "unassured"]
+                  }
+                },
+                "required": ["status"]
+              },
+              "then": {
+                "required": ["explanation"]
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {

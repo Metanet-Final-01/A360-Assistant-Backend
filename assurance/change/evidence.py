@@ -57,8 +57,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             raise AssuranceError(f"manifest subject.{key} is not a full Git SHA")
     if not subject.get("diff_sha256", "").startswith("sha256:"):
         raise AssuranceError("manifest diff digest is missing")
-    if manifest["policy"].get("rollout_mode") != "warn":
-        raise AssuranceError("change manifest must use Warn rollout")
+    if manifest["policy"].get("rollout_mode") not in {"observe", "warn"}:
+        raise AssuranceError("change manifest has an unsupported rollout mode")
     if manifest["applicable_controls"] != list(CONTROL_ORDER):
         raise AssuranceError("manifest must declare the complete ordered control set")
 
@@ -81,8 +81,14 @@ def validate_report(report: dict[str, Any]) -> None:
         raise AssuranceError("assurance report fields do not match the v1.0 contract")
     if report["schema_version"] != SCHEMA_VERSION:
         raise AssuranceError("assurance report schema version mismatch")
-    if report["enforcement"] != {"mode": "warn", "blocks_merge": False}:
-        raise AssuranceError("Warn report cannot claim a merge blocking effect")
+    enforcement = report["enforcement"]
+    if (
+        not isinstance(enforcement, dict)
+        or enforcement.get("mode") not in {"observe", "warn"}
+        or enforcement.get("blocks_merge") is not False
+    ):
+        raise AssuranceError("assurance report has an unsupported enforcement effect")
+    is_warn = enforcement["mode"] == "warn"
     allowed_statuses = {"pass", "fail", "error", "unassured", "not_applicable"}
     statuses = {control["status"] for control in report["controls"]}
     if not statuses <= allowed_statuses:
@@ -102,11 +108,8 @@ def validate_report(report: dict[str, Any]) -> None:
                 for key in ("finding", "impact", "action")
             )
         ):
-            raise AssuranceError("control explanation does not match the Warn contract")
-        if (
-            control["status"] not in {"pass", "not_applicable"}
-            and explanation is None
-        ):
+            raise AssuranceError("control explanation does not match the assurance contract")
+        if is_warn and control["status"] not in {"pass", "not_applicable"} and explanation is None:
             raise AssuranceError("non-passing Warn control requires an explanation")
         evidence = control["evidence"]
         if evidence["subject_sha"] != report["subject"]["head_sha"]:
