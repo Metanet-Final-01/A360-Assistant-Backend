@@ -31,7 +31,7 @@ from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
 from app.schemas import AnalysisResult, ProgressEvent, Recommendation
 from app.schemas.analysis import normalize_constraints
-from app.services import alerts, budget
+from app.services import alerts, budget, turn_stream
 from app.services.assurance_evidence import persist_output_receipt
 from app.services.output_assurance import (
     OutputBoundaryContext,
@@ -1534,7 +1534,28 @@ async def agent_turn(
 
     turn_request_id = get_request_id()
 
-    async def sse():
+    # 재개 가능한 턴 (RPA-339) — 이벤트를 공유 버퍼에 미러링해, 새로고침으로 연결이 끊겨도
+    # 같은 턴을 이어받게 한다. 이미 도는 턴이 있으면 새로 시작하지 않고 그 id로 재구독하라고
+    # 알린다(새로고침 연타로 LLM 턴이 중복 실행되는 것을 막는다).
+    # Redis 미설정이면 claim이 항상 None이라 이 분기는 없는 것과 같다(기존 동작 보존).
+    turn_id = turn_stream.new_turn_id()
+    buffer_ok, busy_turn_id = await turn_stream.claim(str(session_key), turn_id)
+    if busy_turn_id:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "TURN_IN_PROGRESS",
+                "message": "이미 진행 중인 턴이 있습니다 — 해당 턴을 이어받으세요.",
+                "turn_id": busy_turn_id,
+            },
+        )
+    # 버퍼가 살아 있을 때만 "끊겨도 계속 생성"으로 동작한다. 없으면 기존 절약 정책(RPA-106:
+    # 끊기면 즉시 중단)을 그대로 쓴다 — 이어받을 수단이 없는데 비용만 쓰는 건 손해다.
+    # 🔴 설정(REDIS_URL 유무)이 아니라 **실제 선점 성공**으로 판단한다 (Qodo #455): URL은 있는데
+    #    Redis가 죽었으면 끊긴 뒤에도 생성만 계속하고 재개도 안 돼 양쪽 다 손해다.
+    resumable = buffer_ok
+
+    async def _frames():
         result_data = None
         saw_error = False
         disconnected = False
@@ -1578,8 +1599,9 @@ async def agent_turn(
                 ):
                     # 조용한 구간엔 heartbeat만 흘려 연결을 살린다 (RPA-233, CloudFront 60초 idle).
                     # 끊긴 클라이언트엔 보내지 않고 즉시 턴을 중단한다 — 계속 소비하면 비용만 나간다.
+                    # (재개 가능하면 중단하지 않는다 — 끊긴 건 '전송'뿐이고 결과는 버퍼로 간다, RPA-339)
                     if event is _HEARTBEAT:
-                        if await request.is_disconnected():
+                        if not resumable and await request.is_disconnected():
                             logger.info("클라이언트 끊김 — 턴 중단(heartbeat): session=%s", session_key)
                             _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
                             disconnected = True
@@ -1599,7 +1621,9 @@ async def agent_turn(
                     # 완료되고 끝. BaseHTTPMiddleware 조합에선 Starlette 자동 취소가 보장되지
                     # 않아 이벤트 경계마다 명시적으로 확인한다.
                     # done 전 끊김 → 미완성 턴 폐기(저장 안 함). done 후 끊김 → 저장 + 전송만 생략.
-                    if await request.is_disconnected():
+                    # ⚠️ 재개 가능하면(RPA-339) 이 절약을 끄고 끝까지 생성한다 — 새로고침한
+                    #    사용자가 이어받아야 하므로 '미완성 폐기'가 곧 답변 유실이 된다.
+                    if not resumable and await request.is_disconnected():
                         logger.info("클라이언트 끊김 — 턴 중단: session=%s", session_key)
                         _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
                         disconnected = True
@@ -1612,7 +1636,7 @@ async def agent_turn(
             # done이 마지막 이벤트면 루프가 끊김 체크 없이 끝난다(선처리 continue) — 최종
             # 전송 전에 한 번 더 확인해, 죽은 클라이언트로의 yield(전송 예외 → turn_events
             # 적재 누락)를 막는다 (CodeRabbit #165). 저장은 그대로 진행된다.
-            if not disconnected and await request.is_disconnected():
+            if not resumable and not disconnected and await request.is_disconnected():
                 logger.info("클라이언트 끊김 — 응답 전송 생략: session=%s", session_key)
                 _tev("error", "agent", "클라이언트 연결 끊김 — 전송 생략")
                 disconnected = True
@@ -1652,7 +1676,8 @@ async def agent_turn(
             _tev("error", "agent", "처리 시간이 너무 길어 중단했습니다")
             # 이미 끊긴 클라이언트에 yield하다 취소되면 아래 turn_events 적재가 건너뛰어진다.
             # 완료 응답과 같은 경계로 전송만 생략하고 관측 기록은 끝까지 저장한다.
-            if not await request.is_disconnected():
+            # (재개 가능하면 프레임은 항상 만든다 — 실제 전송 여부는 sse() 래퍼가 정한다.)
+            if resumable or not await request.is_disconnected():
                 yield ProgressEvent(
                     event="error", stage="agent", message="처리 시간이 너무 길어 중단했습니다"
                 ).to_sse()
@@ -1668,6 +1693,156 @@ async def agent_turn(
         # 타임라인 일괄 적재 — 스트림이 정상 종료된 뒤 한 번 (best-effort, threadpool).
         # 클라이언트가 중간에 끊으면 여기 못 오지만, 끊김 처리는 별도 과제(HIGH todo).
         await run_in_threadpool(_save_turn_events, session_key, turn_request_id, tev)
+
+    async def sse():
+        """생성(_frames)과 **전달**을 분리한다 (RPA-339).
+
+        모든 프레임을 재개 버퍼에 남기고, 살아 있는 클라이언트에만 흘린다. 끊기면 전송만
+        멈추고 생성은 `_frames`가 끝까지 진행한다 — 그래야 새로고침한 사용자가 같은 턴을
+        이어받고, DB 저장(`_persist_turn_result`)도 정상적으로 일어난다.
+
+        첫 프레임으로 `stage="turn_started"` + `data.turn_id`를 내려 프론트가 재구독 키를
+        확보하게 한다. `ProgressEvent.event`가 Literal이라 새 이벤트 타입을 만들지 않고
+        기존 계약 안에서 stage 값만 추가한다(가산적 — 모르는 stage는 무시하면 그만).
+        """
+        client_gone = False
+        try:
+            # ⚠️ 재개가 켜졌을 때만 낸다. 꺼져 있으면 turn_id는 쓸 데가 없고, 무엇보다
+            #    "REDIS_URL 미설정이면 도입 전과 같은 프레임 열"이라는 이 기능의 전제가 깨진다.
+            if resumable:
+                head = ProgressEvent(
+                    event="stage", stage="turn_started",
+                    data={"turn_id": turn_id, "resumable": True},
+                ).to_sse()
+                await turn_stream.publish(str(session_key), turn_id, head)
+                yield head
+            async for frame in _frames():
+                await turn_stream.publish(str(session_key), turn_id, frame)
+                if client_gone:
+                    continue
+                if resumable and await request.is_disconnected():
+                    logger.info(
+                        "클라이언트 끊김 — 전송 중단, 생성은 계속: session=%s turn=%s",
+                        session_key, turn_id,
+                    )
+                    client_gone = True
+                    continue
+                yield frame
+        finally:
+            # 정상 종료·취소·예외 어느 쪽이든 종료 마커를 남긴다 — 안 남기면 재구독자가
+            # 끝을 모르고 TTL까지 기다리고, 활성 키가 남아 다음 턴이 409로 막힌다.
+            # ⚠️ 정리에는 **시간 제한**이 있어야 한다 (Qodo #455 2차). 맨 shield만 걸면 Redis가
+            #    hang일 때 요청 완료가 무기한 멈추고, 취소돼도 정리 태스크가 배경에 무한정 남는다.
+            #    이 모듈에 이미 있는 경계를 쓴다 — `_wait_for_cleanup`: 1초 상한, 초과 시 취소 +
+            #    결과 수거, 바깥 취소는 그대로 전파. 새 정리 규약을 또 만들지 않는다.
+            close_task = asyncio.ensure_future(turn_stream.close(str(session_key), turn_id))
+            await _wait_for_cleanup(close_task, "turn_stream close")
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+_RESUME_BLOCK_MS = 1000  # follow 한 번의 대기 — 짧게 여러 번 돌아야 재끊김에 빨리 반응한다
+
+
+@router.get("/{session_id}/turns/{turn_id}/stream")
+async def resume_turn_stream(
+    session_id: str,
+    turn_id: str,
+    after: str | None = Query(None, description="마지막으로 받은 이벤트 id — 그 다음부터 재생"),
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> StreamingResponse:
+    """진행 중이거나 방금 끝난 턴을 이어받는다 — 새로고침해도 답변이 계속 흐르게 (RPA-339).
+
+    원래 SSE가 끊겨도 생성은 계속되고 모든 프레임이 버퍼에 남는다. 여기서 `after` **다음**부터
+    재생한 뒤 실시간으로 이어 붙이므로, 프론트는 **끊긴 적 없는 것과 같은 프레임 열**을 받는다
+    (프레임 원문을 가공 없이 보관·재생한다).
+
+    - `after` 미지정 = 처음부터. 프론트가 마지막 id를 모르면 화면을 통째로 다시 그린다.
+    - 각 프레임 앞에 `id:` 줄을 붙여 다음 재구독 커서를 알려준다(SSE 표준 필드).
+    - 소유권은 `_owned_session_or_404`가 보고, 버퍼 키가 **세션 네임스페이스** 안이라
+      검사한 대상과 읽는 대상이 일치한다(남의 turn_id는 여기서 존재하지 않는다).
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    if not turn_stream.enabled():
+        raise HTTPException(
+            503,
+            detail={"code": "RESUME_UNAVAILABLE", "message": "턴 재개가 비활성화되어 있습니다."},
+        )
+    # 커서는 **경계에서** 검증한다 (Qodo #455 2차). 형식이 깨진 값을 그대로 Redis로 넘기면
+    # replay/follow가 예외를 삼켜 빈 결과를 주고, 엔드포인트는 그걸 '조용한 구간'으로 오해해
+    # 상한까지(상한 0이면 무기한) heartbeat만 흘린다 — 클라이언트 입력 오류가 영구 스트림이 된다.
+    after = (after or "").strip() or None
+    if after is not None and not re.fullmatch(r"\d+-\d+", after):
+        raise HTTPException(
+            400,
+            detail={"code": "INVALID_CURSOR", "message": "after는 <밀리초>-<시퀀스> 형식이어야 합니다."},
+        )
+    session_key = str(session.id)
+    try:
+        turn_exists = await turn_stream.exists(session_key, turn_id)
+    except turn_stream.TurnStreamUnavailable as exc:
+        # 버퍼를 못 읽는 것과 "그런 턴이 없다"는 다르다 — 404로 뭉개면 클라이언트가 재시도를 포기한다.
+        raise HTTPException(
+            503,
+            detail={"code": "RESUME_UNAVAILABLE", "message": "재개 버퍼에 접근할 수 없습니다."},
+        ) from exc
+    if not turn_exists:
+        raise HTTPException(
+            404,
+            detail={"code": "TURN_NOT_FOUND", "message": "이어받을 턴이 없습니다(만료되었거나 없음)."},
+        )
+
+    async def sse():
+        cursor = after or "0-0"
+        # 1) 밀린 구간 따라잡기 — 페이지 단위로 받아 **받는 즉시** 흘린다.
+        #    토큰 단위 버퍼라 긴 턴이면 엔트리가 수천 개다. 전량을 리스트로 만들면 첫 바이트까지
+        #    지연되고 메모리도 튄다 (Qodo #455).
+        # 🔴 버퍼 오류는 **종결 조건**이다 (Qodo #455 4차). 읽기 헬퍼가 예외를 삼키고 빈 값을 주면
+        #    "아직 새 프레임 없음"과 구분이 안 돼, Redis가 죽은 뒤에도 상한까지(상한 0이면 무기한)
+        #    heartbeat만 흘리고 폴링마다 경고 로그를 쌓는다. 오류를 받으면 error 프레임 하나 주고
+        #    끊어 클라이언트가 재시도하게 한다.
+        try:
+            # 1) 밀린 구간 따라잡기 — 페이지 단위로 받아 **받는 즉시** 흘린다.
+            #    토큰 단위 버퍼라 긴 턴이면 엔트리가 수천 개다. 전량을 리스트로 만들면 첫 바이트까지
+            #    지연되고 메모리도 튄다 (Qodo #455).
+            async for entry_id, frame, is_end in turn_stream.replay(session_key, turn_id, after):
+                cursor = entry_id
+                if is_end:
+                    return
+                yield f"id: {entry_id}\n{frame}"
+            # 2) 실시간 이어받기 — 끝 마커를 못 본 경우를 대비해 턴 상한으로 바운드한다.
+            #    ⚠️ TURN_MAX_DURATION_SEC=0은 "상한 끔"이 계약이다(_iter_with_heartbeat와 같은 해석).
+            #       그대로 더하면 deadline이 현재시각이라 루프가 한 번도 안 돌아 재개가 죽는다 (Qodo #455).
+            max_sec = _turn_max_sec()
+            deadline = (time.monotonic() + max_sec) if max_sec > 0 else None
+            while deadline is None or time.monotonic() < deadline:
+                rows = await turn_stream.follow(session_key, turn_id, cursor, _RESUME_BLOCK_MS)
+                if not rows:
+                    # 커서가 종료 마커보다 뒤면(유효한 형식의 미래 id 등) follow는 영원히 빈손이다 —
+                    # 마지막 엔트리를 직접 보고 끝났으면 닫는다 (Qodo #455 3차). 형식 검증은 이 경우를
+                    # 못 잡는다(형식은 맞다). 조용할 때만 확인하므로 비용도 없다.
+                    if await turn_stream.ended(session_key, turn_id):
+                        return
+                    # 조용한 구간에도 연결을 살려 둔다 (원 스트림과 같은 이유 — CloudFront 60초 idle).
+                    yield _SSE_HEARTBEAT_FRAME
+                    continue
+                for entry_id, frame, is_end in rows:
+                    cursor = entry_id
+                    if is_end:
+                        return
+                    yield f"id: {entry_id}\n{frame}"
+        except turn_stream.TurnStreamUnavailable:
+            # 경고는 turn_stream이 exc_info와 함께 이미 남겼다 — 여기서 또 남기면 같은 사건이
+            # 두 줄로 쌓인다 (Qodo #455 5차). 여기선 스트림 종결만 담당한다.
+            yield ProgressEvent(
+                event="error", stage="agent", message="재개 스트림이 중단되었습니다 — 다시 시도해주세요."
+            ).to_sse()
+            return
 
     return StreamingResponse(
         sse(),
