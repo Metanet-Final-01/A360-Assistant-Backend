@@ -208,6 +208,67 @@ def test_patch_solution_normalizes_and_reverts_to_a360():
     assert session.solution == "a360"  # 공백 제거 + 소문자화
 
 
+def test_patch_title_persists_the_first_message_as_a_provisional_title():
+    session = _session(user_id=UID)
+    db = FakeDB(session=session)
+
+    result = sessions_api.patch_session(
+        str(SID), sessions_api.SessionPatch(title="ㅐ"), db=db, user=SimpleNamespace(id=UID)
+    )
+
+    assert result["title"] == "ㅐ"
+    assert session.title == "ㅐ" and db.committed
+
+
+def test_patch_title_rejects_blank_value():
+    session = _session(user_id=UID)
+
+    with pytest.raises(HTTPException) as error:
+        sessions_api.patch_session(
+            str(SID), sessions_api.SessionPatch(title="   "),
+            db=FakeDB(session=session), user=SimpleNamespace(id=UID),
+        )
+
+    assert error.value.status_code == 422
+
+
+def test_title_suggestion_updates_from_latest_user_messages(monkeypatch):
+    session = _session(user_id=UID)
+    messages = [
+        SimpleNamespace(role="user", content="ㅐ"),
+        SimpleNamespace(role="user", content="반가워"),
+    ]
+    db = FakeDB(session=session, messages=messages)
+    seen = {}
+
+    def suggest(user_messages, session_id):
+        from app.core.llm import current_usage_context
+
+        seen["context"] = current_usage_context()
+        return "반가운 인사"
+
+    monkeypatch.setattr(sessions_api, "suggest_session_title", suggest)
+    result = sessions_api.suggest_title(str(SID), db=db, user=SimpleNamespace(id=UID))
+
+    assert result["title"] == "반가운 인사"
+    assert result["updated"] is True
+    assert session.title == "반가운 인사" and db.committed
+    assert seen["context"].component == "chat"
+    assert seen["context"].user_id == UID
+    assert seen["context"].session_id == SID
+
+
+def test_title_suggestion_keeps_provisional_title_when_context_is_insufficient(monkeypatch):
+    session = _session(user_id=UID)
+    db = FakeDB(session=session, messages=[SimpleNamespace(role="user", content="ㅐ")])
+    monkeypatch.setattr(sessions_api, "suggest_session_title", lambda *args, **kwargs: None)
+    result = sessions_api.suggest_title(str(SID), db=db, user=SimpleNamespace(id=UID))
+
+    assert result["title"] == "채팅"
+    assert result["updated"] is False
+    assert not db.committed
+
+
 @pytest.mark.parametrize("bad", ["", "   ", "x" * 60, "drop table;", "한글솔루션"])
 def test_patch_solution_rejects_bad_values(bad):
     """자유 문자열이 세션에 굳으면 생성 경로가 통째로 갈린다 — 형식을 좁게 막는다."""

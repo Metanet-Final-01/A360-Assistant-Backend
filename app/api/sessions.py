@@ -39,6 +39,7 @@ from app.services.output_assurance import (
     finalize_persistence_observation,
     observe_recommendation_candidate,
 )
+from app.services.session_title import normalize_title, suggest_session_title
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +125,10 @@ _SOLUTION_RE = re.compile(r"^[a-z0-9][a-z0-9 ._-]{0,48}$")
 
 
 class SessionPatch(BaseModel):
-    """세션 부분 수정 — 지금은 solution만."""
+    """Update a session solution and/or display title."""
 
-    solution: str
+    solution: str | None = None
+    title: str | None = Field(None, max_length=60)
 
 
 @router.patch("/{session_id}")
@@ -143,12 +145,60 @@ def patch_session(
     — 이 엔드포인트가 그 수단이다("a360"으로 PATCH하면 원복). 프론트 대응은 RPA-286.
     """
     session = _owned_session_or_404(session_id, db, user)  # 소유권 검사
-    solution = (payload.solution or "").strip().lower()
+    if payload.solution is None:
+        if payload.title is None:
+            raise HTTPException(status_code=422, detail="No session value to update")
+        title = normalize_title(payload.title)
+        if title is None:
+            raise HTTPException(status_code=422, detail="Invalid title format")
+        session.title = title
+        db.commit()
+        return _session_out(session)
+
+    solution = payload.solution.strip().lower()
     if not _SOLUTION_RE.match(solution):
         raise HTTPException(status_code=422, detail="solution 형식이 올바르지 않습니다")
     session.solution = solution
+    if payload.title is not None:
+        title = normalize_title(payload.title)
+        if title is None:
+            raise HTTPException(status_code=422, detail="Invalid title format")
+        session.title = title
     db.commit()
     return _session_out(session)
+
+
+@router.post("/{session_id}/title-suggestion")
+def suggest_title(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """Generate a session title from the latest one or two user messages.
+
+    This endpoint is called asynchronously by the client after a completed turn.
+    A title-generation failure preserves the current title instead of affecting chat.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    rows = db.execute(
+        select(models.ChatMessage)
+        .where(models.ChatMessage.session_id == session.id)
+        .where(models.ChatMessage.role == "user")
+        .order_by(models.ChatMessage.created_at.desc())
+        .limit(2)
+    ).scalars().all()
+    with usage_context(
+        component="chat", user_id=user.id if user else None, session_id=session.id
+    ):
+        title = suggest_session_title(
+            [row.content for row in reversed(rows)], session_id=session.id
+        )
+    if title is None:
+        return {**_session_out(session), "updated": False}
+
+    session.title = title
+    db.commit()
+    return {**_session_out(session), "updated": True}
 
 
 @router.delete("/{session_id}", status_code=204)
