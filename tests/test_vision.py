@@ -2,6 +2,8 @@
 
 import io
 
+import pytest
+from PIL import Image
 from pypdf import PdfWriter
 
 from app.core import llm
@@ -36,9 +38,50 @@ def test_table_text_counts_toward_threshold(monkeypatch):
     assert vision.pages_needing_vision(parsed) == []
 
 
-def test_render_pdf_pages_produces_png():
+def test_render_pdf_pages_uses_supported_compact_image():
     images = vision.render_pdf_pages(_blank_pdf(), [1])
-    assert images[1][0].startswith(b"\x89PNG")
+    assert images[1][0].startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
+
+
+def test_rendered_page_chooses_the_smaller_supported_encoding():
+    image = Image.new("RGB", (64, 64), "white")
+
+    encoded = vision._encode_rendered_page(image)
+
+    assert encoded.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
+
+
+def test_extract_page_uses_actual_mime_and_normalizes_output(monkeypatch):
+    captured = {}
+
+    def _chat(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return "  제목  \r\n\r\n\r\n  본문  \r\n"
+
+    monkeypatch.setattr(llm, "chat", _chat)
+
+    result = vision._extract_page([b"\xff\xd8\xfffake"], None, None)
+
+    assert result == "제목\n\n본문"
+    assert captured["messages"][0]["role"] == "system"
+    image = captured["messages"][1]["content"][1]
+    assert image["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert captured["kwargs"]["purpose"] == "vision_parse"
+
+
+def test_extract_page_rejects_unsupported_image(monkeypatch):
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: "must not run")
+
+    with pytest.raises(ValueError, match="Unsupported image format at position 1"):
+        vision._extract_page([b"unsupported"], None, None)
+
+
+def test_extract_page_rejects_mixed_supported_and_unsupported_images(monkeypatch):
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: "must not run")
+
+    with pytest.raises(ValueError, match="Unsupported image format at position 2"):
+        vision._extract_page([b"\xff\xd8\xffsupported", b"unsupported"], None, None)
 
 
 def test_enrich_stream_event_order_and_merge(monkeypatch):
@@ -74,7 +117,7 @@ def test_enrich_parallel_pages_all_processed(monkeypatch):
     monkeypatch.setenv("VISION_MIN_TEXT_CHARS", "200")
     monkeypatch.setattr(llm, "chat", lambda *a, **k: "추출된 내용")
     monkeypatch.setattr(
-        vision, "render_pdf_pages", lambda content, nums: {n: [b"\x89PNGfake"] for n in nums}
+        vision, "render_pdf_pages", lambda content, nums: {n: [b"\x89PNG\r\n\x1a\nfake"] for n in nums}
     )
     parsed = {"parser": "pypdf", "pages": [_poor_page(1), _poor_page(2), _poor_page(3)],
               "full_text": "", "warnings": []}
@@ -100,7 +143,7 @@ def test_enrich_continues_when_one_page_fails(monkeypatch):
 
     monkeypatch.setattr(llm, "chat", _chat)
     monkeypatch.setattr(
-        vision, "render_pdf_pages", lambda content, nums: {n: [b"\x89PNGfake"] for n in nums}
+        vision, "render_pdf_pages", lambda content, nums: {n: [b"\x89PNG\r\n\x1a\nfake"] for n in nums}
     )
     monkeypatch.setenv("VISION_CONCURRENCY", "1")  # 실패 순서 결정적으로
     parsed = {"parser": "pypdf", "pages": [_poor_page(1), _poor_page(2)],
