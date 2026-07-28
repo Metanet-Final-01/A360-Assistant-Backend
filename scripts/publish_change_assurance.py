@@ -21,7 +21,7 @@ from assurance.change.foundation import (
 from assurance.change.transport import load_change_envelope
 
 
-WORKFLOW_NAME = "Change Assurance (Observe)"
+WORKFLOW_NAME = "Change Assurance (Warn)"
 WRITER_PATH = "/api/internal/assurance/change-receipts"
 MAX_RESPONSE_BYTES = 64 * 1024
 

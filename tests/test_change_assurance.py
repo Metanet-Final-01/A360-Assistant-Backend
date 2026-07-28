@@ -39,7 +39,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "change_assurance" / "scenarios.json"
 MANIFEST_SCHEMA = ROOT / "assurance" / "change" / "schemas" / "change-manifest.schema.json"
 REPORT_SCHEMA = ROOT / "assurance" / "change" / "schemas" / "assurance-report.schema.json"
 POLICY_SCHEMA = ROOT / "assurance" / "change" / "schemas" / "dependency-policy.schema.json"
-WORKFLOW = ROOT / ".github" / "workflows" / "change-assurance-observe.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "change-assurance-warn.yml"
 FIXED_NOW = datetime(2026, 7, 16, tzinfo=timezone.utc)
 FIXED_GIT_DATE = "2026-07-16T00:00:00Z"
 
@@ -109,7 +109,7 @@ def _policy(scenario: dict) -> dict:
         import_map["fixture_sentinel"] = "fixture-sentinel"
     return {
         "schema_version": "1.0",
-        "rollout_mode": "observe",
+        "rollout_mode": "warn",
         "policy_decision_state": "approved_fixture",
         "requirement_files": ["requirements.txt", "requirements-dev.txt"],
         "dependency_paths": ["requirements.txt", "requirements-dev.txt", "pyproject.toml"],
@@ -182,7 +182,7 @@ def test_normal_and_adversarial_fixtures_have_expected_decisions(tmp_path: Path)
             "decision": "not_evaluated",
             "changed_by_assurance": False,
         }
-        assert report["enforcement"] == {"mode": "observe", "blocks_merge": False}
+        assert report["enforcement"] == {"mode": "warn", "blocks_merge": False}
         _assert_artifact_digests(output)
 
 
@@ -1073,7 +1073,7 @@ def test_detector_error_receipt_is_nonpassing_and_schema_valid(tmp_path: Path) -
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(report)
 
 
-def test_cli_error_stays_nonblocking_in_observe(tmp_path: Path) -> None:
+def test_cli_error_warns_but_stays_nonblocking(tmp_path: Path, capsys) -> None:
     exit_code = cli_main(
         [
             "--repo",
@@ -1091,7 +1091,26 @@ def test_cli_error_stays_nonblocking_in_observe(tmp_path: Path) -> None:
     report = json.loads((tmp_path / "out" / "assurance-report.json").read_text(encoding="utf-8"))
     assert exit_code == 0
     assert report["assurance_decision"] == "unassured"
-    assert report["enforcement"]["blocks_merge"] is False
+    assert report["enforcement"] == {"mode": "warn", "blocks_merge": False}
+    output = capsys.readouterr().out
+    assert "::warning title=Change Assurance 경고: CH-01 DETECTOR_EXECUTION_ERROR::" in output
+    assert "확인/조치:" in output
+
+
+def test_nonpassing_control_contains_evidence_based_operator_guidance(
+    tmp_path: Path,
+) -> None:
+    scenario = _load_scenarios()["fake_dependency"]
+    report, _ = _run_scenario(tmp_path, scenario)
+    control = next(
+        item for item in report["controls"] if item["control_id"] == "CH-04"
+    )
+
+    assert control["status"] == "fail"
+    assert control["explanation"]["finding"]
+    assert "의존성" in control["explanation"]["impact"]
+    assert "확인" in control["explanation"]["action"]
+    assert control["evidence"]["uri"] == "dependency-evidence.json"
 
 
 def test_cli_success_derives_standard_library_change(tmp_path: Path) -> None:

@@ -1,8 +1,8 @@
-# Change Assurance Observe MVP
+# Change Assurance Warn
 
 > Jira: `RPA-180`
 >
-> 현재 모드: `Observe`
+> 현재 모드: `Warn`
 >
 > 병합 차단 효과: 없음
 
@@ -39,18 +39,18 @@ assurance-report.json + SHA256SUMS + evidence artifact
         v
 allow_candidate | deny | unassured
 
-Observe에서는 위 판정과 무관하게 기존 병합 결과를 바꾸지 않음
+Warn에서는 비통과 판정을 GitHub 경고로 표시하지만 기존 병합 결과를 바꾸지 않음
 ```
 
 ## 판정 의미
 
-| 판정 | 의미 | Observe에서의 효과 |
+| 판정 | 의미 | Warn에서의 효과 |
 |---|---|---|
-| `allow_candidate` | 적용된 control이 모두 통과했고 증거가 완전함 | 기록만 함 |
-| `deny` | 가짜 import, 미승인 dependency, 고위험 advisory, 금지 license 등 명시적 위반 | 기록만 함 |
-| `unassured` | snapshot 누락·오래됨, detector 오류, 보호 경로 변경 등으로 안전을 증명하지 못함 | 기록만 함 |
+| `allow_candidate` | 적용된 control이 모두 통과했고 증거가 완전함 | 통과 기록 |
+| `deny` | 가짜 import, 미승인 dependency, 고위험 advisory, 금지 license 등 명시적 위반 | 경고 기록, 병합 허용 |
+| `unassured` | snapshot 누락·오래됨, detector 오류, 보호 경로 변경 등으로 안전을 증명하지 못함 | 경고 기록, 병합 허용 |
 
-`unassured`는 성공이 아니다. detector 오류나 증거 누락을 `PASS`로 바꾸지 않는다. 다만 RPA-180은 측정 단계이므로
+`unassured`는 성공이 아니다. detector 오류나 증거 누락을 `PASS`로 바꾸지 않는다. 다만 Warn 단계이므로
 `enforcement.blocks_merge=false`를 고정한다.
 
 ## Control
@@ -71,7 +71,7 @@ Observe에서는 위 판정과 무관하게 기존 병합 결과를 바꾸지 �
 1. PR head와 base SHA의 merge-base에 있는 `requirements.txt`·`requirements-dev.txt` exact pin을 신뢰 기준
    allowlist로 사용한다.
 2. 새 패키지나 버전 변경은 `approved_additions`에 정확한 버전과 승인 참조가 없으면 `deny`다.
-3. 현재 `policy_decision_state=decision_needed`이며 전역 license 목록과 `high` 임계치는 Observe 측정용 제안값이지 사람 승인 정책이 아니다.
+3. 현재 `policy_decision_state=decision_needed`이며 전역 license 목록과 `high` 임계치는 Warn 측정용 제안값이지 사람 승인 정책이 아니다.
    단, `license_policy.approved_exceptions`는 Jira 등 명시적 승인 근거에 결합된 package/version/license 고정 예외다.
    세 값 중 하나라도 달라지면 예외를 적용하지 않는다.
 4. `approved_additions`와 운영 취약점 package snapshot은 의도적으로 비어 있다.
@@ -124,7 +124,7 @@ python -m assurance.change.cli `
 | `foundation.py` | 공통 계약, Git object 읽기, 격리된 설치환경 검사 |
 | `dependency_checks.py` | 요구사항·import·취약점·license·보호 경로 판정 |
 | `evidence.py` | manifest/report 계약 검증과 증거 파일 무결성 작성 |
-| `checker.py` | control 결과 조합, 최종 판정, Observe 오류 기록 |
+| `checker.py` | control 결과 조합, 최종 판정, Warn 오류·상세 사유 기록 |
 | `cli.py` | GitHub Actions와 로컬 실행 진입점 |
 
 ## 검증
@@ -148,8 +148,8 @@ python -m pytest -q tests/test_change_assurance.py
 - 취약점 snapshot의 운영 갱신 주기와 승인자는 아직 확정되지 않았다.
 - 외부 패키지를 실행하는 완전 격리·네트워크 차단 runner는 아직 없다.
 
-정책 보호와 Observe 승격 근거는 후속 운영 검증에서 다룬다. 이 MVP와 `RPA-207` 전송 코드만으로 보안 인증이나
-`Warn`·`Enforce` 승격을 주장하면 안 된다.
+Warn 운영 결과와 오탐률은 후속 운영 검증에서 확인한다. 이 구현과 `RPA-207` 전송 코드만으로 보안 인증이나
+`Enforce` 승격을 주장하면 안 된다.
 
 ## 사람 리뷰 후속 판정
 
@@ -162,7 +162,7 @@ python -m pytest -q tests/test_change_assurance.py
 
 RPA-180 derives a manifest and assurance evidence from trusted Git objects, checks dependency and import closure,
 flags protected-oracle changes, binds evidence to the exact PR head, and emits digest-addressed artifacts. It runs
-in Observe mode only: `deny` and `unassured` are real assurance decisions, but neither changes the merge outcome.
+in Warn mode: `deny` and `unassured` are real assurance decisions and visible warnings, but neither changes the merge outcome.
 The checker never installs PR dependencies or uses a network fallback. RPA-207 adds a disabled-by-default,
 default-branch publisher and dedicated Backend writer API. Protected environment configuration, policy ownership,
-branch protection, and promotion to Warn or Enforce still require operational verification.
+branch protection and promotion to Enforce still require operational verification.

@@ -289,6 +289,20 @@ def _sanitize_change_controls(controls: Any) -> list[dict[str, Any]]:
             "control_id": _safe_text(control.get("control_id"), limit=20),
             "status": _safe_text(control.get("status"), limit=30),
             "reason_code": _safe_text(control.get("reason_code"), limit=80),
+            "reason": _safe_text(control.get("reason"), limit=500),
+            "explanation": {
+                "finding": _safe_text(
+                    (control.get("explanation") or {}).get("finding"), limit=1200
+                ),
+                "impact": _safe_text(
+                    (control.get("explanation") or {}).get("impact"), limit=500
+                ),
+                "action": _safe_text(
+                    (control.get("explanation") or {}).get("action"), limit=500
+                ),
+            }
+            if isinstance(control.get("explanation"), dict)
+            else None,
             "evidence_uri": _safe_text(evidence.get("uri"), limit=120),
             "evidence_digest": _safe_text(evidence.get("sha256"), limit=71),
         })
@@ -343,6 +357,11 @@ def build_change_receipt(
     completeness_status = "complete" if evidence_complete and not missing else "incomplete"
     subject = report["subject"]
     enforcement = report["enforcement"]
+    enforcement_effect = (
+        "warned"
+        if enforcement["mode"] == "warn" and decision != "allow_candidate"
+        else "none"
+    )
     protected_evidence = envelope["artifacts"].get("protected-change-evidence.json", {})
     human_review = _sanitize_human_review(protected_evidence.get("human_review"))
     receipt_payload = {
@@ -386,7 +405,7 @@ def build_change_receipt(
         },
         "enforcement": {
             "mode": enforcement["mode"],
-            "effect": "blocked" if enforcement["blocks_merge"] else "none",
+            "effect": enforcement_effect,
         },
         "business_outcome": {
             "persisted": None,
@@ -414,7 +433,7 @@ def build_change_receipt(
         assurance_verdict=verdict,
         assurance_status=assurance_status,
         rollout_mode=enforcement["mode"],
-        enforcement_effect="blocked" if enforcement["blocks_merge"] else "none",
+        enforcement_effect=enforcement_effect,
         business_persisted=None,
         validator_version=f"change-assurance/{report['schema_version']}",
         policy_digest=facts["policy_digest"],

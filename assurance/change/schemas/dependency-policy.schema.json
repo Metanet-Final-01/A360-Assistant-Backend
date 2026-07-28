@@ -22,7 +22,7 @@
       "const": "1.0"
     },
     "rollout_mode": {
-      "const": "observe"
+      "const": "warn"
     },
     "policy_decision_state": {
       "enum": [
