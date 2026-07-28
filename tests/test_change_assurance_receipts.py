@@ -114,6 +114,7 @@ def _rewrite_as_legacy_observe_bundle(output: Path) -> None:
     integrity_digest = digest_bytes(integrity_path.read_bytes())
 
     report["enforcement"]["mode"] = "observe"
+    report["manifest_evidence"]["sha256"] = manifest_digest
     for control in report["controls"]:
         control.pop("explanation", None)
         if control["evidence"]["uri"] == "change-manifest.json":
@@ -272,7 +273,12 @@ def test_warn_report_without_explanation_stays_rejected(tmp_path):
 
 def test_mixed_observe_and_warn_artifacts_stay_rejected(tmp_path):
     envelope = _envelope(tmp_path, "good_import")
-    envelope["artifacts"]["assurance-report.json"]["enforcement"]["mode"] = "observe"
+    report = envelope["artifacts"]["assurance-report.json"]
+    report["enforcement"]["mode"] = "observe"
+    for reference in envelope["artifacts"]["evidence-index.json"]["artifacts"]:
+        if reference["uri"] == "assurance-report.json":
+            reference["sha256"] = canonical_digest(report)
+            break
 
     with pytest.raises(AssuranceError, match="rollout modes do not match"):
         validate_change_envelope(envelope)
