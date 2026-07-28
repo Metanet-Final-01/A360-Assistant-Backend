@@ -11,12 +11,14 @@
 """
 
 import importlib
+import importlib.util
 import logging
 import os
 import pkgutil
 import re
 import sys
 from functools import lru_cache
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +61,43 @@ def default_version() -> str:
     return discovered[-1] if discovered else _FALLBACK_DEFAULT
 
 
+def _meta_file(version: str) -> Path | None:
+    """`vN/meta.py`의 실제 경로 — `_discover()`와 **같은 출처**(패키지 `__path__`)에서 찾는다.
+
+    cwd나 상대경로에 기대면 탐색이 보는 폴더와 메타를 읽는 폴더가 갈릴 수 있다.
+    """
+    for root in sys.modules[__package__].__path__:
+        candidate = Path(root) / version / "meta.py"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 @lru_cache(maxsize=None)
 def _meta(version: str) -> dict:
     """버전의 경량 메타(`vN/meta.py`)만 읽는다 — 전체 에이전트 스택은 import하지 않는다.
 
     `/api/agent/versions`·FE 셀렉터가 양 버전을 실제로 구동하지 않고 목록만 얻게 한다.
     meta.py가 없거나 깨져도 빈 dict(호출부가 id로 폴백).
+
+    🔴 `importlib.import_module(f"{__package__}.{version}.meta")`를 쓰면 안 된다 (RPA-190).
+    파이썬은 하위 모듈을 올리기 전에 **부모 패키지 `app.agent.vN`의 `__init__.py`를 먼저 실행**
+    하는데, 그게 analysis·orchestrator·recommend를 끌어온다 → 목록 조회 한 번에 v1·v2·v3의
+    전체 스택(실측 72개 모듈)이 로드돼 콜드 컨테이너에서 **7.4초**가 걸렸다(관측 p95 8,094ms의
+    정체). meta.py는 dict 리터럴뿐이라 부모 패키지를 거치지 않고 파일에서 단독 실행한다
+    (실측 7,423ms → 3ms). 로드한 모듈은 `sys.modules`에 등록하지 않는다 — 등록하면 이름이
+    실제 패키지 경로와 섞여 이후 정식 import를 오염시킨다.
     """
     try:
-        mod = importlib.import_module(f"{__package__}.{version}.meta")
+        path = _meta_file(version)
+        if path is None:
+            return {}
+        # 합성 이름(패키지 경로와 무관) — 부모 패키지 import를 유발하지 않는다.
+        spec = importlib.util.spec_from_file_location(f"_agent_meta_{version}", path)
+        if spec is None or spec.loader is None:
+            return {}
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
         meta = getattr(mod, "VERSION_META", None)
         return dict(meta) if isinstance(meta, dict) else {}
     except Exception:  # noqa: BLE001 — 메타 로드 실패가 목록 조회를 막지 않게

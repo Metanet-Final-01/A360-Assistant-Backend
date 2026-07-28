@@ -6,6 +6,11 @@ LLM/DB 없이 검증한다. "v1/v2가 각자 위치에서 온전히 import되고
 """
 
 import importlib
+import json
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -69,6 +74,53 @@ def test_version_isolation_v1_plan_v2_agentic():
     g2 = importlib.import_module("app.agent.v2.recommend.graph")
     assert hasattr(g1, "build_graph") and not hasattr(g1, "build_agent_graph")
     assert hasattr(g2, "build_agent_graph")
+
+
+def test_available_versions_does_not_import_agent_stacks():
+    """목록 조회가 **에이전트 전체 스택을 로드하지 않는다** — 콜드 컨테이너 지연의 원인 (RPA-190).
+
+    `_meta()`가 `import_module("app.agent.vN.meta")`를 쓰면 파이썬이 부모 패키지
+    `app.agent.vN/__init__.py`를 먼저 실행해 analysis·orchestrator·recommend까지 끌어온다.
+    그래서 LLM도 안 부르는 목록 조회가 실측 **7.4초**(관측 p95 8,094ms)였다.
+
+    ⚠️ **서브프로세스(콜드 인터프리터)로 본다.** 같은 프로세스에서 재면 다른 테스트가 이미
+       v1·v2를 import해 둔 상태라(예: test_version_isolation_…) 실행 순서에 따라 통과해버린다 —
+       그건 이 회귀를 못 잡는 가짜 초록이다.
+    """
+    code = textwrap.dedent(
+        """
+        import json, sys
+        from app.agent import available_versions
+        versions = available_versions()
+        heavy = sorted(
+            m for m in sys.modules
+            if m.startswith("app.agent.v")
+            and any(k in m for k in ("orchestrator", "recommend", "analysis", "verify", "prompts"))
+        )
+        print(json.dumps({
+            "versions": [{"id": v["id"], "label": v["label"], "description": v["description"]}
+                         for v in versions],
+            "heavy": heavy,
+        }))
+        """
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(  # noqa: S603 — 같은 인터프리터로 우리 코드만 실행
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=repo_root, timeout=180
+    )
+    assert proc.returncode == 0, f"서브프로세스 실패:\n{proc.stderr}"
+    data = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert data["heavy"] == [], (
+        "목록 조회가 에이전트 스택을 import했다 — vN/meta.py를 부모 패키지 경유로 읽고 있다: "
+        f"{data['heavy'][:5]}"
+    )
+    # 가벼워지기만 하고 메타를 못 읽으면 label이 id로 폴백돼 조용히 빈 껍데기가 된다.
+    # "안 무겁다"와 "제대로 읽었다"를 **둘 다** 본다.
+    assert data["versions"], "버전 목록이 비었다"
+    for v in data["versions"]:
+        assert v["label"] != v["id"], f"{v['id']}: meta.py를 못 읽어 label이 id로 폴백했다"
+        assert v["description"], f"{v['id']}: description이 비었다(meta 로드 실패)"
 
 
 def test_dispatcher_keeps_public_symbol():
