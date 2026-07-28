@@ -106,6 +106,19 @@ def _get_client() -> Any | None:
     return _client
 
 
+def _read_client() -> Any:
+    """읽기 경로 전용 클라이언트 — 없으면 **접근 불가로 올린다**.
+
+    🔴 `None`을 빈 결과로 되돌리면 안 된다 (Qodo #455 5차). `REDIS_URL`은 설정됐는데 클라이언트
+    생성이 실패한 경우까지 "그런 턴 없음"(404)으로 위장돼, 클라이언트가 재시도를 포기한다.
+    쓰기 경로는 여전히 `_get_client()`를 써서 조용히 저하한다(정책이 다르다).
+    """
+    r = _get_client()
+    if r is None:
+        raise TurnStreamUnavailable("재개 버퍼 클라이언트를 만들 수 없습니다")
+    return r
+
+
 def reset_client() -> None:
     """테스트 격리용 — 다음 호출이 클라이언트를 새로 만들게 한다."""
     global _client, _client_url
@@ -219,9 +232,7 @@ async def replay(session_id: str, turn_id: str, after: str | None):
     수천 개다 — 전량을 리스트로 만들면 첫 바이트까지 지연되고 메모리도 튄다. 페이지로 끊어
     호출부가 받는 즉시 흘려보내게 한다.
     """
-    r = _get_client()
-    if r is None:
-        return
+    r = _read_client()
     key = _events_key(session_id, turn_id)
     cursor = after
     while True:
@@ -246,9 +257,7 @@ async def follow(session_id: str, turn_id: str, after: str, block_ms: int) -> li
     호출부가 이 함수를 반복 호출하는 구조라, 짧은 block을 여러 번 도는 편이 취소(클라이언트가
     또 끊김)에 빠르게 반응한다 — 한 번에 길게 막으면 그동안 응답이 없다.
     """
-    r = _get_client()
-    if r is None:
-        return []
+    r = _read_client()
     try:
         res = await r.xread({_events_key(session_id, turn_id): after}, count=200, block=block_ms)
         if not res:
@@ -266,9 +275,7 @@ async def ended(session_id: str, turn_id: str) -> bool:
     끝을 못 본다 — 마지막 엔트리를 직접 보고 종결을 판단한다 (Qodo #455 3차). 조용한 구간에서만
     호출하므로 hot path 비용이 아니다.
     """
-    r = _get_client()
-    if r is None:
-        return False
+    r = _read_client()
     try:
         rows = _rows(await r.xrevrange(_events_key(session_id, turn_id), count=1))
         return bool(rows) and rows[0][2]
@@ -279,9 +286,7 @@ async def ended(session_id: str, turn_id: str) -> bool:
 
 async def exists(session_id: str, turn_id: str) -> bool:
     """버퍼가 아직 살아 있나 — 만료·오타 turn_id를 404로 가르기 위해."""
-    r = _get_client()
-    if r is None:
-        return False
+    r = _read_client()
     try:
         return bool(await r.exists(_events_key(session_id, turn_id)))
     except Exception as exc:  # noqa: BLE001 — 읽기 경로는 오류를 숨기지 않는다

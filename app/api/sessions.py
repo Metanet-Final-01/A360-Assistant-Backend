@@ -1837,7 +1837,8 @@ async def resume_turn_stream(
                         return
                     yield f"id: {entry_id}\n{frame}"
         except turn_stream.TurnStreamUnavailable:
-            logger.warning("재개 버퍼 접근 실패 — 스트림 종료: session=%s turn=%s", session_key, turn_id)
+            # 경고는 turn_stream이 exc_info와 함께 이미 남겼다 — 여기서 또 남기면 같은 사건이
+            # 두 줄로 쌓인다 (Qodo #455 5차). 여기선 스트림 종결만 담당한다.
             yield ProgressEvent(
                 event="error", stage="agent", message="재개 스트림이 중단되었습니다 — 다시 시도해주세요."
             ).to_sse()

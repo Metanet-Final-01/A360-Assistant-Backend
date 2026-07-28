@@ -416,3 +416,23 @@ def test_buffer_error_before_stream_is_503_not_404(monkeypatch, redis_on):
         r = c.get(f"/api/sessions/{SID}/turns/whatever/stream")
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "RESUME_UNAVAILABLE"
+
+
+def test_client_init_failure_is_503_not_404(monkeypatch):
+    """`REDIS_URL`은 있는데 **클라이언트 생성이 실패**하면 503 — 404로 위장하면 안 된다.
+
+    404는 "그런 턴이 없다"는 뜻이라 클라이언트가 재시도를 포기한다. 버퍼에 못 닿는 것은
+    일시 장애일 수 있어 의미가 다르다 (Qodo #455 5차 — 4차 수정이 놓친 클라이언트 초기화 경로).
+    """
+    def _boom(url):
+        raise ConnectionError("cannot connect")
+
+    monkeypatch.setenv("REDIS_URL", "redis://unreachable")
+    monkeypatch.setattr(turn_stream, "_make_client", _boom)
+    turn_stream.reset_client()
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/turns/whatever/stream")
+    assert r.status_code == 503, "클라이언트 생성 실패가 404(턴 없음)로 위장됐다"
+    assert r.json()["detail"]["code"] == "RESUME_UNAVAILABLE"
