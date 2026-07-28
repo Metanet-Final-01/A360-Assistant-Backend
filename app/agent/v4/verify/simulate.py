@@ -10,6 +10,10 @@ LLM에게 "머릿속으로 실행해봐"라고만 하면 트레이스 자체를 
   - error   : Try 도중 실패 가정 — Try 표시 후 Catch·Finally 경로
   - alt     : If는 Else(또는 마지막) 분기, Loop 본문 0회 — '아무 일도 없는' 경로
 이것은 dryrun 근사이지 실행 보증이 아니다 — 호출부가 notes/confidence에 그 성격을 남긴다.
+
+⚠ **점수축과 결함축을 가른다** (RPA-298): `error` 경로는 Error handler가 있는 흐름도에만
+생기고 통과가 가장 어렵다. 통과율에 섞으면 예외 처리를 넣은 후보만 벌점을 받는다 —
+그래서 `nominal_pass_rate`(happy·alt)만 점수로 쓰고, 예외 경로 결함은 finding으로 낸다.
 """
 
 from pathlib import Path
@@ -32,16 +36,55 @@ class TraceVerdict(BaseModel):
     issues: list[str] = Field(default_factory=list, description="경로가 목적 달성에 실패하는 이유들")
 
 
+# 정상 경로(점수축)와 예외 경로(결함축)를 가르는 경계. `error`는 Error handler가 있는
+# 흐름도에만 생기므로 통과율에 섞으면 **예외 처리를 넣을수록 점수가 깎인다**(아래 참조).
+_ERROR_TRACE = "error"
+
+
 class SimulationReport(BaseModel):
-    """L3 판정 결과 — flow_confidence의 시뮬레이션 통과율 원료."""
+    """L3 판정 결과 — 정상 경로 통과율(점수축)과 예외 경로 판정(결함축)을 **분리**한다."""
 
     verdicts: list[TraceVerdict] = Field(default_factory=list)
 
     @property
-    def pass_rate(self) -> float:
-        if not self.verdicts:
+    def nominal_pass_rate(self) -> float:
+        """`happy`·`alt` 통과율 — deterministic_score·flow_confidence가 쓰는 값.
+
+        ## 왜 `error`를 빼는가 (실측, 2026-07-28)
+
+            00:02  예외처리 없음 → 트레이스 2개 → 통과율 1.00
+            00:05  예외처리 없음 → 트레이스 2개 → 통과율 0.50
+            00:07  예외처리 있음 → 트레이스 3개 → 통과율 0.00
+
+        `error` 트레이스는 **Error handler가 있는 흐름도에만** 만들어진다(build_traces의
+        `has_eh` 게이트). 그런데 그 경로는 통과가 가장 어렵다 — Catch가 실제로 수습하고,
+        Finally가 정리하고, 오류 뒤 후속 단계가 안 돌아야 한다. 통과율에 섞으면
+        **예외 처리를 넣은 후보만 심사를 하나 더 받고 점수가 깎인다.**
+
+        그 벌점이 다른 신호들과 같은 방향으로 겹쳐 있었다: R12(예외 처리 없음)는 warning이라
+        교정 목적 함수에서 빠지고, 회귀 가드는 Try/Catch wrap을 '가중합 무변화'로 항상
+        폐기한다. 즉 시스템 전체가 예외 처리를 억제하고 있었고, 산출물이 평면으로 나왔다.
+
+        예외 경로의 결함이 사라지는 것은 아니다 — `from_simulation`이 major finding으로
+        내보내 surgeon에게 전달한다. 점수에서 빼고 **결함으로 옮긴** 것이다.
+        """
+        nominal = [v for v in self.verdicts if v.trace_id != _ERROR_TRACE]
+        if not nominal:
             return 1.0
-        return sum(1 for v in self.verdicts if v.ok) / len(self.verdicts)
+        return sum(1 for v in nominal if v.ok) / len(nominal)
+
+    @property
+    def error_path_ok(self) -> bool | None:
+        """예외 경로 판정. None은 '판정 안 함'이다 — 예외 처리가 없어 경로 자체가 없었다는 뜻.
+
+        False와 None을 구별하는 이유: 전자는 "예외 처리가 있는데 수습을 못 한다", 후자는
+        "예외 처리가 아예 없다"로 처방이 다르다. 하나로 뭉치면 예외 처리가 없는 흐름도가
+        '예외 경로 통과'로 보인다(모름 → 침묵 원칙).
+        """
+        for v in self.verdicts:
+            if v.trace_id == _ERROR_TRACE:
+                return v.ok
+        return None
 
 
 def _fmt_action(action: dict, note: str = "") -> str:
@@ -170,7 +213,7 @@ def run_simulation(spec: dict, flow: dict, *, purpose: str = "verify_simulate") 
         model_cls=SimulationReport,
     )
     # 판정 무결성: 트레이서가 만들지 않은 경로 판정은 버리고, 판정이 누락된 경로는
-    # 보수적으로 실패 처리한다 — 누락을 빼고 나누면 pass_rate가 부푼다(전량 누락 시 1.0).
+    # 보수적으로 실패 처리한다 — 누락을 빼고 나누면 통과율이 부푼다(전량 누락 시 1.0).
     report.verdicts = [v for v in report.verdicts if v.trace_id in traces]
     judged = {v.trace_id for v in report.verdicts}
     for tid in traces:

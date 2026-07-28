@@ -134,7 +134,11 @@ class CandidateReport(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
     must_coverage: float | None = None
     gate_failures: list[str] = Field(default_factory=list)  # must인데 missing인 req_id들
+    # 정상 경로(happy·alt) 통과율만 담는다 — 예외 경로를 섞으면 Try/Catch를 넣은 후보만
+    # 심사가 하나 늘어 벌점을 받는다(verify.simulate.nominal_pass_rate의 실측).
     sim_pass_rate: float | None = None
+    # 예외 경로 판정. None은 '예외 처리가 없어 경로 자체가 없었다' — False(수습 실패)와 다르다.
+    error_path_ok: bool | None = None
     coverage_by_step: dict[str, str] = Field(default_factory=dict)
     coverage_by_req: dict[str, str] = Field(default_factory=dict)
 

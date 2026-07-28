@@ -585,7 +585,10 @@ async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict,
         findings=fnd,
         must_coverage=coverage.must_coverage if coverage is not None else None,
         gate_failures=[e.req_id for e in coverage.hard_gate_failures()] if coverage is not None else [],
-        sim_pass_rate=sim.pass_rate if sim is not None else None,
+        # 정상 경로(happy·alt)만 점수로 쓴다 — 예외 경로를 섞으면 Try/Catch를 넣은 후보만
+        # 심사가 하나 늘어 벌점을 받는다(simulate.nominal_pass_rate의 실측).
+        sim_pass_rate=sim.nominal_pass_rate if sim is not None else None,
+        error_path_ok=sim.error_path_ok if sim is not None else None,
         coverage_by_step=cov_by_step,
         coverage_by_req=cov_by_req,
     )
@@ -634,6 +637,8 @@ def _emit_candidate_scorecard(reports, verdict: dict, attempted: int) -> None:
             "actions": _flow_action_count(getattr(r, "flow", None) or {}),
             "must_coverage": getattr(r, "must_coverage", None),
             "sim_pass_rate": getattr(r, "sim_pass_rate", None),
+            # None(예외 처리 없음)과 False(수습 실패)를 구별해 남긴다 — 처방이 다르다.
+            "error_path_ok": getattr(r, "error_path_ok", None),
             "gate_failures": len(getattr(r, "gate_failures", None) or []),
             "det": det() if callable(det) else None,
             "judge": (scores.get(cid) or {}).get("total"),
@@ -864,7 +869,7 @@ async def refine_draft(draft: DraftResult, ctx=None, *, deadline_mono: float | N
         from ..verify.simulate import run_simulation
         try:
             async with sem:
-                sim_rate = (await asyncio.to_thread(run_simulation, spec, flow)).pass_rate
+                sim_rate = (await asyncio.to_thread(run_simulation, spec, flow)).nominal_pass_rate
         except Exception as e:  # noqa: BLE001
             logger.warning("최종 L3 재실행 실패 — 승자 통과율 재사용: %s", e)
     must_cov = coverage.must_coverage if coverage is not None else winner_report.get("must_coverage")

@@ -217,13 +217,26 @@ def from_coverage(report) -> list[Finding]:
 
 
 def from_simulation(report) -> list[Finding]:
-    """L3 SimulationReport → Finding 목록. 실행 서사가 깨지는 경로는 major."""
+    """L3 SimulationReport → Finding 목록. 실행 서사가 깨지는 경로는 major.
+
+    예외 경로(`error`) 실패가 여기로 온다는 것이 계약이다 — 통과율(점수축)에서 뺀 대신
+    **결함축으로 옮긴** 자리이므로(simulate.nominal_pass_rate 참조), 이 변환이 빠지면
+    "오류가 나도 봇이 계속 돌아 빈 메일을 보낸다" 같은 결함이 통째로 사라진다.
+    수리 힌트를 붙여 surgeon이 무엇을 해야 하는지 알게 한다 — L3 결함은 규칙 이름이 없어
+    (rule=None) 프롬프트에서 맥락 없는 한 줄로 보이기 쉽다.
+    """
     findings: list[Finding] = []
     for v in report.verdicts:
         if v.ok:
             continue
+        hint = (
+            "예외 경로 — Catch가 실제로 수습하거나, 수습이 불가능하면 그 뒤 단계가 "
+            "실행되지 않도록 구조를 바꾸세요"
+            if v.trace_id == "error" else None
+        )
         for issue in v.issues or ["경로 판정 실패"]:
             findings.append(
-                Finding(layer="L3", severity="major", message=f"[{v.trace_id}] {issue}")
+                Finding(layer="L3", severity="major",
+                        message=f"[{v.trace_id}] {issue}", fix_hint=hint)
             )
     return findings
