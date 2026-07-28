@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 # 세션을 여는/닫는 액션의 이름 패턴. 액션명 **앞머리**만 본다 — 중간 일치를 허용하면
 # "Close spreadsheet after reopen" 같은 서술형 이름이 양쪽에 다 걸린다.
+# 앞머리로 못 잡는 슬러그 표기(`excelAdvancedPackageCloseAction`)는 아래 ③ 닫기 보강이
+# **opener 보유 패키지로 좁혀** 담당한다.
 _OPENER_RE = re.compile(r"^\s*(open|connect|start\s+session|log\s?in)\b", re.IGNORECASE)
 _CLOSER_RE = re.compile(r"^\s*(close|disconnect|end\s+session|log\s?out)\b", re.IGNORECASE)
 
@@ -148,7 +150,16 @@ def derive_session_registry(
 ) -> SessionRegistry:
     """세션 opener/closer를 카탈로그에서 유도한다. 유도가 비면 폴백 상수를 쓴다.
 
-    게이팅이 핵심이다 — 액션명 정규식만 쓰면 세션과 무관한 `File/Open`이 opener로 잡힌다.
+    신호는 두 층이고 **명시 신호가 이긴다**:
+
+    ① 명시 — 스펙의 `session_role`("opener"/"closer")와 `return_type == "SESSION"`.
+       카탈로그 빌드가 붙인 값이라 오탐 위험이 없어 **패키지 게이팅 없이** 채택한다.
+    ② 이름 — `_OPENER_RE`/`_CLOSER_RE`. 이쪽은 세션 파라미터를 가진 패키지(또는 ①이 잡은
+       패키지) 안에서만 본다. 게이팅이 없으면 세션과 무관한 `File/Open`이 opener가 된다.
+
+    ①이 필요한 이유(v3에서 이식): `sessionName`을 **TEXT**로 받는 표기 세대가 있어
+    SESSION 타입 파라미터만으로 게이팅하면 그 패키지가 통째로 빠진다 — 실제 카탈로그의
+    `WebAutomation/StartSessionWebAutomation`(return_type=SESSION)이 그 사례다.
     """
 
     def build() -> SessionRegistry:
@@ -160,21 +171,56 @@ def derive_session_registry(
                 source="constants" if (fallback_openers or fallback_closers) else "empty",
             )
 
+        openers: set[tuple[str, str]] = set()
+        closers: set[tuple[str, str]] = set()
+
+        # ① 카탈로그가 **명시한** 역할 — 게이팅 없이 채택한다.
+        # 게이팅은 이름 정규식이 `File/Open` 같은 것을 opener로 잡는 것을 막으려고 있는데,
+        # 명시 신호에는 그 위험이 없다. 이 두 신호가 없으면 세션 파라미터를 SESSION 타입으로
+        # 선언하지 않은 패키지(`sessionName`을 TEXT로 받는 세대)가 통째로 빠진다.
+        explicit_packages: set[str] = set()
+        for spec in specs:
+            pkg, act = spec.get("package"), spec.get("action")
+            if not pkg or not act:
+                continue
+            role = str(spec.get("session_role") or "").strip().lower()
+            rt = str(spec.get("return_type") or "").strip().upper()
+            if role == "opener" or rt == _SESSION_PARAM_TYPE:
+                openers.add((pkg, act))
+                explicit_packages.add(pkg)
+            elif role == "closer":
+                closers.add((pkg, act))
+                explicit_packages.add(pkg)
+
+        # ② 이름 규칙 — 세션을 다루는 것이 확실한 패키지 안에서만.
         session_packages = {
             spec.get("package")
             for spec in specs
             if spec.get("package") and _has_session_param(spec)
-        }
-
-        openers: set[tuple[str, str]] = set()
-        closers: set[tuple[str, str]] = set()
+        } | explicit_packages
         for spec in specs:
             pkg, act = spec.get("package"), spec.get("action")
             if not pkg or not act or pkg not in session_packages:
                 continue
+            if (pkg, act) in openers or (pkg, act) in closers:
+                continue  # 명시 신호가 이긴다
             if _OPENER_RE.match(act):
                 openers.add((pkg, act))
             elif _CLOSER_RE.match(act):
+                closers.add((pkg, act))
+
+        # ③ 닫기 보강 — opener를 보유한 패키지 **안에서만** substring으로 본다 (v3에서 이식).
+        # 앞머리 앵커는 `excelAdvancedPackageCloseAction` 같은 슬러그 표기를 구조적으로 못
+        # 잡는다(이름이 패키지명으로 시작한다). 여는 것만 유도되고 닫는 것이 안 잡히면
+        # R8(세션 미종료)이 **모든 흐름도에서** 헛발화한다 — 그게 더 나쁘다.
+        # 게이팅이 오탐을 막는다: opener가 없는 패키지의 `File/CloseHandle`은 안 걸린다.
+        opener_packages = {p for p, _ in openers}
+        for spec in specs:
+            pkg, act = spec.get("package"), spec.get("action")
+            if not pkg or not act or pkg not in opener_packages or (pkg, act) in openers:
+                continue
+            low = act.lower()
+            if "close" in low or ("end" in low and "session" in low):
                 closers.add((pkg, act))
 
         derived_count = len(openers) + len(closers)

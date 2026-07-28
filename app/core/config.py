@@ -110,21 +110,8 @@ REGISTRY: dict[str, EnvSpec] = {
     "LLM_CONNECT_TIMEOUT_SECONDS": EnvSpec("5.0", cast=float, group="llm", doc="LLM 연결 타임아웃(초)"),
     "LLM_MAX_RETRIES": EnvSpec("2", cast=int, group="llm", doc="LLM 재시도 횟수"),
     "AGENT_VERSION": EnvSpec(None, group="llm", doc="에이전트 그래프 버전 선택 (v1/v2/v3, 미설정=기본)"),
-    # v4 심판 반증 모드 토글. 켜짐(기본)이면 심판이 판정 1콜 → 1+N+3콜(후보 N=2~3이므로
-    # 6~7콜)로 늘어난다 — 초안 구간 비용/지연이 걸린 스위치라 끌 수 있어야 한다.
-    # false면 v3와 같은 채점형 1콜 경로로 되돌아간다 (app/agent/v4/orchestrator/judge.py).
-    "V4_JUDGE_REFUTATION": EnvSpec("true", cast=_bool, group="llm",
-        doc="v4 심판 반증 모드 (맹목 기대·반증·중요 슬롯 다수결). false=레거시 채점형 1콜"),
-    # v4 교정(surgeon EditOps) 라운드 상한. 0이면 교정을 아예 하지 않고 **초안을 그대로
-    # 확정**한다 — 검수 결과는 표시용으로 계속 붙는다.
-    #
-    # 왜 끄는 스위치가 필요한가 (실측 2026-07-28 00:46): 교정 라운드 1이 가중합을 200→0으로
-    # 만들었는데, 산출물은 버튼 클릭이 `Browser/Call a JavaScript function`이 되고 데이터를
-    # 읽는 액션이 하나도 없는 흐름도였다. 교정의 목적 함수가 '정적 위반 + req_id 배정'뿐이라,
-    # req_id를 단 채 아무 액션으로 갈아끼우면 만점이 된다. compose 후보 자체는 그보다 나았다.
-    # 즉 "교정이 순이득인가"가 열린 질문이고, 코드를 지우기 전에 이 스위치로 재본다.
-    "V4_REFINE_MAX_ROUNDS": EnvSpec("8", cast=int, group="llm", dynamic=True,
-        doc="v4 교정 라운드 상한. 0=교정 끄고 초안 확정(검수 표시는 유지)"),
+    # (V4_JUDGE_REFUTATION·V4_REFINE_MAX_ROUNDS는 v4 폐기와 함께 제거됐다. .env에 남아 있어도
+    #  레지스트리에 없는 키는 무시되므로 해가 없다 — 정리는 운영 편의 문제다.)
     # LLM 단가(1M 토큰당 USD) — os.environ[]로 읽는 보조 모델 폴백 단가 (llm.py). 미설정 시
     # None → 비용 계산 생략(기존 동작). RPA-224 래칫이 environ[]를 못 잡아 누락됐던 키들.
     "LLM_INPUT_COST_PER_1M": EnvSpec(None, cast=float, group="llm", doc="입력 토큰 1M당 USD"),

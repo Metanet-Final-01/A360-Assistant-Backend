@@ -311,16 +311,49 @@ def test_derive_survives_broken_catalog():
     assert r.source == "constants" and r.usable
 
 
-def test_knowledge_layer_not_imported_by_legacy_versions():
-    """v1~v3는 지식층을 쓰지 않는다 — 비교 셀렉터가 오염되면 버전 비교가 무의미해진다."""
+def test_knowledge_layer_not_imported_by_frozen_versions():
+    """v1·v2는 지식층을 쓰지 않는다 — 얼린 기준선이라 어휘가 바뀌면 비교가 무의미해진다.
+
+    v3는 **의도적으로 제외**한다. 원래 이 테스트는 v1~v3를 다 막아 v4와의 비교 셀렉터를
+    지켰는데, v4가 폐기되고 v3가 운영 대상이 되면서 전제가 뒤집혔다 — v3의 수기 어휘가
+    바로 고칠 대상이다(v3/recommend/research.py의 `_STRUCTURAL_CANDIDATES` 주석이
+    "정본 어휘층이 생기면 그쪽으로 이관 예정"이라고 예고해 둔 그 이관이다).
+    """
     from pathlib import Path
 
     agent_root = Path(__file__).resolve().parent.parent / "app" / "agent"
     offenders = [
         f"{p.relative_to(agent_root)}:{i}"
-        for ver in ("v1", "v2", "v3")
+        for ver in ("v1", "v2")
         for p in (agent_root / ver).rglob("*.py")
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
         if "agent.knowledge" in line or "from ..knowledge" in line
     ]
-    assert not offenders, f"레거시 버전이 지식층을 import한다: {offenders}"
+    assert not offenders, f"얼린 버전이 지식층을 import한다: {offenders}"
+
+
+def test_명시_신호는_패키지_게이팅_없이_잡는다():
+    """🔴 v3에서 이식한 신호 — `sessionName`을 TEXT로 받는 세대가 통째로 빠지던 구멍.
+
+    SESSION 타입 파라미터만으로 게이팅하면 `WebAutomation/StartSessionWebAutomation`처럼
+    `return_type=SESSION`을 명시한 opener가 안 잡힌다. 명시 신호는 카탈로그 빌드가 붙인
+    값이라 이름 정규식과 달리 오탐 위험이 없으므로 게이팅 밖에서 채택한다.
+    """
+    catalog = _StubCatalog([
+        {"package": "WebAutomation", "action": "StartSessionWebAutomation",
+         "return_type": "SESSION", "parameters": [{"name": "sessionName", "type": "TEXT"}]},
+        {"package": "DocHub", "action": "무엇이든", "session_role": "closer", "parameters": []},
+    ])
+    reg = derive.derive_session_registry(catalog)
+
+    assert ("WebAutomation", "StartSessionWebAutomation") in reg.openers
+    assert ("DocHub", "무엇이든") in reg.closers
+
+
+def test_이름_규칙은_여전히_게이팅된다():
+    """명시 신호를 게이팅 밖으로 뺀 것이 이름 규칙까지 푼 것은 아니다 —
+    `File/Open`이 opener가 되면 R7/R8이 전부 헛발화한다."""
+    catalog = _StubCatalog([
+        {"package": "File", "action": "Open", "parameters": [{"name": "path", "type": "TEXT"}]},
+    ])
+    assert derive.derive_session_registry(catalog).openers == frozenset()

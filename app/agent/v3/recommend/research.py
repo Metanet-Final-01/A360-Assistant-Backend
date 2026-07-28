@@ -17,6 +17,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from app.agent.knowledge.derive import derive_structural_actions
+
 from ..orchestrator.jsonio import chat_json
 from ..verify.checker import derive_session_registry
 from .stream import emit
@@ -42,9 +44,11 @@ _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
 # 부재 → Continue 오용, 세션 opener 부재 → 세션 생명주기 통누락) 결정론으로 보완한다.
 # 카탈로그 표기 세대가 바뀔 때마다 이 목록이 깨지는 회귀가 반복됐다(과거 "ifPackageIfAction"
 # MISS로 Else If 오용 — 정준환 실측 / 2026-07-18 재적재로 9개 중 8개 MISS 재발).
-# 대응: 알려진 표기 세대를 전부 병기한다 — structural_complement가 카탈로그 조회로 존재하는
-# 것만 남기므로, 현재 연결된 카탈로그(네온 구표기든 v2 문서 정본이든)에 맞는 이름이 자동
-# 선택되고 나머지는 무해하게 걸러진다. 정본 어휘층(별칭 사전)이 생기면 그쪽으로 이관 예정.
+# ⚠ **이 목록은 폴백이다.** 위 주석이 예고한 "정본 어휘층"이 `app.agent.knowledge`로
+# 만들어졌고, `derive_structural_actions(catalog)`가 카탈로그의 제어 흐름 패키지 액션을
+# **전량** 열거한다. 수기 병기는 아무리 늘려도 다음 세대를 못 따라가고, 실측에서
+# 실재 39개 중 29개를 놓치고 있었다(Loop 이터레이터 변형이 20여 개다).
+# 유도가 빈 결과를 낼 때(카탈로그 순회 불가·테스트 스텁)만 이 목록이 쓰인다.
 _STRUCTURAL_CANDIDATES: list[tuple[str, str]] = [
     # v2 문서 정본 표기 (khub identity 카탈로그, 2026-07-19)
     ("Loop", "Loop"),
@@ -92,14 +96,17 @@ def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, s
     ① 메뉴에 등장한 패키지의 세션 opener/closer (derive_session_registry 재사용) —
        업무 액션이 뽑혔는데 여닫기가 빠지는 연쇄(세션 생명주기 통누락)를 차단한다.
     ② 제어 흐름 구조 액션(Loop 이터레이터·If·Error handler·Step) — 요구사항 질의로는
-       절대 검색되지 않지만 모든 흐름도에 필요한 어휘다.
+       절대 검색되지 않지만 모든 흐름도에 필요한 어휘다. **카탈로그에서 전량 유도한다**
+       (`derive_structural_actions`) — 수기 병기 목록은 표기 세대가 바뀔 때마다 깨졌고
+       실측에서 실재 39개 중 29개를 놓치고 있었다. 유도가 비면 그 목록으로 폴백한다.
     카탈로그에 실재하는 것만 반환한다(폐쇄어휘 유지).
     """
     openers, closers = derive_session_registry(catalog)
     candidates: list[tuple[str, str]] = [
         key for key in sorted(openers | closers) if key[0] in menu_packages
     ]
-    candidates += _STRUCTURAL_CANDIDATES
+    derived = derive_structural_actions(catalog)
+    candidates += list(derived) if derived else _STRUCTURAL_CANDIDATES
     out: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for pkg, act in candidates:

@@ -37,10 +37,16 @@ VarRef)다. composer 명시가 1차이고 `$var$` 파싱이 교차 보정한다 
 유도한다(derive_session_registry) — 커버리지가 상수 3개 패키지에 갇히지 않게.
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 
+from app.agent.knowledge import derive as knowledge_derive
+from app.agent.knowledge import lexicon
+
 from .catalog import CatalogLookup
+
+logger = logging.getLogger(__name__)
 
 # 본문(children)을 가질 수 있는 컨테이너 액션. A360에는 임의 병합점이 없어
 # 분기/반복 블록이 끝나면 다음 형제로 이어진다 — 컨테이너만 children을 갖는다.
@@ -51,10 +57,14 @@ from .catalog import CatalogLookup
 # 헛위반(R6)을 만든다 — 실제로 구 봇 JSON 표기(ErrorHandler/try)가 전부 불일치해
 # 에이전트가 Loop/If/Try를 올바르게 써도 재생성을 유발했다. A360에서 본문을 갖는 건
 # 이 제어 흐름 패키지들뿐이므로 패키지로 판정하고, 본문이 없는 게 명백한 액션만 뺀다.
-CONTAINER_PACKAGES: frozenset[str] = frozenset(
-    {"Loop", "If", "Step", "Error handler", "Trigger loop"}
-)
+# 공용 지식층에서 온다 — A360 언어 수준 어휘라 카탈로그 재적재로 거짓이 되지 않는다.
+CONTAINER_PACKAGES: frozenset[str] = lexicon.CONTAINER_PACKAGES
+
 # 컨테이너 패키지 소속이지만 본문(children)을 갖지 않는 액션 — 제어 이동/신호뿐이다.
+# ⚠ 이 3쌍은 **현행 카탈로그에 전부 부재**다(llm_agent 소싱 이후 표기가 바뀌었다). 그래서
+# `Loop/Break`가 컨테이너로 오판돼 "본문 없는 컨테이너"(R14) 헛위반이 났다. 이제
+# `container_exceptions(catalog)`가 카탈로그에서 실재 액션으로 유도하고, 이 상수는
+# 유도가 빈 결과를 낼 때(카탈로그 순회 불가·테스트 스텁)의 폴백으로만 남는다.
 NON_CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
     {
         ("Loop", "loopPackageBreakAction"),
@@ -64,9 +74,27 @@ NON_CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def is_container(package: str | None, action: str | None) -> bool:
-    """이 액션이 children(본문)을 가질 수 있는 컨테이너인지 판정한다 — R6 기준."""
-    return package in CONTAINER_PACKAGES and (package, action) not in NON_CONTAINER_ACTIONS
+def container_exceptions(catalog=None) -> frozenset[tuple[str, str]]:
+    """카탈로그에서 유도한 '본문 없는 컨테이너 액션'. 유도가 비면 수기 상수 폴백."""
+    if catalog is None:
+        return NON_CONTAINER_ACTIONS
+    return knowledge_derive.derive_container_exceptions(catalog) or NON_CONTAINER_ACTIONS
+
+
+def is_container(
+    package: str | None,
+    action: str | None,
+    *,
+    non_container: frozenset[tuple[str, str]] | None = None,
+) -> bool:
+    """이 액션이 children(본문)을 가질 수 있는 컨테이너인지 판정한다 — R6 기준.
+
+    `non_container`를 안 주면 수기 상수를 쓴다(하위호환). 카탈로그를 아는 호출부는
+    `container_exceptions(catalog)` 결과를 넘겨 Break·Continue·Throw를 표기 세대와
+    무관하게 제외시킨다.
+    """
+    exceptions = NON_CONTAINER_ACTIONS if non_container is None else non_container
+    return lexicon.is_container(package, action, non_container=exceptions)
 
 # RADIO/SELECT처럼 값이 정해진 선택지 안에 있어야 하는 타입 (R4 대상).
 _ENUM_TYPES = {"RADIO", "SELECT"}
@@ -232,7 +260,12 @@ def _is_number(value) -> bool:
         return False
 
 
-def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[Violation]:
+def _check_action(
+    action: dict,
+    catalog: CatalogLookup,
+    location: str,
+    non_container: frozenset[tuple[str, str]] | None = None,
+) -> list[Violation]:
     """액션 하나를 R1(카탈로그 존재)·R2~R5(파라미터)·R6(children 컨테이너)로 검사하고 children을 재귀한다."""
     violations: list[Violation] = []
     pkg, act = action.get("package"), action.get("action")
@@ -254,7 +287,7 @@ def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[V
         violations.extend(_check_parameters(action, spec, location))
 
     # R6: children은 컨테이너 액션에만
-    if children and not is_container(pkg, act):
+    if children and not is_container(pkg, act, non_container=non_container):
         violations.append(
             Violation(
                 "R6", location,
@@ -264,7 +297,9 @@ def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[V
         )
 
     for i, child in enumerate(children):
-        violations.extend(_check_action(child, catalog, f"{location}.children[{i}]"))
+        violations.extend(
+            _check_action(child, catalog, f"{location}.children[{i}]", non_container)
+        )
     return violations
 
 
@@ -274,8 +309,11 @@ def run_checks(actions: list[dict], catalog: CatalogLookup) -> list[Violation]:
     actions: RecommendedAction.model_dump() 리스트 또는 동형 dict 리스트.
     """
     violations: list[Violation] = []
+    # 컨테이너 예외는 카탈로그에서 한 번만 유도해 트리 전체에 내려보낸다 — 수기 3쌍은
+    # 현행 표기와 어긋나 Loop/Break를 컨테이너로 오판했다(container_exceptions 참조).
+    non_container = container_exceptions(catalog)
     for i, action in enumerate(actions):
-        violations.extend(_check_action(action, catalog, f"actions[{i}]"))
+        violations.extend(_check_action(action, catalog, f"actions[{i}]", non_container))
     return violations
 
 
@@ -284,46 +322,29 @@ def run_checks(actions: list[dict], catalog: CatalogLookup) -> list[Violation]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def derive_session_registry(catalog=None) -> tuple[frozenset, frozenset]:
-    """세션 opener/closer 집합을 수기 상수 + 카탈로그 메타에서 유도한다.
+    """세션 opener/closer 집합을 **카탈로그에서 유도**한다. 수기 상수는 폴백이다.
 
-    - opener/closer 1순위: 스펙의 session_role — v2 문서 카탈로그 빌드가 패키지 단위로
-      유도해 싣는 명시 신호(48패키지 실측). 표기 세대와 무관하게 동작한다.
-    - opener 2순위: 스펙 return_type이 SESSION인 액션(구 JAR 카탈로그의 cloudExcelOpen형).
-    - closer 보강: opener를 보유한 패키지에서 액션명이 close / end+session 패턴인 액션.
-      (구 카탈로그엔 닫기 구조 신호가 없어 이름 휴리스틱 — opener 보유 패키지로 좁혀 오탐 방지.)
+    유도 본체는 공용 지식층(`app.agent.knowledge.derive`)이다 — 같은 규칙을 버전마다
+    복제하면 한쪽만 고쳐질 때 "검수가 잡는 결함"과 "채점이 세는 결함"이 갈린다.
+    유도 규칙(session_role 1순위 → return_type=SESSION → SESSION 파라미터 게이팅 등)은
+    그쪽 독스트링을 보라.
 
-    카탈로그가 순회를 지원하지 않으면(iter_action_schemas 부재 — 테스트 스텁) 상수만
-    반환한다. 실제 세션 패키지는 상수 4개보다 훨씬 많아 유도가 커버리지를 넓힌다.
+    반환 타입은 v3 계약 그대로 (openers, closers) 튜플이다 — 지식층은 usable 플래그를 든
+    SessionRegistry를 주지만, v3 호출부 전체가 튜플 언패킹을 하고 있어 경계에서 눕힌다.
+
+    ⚠ 유도가 비면(카탈로그 순회 불가·테스트 스텁) 수기 상수 7쌍으로 떨어진다. 그 상수는
+    **현행 카탈로그에 없는 세대의 표기**라 R7/R8이 한 번도 발화하지 못한 이력이 있다
+    (RPA-141). 즉 폴백은 '검사가 죽지 않게' 하는 장치이지 정확한 어휘가 아니다.
     """
-    openers = set(SESSION_OPENERS)
-    closers = set(SESSION_CLOSERS)
-    iter_fn = getattr(catalog, "iter_action_schemas", None)
-    if callable(iter_fn):
-        try:
-            specs = [s for s in iter_fn() if isinstance(s, dict)]
-        except Exception:  # noqa: BLE001 — 유도 실패가 검사 자체를 막으면 안 된다(상수 폴백)
-            specs = []
-        for s in specs:
-            pkg, act = s.get("package"), s.get("action")
-            if not pkg or not act:
-                continue
-            role = s.get("session_role")  # v2 문서 카탈로그의 명시 신호 (1순위)
-            if role == "opener":
-                openers.add((pkg, act))
-            elif role == "closer":
-                closers.add((pkg, act))
-            rt = s.get("return_type")  # 구 JAR 카탈로그 신호 (2순위)
-            if isinstance(rt, str) and rt.strip().upper() == "SESSION":
-                openers.add((pkg, act))
-        opener_pkgs = {p for p, _ in openers}
-        for s in specs:
-            pkg, act = s.get("package"), s.get("action")
-            if not pkg or not act or pkg not in opener_pkgs:
-                continue
-            low = act.lower()
-            if "close" in low or ("end" in low and "session" in low):
-                closers.add((pkg, act))
-    return frozenset(openers), frozenset(closers)
+    registry = knowledge_derive.derive_session_registry(
+        catalog,
+        fallback_openers=SESSION_OPENERS,
+        fallback_closers=SESSION_CLOSERS,
+    )
+    if not getattr(registry, "usable", False):
+        logger.info("세션 레지스트리 유도 실패(source=%s) — 수기 상수 폴백",
+                    getattr(registry, "source", "?"))
+    return frozenset(registry.openers), frozenset(registry.closers)
 
 
 def _is_session_param(name: object) -> bool:
@@ -886,7 +907,9 @@ def _is_loop_signal(action_name: str | None) -> bool:
     return "break" in low or "continue" in low
 
 
-def run_structure_checks(steps: list[dict]) -> list[Violation]:
+def run_structure_checks(
+    steps: list[dict], non_container: frozenset[tuple[str, str]] | None = None
+) -> list[Violation]:
     """제어 흐름 구조 정합 검사 (R13~R14).
 
     R13 (Error handler 구조, error):
@@ -957,14 +980,16 @@ def run_structure_checks(steps: list[dict]) -> list[Violation]:
                             "필요하면 Loop(이터레이터) 컨테이너로 감싸고 반복할 액션을 그 children에 넣으세요.",
                             package=pkg, action=act, step_id=step_id,
                         ))
-                elif is_container(pkg, act) and not children:
+                elif is_container(pkg, act, non_container=non_container) and not children:
                     violations.append(Violation(
                         "R14", loc,
                         "Loop 본문(children)이 비어 있습니다 — 반복할 액션들을 Loop 안에 넣으세요.",
                         package=pkg, action=act, step_id=step_id, severity="warning",
                     ))
 
-            child_depth = loop_depth + (1 if pkg == "Loop" and is_container(pkg, act) else 0)
+            child_depth = loop_depth + (
+                1 if pkg == "Loop" and is_container(pkg, act, non_container=non_container) else 0
+            )
             walk(children, f"{loc}.children", step_id, child_depth)
 
     for step in steps:
@@ -1089,7 +1114,7 @@ def run_flow_checks(
     reg = registry or derive_session_registry(catalog)
     violations.extend(run_session_checks(steps, reg, emit_r12=True))
     violations.extend(run_dataflow_checks(flow, catalog))
-    violations.extend(run_structure_checks(steps))
+    violations.extend(run_structure_checks(steps, container_exceptions(catalog)))
     violations.extend(run_environment_checks(flow, catalog))
 
     # R12a: 규모 있는 흐름도에 예외 처리 구조가 아예 없음 (A360 표준 골격 위배 — warning)

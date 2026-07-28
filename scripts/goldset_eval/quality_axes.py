@@ -193,11 +193,18 @@ def judge_axis(flow: dict, spec: dict, document: str | None = None,
     실패하면 None을 돌려준다. 0점이 아니다 — "측정하지 못했다"와 "나쁜 흐름도"를 같은
     숫자로 만들면 그 축은 못 읽는다(반증 심판 구현에서 실제로 났던 결함과 같은 부류).
     """
-    from app.agent.v4.orchestrator.judge import (
-        blind_expectations,
-        refute_flow,
-        score_expectations,
-    )
+    # ⚠ 반증 심판 진입점은 v4에만 있었고 v4는 폐기됐다. 이 축은 **측정 불가**로 강등한다 —
+    # 0점으로 채우면 "측정 못 함"과 "나쁜 흐름도"가 같은 숫자가 되어 축을 못 읽는다.
+    # v3에 같은 진입점을 만들면 여기서 import 대상만 바꾸면 된다.
+    try:
+        from app.agent.v3.orchestrator.judge import (  # type: ignore[attr-defined]
+            blind_expectations,
+            refute_flow,
+            score_expectations,
+        )
+    except ImportError:
+        logger.warning("반증 심판 진입점 없음(v4 폐기) — 심판 축 생략")
+        return None
 
     try:
         expectations = blind_expectations(spec, document)

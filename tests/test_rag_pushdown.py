@@ -317,8 +317,12 @@ def test_retriever_forwards_its_pushdown_flag(monkeypatch):
     assert seen["pushdown"] is True
 
 
-def test_only_v4_opts_into_pushdown():
-    """v1~v3는 인자 없이 부른다 — 버전 간 비교의 기준선이 보존돼야 한다.
+def test_no_version_opts_into_pushdown():
+    """모든 버전이 인자 없이 부른다 — 후단 필터가 현재 기준선이다.
+
+    원래 이 테스트는 "v4만 pushdown=True"를 못 박았다. v4가 폐기되면서 pushdown을 켜는
+    버전이 하나도 없어졌다 — `get_hybrid_retriever(pushdown=...)` 자체는 살아 있으므로
+    v3에 켤 수 있고, 켤 때 이 테스트가 그 사실을 드러낸다(조용히 바뀌지 않게).
 
     **파일 원문**을 읽는다. `_make_retriever`를 부르면 실제 인프라에 붙고, 함수 객체를
     inspect하면 conftest의 autouse 스텁이 갈아끼운 람다가 잡힌다(둘 다 이 사실을 못 본다).
@@ -328,9 +332,6 @@ def test_only_v4_opts_into_pushdown():
     import app.agent as agent_pkg
 
     agent_root = Path(agent_pkg.__file__).parent
-    v4_source = (agent_root / "v4" / "retrieval.py").read_text(encoding="utf-8")
-    assert "get_hybrid_retriever(pushdown=True)" in v4_source
-
     for version in ("v1", "v2", "v3"):
         source = (agent_root / version / "retrieval.py").read_text(encoding="utf-8")
         assert "get_hybrid_retriever()" in source
