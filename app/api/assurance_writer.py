@@ -26,7 +26,7 @@ class ChangePublisherSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repository: str = Field(min_length=3, max_length=200)
-    workflow_name: Literal["Change Assurance (Observe)"]
+    workflow_name: Literal["Change Assurance (Warn)"]
     workflow_run_id: int = Field(ge=1)
     run_attempt: int = Field(ge=1)
     event: SourceEvent

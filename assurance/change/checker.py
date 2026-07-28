@@ -1,4 +1,4 @@
-"""Orchestrate Change Assurance decisions and Observe-mode receipts."""
+"""Orchestrate Change Assurance decisions and non-blocking Warn receipts."""
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +15,7 @@ from .dependency_checks import (
     derive_risk_profiles,
 )
 from .evidence import ArtifactWriter, _environment_evidence, validate_manifest, validate_report
+from .explanations import explain_control
 from .foundation import (
     CONTROL_ORDER,
     GIT_SHA,
@@ -112,8 +113,9 @@ class _AssuranceRunner:
     def run(self) -> dict[str, Any]:
         if self.policy.get("schema_version") != SCHEMA_VERSION:
             raise AssuranceError("dependency policy schema version mismatch")
-        if self.policy.get("rollout_mode") != "observe":
-            raise AssuranceError("RPA-180 may only run in Observe mode")
+        rollout_mode = self.policy.get("rollout_mode")
+        if rollout_mode != "warn":
+            raise AssuranceError("Change Assurance is configured for Warn rollout only")
         base = self.repo.commit(self.base_sha)
         head = self.repo.commit(self.head_sha)
         merge_base = self.repo.merge_base(base, head)
@@ -141,7 +143,7 @@ class _AssuranceRunner:
             "policy": {
                 "uri": self.policy_uri,
                 "sha256": self.policy_digest,
-                "rollout_mode": "observe",
+                "rollout_mode": rollout_mode,
                 "decision_state": self.policy["policy_decision_state"],
             },
         }
@@ -292,6 +294,21 @@ class _AssuranceRunner:
             }
         )
         controls.sort(key=lambda item: CONTROL_ORDER.index(item["control_id"]))
+        evidence_by_control = {
+            "CH-04": dependency,
+            "CH-06": protected,
+            "CH-11": subject_evidence,
+            "CH-12": integrity,
+        }
+        for control in controls:
+            explanation = explain_control(
+                control["control_id"],
+                status=control["status"],
+                default_reason=control["reason"],
+                evidence=evidence_by_control.get(control["control_id"]),
+            )
+            if explanation is not None:
+                control["explanation"] = explanation
         evidence_complete = integrity_complete and all(writer.verify_ref(item["evidence"]) for item in controls)
         statuses = {item["status"] for item in controls}
         if "fail" in statuses:
@@ -326,7 +343,7 @@ class _AssuranceRunner:
             "evidence_complete": evidence_complete,
             "assurance_decision": decision,
             "business_outcome": {"decision": "not_evaluated", "changed_by_assurance": False},
-            "enforcement": {"mode": "observe", "blocks_merge": False},
+            "enforcement": {"mode": rollout_mode, "blocks_merge": False},
         }
         validate_report(report)
         writer.write_json("assurance-report.json", report)
@@ -392,7 +409,7 @@ def write_error_report(
     error: BaseException,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Best-effort Observe receipt for detector failure; never claims PASS."""
+    """Best-effort Warn receipt for detector failure; never claims PASS."""
     generated_at = isoformat(now or utc_now())
     subject_head = head_sha if GIT_SHA.fullmatch(head_sha) else "unknown"
     subject_base = base_sha if GIT_SHA.fullmatch(base_sha) else "unknown"
@@ -430,12 +447,17 @@ def write_error_report(
                 "reason_code": "DETECTOR_EXECUTION_ERROR",
                 "reason": "Trusted evidence derivation failed; no passing decision is possible.",
                 "evidence": error_ref,
+                "explanation": explain_control(
+                    "CH-01",
+                    status="error",
+                    default_reason="Trusted evidence derivation failed; no passing decision is possible.",
+                ),
             }
         ],
         "evidence_complete": False,
         "assurance_decision": "unassured",
         "business_outcome": {"decision": "not_evaluated", "changed_by_assurance": False},
-        "enforcement": {"mode": "observe", "blocks_merge": False},
+        "enforcement": {"mode": "warn", "blocks_merge": False},
     }
     validate_report(report)
     writer.write_json("assurance-report.json", report)
@@ -445,14 +467,14 @@ def write_error_report(
 
 def markdown_summary(report: dict[str, Any]) -> str:
     rows = [
-        "### Change Assurance (Observe)",
+        "### Change Assurance (Warn)",
         "",
-        f"- Assurance decision: `{report['assurance_decision']}`",
-        "- Merge blocking effect: `false`",
-        f"- Subject: `{report['subject']['head_sha']}`",
-        f"- Evidence complete: `{str(report['evidence_complete']).lower()}`",
+        f"- 보증 판정: `{report['assurance_decision']}`",
+        "- 병합 차단: `false`",
+        f"- 판정 대상 커밋: `{report['subject']['head_sha']}`",
+        f"- 증거 완전성: `{str(report['evidence_complete']).lower()}`",
         "",
-        "| Control | Status | Reason |",
+        "| 통제 | 상태 | 사유 코드 |",
         "|---|---|---|",
     ]
     for control in report["controls"]:
@@ -462,7 +484,26 @@ def markdown_summary(report: dict[str, Any]) -> str:
     rows.extend(
         [
             "",
-            "> Observe records an assurance decision only. It does not approve or block the business merge.",
+            "> Warn은 비통과 판정을 경고하지만 PR 병합을 차단하지 않습니다.",
         ]
     )
+    non_passing = [
+        control
+        for control in report["controls"]
+        if control["status"] not in {"pass", "not_applicable"}
+    ]
+    if non_passing:
+        rows.extend(["", "#### 경고 상세"])
+        for control in non_passing:
+            explanation = control.get("explanation") or {}
+            rows.extend(
+                [
+                    "",
+                    f"**{control['control_id']} · {control['reason_code']}**",
+                    f"- 발견 내용: {explanation.get('finding', control['reason'])}",
+                    f"- 보증 영향: {explanation.get('impact', '전체 변경을 보증할 수 없습니다.')}",
+                    f"- 확인/조치: {explanation.get('action', '원본 증거를 확인하세요.')}",
+                    f"- 증거: `{control['evidence']['uri']}`",
+                ]
+            )
     return "\n".join(rows) + "\n"

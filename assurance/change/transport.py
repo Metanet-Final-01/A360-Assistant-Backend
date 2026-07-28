@@ -134,7 +134,7 @@ def _validate_ref(
 def _validate_source(source: Any) -> dict[str, Any]:
     if not isinstance(source, dict) or set(source) != _SOURCE_FIELDS:
         raise AssuranceError("publisher source fields do not match the transport contract")
-    if source.get("workflow_name") != "Change Assurance (Observe)":
+    if source.get("workflow_name") != "Change Assurance (Warn)":
         raise AssuranceError("publisher workflow is not authoritative")
     if (
         source.get("event") not in ALLOWED_SOURCE_EVENTS

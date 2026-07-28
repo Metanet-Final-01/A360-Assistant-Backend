@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "rollout_mode": "observe",
+  "rollout_mode": "warn",
   "policy_decision_state": "decision_needed",
   "requirement_files": [
     "requirements.txt",

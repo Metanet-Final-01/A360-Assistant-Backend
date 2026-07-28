@@ -80,7 +80,7 @@ def _envelope(tmp_path, scenario_name: str = "good_import"):
     report, output = _run_scenario(tmp_path, scenario)
     source = {
         "repository": report["subject"]["repository"],
-        "workflow_name": "Change Assurance (Observe)",
+        "workflow_name": "Change Assurance (Warn)",
         "workflow_run_id": 12345,
         "run_attempt": 1,
         "event": "pull_request",
@@ -151,7 +151,7 @@ def test_valid_unassured_report_is_refused_not_promoted(tmp_path):
     report, output = _run_scenario(tmp_path, scenario)
     envelope = load_change_envelope(output, source={
         "repository": report["subject"]["repository"],
-        "workflow_name": "Change Assurance (Observe)",
+        "workflow_name": "Change Assurance (Warn)",
         "workflow_run_id": 12346,
         "run_attempt": 1,
         "event": "pull_request",
@@ -164,6 +164,16 @@ def test_valid_unassured_report_is_refused_not_promoted(tmp_path):
 
     assert row.decision == "unassured"
     assert summary["assurance_verdict"] == "refused"
+    assert row.rollout_mode == "warn"
+    assert row.enforcement_effect == "warned"
+    non_passing = [
+        control
+        for control in row.receipt_payload["controls"]
+        if control["status"] not in {"pass", "not_applicable"}
+    ]
+    assert non_passing
+    assert all(control["reason"] for control in non_passing)
+    assert all(control["explanation"]["action"] for control in non_passing)
     assert receipt_integrity(row) is True
 
 
@@ -200,7 +210,7 @@ def test_checksum_manifest_tampering_is_rejected(tmp_path):
     with pytest.raises(AssuranceError):
         load_change_envelope(output, source={
             "repository": report["subject"]["repository"],
-            "workflow_name": "Change Assurance (Observe)",
+            "workflow_name": "Change Assurance (Warn)",
             "workflow_run_id": 12345,
             "run_attempt": 1,
             "event": "pull_request",
@@ -231,7 +241,7 @@ def test_top_level_symbolic_artifact_directory_is_rejected(tmp_path, monkeypatch
     with pytest.raises(AssuranceError, match="unavailable or symbolic"):
         load_change_envelope(alias, source={
             "repository": report["subject"]["repository"],
-            "workflow_name": "Change Assurance (Observe)",
+            "workflow_name": "Change Assurance (Warn)",
             "workflow_run_id": 12345,
             "run_attempt": 1,
             "event": "pull_request",
@@ -487,7 +497,7 @@ def test_publisher_derives_identity_only_from_matching_workflow_run():
         "workflow_run": {
             "id": 12345,
             "run_attempt": 2,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -514,7 +524,7 @@ def test_publisher_accepts_review_triggered_assurance_run():
         "workflow_run": {
             "id": 12346,
             "run_attempt": 1,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request_review",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -551,7 +561,7 @@ def test_publisher_accepts_one_sha_resolved_pull_request_when_event_list_is_empt
         "workflow_run": {
             "id": 12345,
             "run_attempt": 2,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -577,7 +587,7 @@ def test_publisher_rejects_resolved_pull_request_that_disagrees_with_event():
         "workflow_run": {
             "id": 12345,
             "run_attempt": 2,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -654,7 +664,7 @@ def test_publisher_posts_validated_envelope_without_logging_token(tmp_path, monk
 
 
 def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
-    observe = (ROOT / ".github/workflows/change-assurance-observe.yml").read_text(encoding="utf-8")
+    warn = (ROOT / ".github/workflows/change-assurance-warn.yml").read_text(encoding="utf-8")
     publisher = (ROOT / ".github/workflows/change-assurance-publish.yml").read_text(
         encoding="utf-8"
     )
@@ -663,12 +673,12 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
 
     assert "workflow_run:" in workflow_header
     assert "pull_request_target" not in publisher
-    assert "pull_request_review:" in observe
-    assert "types: [submitted, dismissed]" in observe
-    assert "python -m assurance.change.review_evidence" in observe
-    assert "--review-evidence" in observe
-    assert "First rollout: execute only the checker already trusted" in observe
-    assert "grep -q -- '--review-evidence' assurance/change/cli.py" in observe
+    assert "pull_request_review:" in warn
+    assert "types: [submitted, dismissed]" in warn
+    assert "python -m assurance.change.review_evidence" in warn
+    assert "--review-evidence" in warn
+    assert "First rollout: execute only the checker already trusted" in warn
+    assert "grep -q -- '--review-evidence' assurance/change/cli.py" in warn
     assert "actions: read" in workflow_header
     assert "contents: read" in workflow_header
     assert "pull-requests: read" in workflow_header
@@ -692,8 +702,8 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "steps.evidence.outputs.publish == 'true'" in publish_job
     assert "python -m scripts.publish_change_assurance" in publish_job
     assert "python scripts/publish_change_assurance.py" not in publish_job
-    assert "ASSURANCE_WRITER_TOKEN" not in observe
-    assert "secrets." not in observe
+    assert "ASSURANCE_WRITER_TOKEN" not in warn
+    assert "secrets." not in warn
 
 
 def test_backend_deploy_injects_writer_credentials_from_protected_environment():

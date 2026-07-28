@@ -1,4 +1,4 @@
-name: Change Assurance (Observe)
+name: Change Assurance (Warn)
 
 on:
   pull_request:
@@ -11,7 +11,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: change-assurance-observe-${{ github.event.pull_request.number }}
+  group: change-assurance-warn-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -111,11 +111,11 @@ jobs:
             '' \
             'The trusted base does not contain the Change Assurance runner.' \
             'No code from the PR head was executed as an assurance checker.' \
-            'Merge this Observe bootstrap before relying on later PR evidence.' \
+            'Merge this Warn bootstrap before relying on later PR evidence.' \
             > "$ASSURANCE_OUTPUT/BOOTSTRAP_UNASSURED.md"
           cat "$ASSURANCE_OUTPUT/BOOTSTRAP_UNASSURED.md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Observe evidence
+      - name: Upload Warn evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

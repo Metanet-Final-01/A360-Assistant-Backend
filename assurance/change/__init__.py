@@ -1,4 +1,4 @@
-"""Change Assurance Observe harness."""
+"""Change Assurance Warn harness."""
 
 from .checker import (
     DependencyEnvironment,
