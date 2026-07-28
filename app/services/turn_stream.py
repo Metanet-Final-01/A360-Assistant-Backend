@@ -33,9 +33,10 @@ Redis **Stream**이 이 용도에 정확히 맞는다: `XADD`로 append, `XRANGE
 """
 
 import logging
-import os
 import uuid
 from typing import Any
+
+from app.core import config
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +44,21 @@ logger = logging.getLogger(__name__)
 _TTL_SEC = 1800
 _END_FIELD = "end"  # 종료 마커 엔트리 표식 — 팔로워가 이걸 보면 스트림을 닫는다
 _SSE_FIELD = "sse"  # 원문 SSE 프레임을 그대로 보관한다(재생 시 바이트 동일)
+_REPLAY_PAGE = 200  # replay 한 페이지 — 토큰 단위 버퍼라 전량 적재를 피한다
 
 _client: Any = None
 _client_url: str | None = None
 
 
 def _redis_url() -> str:
-    """호출 시점 읽기 — conftest가 빈 문자열로 격리한다(rag_cache와 같은 계약)."""
-    return os.getenv("REDIS_URL", "").strip()
+    """호출 시점 읽기 — conftest가 빈 문자열로 격리한다(rag_cache와 같은 계약).
+
+    ⚠️ `os.getenv` 직접 호출이 아니라 **설정 레지스트리를 경유**한다 (RPA-224). 새 파일이
+    env를 직접 읽으면 `test_config_registry`의 래칫이 막는다 — 선언되지 않은 키가 조용히
+    늘어나는 것을 방지하는 계약이다. `config.X`는 여전히 호출 시점 읽기라 테스트의
+    monkeypatch가 그대로 듣는다.
+    """
+    return (config.REDIS_URL or "").strip()
 
 
 def enabled() -> bool:
@@ -93,7 +101,7 @@ def reset_client() -> None:
 
 
 def _ns() -> str:
-    env = os.getenv("APP_ENV", "development").strip() or "development"
+    env = (config.APP_ENV or "development").strip() or "development"
     return f"a360:{env}:turn:v1"
 
 
@@ -115,27 +123,31 @@ def new_turn_id() -> str:
     return uuid.uuid4().hex
 
 
-async def claim(session_id: str, turn_id: str) -> str | None:
-    """이 세션의 활성 턴으로 선점한다. 성공이면 None, 이미 돌고 있으면 **그 turn_id**.
+async def claim(session_id: str, turn_id: str) -> tuple[bool, str | None]:
+    """활성 턴으로 선점한다. `(버퍼 사용가능, 이미 도는 turn_id)`를 돌려준다.
 
-    새로고침 연타로 같은 세션에 턴이 여러 개 도는 것을 막는다 — 호출부는 반환값이 있으면
-    새 턴을 시작하는 대신 그 id로 재구독하라고 프론트에 알린다.
+    - `(True, None)`  선점 성공 — 버퍼가 살아 있다 → 재개 모드로 가도 된다
+    - `(True, "xyz")` 이미 다른 턴이 돈다 → 호출부가 409로 재구독을 유도
+    - `(False, None)` Redis 미설정·장애 → **재개 불가**. 호출부는 기존 절약 정책으로 돌아가야 한다
 
-    Redis가 없거나 죽었으면 None(=선점 성공으로 취급)을 돌려준다: 중복 차단은 부가 기능이고
-    턴을 못 시작하게 막는 게 더 나쁘다.
+    🔴 `enabled()`(설정 여부)만으로 재개 모드를 켜면 안 된다 (Qodo #455): `REDIS_URL`은 있는데
+    Redis가 죽은 경우, 끊긴 뒤에도 계속 생성해 **비용만 쓰고 재개도 안 된다**(양쪽 다 손해).
+    이 함수는 턴의 첫 Redis 작업이라 실제 가용성 프로브를 겸한다 — 설정이 아니라 **동작**으로 판단한다.
+
+    중복 차단 자체는 부가 기능이라, 장애 시엔 턴을 막지 않고 그냥 재개만 포기한다.
     """
     r = _get_client()
     if r is None:
-        return None
+        return (False, None)
     try:
         ok = await r.set(_active_key(session_id), turn_id, nx=True, ex=_TTL_SEC)
         if ok:
-            return None
+            return (True, None)
         existing = await r.get(_active_key(session_id))
-        return existing or None
-    except Exception:  # noqa: BLE001 — 선점 실패가 턴을 막으면 안 된다
-        logger.warning("turn_stream 선점 실패 (무시): session=%s", session_id, exc_info=True)
-        return None
+        return (True, existing or None)
+    except Exception:  # noqa: BLE001 — 선점 실패가 턴을 막으면 안 된다(재개만 포기)
+        logger.warning("turn_stream 선점 실패 — 재개 비활성: session=%s", session_id, exc_info=True)
+        return (False, None)
 
 
 async def publish(session_id: str, turn_id: str, sse_text: str) -> None:
@@ -185,21 +197,35 @@ def _rows(entries: Any) -> list[tuple[str, str, bool]]:
     return out
 
 
-async def replay(session_id: str, turn_id: str, after: str | None) -> list[tuple[str, str, bool]]:
-    """`after` **다음**부터 지금까지 쌓인 것을 한 번에 준다(재구독 시 따라잡기용).
+async def replay(session_id: str, turn_id: str, after: str | None):
+    """`after` **다음**부터 쌓인 것을 **페이지 단위로** 흘린다(재구독 시 따라잡기용).
 
     `after`가 없으면 처음부터 — 새로고침 후 프론트가 마지막으로 본 id를 모를 때 화면을
     통째로 다시 그릴 수 있다.
+
+    ⚠️ 한 번에 다 읽지 않는다 (Qodo #455). 버퍼는 **토큰 단위**로 쌓이므로 긴 턴이면 엔트리가
+    수천 개다 — 전량을 리스트로 만들면 첫 바이트까지 지연되고 메모리도 튄다. 페이지로 끊어
+    호출부가 받는 즉시 흘려보내게 한다.
     """
     r = _get_client()
     if r is None:
-        return []
-    try:
-        min_ = f"({after}" if after else "-"
-        return _rows(await r.xrange(_events_key(session_id, turn_id), min=min_))
-    except Exception:  # noqa: BLE001
-        logger.warning("turn_stream replay 실패: turn=%s", turn_id, exc_info=True)
-        return []
+        return
+    key = _events_key(session_id, turn_id)
+    cursor = after
+    while True:
+        try:
+            min_ = f"({cursor}" if cursor else "-"
+            rows = _rows(await r.xrange(key, min=min_, count=_REPLAY_PAGE))
+        except Exception:  # noqa: BLE001
+            logger.warning("turn_stream replay 실패: turn=%s", turn_id, exc_info=True)
+            return
+        if not rows:
+            return
+        for row in rows:
+            yield row
+        if len(rows) < _REPLAY_PAGE:
+            return
+        cursor = rows[-1][0]
 
 
 async def follow(session_id: str, turn_id: str, after: str, block_ms: int) -> list[tuple[str, str, bool]]:

@@ -251,3 +251,55 @@ def test_unknown_turn_id_is_404(monkeypatch, redis_on):
     with TestClient(app) as c:
         r = c.get(f"/api/sessions/{SID}/turns/{uuid.uuid4().hex}/stream")
     assert r.status_code == 404
+
+
+# --- Qodo #455 반영분 회귀 ---
+
+def test_redis_down_falls_back_to_non_resumable(monkeypatch):
+    """`REDIS_URL`은 있는데 Redis가 죽었으면 **재개 모드로 가지 않는다**.
+
+    설정(enabled)만 보고 재개 모드로 가면, 끊긴 뒤에도 계속 생성해 **비용만 쓰고 재개도 안 되는**
+    양쪽 손해가 된다. 선점(claim)이 실제로 성공했는지로 판단해야 한다.
+    """
+    class _Dead:
+        async def set(self, *a, **k):
+            raise ConnectionError("redis down")
+
+        async def get(self, *a, **k):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setenv("REDIS_URL", "redis://dead")
+    monkeypatch.setattr(turn_stream, "_make_client", lambda url: _Dead())
+    turn_stream.reset_client()
+    _install_agent(monkeypatch, _answer_events())
+    _persist_noop(monkeypatch)
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    status, frames, _ = _post_turn()
+    assert status == 200, "Redis 장애가 턴 자체를 막으면 안 된다"
+    assert not [f for f in frames if f.get("stage") == "turn_started"], (
+        "버퍼가 죽었는데 재개 모드로 진입했다 — 끊겨도 계속 생성해 비용만 나간다"
+    )
+
+
+def test_resume_follows_when_turn_timeout_disabled(monkeypatch, redis_on):
+    """`TURN_MAX_DURATION_SEC=0`(=상한 끔)에서도 재구독이 **이어받기까지** 한다.
+
+    0을 그대로 더하면 deadline이 현재시각이라 follow 루프가 한 번도 안 돌고, 재개가 replay까지만
+    되고 끝난다 — 문서화된 설정값에서 기능이 죽는다.
+    """
+    monkeypatch.setenv("TURN_MAX_DURATION_SEC", "0")
+    key = turn_stream._events_key(str(SID), "t-follow")
+    redis_on.xadd(key, {"sse": "data: {\"event\":\"stage\"}\n\n", "end": "0"})  # 끝 마커 없음
+
+    async def _fake_follow(session_id, turn_id, after, block_ms):
+        return [("9-9", 'data: {"event":"token","message":"FOLLOWED"}\n\n', False),
+                ("9-10", "", True)]
+
+    monkeypatch.setattr(turn_stream, "follow", _fake_follow)
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/turns/t-follow/stream")
+    assert r.status_code == 200
+    assert "FOLLOWED" in r.text, "상한 0에서 follow 루프가 돌지 않았다 — 재개가 replay에서 멈춘다"

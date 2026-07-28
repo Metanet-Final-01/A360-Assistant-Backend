@@ -1539,7 +1539,7 @@ async def agent_turn(
     # 알린다(새로고침 연타로 LLM 턴이 중복 실행되는 것을 막는다).
     # Redis 미설정이면 claim이 항상 None이라 이 분기는 없는 것과 같다(기존 동작 보존).
     turn_id = turn_stream.new_turn_id()
-    busy_turn_id = await turn_stream.claim(str(session_key), turn_id)
+    buffer_ok, busy_turn_id = await turn_stream.claim(str(session_key), turn_id)
     if busy_turn_id:
         raise HTTPException(
             409,
@@ -1551,7 +1551,9 @@ async def agent_turn(
         )
     # 버퍼가 살아 있을 때만 "끊겨도 계속 생성"으로 동작한다. 없으면 기존 절약 정책(RPA-106:
     # 끊기면 즉시 중단)을 그대로 쓴다 — 이어받을 수단이 없는데 비용만 쓰는 건 손해다.
-    resumable = turn_stream.enabled()
+    # 🔴 설정(REDIS_URL 유무)이 아니라 **실제 선점 성공**으로 판단한다 (Qodo #455): URL은 있는데
+    #    Redis가 죽었으면 끊긴 뒤에도 생성만 계속하고 재개도 안 돼 양쪽 다 손해다.
+    resumable = buffer_ok
 
     async def _frames():
         result_data = None
@@ -1728,8 +1730,11 @@ async def agent_turn(
                 yield frame
         finally:
             # 정상 종료·취소·예외 어느 쪽이든 종료 마커를 남긴다 — 안 남기면 재구독자가
-            # 끝을 모르고 TTL까지 기다린다.
-            await turn_stream.close(str(session_key), turn_id)
+            # 끝을 모르고 TTL까지 기다리고, 활성 키가 남아 다음 턴이 409로 막힌다.
+            # ⚠️ finally 안의 await도 취소 지점이다 (Qodo #455). shield로 정리 자체는 끝까지
+            #    돌게 하고, 이 자리에서 올라오는 취소는 삼킨다(정리는 best-effort).
+            with contextlib.suppress(Exception):
+                await asyncio.shield(turn_stream.close(str(session_key), turn_id))
 
     return StreamingResponse(
         sse(),
@@ -1775,15 +1780,20 @@ async def resume_turn_stream(
 
     async def sse():
         cursor = after or "0-0"
-        # 1) 밀린 구간 따라잡기
-        for entry_id, frame, is_end in await turn_stream.replay(session_key, turn_id, after):
+        # 1) 밀린 구간 따라잡기 — 페이지 단위로 받아 **받는 즉시** 흘린다.
+        #    토큰 단위 버퍼라 긴 턴이면 엔트리가 수천 개다. 전량을 리스트로 만들면 첫 바이트까지
+        #    지연되고 메모리도 튄다 (Qodo #455).
+        async for entry_id, frame, is_end in turn_stream.replay(session_key, turn_id, after):
             cursor = entry_id
             if is_end:
                 return
             yield f"id: {entry_id}\n{frame}"
         # 2) 실시간 이어받기 — 끝 마커를 못 본 경우를 대비해 턴 상한으로 바운드한다.
-        deadline = time.monotonic() + _turn_max_sec()
-        while time.monotonic() < deadline:
+        #    ⚠️ TURN_MAX_DURATION_SEC=0은 "상한 끔"이 계약이다(_iter_with_heartbeat와 같은 해석).
+        #       그대로 더하면 deadline이 현재시각이라 루프가 한 번도 안 돌아 재개가 죽는다 (Qodo #455).
+        max_sec = _turn_max_sec()
+        deadline = (time.monotonic() + max_sec) if max_sec > 0 else None
+        while deadline is None or time.monotonic() < deadline:
             rows = await turn_stream.follow(session_key, turn_id, cursor, _RESUME_BLOCK_MS)
             if not rows:
                 # 조용한 구간에도 연결을 살려 둔다 (원 스트림과 같은 이유 — CloudFront 60초 idle).
