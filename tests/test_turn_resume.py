@@ -10,7 +10,9 @@
 실 Redis 없이 fakeredis(async)로 돈다 — rag_cache의 Redis 테스트 선례와 같은 방식이다.
 """
 
+import asyncio
 import json
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -303,3 +305,53 @@ def test_resume_follows_when_turn_timeout_disabled(monkeypatch, redis_on):
         r = c.get(f"/api/sessions/{SID}/turns/t-follow/stream")
     assert r.status_code == 200
     assert "FOLLOWED" in r.text, "상한 0에서 follow 루프가 돌지 않았다 — 재개가 replay에서 멈춘다"
+
+
+def test_resume_rejects_malformed_cursor(monkeypatch, redis_on):
+    """형식이 깨진 `after`는 **경계에서** 400 — 영구 heartbeat 스트림이 되지 않게.
+
+    그대로 Redis로 넘기면 replay/follow가 예외를 삼켜 빈 결과를 주고, 엔드포인트는 그걸
+    '조용한 구간'으로 오해해 상한까지(상한 0이면 무기한) heartbeat만 흘린다 (Qodo #455 2차).
+    """
+    key = turn_stream._events_key(str(SID), "t-cursor")
+    redis_on.xadd(key, {"sse": "data: {}\n\n", "end": "1"})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/turns/t-cursor/stream", params={"after": "not-an-id"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "INVALID_CURSOR"
+
+
+def test_resume_accepts_blank_cursor_as_none(monkeypatch, redis_on):
+    """공백만 있는 `after`는 미지정으로 취급한다(400이 아니라 처음부터 재생)."""
+    key = turn_stream._events_key(str(SID), "t-blank")
+    redis_on.xadd(key, {"sse": 'data: {"event":"token","message":"FROM_START"}\n\n', "end": "0"})
+    redis_on.xadd(key, {"sse": "", "end": "1"})
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    with TestClient(app) as c:
+        r = c.get(f"/api/sessions/{SID}/turns/t-blank/stream", params={"after": "   "})
+    assert r.status_code == 200
+    assert "FROM_START" in r.text
+
+
+def test_hung_close_does_not_stall_request(monkeypatch, redis_on):
+    """정리(close)가 hang이어도 **요청 완료를 붙잡지 않는다** (Qodo #455 2차).
+
+    맨 `asyncio.shield`만 걸면 Redis I/O가 멈췄을 때 요청이 무기한 대기한다. 이 모듈에 이미
+    있는 `_wait_for_cleanup`(1초 상한 + 초과 시 취소)을 써야 한다.
+    """
+    async def _hang(session_id, turn_id):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(turn_stream, "close", _hang)
+    _install_agent(monkeypatch, _answer_events())
+    _persist_noop(monkeypatch)
+    _override(FakeDB(session=SimpleNamespace(id=SID, user_id=None, solution="a360")))
+
+    t0 = time.perf_counter()
+    status, _, _ = _post_turn()
+    elapsed = time.perf_counter() - t0
+    assert status == 200
+    assert elapsed < 15, f"정리가 요청을 {elapsed:.1f}초 붙잡았다 — 시간 제한이 없다"

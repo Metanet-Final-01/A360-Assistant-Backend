@@ -1731,10 +1731,12 @@ async def agent_turn(
         finally:
             # 정상 종료·취소·예외 어느 쪽이든 종료 마커를 남긴다 — 안 남기면 재구독자가
             # 끝을 모르고 TTL까지 기다리고, 활성 키가 남아 다음 턴이 409로 막힌다.
-            # ⚠️ finally 안의 await도 취소 지점이다 (Qodo #455). shield로 정리 자체는 끝까지
-            #    돌게 하고, 이 자리에서 올라오는 취소는 삼킨다(정리는 best-effort).
-            with contextlib.suppress(Exception):
-                await asyncio.shield(turn_stream.close(str(session_key), turn_id))
+            # ⚠️ 정리에는 **시간 제한**이 있어야 한다 (Qodo #455 2차). 맨 shield만 걸면 Redis가
+            #    hang일 때 요청 완료가 무기한 멈추고, 취소돼도 정리 태스크가 배경에 무한정 남는다.
+            #    이 모듈에 이미 있는 경계를 쓴다 — `_wait_for_cleanup`: 1초 상한, 초과 시 취소 +
+            #    결과 수거, 바깥 취소는 그대로 전파. 새 정리 규약을 또 만들지 않는다.
+            close_task = asyncio.ensure_future(turn_stream.close(str(session_key), turn_id))
+            await _wait_for_cleanup(close_task, "turn_stream close")
 
     return StreamingResponse(
         sse(),
@@ -1770,6 +1772,15 @@ async def resume_turn_stream(
         raise HTTPException(
             503,
             detail={"code": "RESUME_UNAVAILABLE", "message": "턴 재개가 비활성화되어 있습니다."},
+        )
+    # 커서는 **경계에서** 검증한다 (Qodo #455 2차). 형식이 깨진 값을 그대로 Redis로 넘기면
+    # replay/follow가 예외를 삼켜 빈 결과를 주고, 엔드포인트는 그걸 '조용한 구간'으로 오해해
+    # 상한까지(상한 0이면 무기한) heartbeat만 흘린다 — 클라이언트 입력 오류가 영구 스트림이 된다.
+    after = (after or "").strip() or None
+    if after is not None and not re.fullmatch(r"\d+-\d+", after):
+        raise HTTPException(
+            400,
+            detail={"code": "INVALID_CURSOR", "message": "after는 <밀리초>-<시퀀스> 형식이어야 합니다."},
         )
     session_key = str(session.id)
     if not await turn_stream.exists(session_key, turn_id):
