@@ -15,6 +15,17 @@ logger = logging.getLogger(__name__)
 
 _SEARCH_LIMIT = 5
 
+# 액션 어휘가 필요한 노드(recommend·edit)가 search_kb에 거는 소스 타입 제한.
+#
+# 왜 필요한가: 코퍼스의 92%가 doc_page이고(16,164/17,838행) `package_overview`·
+# `package_release`는 **action_name이 null**이다. 제한 없이 검색하면 그 행들이 상위를
+# 채워 액션 후보를 굶기고, 특히 package_overview는 "패키지 이름은 있는데 액션이 null"이라
+# LLM이 액션명을 **지어낼** 재료가 된다(R1 환각). action_schema만 (package, action)이
+# 둘 다 항상 채워져 있다.
+#
+# qa는 문서까지 봐야 하므로 이 제한을 쓰지 않는다(None = 전체).
+ACTION_SOURCE_TYPES = ["action_schema", "bot_example"]
+
 
 def build_kb_tools(sources_sink: list[dict], ctx=None, source_types: list[str] | None = None):
     """KB 툴을 만든다. 검색 히트 원본은 sources_sink에 누적된다.
