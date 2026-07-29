@@ -58,15 +58,57 @@ def emit_spec_frame(spec: dict, caption: str) -> None:
     })
 
 
+def log_anchor_report(spec: dict, analysis: dict | None) -> None:
+    """분석 단계가 must 요구로 덮였는지 확인해 로그에 남긴다 — 결함 판정이 아니라 관측이다.
+
+    must의 입도가 분석에 고정되지 않으면 실행마다 must 개수가 달라지고, 그러면
+    `must_coverage`의 **분모**가 흔들려 실행 간 비교가 성립하지 않는다(심판 결정론 점수의
+    절반, 하드 게이트, flow_confidence가 전부 이 값을 탄다). 덮이지 않은 단계는 흐름도에서
+    통째로 빠질 자리이므로 그 사실을 남긴다.
+    """
+    steps = (analysis or {}).get("steps") or []
+    reqs = spec.get("requirements") or []
+    musts = [r for r in reqs if r.get("priority", "must") == "must"]
+    shoulds = [r for r in reqs if r.get("priority") == "should"]
+    anchored = {r.get("step_id") for r in musts if r.get("step_id")}
+    logger.info(
+        "스펙 앵커링 — 분석 %d단계 / must %d건(앵커 %d건) / 골격 %d건",
+        len(steps), len(musts), len(anchored), len(shoulds),
+    )
+    if steps and not anchored:
+        logger.warning("must 요구에 step_id가 하나도 없다 — 입도가 분석에 고정되지 않았다")
+        return
+    uncovered = [s.get("step_id") for s in steps if s.get("step_id") not in anchored]
+    if uncovered:
+        logger.warning(
+            "must 요구가 없는 분석 단계: %s — 그 단계는 흐름도에서 빠질 수 있다",
+            ", ".join(str(s) for s in uncovered),
+        )
+    if musts and len(shoulds) > len(musts) // 2:
+        logger.warning(
+            "운영 골격 요구가 많다(must %d건 대비 골격 %d건) — 골격이 업무를 밀어낼 수 있다",
+            len(musts), len(shoulds),
+        )
+
+
 def build_flow_spec(state: dict, document: str | None) -> dict:
     """턴 컨텍스트 → FlowSpec dict (LLM 1회 + jsonio 교정 1회).
 
     실패 시 최소 스펙(goal=사용자 메시지)으로 강등한다 — spec 부재가 생성 전체를 막지 않게
     (부분 실패 = 품질 강등이지 턴 실패가 아님).
+
+    `SPEC_USE_ANALYSIS=0`이면 [업무 분석] 블록을 빼고 **원문만** 보고 정형화한다 (A/B 측정용,
+    config.SPEC_USE_ANALYSIS 주석 참고). 분석을 뺄 때는 요구를 분석 단계에 앵커할 근거도 함께
+    사라지므로, 프롬프트가 요구하는 `step_id`는 채워지지 않는 게 정상이다 — 앵커 보고서가
+    그 사실을 로그로 남긴다.
     """
+    from .. import config
+
     emit({"event": "stage", "stage": "analyzing", "message": "요구사항 정형화 중"})
+    analysis = state.get("analysis") if config.SPEC_USE_ANALYSIS else None
+    analysis_block = f"[업무 분석]\n{analysis_brief(analysis)}\n\n" if config.SPEC_USE_ANALYSIS else ""
     user_content = (
-        f"[업무 분석]\n{analysis_brief(state.get('analysis'))}\n\n"
+        f"{analysis_block}"
         f"[이전 대화 압축 요약]\n{render_compact(state.get('compact'))}\n\n"
         f"[대화 이력]\n{render_history(state.get('history'))}\n\n"
         f"[현재 요청]\n{state.get('message', '')}"
@@ -98,5 +140,15 @@ def build_flow_spec(state: dict, document: str | None) -> dict:
             rid = f"req-{counter}"
             r["req_id"] = rid
         seen.add(rid)
+    log_anchor_report(d, analysis)
+    # A/B를 사후 추적할 수 있게 어느 쪽으로 돌았는지 관측에 남긴다 — 스펙 품질 비교의 기준선이다.
+    musts = [r for r in d.get("requirements") or [] if r.get("priority", "must") == "must"]
+    emit({
+        "event": "stage", "stage": "analyzing",
+        "message": f"요구사항 {len(d.get('requirements') or [])}건 정형화"
+                   f" ({'분석 기반' if config.SPEC_USE_ANALYSIS else '원문만'})",
+        "data": {"use_analysis": bool(config.SPEC_USE_ANALYSIS),
+                 "musts": len(musts), "총요구": len(d.get("requirements") or [])},
+    })
     emit_spec_frame(d, f"요구사항 {len(d.get('requirements') or [])}건 정형화")
     return d
