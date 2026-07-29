@@ -764,6 +764,7 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "OPENSEARCH_USERNAME must not contain whitespace." in opensearch_step["run"]
     assert "OPENSEARCH_USERNAME must not contain double quotes or backslashes." in opensearch_step["run"]
     assert "OPENSEARCH_PASSWORD must not contain double quotes or backslashes." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD must not contain tabs." in opensearch_step["run"]
     assert "OPENSEARCH_PASSWORD must not contain newlines." in opensearch_step["run"]
     assert "OPENSEARCH_PASSWORD is required when OPENSEARCH_USERNAME is set." in opensearch_step["run"]
     assert "OPENSEARCH_USERNAME is required when OPENSEARCH_PASSWORD is set." in opensearch_step["run"]
