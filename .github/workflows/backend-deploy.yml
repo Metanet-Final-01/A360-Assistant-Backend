@@ -38,10 +38,6 @@ on:
         required: true
         type: boolean
         default: true
-      admin_api_allowed_source_cidrs:
-        description: "Comma-separated CIDR allowlist for public ALB /api/admin/* forwarding"
-        required: true
-        default: "127.0.0.1/32"
   push:
     branches:
       - main
@@ -105,7 +101,6 @@ jobs:
           OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
           ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          ADMIN_API_ALLOWED_SOURCE_CIDRS: ${{ vars.ADMIN_API_ALLOWED_SOURCE_CIDRS || inputs.admin_api_allowed_source_cidrs || '127.0.0.1/32' }}
         run: |
           if [ -z "$OPS_API_KEY" ]; then
             echo "OPS_API_KEY is missing from the selected GitHub Environment." >&2
@@ -119,15 +114,6 @@ jobs:
             echo "GHCR_READ_TOKEN repository secret is missing." >&2
             exit 1
           fi
-          if [ -z "$ADMIN_API_ALLOWED_SOURCE_CIDRS" ]; then
-            echo "ADMIN_API_ALLOWED_SOURCE_CIDRS is required for /api/admin/* ALB allowlisting." >&2
-            exit 1
-          fi
-          if ! printf '%s' "$ADMIN_API_ALLOWED_SOURCE_CIDRS" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}(,([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2})*$'; then
-            echo "ADMIN_API_ALLOWED_SOURCE_CIDRS must be comma-separated IPv4 CIDRs, for example 203.0.113.10/32." >&2
-            exit 1
-          fi
-
       - name: Validate OpenSearch host
         env:
           OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
@@ -224,7 +210,6 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ALERT_GLOBAL_DAILY_USD: ${{ vars.ALERT_GLOBAL_DAILY_USD }}
           ALERT_5XX_DAILY: ${{ vars.ALERT_5XX_DAILY }}
-          ADMIN_API_ALLOWED_SOURCE_CIDRS: ${{ vars.ADMIN_API_ALLOWED_SOURCE_CIDRS || inputs.admin_api_allowed_source_cidrs || '127.0.0.1/32' }}
           RAG_CACHE_ENABLED: ${{ inputs.rag_cache_enabled }}
           START_BACKEND_CONTAINER: ${{ inputs.start_backend_container }}
         run: |
@@ -246,7 +231,6 @@ jobs:
               OpenSearchPassword="$OPENSEARCH_PASSWORD" \
               GithubToken="$GHCR_READ_TOKEN" \
               OpsApiKey="$OPS_API_KEY" \
-              AdminApiAllowedSourceCidrs="$ADMIN_API_ALLOWED_SOURCE_CIDRS" \
               AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN" \
               AssuranceWriterRepository="${{ github.repository }}" \
               SlackWebhookUrl="$SLACK_WEBHOOK_URL" \
