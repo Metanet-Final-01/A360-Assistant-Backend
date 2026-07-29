@@ -61,6 +61,13 @@
     "uvicorn": "uvicorn",
     "yaml": "pyyaml"
   },
+  "approved_dynamic_imports": [
+    {
+      "path": "app/agent/registry.py",
+      "module_prefix": "app.agent.",
+      "approval_ref": "RPA-343"
+    }
+  ],
   "approved_additions": {},
   "license_policy": {
     "allowed_spdx": [

@@ -13,6 +13,7 @@
     "local_roots",
     "protected_paths",
     "import_distribution_map",
+    "approved_dynamic_imports",
     "approved_additions",
     "license_policy",
     "vulnerability_policy"
@@ -49,6 +50,33 @@
       "additionalProperties": {
         "type": "string",
         "minLength": 1
+      }
+    },
+    "approved_dynamic_imports": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "module_prefix",
+          "approval_ref"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\\.py$"
+          },
+          "module_prefix": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*\\.$"
+          },
+          "approval_ref": {
+            "type": "string",
+            "pattern": "^RPA-[1-9][0-9]*$"
+          }
+        }
       }
     },
     "approved_additions": {

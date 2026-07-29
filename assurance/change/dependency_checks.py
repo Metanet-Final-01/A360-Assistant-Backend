@@ -5,7 +5,7 @@ import ast
 import re
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .foundation import (
@@ -24,7 +24,59 @@ from .foundation import (
 )
 
 
-def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], list[str]]:
+def _module_package(path: str) -> str:
+    parts = PurePosixPath(path).with_suffix("").parts
+    if not parts:
+        return ""
+    package_parts = parts if parts[-1] == "__init__" else parts[:-1]
+    if package_parts and package_parts[-1] == "__init__":
+        package_parts = package_parts[:-1]
+    return ".".join(package_parts)
+
+
+def _dynamic_import_prefix(path: str, expression: ast.expr) -> str | None:
+    """Return the statically bounded prefix of a non-literal import target."""
+    if not isinstance(expression, ast.JoinedStr):
+        return None
+    prefix = ""
+    for value in expression.values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            prefix += value.value
+            continue
+        if (
+            not prefix
+            and isinstance(value, ast.FormattedValue)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "__package__"
+        ):
+            prefix = _module_package(path)
+            continue
+        break
+    return prefix if prefix.endswith(".") else None
+
+
+def _approved_dynamic_import(
+    path: str,
+    module_prefix: str | None,
+    approvals: list[dict[str, str]],
+) -> dict[str, str] | None:
+    if module_prefix is None:
+        return None
+    for approval in approvals:
+        if (
+            approval.get("path") == path
+            and module_prefix.startswith(approval.get("module_prefix", ""))
+        ):
+            return approval
+    return None
+
+
+def parse_imports(
+    path: str,
+    content: bytes | None,
+    *,
+    approved_dynamic_imports: list[dict[str, str]] | None = None,
+) -> tuple[list[ImportSpec], list[str]]:
     if content is None:
         return [], []
     try:
@@ -188,7 +240,29 @@ def parse_imports(path: str, content: bytes | None) -> tuple[list[ImportSpec], l
                 )
             )
         else:
-            dynamic_errors.append(f"{path}:{node.lineno}: non-literal dynamic import cannot be verified")
+            module_prefix = (
+                _dynamic_import_prefix(path, node.args[0]) if node.args else None
+            )
+            approval = _approved_dynamic_import(
+                path,
+                module_prefix,
+                approved_dynamic_imports or [],
+            )
+            if approval is not None:
+                imports.append(
+                    ImportSpec(
+                        path,
+                        approval["module_prefix"].rstrip("."),
+                        None,
+                        node.lineno,
+                        "dynamic_approved_prefix",
+                        execution_context(node),
+                    )
+                )
+            else:
+                dynamic_errors.append(
+                    f"{path}:{node.lineno}: non-literal dynamic import cannot be verified"
+                )
 
     deduped = {item.key: item for item in imports if item.module}
     return sorted(
@@ -410,6 +484,7 @@ def _new_imports(
     base: str,
     head: str,
     changes: list[dict[str, str]],
+    approved_dynamic_imports: list[dict[str, str]],
 ) -> tuple[list[ImportSpec], list[str]]:
     additions: list[ImportSpec] = []
     errors: list[str] = []
@@ -418,10 +493,16 @@ def _new_imports(
         if not path.endswith(".py") or change["status"].startswith("D"):
             continue
         old_path = change.get("old_path", path)
-        head_imports, head_errors = parse_imports(path, repo.show(head, path))
+        head_imports, head_errors = parse_imports(
+            path,
+            repo.show(head, path),
+            approved_dynamic_imports=approved_dynamic_imports,
+        )
         if old_path.endswith(".py"):
             base_imports, base_errors = parse_imports(
-                old_path, repo.show(base, old_path)
+                old_path,
+                repo.show(base, old_path),
+                approved_dynamic_imports=approved_dynamic_imports,
             )
         else:
             base_imports, base_errors = [], []
@@ -445,6 +526,7 @@ def _new_imports(
 def _head_import_inventory(
     repo: GitRepository,
     head: str,
+    approved_dynamic_imports: list[dict[str, str]],
 ) -> tuple[list[ImportSpec], list[str]]:
     """Parse every tracked Python module when dependency removal needs closure proof."""
     imports: list[ImportSpec] = []
@@ -452,7 +534,11 @@ def _head_import_inventory(
     for path in repo.paths(head):
         if not path.endswith(".py"):
             continue
-        parsed, parse_errors = parse_imports(path, repo.show(head, path))
+        parsed, parse_errors = parse_imports(
+            path,
+            repo.show(head, path),
+            approved_dynamic_imports=approved_dynamic_imports,
+        )
         imports.extend(parsed)
         errors.extend(parse_errors)
     deduped = {(item.path, *item.key): item for item in imports}
@@ -619,11 +705,22 @@ def derive_dependency_evidence(
     removed_packages = {
         item["package"] for item in requirement_delta if item["kind"] == "removed"
     }
-    imports, import_errors = _new_imports(repo, base, head, changes)
+    approved_dynamic_imports = policy.get("approved_dynamic_imports", [])
+    imports, import_errors = _new_imports(
+        repo,
+        base,
+        head,
+        changes,
+        approved_dynamic_imports,
+    )
     head_imports: list[ImportSpec] = []
     head_inventory_errors: list[str] = []
     if removed_packages:
-        head_imports, head_inventory_errors = _head_import_inventory(repo, head)
+        head_imports, head_inventory_errors = _head_import_inventory(
+            repo,
+            head,
+            approved_dynamic_imports,
+        )
     local_roots = _local_roots(repo, head, policy)
     external_imports = [
         item
