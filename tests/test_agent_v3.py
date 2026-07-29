@@ -1099,6 +1099,9 @@ def test_추론은_구조_단계에만_걸리고_인정된_값만_보낸다(monk
     from app.agent.v3 import config as v3config
     from app.agent.v3.recommend.graph import _REASONING_LEVELS, _make_llm
 
+    # `_make_llm`은 진짜 ChatOpenAI를 만든다 — 키가 없으면 생성 자체가 터진다. 로컬은 .env가
+    # 채워 줘서 안 터지고 CI에서만 터졌다(같은 파일의 다른 _make_llm 테스트들은 이미 이걸 넣고 있다).
+    monkeypatch.setattr(v3config, "OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(v3config, "COMPOSE_MAX_TOKENS", 0)
     assert _REASONING_LEVELS == {"none", "low", "medium", "high", "xhigh"}
 
