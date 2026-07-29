@@ -908,7 +908,7 @@ def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
     ]["UserData"]["Fn::Base64"][0]
     assert asg_properties["TargetGroupARNs"] == [
         "StartsBackendContainer",
-        ["BackendTargetGroup"],
+        ["BackendTargetGroup", "BackendInternalTargetGroup"],
         "AWS::NoValue",
     ]
     assert asg_properties["HealthCheckType"] == ["StartsBackendContainer", "ELB", "EC2"]
