@@ -5,6 +5,8 @@ LLM이 필요한 지점(judge)은 chat_json을 실패시켜 결정론 폴백 경
 LLM 정상 경로는 E2E(AGENT_VERSION=v3) 검증 범위다.
 """
 
+import json
+
 import pytest
 
 from app.agent.v3.orchestrator import cards as cards_mod
@@ -457,6 +459,39 @@ def test_flow_confidence_composition():
     assert carded == pytest.approx(0.9)  # 카드 2장 → ×0.9
 
 
+def test_major도_신뢰도를_깎는다():
+    """수리 루프가 실제로 고치는 것은 대부분 major다 — 식에 없으면 수리가 숫자에 안 보인다.
+
+    실측(2026-07-29): 세션을 열지 않고 닫고, 변수를 정의 전에 쓰고, Try가 둘로 갈린 흐름도가
+    major 4건을 달고도 blocker가 없다는 이유로 감쇠 1.00을 받았다 — 넷을 다 고쳐도 0.20 그대로.
+    계수는 blocker(0.8)보다 확연히 완만해야 한다(major는 '실행 불가 확정'이 아니다).
+    """
+    majors, _ = from_violations_dicts([
+        {"rule": "R7", "location": "actions[0]", "step_id": "s1", "message": ""},
+        {"rule": "R13", "location": "actions[1]", "step_id": "s1", "message": ""},
+    ])
+    assert [f.severity for f in majors] == ["major", "major"]
+
+    clean = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
+    dinged = compute_flow_confidence(must_coverage=1.0, findings=majors, sim_pass_rate=1.0)
+    assert dinged < clean, "major가 신뢰도에 반영되지 않는다"
+    assert dinged == pytest.approx(0.9)          # 0.95^2
+
+    blocker, _ = from_violations_dicts([
+        {"rule": "R1", "location": "actions[0]", "step_id": "s1", "message": ""},
+    ])
+    one_blocker = compute_flow_confidence(must_coverage=1.0, findings=blocker, sim_pass_rate=1.0)
+    one_major = compute_flow_confidence(must_coverage=1.0, findings=majors[:1], sim_pass_rate=1.0)
+    assert one_blocker < one_major, "major 감쇠가 blocker만큼 세면 안 된다"
+
+    # warning은 여전히 감점 축이 아니다 (감점·앵커용)
+    warns, _ = from_violations_dicts([
+        {"rule": "R12", "location": "actions[0]", "step_id": "s1", "message": ""},
+    ])
+    assert compute_flow_confidence(
+        must_coverage=1.0, findings=warns, sim_pass_rate=1.0) == pytest.approx(clean)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TaskPlan 가드 + 심판 결정론 경로
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,7 +514,7 @@ def test_guard_plan_rules():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_r13_action_between_try_and_catch():
-    """Try(빈 본문) → 일반 액션 → Catch: 인접성 error + 빈 Try warning."""
+    """Try(빈 본문) → 일반 액션 → Catch: 짝 깨짐은 blocker + 빈 Try는 warning."""
     steps = [{"step_id": "s1", "actions": [
         _act("Error handler", "errorHandlerTry"),
         _act("String", "assign"),
@@ -487,10 +522,46 @@ def test_r13_action_between_try_and_catch():
     ]}]
     violations = checker.run_structure_checks(steps)
     r13 = [v for v in violations if v.rule == "R13"]
-    assert any(v.severity == "error" and "Catch" in v.message for v in r13)  # 인접성
-    assert any(v.severity == "warning" and "비어" in v.message for v in r13)  # 빈 Try
-    # Catch 자신도 Try에 안 붙어 있다는 위반
-    assert any("붙어 있지 않습니다" in v.message for v in r13)
+    assert any(v.severity == "blocker" and "바로 와야" in v.message for v in r13)
+    # 빈 Try는 major다 — warning이면 refine이 손대지 않아 골격만 남은 흐름도가 그대로 나간다
+    assert any(v.severity == "error" and "비어" in v.message for v in r13)
+    # Catch 자신도 Try에 안 붙어 있다 — 같은 이유로 blocker
+    assert any(v.severity == "blocker" and "붙어 있지 않습니다" in v.message for v in r13)
+
+
+def test_짝_없는_try는_blocker로_신뢰도를_떨어뜨린다():
+    """A360이 저장·실행을 거부하는 구조는 R1(환각)과 같은 급이어야 출고를 막는다.
+
+    실측(2026-07-28): Try 3개 대 Catch 1개인 흐름도가 major로만 잡혀 신뢰도 0.13으로 나갔다.
+    """
+    from app.agent.v3.orchestrator.harness import compute_flow_confidence
+    from app.agent.v3.verify.findings import from_violations
+
+    steps = [{"step_id": "s1", "actions": [
+        _act("Error handler", "errorHandlerTry", children=[_act("String", "assign")]),
+        _act("Error handler", "errorHandlerTry", children=[_act("String", "assign")]),
+    ]}]
+    findings, _ = from_violations(checker.run_structure_checks(steps))
+    blockers = [f for f in findings if f.severity == "blocker"]
+    assert len(blockers) == 2  # 짝 없는 Try 두 개
+
+    # must를 다 덮어도 실행 불가 구조면 신뢰도가 내려간다
+    full = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=None)
+    broken = compute_flow_confidence(must_coverage=1.0, findings=findings, sim_pass_rate=None)
+    assert broken < full
+
+
+def test_severity_덮어쓰기는_양방향이다():
+    """한 규칙이 성격이 다른 조건을 담는다 — warning 방향으로만 열면 실행 불가 결함이 묻힌다."""
+    from app.agent.v3.verify.checker import Violation
+    from app.agent.v3.verify.findings import from_violations
+
+    findings, _ = from_violations([
+        Violation("R13", "a", "짝 없음", severity="blocker"),
+        Violation("R13", "b", "빈 본문", severity="warning"),
+        Violation("R13", "c", "기본값 error → 규칙 기본 심각도"),
+    ])
+    assert [f.severity for f in findings] == ["blocker", "warning", "major"]
 
 
 def test_r13_proper_try_catch_finally_passes():
@@ -501,6 +572,59 @@ def test_r13_proper_try_catch_finally_passes():
         _act("String", "assign"),  # 블록 밖 후속 작업은 정상
     ]}]
     assert [v for v in checker.run_structure_checks(steps) if v.severity == "error"] == []
+
+
+def test_r13_단계로_갈린_try_catch_finally는_error가_아니라_병합_warning():
+    """실행 시퀀스로는 인접한데 step만 갈린 경우 — 실측 af21278b(step2=Try/3=Catch/4=Finally).
+
+    단계별로만 보면 '붙어 있지 않다' error 3건이 되지만 실행 의미는 멀쩡하다. 진짜 문제는
+    화면이 한 덩어리로 안 그려지는 것이라 warning + merge_step 지시로 가른다.
+    """
+    steps = [
+        {"step_id": "s1", "actions": [_act("Error handler", "errorHandlerTry",
+                                           children=[_act("String", "assign")])]},
+        {"step_id": "s2", "actions": [_act("Error handler", "errorHandlerCatch")]},
+        {"step_id": "s3", "actions": [_act("Error handler", "errorHandlerFinally")]},
+    ]
+    violations = checker.run_structure_checks(steps)
+    assert [v for v in violations if v.severity == "error"] == []
+    r13 = [v for v in violations if v.rule == "R13"]
+    assert len(r13) == 2 and all(v.severity == "warning" for v in r13)
+    assert all("다른 단계에 있습니다" in v.message and "merge_step" in v.message for v in r13)
+
+
+def test_r17_children_없는_step은_비실행_스캐폴드():
+    """실측 379cf982 — 빈 Step 9개가 업무를 주장한 흐름도가 신뢰도 최고점을 받았다."""
+    steps = [{"step_id": "s1", "actions": [
+        _act("Step", "Step"),                                       # 빈 구획 — 아무것도 안 함
+        _act("Step", "Step", children=[_act("String", "assign"),    # 둘 이상 묶는 구획은 정상
+                                       _act("String", "toNumber")]),
+    ]}]
+    r17 = [v for v in checker.run_structure_checks(steps) if v.rule == "R17"]
+    assert len(r17) == 1 and r17[0].location == "actions[0]"
+
+
+def test_r18_throw는_catch나_분기_안에서만_유효하다():
+    """실측 — 최상위 «오류 재던지기», Try children의 «성공 완료 표시»가 무검출로 샜다."""
+    steps = [{"step_id": "s1", "actions": [
+        _act("Error handler", "errorHandlerTry", children=[
+            _act("Error handler", "errorHandlerThrow"),             # 정상 경로 — 매번 터진다
+            _act("If", "if", children=[_act("Error handler", "errorHandlerThrow")]),  # 조건부 OK
+        ]),
+        _act("Error handler", "errorHandlerCatch", children=[
+            _act("Error handler", "errorHandlerThrow"),             # 오류 재전파 — OK
+        ]),
+        _act("Error handler", "errorHandlerThrow"),                 # 최상위 — 뒤가 전부 죽는다
+    ]}]
+    r18 = [v for v in checker.run_structure_checks(steps) if v.rule == "R18"]
+    assert {v.location for v in r18} == {"actions[0].children[0]", "actions[2]"}
+
+
+def test_eh_role은_throw를_안다():
+    """checker의 수기 사본이 'throw'를 몰라 R18이 한 건도 발화하지 못했다 — 지식층 위임 회귀."""
+    assert checker._eh_role("errorHandlerThrow") == "throw"
+    assert checker._eh_role("Throw") == "throw"
+    assert checker._eh_role("errorHandlerTry") == "try"
 
 
 def test_r14_continue_outside_loop_and_empty_loop():
@@ -543,6 +667,1577 @@ def test_structural_complement_adds_session_and_control_flow():
     assert not any(pkg == "Word" for pkg, _ in out)
     # 카탈로그에 없는 후보는 제외된다 (폐쇄어휘 유지)
     assert all(FakeCatalog().get_action_schema(p, a) is not None for p, a in out)
+
+
+def test_앵커_리포트가_덮이지_않은_분석_단계를_짚는다(caplog):
+    """must가 분석 단계에 안 붙으면 실행마다 입도가 달라져 must_coverage 분모가 흔들린다.
+
+    실측(2026-07-28): 7턴 연속 step_id가 0건이었고, 같은 문서에서 절차가 뒤바뀐 스펙이 나왔다.
+    """
+    import logging
+
+    from app.agent.v3.orchestrator.spec import log_anchor_report
+
+    analysis = {"steps": [{"step_id": f"step-{i}"} for i in (1, 2, 3)]}
+    spec = {"requirements": [
+        {"req_id": "req-1", "priority": "must", "step_id": "step-1"},
+        {"req_id": "req-2", "priority": "must", "step_id": "step-2"},
+        {"req_id": "req-3", "priority": "should"},
+    ]}
+    with caplog.at_level(logging.WARNING):
+        log_anchor_report(spec, analysis)
+    assert "step-3" in caplog.text  # 덮이지 않은 단계를 짚는다
+    assert "step-1" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        log_anchor_report({"requirements": [{"req_id": "r", "priority": "must"}]}, analysis)
+    assert "step_id가 하나도 없다" in caplog.text  # 앵커링 자체가 안 된 경우
+
+
+def test_골격이_업무를_밀어내면_경고한다(caplog):
+    """실측: 골격 4건일 때 흐름도가 깔끔했고 6건일 때 업무 액션이 밀려났다."""
+    import logging
+
+    from app.agent.v3.orchestrator.spec import log_anchor_report
+
+    analysis = {"steps": [{"step_id": "step-1"}]}
+    spec = {"requirements": (
+        [{"req_id": f"m{i}", "priority": "must", "step_id": "step-1"} for i in range(4)]
+        + [{"req_id": f"s{i}", "priority": "should"} for i in range(3)]
+    )}
+    with caplog.at_level(logging.WARNING):
+        log_anchor_report(spec, analysis)
+    assert "골격이 업무를 밀어낼 수 있다" in caplog.text
+
+
+def test_질의에_카탈로그_패키지명을_앵커로_붙인다():
+    """패키지 이름 유무가 점수를 가른다 — 실측 Recorder/Click: 0.32(업무 문장) 대 0.77(어휘).
+
+    LLM이 지어낸 패키지명은 검색을 오염시키므로 카탈로그 실재분만 통과시킨다.
+    """
+    from app.agent.v3.recommend.research import _MAX_QUERY_PACKAGES, _with_packages
+
+    known = {"Recorder", "Browser", "Excel advanced"}
+    assert _with_packages("click element on screen", ["Recorder"], known) == \
+        "Recorder click element on screen"
+    # 카탈로그에 없는 이름은 버린다
+    assert _with_packages("send email", ["Knox Portal"], known) == "send email"
+    # 상한을 넘겨 붙이면 동작 어휘가 묻힌다
+    picked = _with_packages("x", ["Recorder", "Browser", "Excel advanced"], known)
+    assert len(picked.split()) == _MAX_QUERY_PACKAGES + 1
+    # 앵커가 없으면 질의를 그대로 둔다(공백도 안 붙는다)
+    assert _with_packages("open website", [], known) == "open website"
+
+
+def test_구조_게이트는_값_없이_판정되는_규칙만_본다():
+    """R2~R5(파라미터)·R9~R11(변수 흐름)은 값 단계가 채워야 판정된다 — 게이트에서 빼야 한다."""
+    from app.agent.v3.recommend.graph import _GATE_RULES
+
+    assert {"R13", "R17", "R18", "R19", "R1"} <= _GATE_RULES
+    assert _GATE_RULES.isdisjoint({"R2", "R3", "R4", "R5", "R9", "R10", "R11"})
+
+
+def test_게이트가_구조_결함과_must_누락을_모은다(monkeypatch):
+    """값을 다 채운 뒤에 '요구가 통째로 빠졌다'를 알면 그 비용이 버려진다.
+
+    반환은 (관측용 지시 줄, 수리에 넘길 커버리지 Finding)이다 — 정적 위반은 수리가
+    흐름도에서 다시 계산하므로 넘기지 않는다.
+    """
+    from types import SimpleNamespace
+
+    from app.agent.v3.recommend import graph as g
+    from app.agent.v3.verify.semantic import CoverageEntry, CoverageReport
+
+    outline = {"steps": [{"step_id": "s1", "actions": [
+        _act("Error handler", "errorHandlerTry"),   # 짝 없는 Try → blocker
+    ]}]}
+    cov = CoverageReport(entries=[
+        CoverageEntry(req_id="req-1", priority="must", status="missing", note="저장 액션 없음"),
+        CoverageEntry(req_id="req-2", priority="must", status="covered"),
+        CoverageEntry(req_id="req-3", priority="should", status="missing"),
+    ])
+    monkeypatch.setattr("app.agent.v3.verify.semantic.run_semantic_check", lambda *a, **k: cov)
+    issues, cov_findings = g._gate_issues(
+        outline, {"requirements": []}, SimpleNamespace(catalog=FakeCatalog()))
+
+    assert any("R13" in i for i in issues)                 # 구조 결함
+    assert any("req-1" in i and "missing" in i for i in issues)  # must 누락
+    assert not any("req-2" in i for i in issues)           # 충족된 건 안 싣는다
+    assert not any("req-3" in i for i in issues)           # should는 게이트 대상 아님
+    # 수리 입력에는 커버리지만 — 정적 위반(R13)은 수리가 직접 다시 센다
+    assert cov_findings and all(f.req_id for f in cov_findings)
+    assert all(f.severity != "warning" for f in cov_findings)
+
+
+def test_게이트는_partial도_지적한다(monkeypatch):
+    """must_coverage는 covered만 센다 — partial은 missing과 똑같이 0점이다.
+
+    그런데 게이트가 missing·violated만 지적하면 partial은 조용히 통과한다. 실측(2026-07-29):
+    빈 Loop로 「최근 3일치 반영」을, 표 생성 액션으로 「테두리 설정」을 때운 구조가 게이트를
+    그대로 지나 최종 채점에서 2/7을 받았다. 게이트는 **점수가 감점하는 것과 같은 것**을
+    지적해야 조기 여과로 값을 한다.
+    """
+    from types import SimpleNamespace
+
+    from app.agent.v3.recommend import graph as g
+    from app.agent.v3.verify.semantic import CoverageEntry, CoverageReport
+
+    cov = CoverageReport(
+        entries=[
+            CoverageEntry(req_id="req-1", priority="must", status="partial",
+                          note="Loop 본문이 비어 반복이 일어나지 않음"),
+            CoverageEntry(req_id="req-2", priority="must", status="covered"),
+            CoverageEntry(req_id="req-3", priority="should", status="partial"),
+        ],
+        scenario_gaps=["표가 0행이면?"],
+    )
+    monkeypatch.setattr("app.agent.v3.verify.semantic.run_semantic_check", lambda *a, **k: cov)
+    issues, cov_findings = g._gate_issues(
+        {"steps": []}, {"requirements": []}, SimpleNamespace(catalog=FakeCatalog()))
+
+    assert any("req-1" in i and "partial" in i for i in issues), "partial이 조용히 통과했다"
+    assert not any("req-2" in i for i in issues)      # covered는 안 싣는다
+    assert not any("req-3" in i for i in issues)      # should는 게이트 대상 아님
+    # 시나리오 공백은 요구가 아니라 조언 — 수리 입력에 넣으면 과생성을 부른다
+    assert all(f.req_id for f in cov_findings)
+    assert not any("시나리오" in f.message for f in cov_findings)
+
+
+def test_수리가_흐름을_줄이면_반려한다():
+    """실측(2026-07-29 01:49): 게이트 수리가 「req-4~7 missing」을 받고 그 요구를 담당하던
+    엑셀·메일 단계를 지우고 notes에 '자동화 불가'로 적어 냈다 — 액션 ~20개 → 4개.
+
+    커버리지 지적은 **추가하라**는 뜻이라 삭제는 해소가 아니다. 수리는 개선일 때만 받는다.
+    """
+    from app.agent.v3.recommend.graph import _repair_regression
+
+    before = {"steps": [
+        {"step_id": "s1", "actions": [_act("Browser", "Open"), _act("Browser", "Close")]},
+        {"step_id": "s2", "actions": [_act("Excel advanced", "Open"), _act("Email", "Send")]},
+    ]}
+    shrunk = {"steps": [{"step_id": "s1", "actions": [_act("Browser", "Open")]}]}
+    assert _repair_regression(before, shrunk)                      # 액션이 줄면 반려
+    assert _repair_regression(before, {"steps": before["steps"][:1]})  # 단계가 줄어도 반려
+    assert _repair_regression(before, before) is None              # 그대로면 통과
+
+    grown = {"steps": [
+        before["steps"][0],
+        {"step_id": "s2", "actions": [_act("Excel advanced", "Open"),
+                                      _act("Excel advanced", "Set cell border"),
+                                      _act("Email", "Send")]},
+    ]}
+    assert _repair_regression(before, grown) is None               # 늘면 통과
+
+
+def test_값_단계는_구조를_줄일_수_없다():
+    """값 단계 출력에는 구조가 아예 없다 — 그래서 구조를 줄일 수단이 없다.
+
+    실측: 구조 32개 액션 → 최종 11개. Loop children이 비고, Try children이 비고, 한 단계는
+    액션이 0개가 됐다. 값 단계가 흐름도를 **재출력**하던 계약 탓이었다. 지금은 id별 값만
+    받으므로 모델이 구조를 줄여 내고 싶어도 낼 자리가 없다.
+    """
+    from app.agent.v3.recommend import graph as g
+
+    outline = {"steps": [{"step_id": "s1", "actions": [
+        _act("Browser", "Open"),
+        _act("Loop", "For each row in table", children=[
+            _act("Excel advanced", "Write"), _act("Excel advanced", "Read"),
+        ]),
+    ]}], "variables": [], "notes": "구조 단계 메모"}
+    g._edit_ops.annotate_ids(outline)
+
+    # 값 단계가 Loop 본문을 비우려 해도 — 낼 수 있는 건 id와 값뿐이다
+    patch = g._parse_patch(json.dumps({"nodes": [
+        {"id": "n1", "parameters": [{"name": "URL", "value": "https://example.com"}]},
+        {"id": "n2", "parameters": [{"name": "table", "value": "$tRows$"}],
+         "package": "Loop", "children": []},          # 구조를 끼워 넣어도
+    ], "variables_add": [{"name": "tRows", "type": "TABLE"}]}))
+    assert "children" not in patch["nodes"][1]        # 파서가 구조를 걷어낸다
+    assert "package" not in patch["nodes"][1]
+
+    g._apply_patches(outline, patch["nodes"])
+    g._merge_variables(outline, patch["variables_add"])
+
+    assert g._count_actions(outline) == 4                        # 구조는 안 줄어든다
+    acts = outline["steps"][0]["actions"]
+    assert acts[0]["parameters"][0]["value"] == "https://example.com"
+    assert acts[1]["parameters"][0]["value"] == "$tRows$"
+    assert [c["action"] for c in acts[1]["children"]] == ["Write", "Read"]  # 본문이 살아 있다
+    assert [v["name"] for v in outline["variables"]] == ["tRows"]
+
+
+def test_값은_자리가_아니라_id로_붙는다():
+    """값 단계가 노드 하나를 빠뜨려도 뒤쪽 값이 밀리지 않는다 — 순서가 아니라 id가 좌표다."""
+    from app.agent.v3.recommend import graph as g
+
+    outline = {"steps": [{"step_id": "s1", "actions": [
+        _act("Browser", "Open"), _act("Recorder", "Click"), _act("Browser", "Close"),
+    ]}]}
+    g._edit_ops.annotate_ids(outline)
+
+    # 가운데(n2)를 빠뜨리고, 없는 id(n9)까지 낸 응답
+    applied, unknown = g._apply_patches(outline, [
+        {"id": "n1", "parameters": [{"name": "URL", "value": "u"}]},
+        {"id": "n3", "parameters": [{"name": "session", "value": "s"}]},
+        {"id": "n9", "parameters": [{"name": "x", "value": "y"}]},
+    ])
+
+    assert (applied, unknown) == (2, 1)
+    acts = outline["steps"][0]["actions"]
+    assert acts[0]["parameters"][0]["value"] == "u"
+    assert not acts[1].get("parameters")                          # Click은 값 없이 남는다
+    assert acts[2]["parameters"][0]["value"] == "s"               # Close 값이 제자리로
+
+
+def test_빈_Step으로는_빈_Try_지적을_덮을_수_없다():
+    """수리가 지적을 '형식만' 없애는 길 — Try 안에 라벨뿐인 Step을 넣어도 보호 대상은 0이다.
+
+    Step은 순수 구획이라 그 자체로는 아무것도 실행하지 않는다. children 유무로만 판정하면
+    빈 Step 하나로 R13이 사라지고, 사람 눈에는 오류 처리가 갖춰진 흐름도로 보인다.
+    """
+    from app.agent.v3.verify.checker import run_structure_checks
+
+    def _rules(flow_actions):
+        return [v.rule for v in run_structure_checks([{"step_id": "s1", "actions": flow_actions}])]
+
+    scaffold = [
+        _act("Error handler", "Try", children=[
+            _act("Step", "Step", children=[_act("Step", "Step")]),      # 껍데기만
+        ]),
+        _act("Error handler", "Catch", children=[_act("Logging", "Log text to file")]),
+    ]
+    assert "R13" in _rules(scaffold)      # 여전히 빈 Try다
+    assert "R17" in _rules(scaffold)      # 빈 Step 자체도 잡힌다
+
+    real = [
+        _act("Error handler", "Try", children=[
+            _act("Step", "Step", children=[_act("Browser", "Open")]),   # 실제 액션이 있다
+        ]),
+        _act("Error handler", "Catch", children=[_act("Logging", "Log text to file")]),
+    ]
+    assert "R13" not in _rules(real)
+
+
+def test_비권장_패키지는_문서에서_유도해_경고한다():
+    """레거시 호환용 패키지는 액션 스펙만 보면 멀쩡한 후보로 보이고 검색 점수도 정상이다.
+
+    실측: `Browser/Open`이 0.91로 1위였는데 흐름도는 레거시 패키지의 페이지 열기를 골랐다.
+    패키지 이름을 코드에 박지 않고 **개요 문서가 하는 말**로 판정한다 — 문서가 바뀌면
+    판정도 따라간다. 실행이 깨지진 않으므로(마이그레이션 봇에선 정당) warning이다.
+    """
+    from app.agent.v3.verify.checker import run_package_checks
+
+    class _Cat(FakeCatalog):
+        def discouraged_packages(self):
+            return {"OldWeb": "We do not recommend using this package for new bot development."}
+
+    steps = [{"step_id": "s1", "actions": [
+        _act("OldWeb", "Open page"), _act("Browser", "Close"),
+    ]}]
+    v = [x for x in run_package_checks(steps, _Cat()) if x.rule == "R20"]
+    assert len(v) == 1
+    assert v[0].severity == "warning"
+    assert "OldWeb" in v[0].message and "new bot development" in v[0].message
+
+    # 표시가 없는 카탈로그(구 버전·테스트 스텁)에서는 조용히 쉰다
+    assert not [x for x in run_package_checks(steps, FakeCatalog()) if x.rule == "R20"]
+
+
+def test_비권장_패키지_판정은_문장으로_한다():
+    """이름 목록이 아니라 '권장하지 않는다'는 문장을 찾는다 — 줄바꿈에 잘리지 않아야 한다."""
+    from app.services.catalog import _discouraged_reason
+
+    folded = ("패키지: Old / 레거시\n설명: The actions are only used in migrated bots .\n"
+              "We do not recommend using this package\nfor new bot development.\n액션 목록(3개)")
+    assert _discouraged_reason(folded) == (
+        "We do not recommend using this package for new bot development."
+    )
+    assert _discouraged_reason("패키지: Browser 설명: Opens a web page.") is None
+
+
+def test_Error_handler_블록_뒤에_업무가_남으면_잡는다():
+    """Try가 하나여도 그 안에 업무의 일부만 들어가는 형태가 반복됐다.
+
+    실측 3턴 연속: 웹 조회만 Try에 넣고 엑셀·메일은 블록 뒤 step에 뒀다. 그 업무는 보호를
+    못 받고, 블록의 Finally가 아직 쓸 세션을 미리 닫는다. 정리(closer)와 성공 가드(If)는
+    블록 뒤에 와도 되므로 통과시킨다.
+    """
+    from app.agent.v3.verify.checker import run_structure_checks
+
+    closers = frozenset({("Browser", "Close"), ("Email", "Disconnect")})
+
+    def _msgs(steps):
+        return [v.message for v in run_structure_checks(steps, closers=closers) if v.rule == "R13"]
+
+    block = [
+        _act("Error handler", "Try", children=[_act("Browser", "Open")]),
+        _act("Error handler", "Catch", children=[_act("Logging", "Log text to file")]),
+        _act("Error handler", "Finally", children=[_act("Browser", "Close")]),
+    ]
+
+    leftover = [{"step_id": "s1", "actions": block},
+                {"step_id": "s2", "actions": [_act("Email", "Send")]}]
+    assert any("뒤에 업무 액션이 1개" in m for m in _msgs(leftover))
+
+    # 정리·성공 가드·구획(Step)만 남는 것은 정상
+    ok = [{"step_id": "s1", "actions": block}, {"step_id": "s2", "actions": [
+        _act("Email", "Disconnect"),                               # 정리
+        _act("If", "If", children=[_act("Email", "Send")]),        # 성공 가드 안의 결과 알림
+        _act("Step", "Step", children=[_act("Browser", "Close")]),  # 구획 뚫고 봐도 정리
+    ]}]
+    assert not any("뒤에 업무 액션" in m for m in _msgs(ok))
+
+    # Step 안에 숨은 업무는 뚫고 잡는다
+    hidden = [{"step_id": "s1", "actions": block}, {"step_id": "s2", "actions": [
+        _act("Step", "Step", children=[_act("Microsoft 365 Excel", "Paste cell")]),
+    ]}]
+    assert any("뒤에 업무 액션" in m for m in _msgs(hidden))
+
+    # closers를 못 구하면 검사하지 않는다 — 정리를 업무로 오인하는 쪽이 더 나쁘다
+    assert not [v for v in run_structure_checks(leftover) if "뒤에 업무 액션" in v.message]
+
+
+def test_열자마자_닫는_세션을_잡는다():
+    """수리가 만든 결함이다 — R8「연 뒤 닫지 않았습니다」를 받고 닫기를 **여는 액션 바로 뒤**에
+    넣어 지적을 없앴다. 가중합이 줄었으니 채택됐지만, 브라우저를 열자마자 닫고 그 뒤 클릭들이
+    죽은 화면에서 돌았다. 빈 Try·빈 Loop·빈 Step과 같은 종류의 결함이 세션에 나타난 것이다.
+    """
+    from app.agent.v3.verify.checker import run_structure_checks
+
+    openers = frozenset({("Browser", "Open")})
+    closers = frozenset({("Browser", "Close")})
+
+    def _msgs(actions):
+        return [v.message for v in run_structure_checks(
+            [{"step_id": "s1", "actions": actions}], openers=openers, closers=closers)]
+
+    idle = [_act("Browser", "Open"), _act("Browser", "Close"), _act("Mouse", "Click")]
+    assert any("바로 뒤" in m for m in _msgs(idle))
+
+    # 사이에 작업이 있으면 정상
+    used = [_act("Browser", "Open"), _act("Mouse", "Click"), _act("Browser", "Close")]
+    assert not any("바로 뒤" in m for m in _msgs(used))
+
+    # 중첩 안에서도 잡는다
+    nested = [_act("Error handler", "Try", children=idle)]
+    assert any("바로 뒤" in m for m in _msgs(nested))
+
+    # 레지스트리가 없으면 검사하지 않는다 (R7/R8과 같은 침묵 원칙)
+    assert not [v for v in run_structure_checks([{"step_id": "s1", "actions": idle}])
+                if "바로 뒤" in v.message]
+
+
+def test_자식_하나짜리_Step은_묶는_일을_안_한다():
+    """Step은 여러 액션을 논리 단위로 묶는 구획이다 — 하나를 감싸면 트리만 깊어진다.
+
+    실측(2026-07-29): 업무 액션 12개에 Step 7개가 붙었고 그중 다섯이 자식 하나짜리였다.
+    실행은 되므로 warning이다(빈 Step은 major).
+    """
+    from app.agent.v3.verify.checker import run_structure_checks
+
+    def _v(actions):
+        return [x for x in run_structure_checks([{"step_id": "s1", "actions": actions}])
+                if x.rule == "R17"]
+
+    one = _v([_act("Step", "Step", children=[_act("Browser", "Open")])])
+    assert len(one) == 1 and one[0].severity == "warning"
+    assert "자식이 하나뿐인 Step" in one[0].message
+
+    two = _v([_act("Step", "Step", children=[_act("Browser", "Open"), _act("Mouse", "Click")])])
+    assert not two                                            # 둘 이상은 정상
+    empty = _v([_act("Step", "Step")])
+    assert len(empty) == 1 and empty[0].severity != "warning"  # 빈 Step은 여전히 major
+
+
+def test_최상위_Try_블록은_하나다():
+    """예외 처리를 두 덩어리로 갈면 앞 Finally가 뒤 블록이 쓸 세션을 닫아 버린다.
+
+    실측: 웹 조회 Try/Catch/Finally(Finally에서 브라우저·엑셀 닫기) 뒤에 엑셀 가공·메일 발송
+    Try가 또 왔다. 닫은 세션 위에서 후속 업무가 도는 구조인데 어떤 규칙도 잡지 못했다.
+    Loop 안에 **중첩된** Try(항목별 실패 격리)는 정당하므로 세지 않는다.
+    """
+    from app.agent.v3.verify.checker import run_structure_checks
+
+    def _msgs(steps):
+        return [v.message for v in run_structure_checks(steps) if v.rule == "R13"]
+
+    def _block(label):
+        return [
+            _act("Error handler", "Try", children=[_act("Browser", "Open")], label=label),
+            _act("Error handler", "Catch", children=[_act("Logging", "Log text to file")]),
+            _act("Error handler", "Finally", children=[_act("Browser", "Close")]),
+        ]
+
+    two = [{"step_id": "s1", "actions": _block("웹")}, {"step_id": "s2", "actions": _block("엑셀")}]
+    assert any("최상위 Try 블록이 2개" in m for m in _msgs(two))
+    # 지적문은 실제 피해(앞이 실패해도 뒤가 그대로 돈다)를 말하고, 국소 편집으로 풀 수 있는
+    # 길(성공 플래그 가드)을 함께 제시해야 한다 — '합치기'만 요구하면 수리가 다중 연산이 된다.
+    msg = next(m for m in _msgs(two) if "최상위 Try 블록" in m)
+    assert "정상 종료" in msg and "성공 플래그" in msg
+
+    one = [{"step_id": "s1", "actions": _block("본 업무")}]
+    assert not any("최상위 Try 블록" in m for m in _msgs(one))
+
+    # 반복 항목 실패 격리 — Loop children 안의 중첩 Try는 별개 블록이 아니다
+    nested = [{"step_id": "s1", "actions": [
+        _act("Error handler", "Try", children=[
+            _act("Loop", "For each row in table", children=_block("항목별")),
+        ]),
+        _act("Error handler", "Catch", children=[_act("Logging", "Log text to file")]),
+    ]}]
+    assert not any("최상위 Try 블록" in m for m in _msgs(nested))
+
+
+def test_추론은_구조_단계에만_걸리고_인정된_값만_보낸다(monkeypatch):
+    """추론 토큰은 출력으로 과금되고 COMPOSE_MAX_TOKENS 상한을 함께 먹는다.
+
+    `_make_llm`은 구조·보강·표기·값이 **공유**하므로 거기 박으면 값 채우기(step별 병렬)에도
+    걸려 비용이 가장 크게 붙는다. 흐름도의 배치를 정하는 자리는 구조 단계 하나뿐이라
+    거기에만 건다. 오타가 그대로 API에 실려 400을 내지 않게 값도 거른다.
+    """
+    from app.agent.v3 import config as v3config
+    from app.agent.v3.recommend.graph import _REASONING_LEVELS, _make_llm
+
+    monkeypatch.setattr(v3config, "COMPOSE_MAX_TOKENS", 0)
+    assert _REASONING_LEVELS == {"none", "low", "medium", "high", "xhigh"}
+
+    assert _make_llm(reasoning="medium").reasoning_effort == "medium"
+    assert _make_llm(reasoning=None).reasoning_effort is None
+    assert _make_llm(reasoning="").reasoning_effort is None          # 미설정
+    assert _make_llm(reasoning="ultra").reasoning_effort is None     # 오타는 안 보낸다
+
+
+def test_추론_비호환이면_추론부터_떼고_턴_내내_끈다():
+    """폴백 순서가 뒤바뀌면 원인이 아닌 쪽을 끄고 같은 이유로 또 실패한다.
+
+    JSON mode는 다른 모든 단계가 이미 쓰는 검증된 설정이고, 추론은 새로 켠 것이라 비호환일
+    가능성이 훨씬 높다 — 추론을 먼저 뗀다. 순서가 반대면 후보가 탈락해 턴이 통째로 죽는다.
+
+    그리고 한 번 실패하면 **그 흐름도를 만드는 동안 다시 켜지 않는다.** 실측(2026-07-29):
+    `_ask`마다 강도가 초기화돼 구조 단계가 예산을 태우고 실패한 뒤 보강 회차가 다시 켜
+    14,538토큰(96초, $0.069)을 더 태웠다. 같은 프롬프트·같은 모델이라 한 번 안 되면 그 턴엔 안 된다.
+    """
+    import inspect
+
+    from app.agent.v3.recommend import graph as g
+
+    src = inspect.getsource(g._compose_candidate)
+    assert src.index("if effort:") < src.index("if json_mode:"), "폴백 순서가 뒤집혔다"
+    # 턴 단위로 꺼져야 한다 — _ask 지역 변수만 끄면 다음 단계가 되살린다
+    assert "nonlocal json_mode, reasoning_off" in src
+    assert "reasoning_off = True" in src
+    assert "None if reasoning_off else reasoning" in src
+
+
+def test_추론과_출력상한은_한_쌍이다():
+    """max_tokens는 completion 전체(추론 + 본문)를 센다 — 추론을 켜면 상한도 같이 올려야 한다.
+
+    실측(2026-07-29): 상한 16,000에 medium 추론을 켜니 reasoning_tokens=16000으로 예산을
+    전부 먹고 본문을 한 글자도 못 냈다. 절단을 막으려고 올려 둔 값이 절단을 일으켰다.
+    본문 실측이 2~2.6k이므로 추론을 켠 상태의 상한은 그보다 크게 남아 있어야 한다.
+    """
+    from app.agent.v3 import config as v3config
+
+    if v3config.COMPOSE_REASONING in {"low", "medium", "high", "xhigh"}:
+        assert v3config.COMPOSE_MAX_TOKENS >= 24000, (
+            "추론을 켠 채 상한이 낮으면 추론이 예산을 다 먹고 본문이 잘린다"
+        )
+
+
+def test_구조_계획을_남기고_결과와_어긋남을_잰다(monkeypatch):
+    """`steps`를 쓰기 시작하면 앞 토큰이 뒤를 묶는다 — 그래서 배치를 먼저 말로 정하게 했다.
+
+    계획은 두 가지를 준다. 「왜 Try를 넷으로 나눴나」를 정황이 아니라 모델의 말로 읽는 것,
+    그리고 `try_blocks`·`step_count`가 숫자라 실제와 **기계적으로** 비교되는 것.
+    "하나로 감싼다"고 써 놓고 넷을 쓴 것과 애초에 넷으로 계획한 것은 처방이 다르다.
+    """
+    from app.agent.v3.recommend import graph as g
+
+    events: list[dict] = []
+    monkeypatch.setattr(g, "emit", events.append)
+
+    outline = {"steps": [
+        {"step_id": "s1", "actions": [
+            _act("Error handler", "Try", children=[_act("Browser", "Open")]),
+            _act("Error handler", "Catch", children=[_act("Logging", "Log text to file")]),
+        ]},
+        {"step_id": "s2", "actions": [
+            _act("Error handler", "Try", children=[_act("Email", "Send")]),
+            _act("Error handler", "Catch", children=[_act("Logging", "Log text to file")]),
+        ]},
+    ]}
+    assert g._count_top_tries(outline) == 2          # 최상위 형제로 선 Try만 센다
+
+    # 계획은 하나라 했는데 둘을 썼다 — 자기모순
+    g._emit_plan("A", {"try_blocks": 1, "step_count": 1,
+                       "error_boundary": "Try 하나로 전체를 감싼다"}, outline)
+    d = events[-1]["data"]
+    assert d["planned"]["try_blocks"] == 1 and d["actual"]["try_blocks"] == 2
+    assert any("Try 덩어리" in gp for gp in d["gaps"])
+    assert "Try 하나로" in d["error_boundary"]        # 모델의 말이 그대로 남는다
+
+    # 숫자가 맞으면 어긋남 없음
+    events.clear()
+    g._emit_plan("A", {"try_blocks": 2, "step_count": 2}, outline)
+    assert events[-1]["data"]["gaps"] == []
+
+    # 계획 칸이 비면 조용히 넘어간다 (구 프롬프트 호환)
+    events.clear()
+    g._emit_plan("A", {}, outline)
+    assert not events
+
+
+def test_닫힌_어휘_검증이_표기_오염을_잡는다():
+    """JSON mode도 Pydantic도 `action: "Send/보내기"`를 못 잡는다 — 유효한 JSON이고 그냥 str이다.
+
+    강제되는 건 문법이지 어휘가 아니라, 검수 R1이 사후에 blocker로 잡을 때는 이미 늦다.
+    실측(2026-07-29): 오염된 이름 4건이 수리 5라운드를 태우고 업무 액션을 통째로 지웠다.
+    """
+    from app.agent.v3.recommend.graph import _notation_hint, _unknown_actions, _vocab_retry_user
+
+    cat = FakeCatalog()
+    spec = next(iter(cat.iter_action_schemas()))
+    pkg, act = spec["package"], spec["action"]
+
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act(pkg, act),                       # 실재 — 안 걸려야 한다
+        _act(pkg, f"{act}/한글 라벨"),          # 라벨이 들러붙음
+        _act(pkg, "완전히 지어낸 액션"),         # 힌트 없음
+    ]}]}
+    unknown = _unknown_actions(flow, cat)
+
+    assert len(unknown) == 2, "실재 액션까지 잡거나 오염을 놓쳤다"
+    assert all(u[1] == pkg for u in unknown)
+    # 힌트는 **같은 패키지에서 실재하는 이름**일 때만 — 못 찾으면 조용히 없다
+    assert _notation_hint(pkg, f"{act}/한글 라벨", cat) == act
+    assert _notation_hint(pkg, "완전히 지어낸 액션", cat) is None
+
+    msg = _vocab_retry_user(flow, unknown, cat)
+    assert "메뉴에 있는 표기" in msg and act in msg
+    assert "«» 안은 라벨이지 액션 이름이" in msg      # 오염 원인을 짚는다
+    assert "액션을 지우거나 구조를 바꾸지 마라" in msg  # 삭제로 해소하는 길을 막는다
+    assert _unknown_actions(flow, None) == []        # 카탈로그 없으면 검사하지 않는다
+
+
+def test_로그_골격은_요청이_있을_때만_만든다():
+    """「무인 실행이니 로그가 필요하겠지」는 트리거가 아니다 — 사용자가 요청했을 때만 만든다.
+
+    골격 요구는 must가 아니지만 흐름도에는 실제 액션으로 들어가고, 그만큼 업무 액션을 밀어낸다.
+    실측(2026-07-29): 문서에 기록 요구가 없는데 로그 기록이 골격으로 올라와 Catch마다
+    Logging 액션이 붙었다.
+    """
+    from pathlib import Path
+
+    from app.agent.v3.orchestrator import spec as spec_mod
+
+    text = (Path(spec_mod.__file__).resolve().parent.parent
+            / "prompts" / "spec_builder.md").read_text(encoding="utf-8")
+
+    assert "로그 기록은 사용자가 요청했을 때만" in text
+    # 오류 처리 요구가 로그 기록을 자동으로 부르지 않아야 한다
+    assert "오류 처리 요구는 **안전 종료**까지이고" in text
+    # 표의 트리거도 같은 말을 해야 한다 (규칙과 표가 어긋나면 표를 따른다)
+    row = next(ln for ln in text.splitlines() if ln.startswith("| 실행 로그 기록"))
+    assert "명시적으로 요구할 때만" in row and "무인" in row
+
+
+def test_spec_use_analysis_토글이_분석_블록을_가른다(monkeypatch):
+    """analyze가 흐름도 품질에 기여하는지 재려면, 스펙 입력에서 분석만 뺄 수 있어야 한다.
+
+    분석 산출물은 사용자 화면·근거 추적에는 쓰이지만 흐름도 경로에는 얇게 전달된다
+    (analysis_brief가 요약·단계명·시스템만 넘기고 inputs·outputs·branching·evidence는 버린다).
+    게다가 spec_builder는 원문도 함께 받는다 — 그래서 기여도가 추측으로 갈린다.
+    토글은 그 추측을 실측으로 바꾸는 장치이고, 원문은 **어느 쪽이든 그대로** 들어가야 한다.
+    """
+    from app.agent.v3 import config as v3config
+    from app.agent.v3.orchestrator import spec as spec_mod
+    from app.schemas.recommendation import FlowSpec
+
+    seen: list[str] = []
+
+    def _capture(messages, **kw):
+        seen.append(messages[1]["content"])
+        return FlowSpec(goal="g")
+
+    monkeypatch.setattr(spec_mod, "chat_json", _capture)
+    monkeypatch.setattr(spec_mod, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(spec_mod, "emit_spec_frame", lambda *a, **k: None)
+    state = {"analysis": {"summary": "요약", "steps": [
+        {"step_id": "step-1", "name": "네이버 접속", "description": "", "systems": ["Edge"]},
+    ]}, "message": "흐름도 만들어줘"}
+
+    monkeypatch.setattr(v3config, "SPEC_USE_ANALYSIS", 1)
+    spec_mod.build_flow_spec(state, "업무정의서 원문")
+    monkeypatch.setattr(v3config, "SPEC_USE_ANALYSIS", 0)
+    spec_mod.build_flow_spec(state, "업무정의서 원문")
+
+    on, off = seen
+    assert "[업무 분석]" in on and "네이버 접속" in on
+    assert "[업무 분석]" not in off and "네이버 접속" not in off
+    # 원문은 양쪽 다 — 끄는 것은 분석이지 근거가 아니다
+    assert "업무정의서 원문" in on and "업무정의서 원문" in off
+
+
+def test_surgeon은_한_라운드에_짝을_완성하라고_지시받는다():
+    """수리 라운드는 전부 적용된 뒤 **한 번에** 판정되고, 결함이 줄지 않으면 통째로 폐기된다.
+
+    실측(2026-07-29): 게이트 2라운드가 모두 `Outlook/Connect`만 insert 하고 Disconnect를
+    안 넣어, 정적 가중합이 0→30 / 0→20으로 늘어 폐기됐다. 여는 액션만 넣으면 R8이 새로
+    생기므로, 절반짜리 수정은 아무것도 안 한 것보다 나쁘다 — 프롬프트가 이를 못 박아야 한다.
+    """
+    from pathlib import Path
+
+    from app.agent.v3.orchestrator import harness
+
+    text = (Path(harness.__file__).resolve().parent.parent
+            / "prompts" / "surgeon.md").read_text(encoding="utf-8")
+
+    assert "통째로 폐기" in text                      # 라운드 단위 판정임을 알린다
+    assert "닫는 액션도 같은 출력에" in text           # 세션 짝
+    assert "빈 컨테이너는 새 결함" in text             # 컨테이너 본문
+    assert "빈틈없이 연속" in text                    # wrap 계약(실측 실패 원인)
+
+
+def test_아웃라인은_채워진_값부터_싣는다():
+    """L2 채점관과 surgeon이 보는 것은 이 아웃라인 하나뿐이다 — 여기서 잘린 값은 없는 값이다.
+
+    액션당 파라미터 상한이 있어 앞에서부터 자르면, 비어 있는 선택 파라미터가 자리를 다 먹고
+    정작 채워진 값이 잘려 나간다. 실측(2026-07-29): 파라미터 24개짜리 메일 발송 액션의
+    앞 8칸 중 4칸이 None이라 본문·형식이 채점관에게 안 보였다.
+    """
+    from app.agent.v3.orchestrator.edit_ops import annotate_ids, render_outline
+
+    params = [{"name": f"opt{i}", "value": None} for i in range(6)]
+    params += [{"name": "Subject", "value": "금 시세"}, {"name": "Body", "value": "본문"}]
+    flow = annotate_ids({"steps": [{"step_id": "s1", "label": "발송", "actions": [
+        _act("Email", "Send", params=params),
+    ]}]})
+    out = render_outline(flow)
+
+    assert "Subject='금 시세'" in out and "Body='본문'" in out, "채워진 값이 잘렸다"
+    assert "미지정 6개" in out          # 빈 것은 개수로만
+    assert "opt0=None" not in out       # 빈 값이 자리를 먹지 않는다
+
+
+def test_순서를_흔드는_라운드는_관용을_못_받는다(monkeypatch):
+    """L2/L3 지적이 걸린 라운드에 주던 '정적 악화 없음(<=)' 관용이 사고를 냈다.
+
+    실측(2026-07-29): `move n2 before n7` 한 줄이 `Browser/Open`을 클릭 두 개 뒤로 옮겼는데
+    가중합이 50→50이라 채택됐다 — 브라우저를 열기 전에 클릭하는 흐름도가 나왔다. 정적 검수는
+    이걸 못 본다(`Recorder/Click`은 브라우저 세션을 파라미터로 안 받아 R7 의존 그래프 밖이다).
+    덧붙이기만 하는 라운드에만 관용을 주고, 옮기거나 지우는 라운드는 가중합이 실제로 줄어야 한다.
+    """
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.orchestrator.edit_ops import EditOp, EditOps
+    from app.agent.v3.verify.findings import Finding
+
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Browser", "Open"), _act("Recorder", "Click"),
+    ]}]}
+    extra = [Finding(layer="L2", severity="major", req_id="req-1", message="req-1 partial")]
+
+    def _run(ops):
+        monkeypatch.setattr(harness, "emit", lambda *a, **k: None)
+        monkeypatch.setattr(harness, "emit_flow_frame", lambda *a, **k: None)
+        monkeypatch.setattr(harness, "chat_json", lambda *a, **k: EditOps(operations=ops))
+        # 가중합을 그대로 유지시키는 검수 스텁 — 관용 여부만 갈리게 한다
+        monkeypatch.setattr(harness, "collect_violations",
+                            lambda *a, **k: [{"rule": "R7", "location": "actions[0]",
+                                              "step_id": "s1", "message": ""}])
+        return harness.refine_flow(flow, FakeCatalog(), extra_findings=extra, max_rounds=1)
+
+    moved = _run([EditOp(op="move", target="n2", anchor="n1", position="before")])
+    assert not moved["repaired"], "순서를 흔들었는데 개선 증거 없이 채택됐다"
+
+    # 덧붙일 액션은 **카탈로그에 실재해야** 한다 — 없는 액션은 적용 전에 걸러진다.
+    added = _run([EditOp(op="insert", anchor="n1", position="after",
+                         action={"package": "Excel_MS", "action": "SaveSpreadSheet"})])
+    assert added["repaired"], "덧붙이기 라운드까지 막으면 이식 지시를 반영할 길이 없다"
+
+
+def test_수리_라운드는_제안과_적용_결과를_남긴다(monkeypatch):
+    """수리가 헛돌 때 원인을 가르려면 '무엇을 제안했고 적용됐는가'가 남아야 한다.
+
+    연산을 못 냈는지 / 냈는데 적용에 실패했는지 / 적용은 됐는데 가중합이 안 줄었는지는
+    처방이 전혀 다른데, 실측에서 4라운드가 전부 폐기됐을 때 토큰 수로도 역산할 수 없었다.
+    """
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.orchestrator.edit_ops import EditOp, EditOps
+
+    events: list[dict] = []
+    monkeypatch.setattr(harness, "emit", events.append)
+    monkeypatch.setattr(harness, "emit_flow_frame", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "chat_json", lambda *a, **k: EditOps(operations=[
+        EditOp(op="insert", anchor="n1", position="after",
+               action={"package": "Excel advanced", "action": "Open"}),
+        EditOp(op="remove", target="n9"),
+    ]))
+
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Excel advanced", "excelAdvancedPackageCloseAction"),   # Open 없이 Close → R7
+    ]}]}
+    harness.refine_flow(flow, FakeCatalog(), max_rounds=1)
+
+    rounds = [e for e in events if "수리 라운드" in (e.get("message") or "")]
+    assert rounds, "수리 라운드 관측 이벤트가 없다"
+    d = rounds[0]["data"]
+    assert d["round"] == 1 and d["verdict"] and "weight" in d
+    assert any(o.startswith("insert") and "Excel advanced/Open" in o for o in d["ops"])
+    assert any(o.startswith("remove") for o in d["ops"])
+
+
+def test_게이트_수리는_국소_편집으로_돈다(monkeypatch):
+    """수리를 전면 재출력으로 시키면 3단 분리로 없앤 실패 모드가 수리에서 되살아난다.
+
+    실측 2턴 연속으로 수리본이 반려됐다 — 한 번은 단계 3개를 1개로 뭉갰고, 한 번은 빈 Try
+    지적을 빈 Step으로 덮어 결함이 늘었다. surgeon EditOps는 흐름도를 다시 쓰지 않으므로
+    뭉갤 방법도 잃을 방법도 없다. 여기서는 배선(규칙 범위·라운드 수·구조 전용 지시)을 지킨다.
+    """
+    from types import SimpleNamespace
+
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.recommend import graph as g
+
+    outline = {"steps": [{"step_id": "s1", "actions": [
+        _act("Excel advanced", "excelAdvancedPackageCloseAction"),   # Open 없이 Close → R7
+    ]}]}
+    seen = {}
+
+    def _fake(flow, catalog, **kw):
+        seen.update(kw)
+        return {"flow": flow, "violations": [], "repaired": False}
+
+    monkeypatch.setattr(harness, "refine_flow", _fake)
+    out = g._gate_repair(outline, [], "A", SimpleNamespace(catalog=FakeCatalog()))
+
+    assert out is outline                                  # 수리 없음 → 원안 그대로
+    assert seen["rules"] is g._GATE_RULES                  # 값 규칙(R2~R5·R9~R11)은 제외
+    assert seen["max_rounds"] == g._GATE_REPAIR_ROUNDS
+    assert "set_params" in seen["note"]                    # 구조 단계라 값은 채우지 않는다
+    assert "insert" in seen["note"]                        # 커버리지 지적의 답은 추가다
+
+
+def test_게이트_수리도_흐름이_줄면_반려한다(monkeypatch):
+    """surgeon이 remove로 요구를 지우는 길은 남아 있다 — 크기 가드를 한 겹 더 둔다."""
+    from types import SimpleNamespace
+
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.recommend import graph as g
+
+    outline = {"steps": [{"step_id": "s1", "actions": [
+        _act("Browser", "Open"), _act("Browser", "Close"),
+    ]}]}
+    shrunk = {"steps": [{"step_id": "s1", "actions": [_act("Browser", "Open")]}]}
+    monkeypatch.setattr(harness, "refine_flow",
+                        lambda flow, catalog, **kw: {"flow": shrunk, "violations": [],
+                                                     "repaired": True})
+
+    out = g._gate_repair(outline, [], "A", SimpleNamespace(catalog=FakeCatalog()))
+    assert out is outline, "줄어든 수리본을 받아들였다"
+
+
+def test_액션이_많으면_값_단계를_나눈다():
+    """실측(2026-07-29): 액션 19개를 한 호출로 맡겼더니 Catch·Finally 4개가 통째로 비었다.
+
+    앞서 있던 분할은 step 단위였는데 구조 프롬프트가 step을 1개로 못 박은 뒤로 발동하지
+    않았다 — 단위가 subtree로 바뀐 뒤에도 그런 일이 없는지 **step 1개짜리로** 잰다.
+    """
+    from app.agent.v3.recommend import graph as g
+
+    small = {"steps": [{"actions": [_act("A", "x"), _act("B", "y")]}]}
+    g._edit_ops.annotate_ids(small)
+    assert g._fill_chunks(small, 8) == [["n1", "n2"]], "상한 아래면 한 조각이다"
+
+    # 실측 흐름도와 같은 모양: step 1개, Try 안에 Step 셋, 그 뒤 Catch·Finally
+    flow = {"steps": [{"step_id": "step-1", "actions": [
+        _act("Error handler", "Try", children=[
+            _act("Step", "Step", children=[_act("A", "1"), _act("A", "2"),
+                                           _act("A", "3"), _act("A", "4")]),
+            _act("Step", "Step", children=[_act("B", "1"), _act("B", "2"), _act("B", "3")]),
+            _act("Step", "Step", children=[_act("C", "1"), _act("C", "2")]),
+        ]),
+        _act("Error handler", "Catch", children=[_act("D", "1")]),
+        _act("Error handler", "Finally", children=[_act("E", "1"), _act("E", "2"), _act("E", "3")]),
+    ]}]}
+    g._edit_ops.annotate_ids(flow)
+    assert g._count_actions(flow) == 19
+    chunks = g._fill_chunks(flow, 8)
+
+    assert len(chunks) > 1, "step이 1개라고 분할이 안 되면 안 된다"
+    assert [len(c) for c in chunks] == [6, 7, 6]
+    assert sum(len(c) for c in chunks) == 19, "빠지거나 겹치는 노드가 없다"
+    assert [i for c in chunks for i in c] == [f"n{i}" for i in range(1, 20)], "순서 보존"
+    assert all(len(c) <= 8 for c in chunks)
+    # 실측에서 값이 통째로 비었던 Catch·Finally가 마지막 조각으로 독립한다
+    assert chunks[-1] == ["n14", "n15", "n16", "n17", "n18", "n19"]
+
+
+def test_상한을_크게_두면_분할이_풀린다():
+    """탈출구 — COMPOSE_FILL_CHUNK를 키우면 조각 하나(분할 전 동작)로 돌아간다."""
+    from app.agent.v3.recommend import graph as g
+
+    flow = {"steps": [{"actions": [
+        _act("Error handler", "Try", children=[_act("A", str(i)) for i in range(12)]),
+    ]}]}
+    g._edit_ops.annotate_ids(flow)
+
+    assert len(g._fill_chunks(flow, 999)) == 1
+    assert len(g._fill_chunks(flow, 4)) > 1
+
+
+def test_조각은_상한을_넘지_않는다():
+    """자식이 많은 컨테이너는 자신을 떼고 자식을 다시 잰다 — 어떤 조각도 상한을 안 넘는다."""
+    from app.agent.v3.recommend import graph as g
+
+    deep = {"steps": [{"actions": [
+        _act("Loop", "For each", children=[
+            _act("If", "If", children=[_act("A", str(i)) for i in range(9)]),
+            _act("B", "after"),
+        ]),
+    ]}]}
+    g._edit_ops.annotate_ids(deep)
+    total = g._count_actions(deep)
+
+    for cap in (1, 2, 3, 5, 8):
+        chunks = g._fill_chunks(deep, cap)
+        assert all(len(c) <= cap for c in chunks), f"cap={cap}에서 조각이 상한을 넘었다"
+        assert sum(len(c) for c in chunks) == total, f"cap={cap}에서 노드가 새거나 겹쳤다"
+
+
+def test_전이_id는_흐름도에_남지_않는다():
+    """id는 값 단계가 노드를 가리키는 임시 좌표다 — 스키마로 새 나가면 안 된다."""
+    from app.agent.v3.recommend import graph as g
+
+    flow = {"steps": [{"actions": [_act("A", "x", children=[_act("B", "y")])]}]}
+    g._edit_ops.annotate_ids(flow)
+    assert g._node_index(flow)                      # 붙었다
+    g._edit_ops.strip_ids(flow)
+
+    assert g._node_index(flow) == {}
+    assert g._edit_ops._ID not in json.dumps(flow)
+
+
+def test_값_단계_프롬프트는_구조를_요구하지_않는다():
+    """출력 계약이 흐름도 재출력이면 조각 분할이 무의미하다 — 계약이 값만인지 프롬프트에서 잰다."""
+    from app.agent.v3.recommend import graph as g
+
+    text = g._FILL_PROMPT
+    example = json.loads(text[text.index("{", text.index("[출력")):text.rindex("}") + 1])
+
+    assert set(example) == {"nodes", "variables_add", "notes"}, "출력 예시가 흐름도를 흉내내면 안 된다"
+    for node in example["nodes"]:
+        assert set(node) <= {"id", *g._VALUE_FIELDS}, f"예시 노드에 구조 필드가 있다: {node}"
+    assert any(not n["parameters"] for n in example["nodes"]), \
+        "파라미터 없는 노드도 내라는 걸 예시가 보여야 한다 — 빠뜨린 것과 구분된다"
+    assert "steps" not in example
+
+
+def test_값_조각들은_세션_이름을_상의_없이_맞춘다():
+    """세션을 여는 액션과 닫는 액션은 보통 다른 조각으로 갈린다(Try 첫머리 vs Finally).
+
+    서로의 출력을 못 보므로, 이름은 **규칙**으로 같아져야 한다. 규칙이 프롬프트에서 빠지면
+    R7/R8이 뒤늦게 잡는 수밖에 없다.
+    """
+    from app.agent.v3.recommend import graph as g
+
+    flow = {"steps": [{"actions": [
+        _act("Error handler", "Try", children=[
+            _act("Browser", "Open"), *[_act("X", str(i)) for i in range(8)],
+        ]),
+        _act("Error handler", "Finally", children=[_act("Browser", "Close")]),
+    ]}]}
+    g._edit_ops.annotate_ids(flow)
+    chunks = g._fill_chunks(flow, 8)
+
+    opener = next(c for c in chunks if "n2" in c)          # Browser/Open
+    closer = next(c for c in chunks if "n11" in c)         # Browser/Close
+    assert opener is not closer, "이 배치에서 여닫기가 갈리지 않으면 이 테스트가 의미 없다"
+
+    text = g._FILL_PROMPT
+    assert "세션 이름" in text
+    assert "여는 액션" in text and "패키지" in text, "이름을 정하는 규칙이 프롬프트에 있어야 한다"
+
+
+def test_값_조각은_흐름도_전체를_맥락으로_받는다():
+    """조각은 자기 몫만 내지만 **보는 것은 전체**여야 한다 — 앞뒤를 모르면 값을 못 정한다."""
+    from app.agent.v3.recommend import graph as g
+
+    flow = {"steps": [{"step_id": "step-1", "actions": [
+        _act("Browser", "Open", children=[]), _act("Browser", "Close"),
+    ]}], "variables": [{"name": "sBrowser", "type": "SESSION", "description": "브라우저"}]}
+    g._edit_ops.annotate_ids(flow)
+
+    user = g._fill_user(g._fill_context(flow), ["n2"], "")
+
+    assert "n1" in user and "n2" in user               # 맥락에는 둘 다 보인다
+    assert "sBrowser" in user                          # 선언된 변수도 함께 간다
+    assert user.rstrip().endswith("n2"), "낼 대상은 n2 하나로 못 박혀야 한다"
+
+
+def test_Session_type은_세션_이름이_아니다():
+    """실측(2026-07-29): `Excel advanced/Open`이 Session type='New'와 Session name=
+    '$sExcelSession$'을 함께 갖는데, 부분 일치 판정이 앞의 것을 먼저 잡아 세션 이름을
+    'New'로 읽었다. 배선이 완벽한 흐름도에서 R7 2건·R8 2건이 오탐으로 났다.
+    """
+    from app.agent.v3.verify.checker import _is_session_param, _session_name
+
+    assert _is_session_param("Session name")
+    assert _is_session_param("sessionName")
+    assert _is_session_param("session")
+    assert _is_session_param("Microsoft 365 Excel session")   # 패키지명을 앞에 단 표기
+    assert not _is_session_param("Session type")              # ← 세션의 속성이지 이름이 아니다
+    assert not _is_session_param("Open mode")
+
+    opener = _act("Excel advanced", "Open", params=[
+        _param("Session type", "New"),
+        _param("Session name", "$sExcelSession$"),
+    ])
+    assert _session_name(opener) == "sExcelSession"
+
+
+def test_세션_이름_파라미터가_둘이면_이름_쪽이_이긴다():
+    """파라미터 순서에 기대면 카탈로그의 필드 나열 순서가 판정을 가른다."""
+    from app.agent.v3.verify.checker import _session_name
+
+    a = _act("P", "Open", params=[
+        _param("Excel session", "레거시"),        # 먼저 나와도
+        _param("Session name", "$sReal$"),        # 이름 쪽이 이긴다
+    ])
+    assert _session_name(a) == "sReal"
+    # 이름 표기가 없으면 있는 것을 쓴다
+    b = _act("P", "Open", params=[_param("Excel session", "$sOnly$")])
+    assert _session_name(b) == "sOnly"
+
+
+def test_오탐이_사라지면_R7_R8도_사라진다():
+    """세션 배선이 맞는 흐름도는 위반이 없어야 한다 — 위반 수는 신뢰도를 깎는다."""
+    from app.agent.v3.verify import checker
+
+    flow = {"steps": [{"step_id": "step-1", "actions": [
+        # 여는 액션이 세션의 *속성*(Session type)과 *이름*(Session name)을 함께 갖는 현행 표기
+        _act("Excel advanced", "cloudExcelOpen", params=[
+            _param("Session type", "New"),
+            _param("sessionName", "$sExcel$"),
+        ]),
+        _act("Excel advanced", "excelAdvancedPackageSaveWorkbookAction",
+             params=[_param("sessionName", "$sExcel$")]),
+        _act("Excel advanced", "excelAdvancedPackageCloseAction",
+             params=[_param("sessionName", "$sExcel$")]),
+    ]}]}
+    found = [v for v in checker.run_flow_checks(flow, FakeCatalog()) if v.rule in ("R7", "R8")]
+    assert found == [], f"짝이 맞는 세션에서 오탐: {[v.message for v in found]}"
+
+
+def test_수리는_카탈로그에_없는_액션을_심지_못한다():
+    """실측(2026-07-29): 한 라운드가 'Excel advanced/Excel advanced/Set border',
+    'Step/Step/Step', 'Email/Email/Connect'(패키지명을 액션 칸에 겹쳐 적은 꼴)를
+    4건 중 4건 '적용'해 가중치가 0→410으로 뛰었다. 수리가 흐름도를 망가뜨린 것이다.
+    """
+    from app.agent.v3.orchestrator.edit_ops import EditOp, annotate_ids, apply_edit_ops
+
+    cat = FakeCatalog()
+    spec = next(iter(cat.iter_action_schemas()))
+    real_pkg, real_act = spec["package"], spec["action"]
+
+    flow = {"steps": [{"actions": [_act(real_pkg, real_act)]}]}
+    annotate_ids(flow)
+    ops = [
+        EditOp(op="insert", anchor="n1", position="after",
+               action={"package": real_pkg, "action": f"{real_pkg}/{real_act}"}),   # 겹쳐 적은 꼴
+        EditOp(op="insert", anchor="n1", position="after",
+               action={"package": real_pkg, "action": real_act}),                    # 실재하는 것
+    ]
+
+    applied, errors = apply_edit_ops(flow, ops, catalog=cat)
+
+    assert applied == 1, "없는 액션이 심어졌다"
+    assert any("카탈로그에 없는 액션" in e for e in errors)
+    assert len(flow["steps"][0]["actions"]) == 2
+
+
+def test_대상을_못_찾는_update는_카탈로그_탓으로_돌리지_않는다():
+    """실측(2026-07-29): 앞선 `remove n8`이 서브트리를 지운 뒤 `update n10`이 남았는데,
+    카탈로그 스크린이 먼저 걸려 "카탈로그에 없는 액션 Microsoft 365 Excel/None"이라는
+    엉뚱한 사유가 나갔다. 그 사유는 다음 라운드 피드백으로 모델에 그대로 돌아간다."""
+    from app.agent.v3.orchestrator.edit_ops import EditOp, annotate_ids, apply_edit_ops
+
+    flow = {"steps": [{"actions": [_act("A", "x")]}]}
+    annotate_ids(flow)
+    applied, errors = apply_edit_ops(
+        flow,
+        [EditOp(op="update", target="n99", package="Microsoft 365 Excel")],
+        catalog=FakeCatalog(),
+    )
+
+    assert applied == 0
+    assert len(errors) == 1
+    assert "카탈로그에 없는" not in errors[0], f"원인을 잘못 짚었다: {errors[0]}"
+    assert "대상 노드를 못 찾" in errors[0]
+
+
+def test_카탈로그를_안_주면_예전처럼_적용한다():
+    """catalog는 선택 인자다 — 검증기를 못 주는 호출부(대화 추출 카탈로그 등)를 막지 않는다."""
+    from app.agent.v3.orchestrator.edit_ops import EditOp, annotate_ids, apply_edit_ops
+
+    flow = {"steps": [{"actions": [_act("A", "x")]}]}
+    annotate_ids(flow)
+    applied, errors = apply_edit_ops(
+        flow, [EditOp(op="insert", anchor="n1", position="after",
+                      action={"package": "지어낸것", "action": "없는것"})])
+    assert (applied, errors) == (1, [])
+
+
+def test_출력_칸의_변수는_소비가_아니다():
+    """실측(2026-07-29): `Recorder/Structured data extraction`이 produces에 tGoldPrices를
+    옳게 선언했는데도 R9가 났다 — 결과를 담을 파라미터에 적힌 `$tGoldPrices$`를 `$var$`
+    교차 파싱이 소비로 셌기 때문이다. 자기가 만든다고 선언한 변수는 자기 출력 칸이다.
+
+    누적 갱신(nCount를 읽어 1 더해 담기)은 consumes에 **명시**하므로 계속 검사된다.
+    """
+    from app.agent.v3.verify import checker
+
+    flow = {
+        "variables": [{"name": "tRows", "type": "TABLE"}, {"name": "nCount", "type": "NUMBER"}],
+        "steps": [{"step_id": "s1", "actions": [
+            # 출력 칸에 자기 변수를 적은 추출 액션 — produces 선언과 짝이 맞는다
+            dict(_act("Recorder", "Structured data extraction",
+                      params=[_param("Output variable", "$tRows$")]),
+                 produces=[{"name": "tRows", "role": "data"}], consumes=[]),
+        ]}],
+    }
+    r9 = [v for v in checker.run_flow_checks(flow, FakeCatalog()) if v.rule == "R9"]
+    assert r9 == [], f"출력 칸을 소비로 셌다: {[v.message for v in r9]}"
+
+    # 명시 consumes는 그대로 잡힌다 — 앞에서 아무도 안 만든 변수를 읽는 경우
+    flow["steps"][0]["actions"][0]["consumes"] = [{"name": "nCount"}]
+    r9 = [v for v in checker.run_flow_checks(flow, FakeCatalog()) if v.rule == "R9"]
+    assert [v.message for v in r9] and "nCount" in r9[0].message
+
+
+def test_세션을_여는_액션은_선언이_없어도_정의자다():
+    """실측(2026-07-29): 조각 셋 중 하나가 Excel 블록 전체의 produces·consumes를 통째로
+    비웠다 — 파라미터는 `$sExcelSession$`로 전부 일관됐는데도. 그때 여는 액션이 자기
+    세션 파라미터 때문에 '정의 전 사용'(R9)으로 지목됐다. 정의하는 당사자인데.
+
+    카탈로그가 opener라고 알려 주므로 선언이 없어도 안다.
+    """
+    from app.agent.v3.verify import checker
+
+    flow = {
+        "variables": [{"name": "sExcel", "type": "SESSION"}, {"name": "tRows", "type": "TABLE"}],
+        "steps": [{"step_id": "s1", "actions": [
+            # 선언은 비었고 파라미터만 일관된 흐름도 — 값 단계가 필드를 빠뜨린 모습
+            _act("Excel advanced", "cloudExcelOpen", params=[_param("sessionName", "$sExcel$")]),
+            _act("Excel advanced", "excelAdvancedPackageSaveWorkbookAction",
+                 params=[_param("sessionName", "$sExcel$")]),
+            # 다른 액션이 하나라도 선언을 갖고 있어야 R9 검사가 켜진다(하위호환 게이트)
+            dict(_act("Excel advanced", "excelAdvancedPackageCloseAction",
+                      params=[_param("sessionName", "$sExcel$")]),
+                 consumes=[{"name": "sExcel"}]),
+        ]}],
+    }
+    r9 = [v for v in checker.run_flow_checks(flow, FakeCatalog()) if v.rule == "R9"]
+    assert r9 == [], f"세션을 여는 당사자를 정의 전 사용으로 지목했다: {[v.message for v in r9]}"
+
+
+def test_유도한_세션은_R10을_새로_만들지_않는다():
+    """R10(생산했는데 아무도 안 씀)은 명시 선언만 센다 — 규칙 변경만으로 경고가 늘면 안 된다."""
+    from app.agent.v3.verify import checker
+
+    flow = {
+        "variables": [{"name": "sExcel", "type": "SESSION"}],
+        "steps": [{"step_id": "s1", "actions": [
+            _act("Excel advanced", "cloudExcelOpen", params=[_param("sessionName", "$sExcel$")]),
+            dict(_act("Excel advanced", "excelAdvancedPackageCloseAction",
+                      params=[_param("sessionName", "$sExcel$")]),
+                 consumes=[{"name": "sExcel"}]),
+        ]}],
+    }
+    r10 = [v for v in checker.run_flow_checks(flow, FakeCatalog()) if v.rule == "R10"]
+    assert r10 == []
+
+
+def test_값_단계는_만드는_변수를_소비자로_적지_않는다():
+    """실측: 네 턴 모두 여는 액션이 자기가 만들 세션을 consumes에 넣어 R9가 났다.
+    규칙을 '세션'에만 걸었더니 Browser는 고쳐지고 Excel과 추출 액션은 그대로였다 —
+    가르는 기준은 세션인지가 아니라 **그 변수를 누가 만드나**다."""
+    from app.agent.v3.recommend import graph as g
+
+    text = g._FILL_PROMPT
+    flat = text.replace(" ", "").replace("`", "")
+    assert "produces에만" in flat, "만드는 쪽의 방향 규칙이 없다"
+    assert "consumes에만" in flat, "읽는 쪽의 방향 규칙이 없다"
+    assert "R9" in text, "왜 안 되는지(검수가 잡는다)를 함께 적어야 한다"
+    # 세션에만 걸면 추출·읽기 액션이 빠진다 — 규칙이 세션 밖까지 닿는지
+    assert "누적" in text, "동시에 넣어도 되는 유일한 경우를 밝혀야 한다"
+
+    # 출력 예시의 여는 액션이 규칙을 지키는지 — 예시가 규칙을 이긴 전례가 여러 번 있다
+    example = json.loads(text[text.index("{", text.index("[출력")):text.rindex("}") + 1])
+    opener = next(n for n in example["nodes"] if n.get("produces"))
+    produced = {v["name"] for v in opener["produces"]}
+    assert produced and not (produced & {v["name"] for v in opener.get("consumes") or []}), \
+        "예시의 여는 액션이 자기 세션을 consumes에도 넣었다"
+
+
+def test_절단_재출력_지시는_단계마다_다르다():
+    """구조용 문구를 값 단계에 그대로 쓰면 **없는 것**을 지키라고 말하게 된다.
+
+    값 단계 출력에는 흐름도도 children도 없다. 정작 줄이면 안 되는 것은 노드 수인데,
+    구조용 문구는 그걸 말하지 않는다 — 잘린 뒤 노드를 덜어 낸 재출력을 그냥 받게 된다.
+    """
+    from app.agent.v3.recommend import graph as g
+
+    assert "children" in g._TRUNCATED_RETRY          # 구조용은 구조를 지키라고 한다
+    assert "children" not in g._FILL_TRUNCATED_RETRY
+    assert "흐름도" not in g._FILL_TRUNCATED_RETRY
+    assert "id" in g._FILL_TRUNCATED_RETRY, "값 단계가 지켜야 할 것은 노드 수다"
+    for text in (g._TRUNCATED_RETRY, g._FILL_TRUNCATED_RETRY):
+        assert "줄이지 마라" in text or "빼지 마라" in text
+
+
+def test_값_상한과_출력_상한은_따로다():
+    """조각 상한(액션 수)과 출력 토큰 상한은 다른 축이다 — 둘 다 선언돼 있어야 한다."""
+    from app.agent.v3 import config as v3config
+    from app.core.config import REGISTRY
+
+    assert v3config.COMPOSE_FILL_CHUNK >= 1
+    assert "COMPOSE_FILL_CHUNK" in REGISTRY
+    assert REGISTRY["COMPOSE_FILL_CHUNK"].cast is int
+
+
+def test_generate_flow_배선이_끝까지_돈다(monkeypatch):
+    """generate_flow 본문을 **실제로 실행**한다 — LLM 단계만 스텁으로 막고 배선을 태운다.
+
+    이 함수는 모든 테스트에서 통째로 monkeypatch 되고 있었다. 그래서 후보 N개 배선을
+    걷어낼 때 남은 `if len(flows) >= 2:` 한 줄이 1,179개 테스트를 전부 통과한 채
+    실행 시점에 NameError로 터졌다 — 사용자 턴이 응답 없이 끝났다.
+
+    스텁은 **LLM을 부르는 곳만** 막는다. 스텁이 늘면 이 테스트가 지키는 배선이 줄어드니,
+    새 단계를 넣을 때 여기 스텁을 추가하기보다 실제로 돌 수 있게 두는 쪽을 먼저 보라.
+    """
+    # asyncio.run으로 돈다 — pytest-asyncio는 이 저장소의 기본 테스트 명령에 없어서
+    # @pytest.mark.asyncio를 붙이면 **조용히 skip**된다. 안 도는 테스트는 없는 것과 같다.
+    import asyncio
+    import copy
+    from types import SimpleNamespace
+
+    from app.agent.v3.orchestrator import cards as cards_mod
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.recommend import graph as g
+    from app.agent.v3.recommend import research
+    from app.agent.v3.verify import semantic, simulate
+
+    flow = {"schema_version": "1.0", "steps": [{"step_id": "step-1", "label": "s", "actions": [
+        _act("Browser", "Open", params=[_param("URL", "https://example.com")]),
+    ]}], "variables": [], "notes": ""}
+    spec = {"goal": "g", "requirements": [{"req_id": "req-1", "text": "웹을 연다", "priority": "must"}]}
+
+    async def _dossier(*a, **k):
+        return {"menu": "- Browser/Open «열기»", "actions": [("Browser", "Open")], "background": ""}
+
+    async def _compose(*a, **k):
+        return copy.deepcopy(flow)
+
+    monkeypatch.setattr(research, "build_dossier", _dossier)
+    monkeypatch.setattr(g, "_compose_candidate", _compose)
+    # 채점 결과는 **실제 모델**로 만든다 — SimpleNamespace로 흉내 내면 소비부가 기대하는
+    # 필드가 바뀌어도 테스트가 통과해 버려, 이 테스트가 막으려는 종류의 사고를 또 놓친다.
+    monkeypatch.setattr(semantic, "run_semantic_check",
+                        lambda *a, **k: semantic.CoverageReport(entries=[
+                            semantic.CoverageEntry(req_id="req-1", priority="must", status="covered")
+                        ]))
+    monkeypatch.setattr(simulate, "run_simulation",
+                        lambda *a, **k: simulate.SimulationReport())
+    monkeypatch.setattr(harness, "refine_flow",
+                        lambda f, *a, **k: {"flow": f, "violations": [], "repaired": False})
+    monkeypatch.setattr(cards_mod, "polish_card_wording", lambda cards: cards)
+
+    out = asyncio.run(g.generate_flow(
+        {"steps": []}, None, spec,
+        ctx=SimpleNamespace(catalog=FakeCatalog(), retriever=None,
+                            searchable=False, solution="A360")))
+
+    assert out["recommendation"]["steps"], "흐름도가 비어 나왔다"
+    assert "flow_confidence" in out["recommendation"]
+    assert isinstance(out["violations"], list)
+
+
+def test_설계_관점은_하나이고_파일이_실재한다():
+    """페르소나 3개로 넓게 뽑는 대신 단계를 나눠 깊게 간다.
+
+    쓰지 않는 페르소나 파일이 남아 있으면 다음 사람이 "이건 왜 안 쓰지"를 다시 파야 한다 —
+    관점 파일은 실재하는 하나뿐이어야 한다.
+    """
+    from pathlib import Path
+
+    from app.agent.v3.recommend import graph
+
+    prompts = Path(graph.__file__).resolve().parent.parent / "prompts"
+    assert (prompts / graph._STANCE_FILE).is_file()
+    assert not list(prompts.glob("persona*.md"))
+
+
+def test_구조_프롬프트가_없는_도구를_시키지_않는다():
+    """v3 compose는 툴 바인딩이 없다(escape hatch를 needs로 대체했다).
+
+    그런데 기본 지침은 오래도록 "두 도구로 반드시 확인하라"고 말하고 있었다 — 모델은 부를 수
+    없는 도구로 '확인'을 지시받고, 확인의 대안도 못 들은 채 액션을 지어냈다(검수 R1).
+    프롬프트가 실제 능력과 어긋나면 규칙이 아니라 소음이 된다.
+    """
+    from app.agent.v3.recommend.graph import compose_system_prompt
+
+    system = compose_system_prompt(
+        "[설계 관점] 표준", {"steps": []}, {"goal": "g", "requirements": []},
+        {"menu": "- Browser/Open «열기»", "background": ""},
+    )
+    for tool in ("search_kb", "get_action_schema"):
+        assert tool not in system, f"없는 도구 '{tool}'를 지시하고 있다"
+    # 확인의 근거와 대안이 명시돼야 한다
+    assert "도구가 하나도 제공되지 않는다" in system
+    assert "needs" in system
+
+
+def test_구조_단계는_파라미터를_안_받고_능력_요청을_받는다():
+    """한 호출이 고르기·순서·값을 다 하다 뒤에서 힘이 빠져 골격만 남았다(4턴 연속).
+
+    구조 단계 프롬프트는 파라미터를 금지하고 needs(능력 요청)를 받아야 한다.
+    """
+    from app.agent.v3.recommend.graph import compose_system_prompt
+
+    system = compose_system_prompt(
+        "[관점] 운영", {"steps": []}, {"goal": "g", "requirements": []},
+        {"menu": "- Browser/Open «열기»", "background": ""},
+    )
+    assert "구조만" in system and "needs" in system
+    assert "parameters`는 넣지 마라" in system
+
+
+def test_능력_요청을_검색해_메뉴에_덧붙인다(monkeypatch):
+    """escape hatch 대체 — 모델이 '물어볼지 말지'를 정하던 걸 구조로 강제한다.
+
+    실측(2026-07-28): 「엑셀 테두리」를 아무도 안 물어보고 must 요구를 통째로 비웠는데,
+    `format cell border excel`로 검색하면 0.90으로 나오는 액션이었다.
+    """
+    from types import SimpleNamespace
+
+    from app.agent.v3.recommend.graph import _capability_menu
+
+    asked: list[str] = []
+
+    class _Ret:
+        def search(self, q, limit=5, source_types=None):
+            asked.append(q)
+            return [{"package_name": "Microsoft 365 Excel", "action_name": "Format cell",
+                     "score": 0.9}]
+
+    ctx = SimpleNamespace(searchable=True, retriever=_Ret(), catalog=FakeCatalog())
+    sink: list = []
+    # 카탈로그에 없는 액션은 메뉴에 못 오른다(폐쇄 어휘) — FakeCatalog엔 Format cell이 없다
+    assert _capability_menu([{"what": "테두리", "query": "format cell border excel"}], sink, ctx) == ""
+    assert asked == ["format cell border excel"]
+    assert sink  # 검색 히트는 근거(sources)로 누적된다
+
+    # 카탈로그에 있는 액션이면 메뉴 블록이 붙는다
+    class _Ret2(_Ret):
+        def search(self, q, limit=5, source_types=None):
+            asked.append(q)
+            return [{"package_name": "Excel advanced", "action_name": "cloudExcelOpen", "score": 0.8}]
+
+    ctx2 = SimpleNamespace(searchable=True, retriever=_Ret2(), catalog=FakeCatalog())
+    out = _capability_menu([{"what": "엑셀 열기", "query": "open excel workbook"}], [], ctx2)
+    assert "[추가 조사 결과" in out and "Excel advanced/cloudExcelOpen" in out
+    # 검색기가 없으면 조용히 건너뛴다
+    assert _capability_menu([{"query": "x"}], [], SimpleNamespace(searchable=False)) == ""
+
+
+def test_값_단계는_흐름도에_쓰인_액션_스펙만_받는다():
+    """구조가 확정됐으니 어떤 스펙이 필요한지 이미 안다 — 채우기 단계엔 검색이 필요 없다."""
+    from app.agent.v3.recommend.graph import _action_spec_block
+
+    flow = {"steps": [{"actions": [
+        _act("Excel advanced", "cloudExcelOpen", children=[_act("Browser", "browserPackageOpenAction")]),
+        _act("없는패키지", "없는액션"),
+    ]}]}
+    block = _action_spec_block(flow, FakeCatalog())
+    assert "Excel advanced/cloudExcelOpen" in block
+    assert "Browser/browserPackageOpenAction" in block   # children까지 훑는다
+    assert "스펙 없음" in block                            # 카탈로그에 없으면 명시
+    assert _action_spec_block(flow, None).startswith("(카탈로그 없음")
+
+
+def test_호출마다_달라지는_조각이_프롬프트_맨_뒤에_온다():
+    """한 턴 안에서 구조 프롬프트는 최대 세 번(구조·보강·수리) 나간다.
+
+    갈리는 조각이 앞에 있으면 공통 접두가 거기서 끊겨 그 뒤가 전부 캐시를 못 탄다.
+    실측(2026-07-28): 한 턴 $0.275 중 compose가 81%, 캐시 적중률 34%.
+    지금 갈리는 것은 보강 회차에만 붙는 `extra_menu`뿐이므로 그것이 맨 뒤여야 한다.
+    """
+    import os
+
+    from app.agent.v3.recommend.graph import compose_system_prompt
+
+    args = ("[설계 관점] 표준",
+            {"steps": [{"step_id": "s1", "name": "접속"}]},
+            {"goal": "g", "requirements": [{"req_id": "req-1", "text": "t"}]},
+            {"menu": "- Browser/Open «열기»", "background": "배경"})
+    first = compose_system_prompt(*args)
+    boosted = compose_system_prompt(*args, extra_menu="\n[보강분 표식]\n- Excel/Open")
+
+    # 보강 회차는 첫 회차 프롬프트를 **접두로 통째 포함**해야 한다 (캐시가 끝까지 이어진다)
+    assert boosted.startswith(first)
+    prefix = len(os.path.commonprefix([first, boosted]))
+    assert prefix == len(first), f"공통 접두가 {prefix}/{len(first)} — 갈리는 조각이 앞으로 샜다"
+    # 고정 조각은 전부 갈리는 조각보다 앞에 있어야 한다
+    tail = boosted.index("[보강분 표식]")
+    for marker in ("[업무 분석]", "[요구사항 스펙]", "[액션 후보 메뉴]", "[배경 지식", "[설계 관점]"):
+        assert boosted.rindex(marker) < tail, f"{marker}가 뒤로 밀렸다"
+
+
+def test_경쟁_패키지를_카탈로그에서_유도한다():
+    """액션 이름 겹침으로 역할군을 만든다 — 표기 꼬리를 정규화해야 엑셀 계열이 이어진다."""
+    from app.agent.knowledge.derive import derive_competing_packages
+
+    class _Cat:
+        def iter_action_schemas(self):
+            # 엑셀 두 종 — 이름 표기만 다르고 하는 일이 같다
+            for a in ("Open", "Close action in Excel advanced package", "Write from data table",
+                      "Get worksheet as data table", "Set cell", "Read column", "Insert row",
+                      "Delete row", "Filter"):
+                yield {"package": "Excel advanced", "action": a}
+            for a in ("Open", "Close", "Write from data table", "Get worksheet as data table",
+                      "Set cell", "Read column", "Insert row", "Delete row", "Format cell"):
+                yield {"package": "Microsoft 365 Excel", "action": a}
+            # 무관한 패키지 — 같은 군이 되면 안 된다
+            for a in ("Click", "Capture", "Structured data extraction"):
+                yield {"package": "Recorder", "action": a}
+
+        def get_action_schema(self, p, a):
+            return {"package": p, "action": a}
+
+    groups = derive_competing_packages(_Cat())
+    assert len(groups) == 1
+    assert groups[0] == frozenset({"Excel advanced", "Microsoft 365 Excel"})
+    assert "Recorder" not in groups[0]
+
+
+def test_r19_경쟁_패키지_혼용을_잡는다():
+    """세션이 패키지마다 따로라 섞으면 실행이 깨진다 — 실측 18개 중 6개가 엑셀을 섞었다."""
+    class _Cat(FakeCatalog):
+        def iter_action_schemas(self):
+            for a in ("Open", "Close", "Write from data table", "Get worksheet as data table",
+                      "Set cell", "Read column", "Insert row", "Delete row"):
+                yield {"package": "Excel advanced", "action": a}
+                yield {"package": "Microsoft 365 Excel", "action": a}
+
+    steps = [{"step_id": "s1", "actions": [
+        _act("Excel advanced", "Open"),
+        _act("Excel advanced", "Write from data table"),
+        _act("Microsoft 365 Excel", "Set cell"),   # ← 다른 패키지, 같은 역할군
+    ]}]
+    vs = checker.run_package_checks(steps, _Cat())
+    assert len(vs) == 1
+    d = vs[0].as_dict()
+    assert d["rule"] == "R19" and d["package"] == "Microsoft 365 Excel"
+    assert "Excel advanced" in d["message"]      # 먼저 등장한 쪽이 기준
+    # 한 패키지만 쓰면 조용하다
+    single = [{"step_id": "s1", "actions": [_act("Excel advanced", "Open")]}]
+    assert checker.run_package_checks(single, _Cat()) == []
+    # 카탈로그가 없으면 판정 근거가 없으니 침묵한다
+    assert checker.run_package_checks(steps, None) == []
+
+
+def test_derive_packages는_카탈로그에서_어휘를_뽑는다():
+    from app.agent.knowledge.derive import derive_packages
+
+    pkgs = dict(derive_packages(FakeCatalog()))
+    assert pkgs  # 유도 실패면 질의 설계자가 어휘 사전 없이 돈다
+    assert all(isinstance(n, int) and n > 0 for n in pkgs.values())
+    counts = [n for _, n in derive_packages(FakeCatalog())]
+    assert counts == sorted(counts, reverse=True)  # 주력 패키지가 앞에 온다
+
+
+def test_메뉴는_기능_단위별로_자리를_나눠_갖는다():
+    """전역 정렬은 '어려운 단위'를 통째로 밀어낸다 — 실측: 웹 조작 최고점 0.315 <
+    엑셀 최저점 0.35라 웹 조작 후보 10건 중 3건만 남고 Browser/Open이 잘렸다."""
+    from app.agent.v3.recommend.research import _interleave
+
+    웹조작 = [(("Recorder", "A"), 0.315), (("Recorder", "B"), 0.309),
+             (("Browser", "Open"), 0.275), (("Legacy", "C"), 0.273)]
+    엑셀 = [(("Excel advanced", "Paste"), 0.465), (("Excel advanced", "Write"), 0.397),
+           (("Excel advanced", "Get"), 0.354)]
+    메일 = [(("Email", "Disconnect"), 0.471), (("Email", "Send"), 0.414)]
+
+    out = _interleave([웹조작, 엑셀, 메일], 6)
+    keys = [k for k, _ in out]
+    # 전역 정렬이면 6칸이 전부 엑셀·메일이고 웹 조작은 0칸이다. 라운드로빈은 2칸씩 나눈다.
+    assert keys.count(("Recorder", "A")) == 1
+    assert sum(1 for p, _ in keys if p in ("Recorder", "Browser", "Legacy")) == 2
+    # 낮은 점수라도 자기 단위 안에서 상위면 들어온다
+    assert ("Browser", "Open") in [k for k, _ in _interleave([웹조작, 엑셀, 메일], 12)]
+
+
+def test_interleave는_중복과_짧은_단위를_견딘다():
+    from app.agent.v3.recommend.research import _interleave
+
+    a = [(("P", "x"), 0.9), (("P", "공유"), 0.5)]
+    b = [(("P", "공유"), 0.8)]   # 다른 단위가 같은 액션을 찾은 경우
+    c: list = []                 # 후보가 없는 단위
+    out = _interleave([a, b, c], 10)
+    assert [k for k, _ in out] == [("P", "x"), ("P", "공유")]
+    assert _interleave([], 5) == []
+
+
+def test_잘림과_형식오류를_finish_reason으로_가른다():
+    """길이 절단에 형식오류용 재시도를 쓰면 같은 길이가 또 나와 반드시 재실패한다."""
+    from types import SimpleNamespace
+
+    from app.agent.v3.recommend.graph import _looks_truncated
+
+    truncated = SimpleNamespace(
+        response_metadata={"finish_reason": "length"}, content='{"steps": [{"a": 1}'
+    )
+    malformed = SimpleNamespace(
+        response_metadata={"finish_reason": "stop"}, content='{"steps": [{"a": 1} {"b": 2}]}'
+    )
+    fenced = SimpleNamespace(
+        response_metadata={"finish_reason": "stop"}, content='```json\n{"steps": []}\n```'
+    )
+    # finish_reason이 안 실려 오는 경로 — 본문 꼬리로 보완한다
+    no_meta_cut = SimpleNamespace(response_metadata={}, content='{"steps": [{"a": 1}, {"b"')
+
+    assert _looks_truncated(truncated) is True
+    assert _looks_truncated(malformed) is False
+    assert _looks_truncated(fenced) is False
+    assert _looks_truncated(no_meta_cut) is True
+
+
+def test_파싱_실패는_원문_위치를_들고_온다():
+    """실패 지점 발췌가 없으면 '절단인지 문법 오류인지, 어느 필드에서 깨졌는지'를 알 수 없다."""
+    import pytest as _pytest
+
+    from app.agent.v3.recommend.graph import _FlowParseError, _parse_excerpt, _parse_flow
+
+    with _pytest.raises(_FlowParseError) as ei:
+        _parse_flow('{"steps": [{"label": "엑셀 열기"} {"label": "표 추출"}]}')
+    err = ei.value
+    assert err.pos is not None and err.raw
+    excerpt = _parse_excerpt(err.raw, err.pos)
+    assert "⟪여기⟫" in excerpt and "엑셀 열기" in excerpt
+    # 메시지는 재시도 프롬프트에 실리므로 원문을 담지 않는다
+    assert "엑셀 열기" not in str(err)
+
+
+def test_compose는_json_mode로_출력한다(monkeypatch):
+    """v3의 다른 구조화 출력은 전부 json_object인데 compose만 무보장이었다 — 0이면 되돌린다."""
+    from app.agent.v3 import config as v3config
+    from app.agent.v3.recommend.graph import _make_llm
+
+    monkeypatch.setattr(v3config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(v3config, "COMPOSE_JSON_MODE", 1)
+    assert _make_llm().model_kwargs["response_format"] == {"type": "json_object"}
+
+    monkeypatch.setattr(v3config, "COMPOSE_JSON_MODE", 0)
+    assert "response_format" not in (_make_llm().model_kwargs or {})
+
+    # 명시 인자가 config를 이긴다 — 비호환을 만났을 때 끄고 다시 만드는 통로다
+    monkeypatch.setattr(v3config, "COMPOSE_JSON_MODE", 1)
+    assert "response_format" not in (_make_llm(json_mode=False).model_kwargs or {})
+    monkeypatch.setattr(v3config, "COMPOSE_JSON_MODE", 0)
+    assert _make_llm(json_mode=True).model_kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_json_mode일_때만_툴을_strict으로_묶는다(monkeypatch):
+    """JSON mode는 auto-parse 경로를 타고, 그 경로는 툴이 전부 strict이어야 한다.
+
+    실측(2026-07-28): strict 없이 켰다가 `search_kb is not strict`로 후보 3개가 한꺼번에
+    죽어 턴 전체가 실패했다.
+    """
+    from langchain_core.tools import tool
+
+    from app.agent.v3 import config as v3config
+    from app.agent.v3.recommend.graph import _make_llm
+
+    monkeypatch.setattr(v3config, "OPENAI_API_KEY", "sk-test")
+
+    @tool
+    def probe(query: str) -> str:
+        """테스트용 툴."""
+        return ""
+
+    bound = _make_llm(json_mode=True).bind_tools([probe], strict=True)
+    assert bound.kwargs["tools"][0]["function"]["strict"] is True
+    plain = _make_llm(json_mode=False).bind_tools([probe])
+    assert not plain.kwargs["tools"][0]["function"].get("strict")
+
+
+def test_compose_출력_상한이_명시된다(monkeypatch):
+    """미지정이면 provider 기본 천장에 걸려 흐름도 JSON이 잘린다 — 0은 미지정 탈출구."""
+    from app.agent.v3 import config as v3config
+    from app.agent.v3.recommend.graph import _make_llm
+
+    monkeypatch.setattr(v3config, "COMPOSE_MAX_TOKENS", 16000)
+    monkeypatch.setattr(v3config, "OPENAI_API_KEY", "sk-test")
+    assert _make_llm().max_tokens == 16000
+
+    monkeypatch.setattr(v3config, "COMPOSE_MAX_TOKENS", 0)
+    assert _make_llm().max_tokens is None
+
+
+def test_운영_골격_요구는_업무_요구를_밀어내지_않는다(monkeypatch):
+    """research 질의 예산 — must가 먼저다.
+
+    스펙에 운영 골격 요구(should)가 들어오면서 조사 대상이 늘었다. 상한(_MAX_UNITS)에
+    걸릴 때 골격이 업무 요구를 밀어내면 그 기능은 흐름도에 아예 못 들어간다 —
+    강등 경로(LLM 실패)에서도 must가 앞에 오는지 못 박는다.
+    """
+    from app.agent.v3.recommend import research
+
+    spec = {
+        "goal": "매출 집계",
+        "requirements": (
+            [{"req_id": f"skel-{i}", "text": f"골격 {i}", "priority": "should"} for i in range(9)]
+            + [{"req_id": "req-1", "text": "매출.xlsx의 B열 합계를 구한다", "priority": "must"}]
+        ),
+    }
+
+    def _boom(*a, **kw):
+        raise RuntimeError("LLM 불가")
+
+    monkeypatch.setattr(research, "chat_json", _boom)
+    units = research._expand_queries(spec)
+
+    assert len(units) == research._MAX_UNITS
+    # 스펙에서 골격이 앞에 나열돼도 업무 요구가 먼저 조사된다
+    assert units[0].topic == "req-1"
+    assert all(u.topic != "req-1" for u in units[1:])
+
+
+def test_질의_설계_예시는_규칙대로_한_단위_한_동작이다():
+    """규칙과 예시가 어긋나면 모델은 **예시를 따른다.**
+
+    "동사가 둘이면 단위도 둘"이라 써 두고 예시 단위마다 동작을 두셋 담아 놓으면, 계획자가
+    동작을 묶은 질의를 낸다. 묶인 질의는 한쪽 동작이 자리를 다 가져가 다른 쪽이 후보에
+    오르지 못하고, 그 요구는 흐름도에서 통째로 빠진다. 예시의 입도를 못 박는다.
+    """
+    import json
+    import re
+    from pathlib import Path
+
+    from app.agent.v3.recommend import research
+
+    text = (Path(research.__file__).resolve().parent.parent
+            / "prompts" / "research_queries.md").read_text(encoding="utf-8")
+    block = re.search(r"```json\n(.*?)\n```", text, re.S)
+    assert block, "출력 형식을 보이는 json 예시 블록이 있어야 한다"
+    units = json.loads(block.group(1))["units"]
+
+    # 쪼개는 프롬프트인데 예시가 서넛뿐이면 '아끼는' 쪽으로 읽힌다
+    assert len(units) >= 6
+    joiners = ("하고", "해서", "그리고", " 후 ", " 및 ", " 와 ", " 과 ")
+    for u in units:
+        assert not any(j in u["ko_query"] for j in joiners), f"동작을 묶은 예시: {u['ko_query']}"
+        assert len(u["en_query"].split()) <= 6, f"동작이 여럿인 예시: {u['en_query']}"
 
 
 def test_repair_spec_excerpts_supplies_insertion_vocabulary():
