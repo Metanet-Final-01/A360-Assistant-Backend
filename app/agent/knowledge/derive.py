@@ -300,3 +300,108 @@ def derive_structural_actions(catalog) -> tuple[tuple[str, str], ...]:
         return tuple(sorted(set(found)))
 
     return _cached(catalog, "structural_actions", build)
+
+
+# 액션 이름 꼬리의 "action in <패키지> package" — 같은 기능인데 패키지마다 표기가 달라
+# 겹침 계산이 헛돈다(`Close action in Excel advanced package` 대 `Close`).
+_ACTION_SUFFIX_RE = re.compile(r"\s*action in .*? package\s*$", re.IGNORECASE)
+# 경쟁 판정 임계 — 실측(2026-07-28) 기준으로 잡았다:
+#   Excel advanced ↔ Microsoft 365 Excel  겹침 24 · 47%  → 경쟁 (잡아야 함)
+#   Excel advanced ↔ Excel basic          겹침 12 · 100% → 경쟁
+#   Google Sheets  ↔ Microsoft 365 Excel  겹침 21 · 60%  → 경쟁
+#   File           ↔ Folder               겹침  6 · 67%  → 아님 (개수로 걸러짐)
+#   Browser        ↔ Recorder             겹침  0        → 아님
+_COMPETE_MIN_SHARED = 8
+_COMPETE_MIN_RATIO = 0.4
+
+
+def _norm_action(name: str) -> str:
+    return _ACTION_SUFFIX_RE.sub("", (name or "").strip().lower())
+
+
+def derive_competing_packages(catalog) -> tuple[frozenset[str], ...]:
+    """같은 일을 하는 패키지 묶음 — (Excel advanced, Microsoft 365 Excel, …) 같은 역할군.
+
+    ## 왜 필요한가
+
+    A360에는 같은 일을 하는 패키지가 여럿이다(스프레드시트 6종, 메일 5종). 이들은 **세션
+    모델이 각자**라서 `Excel advanced/Open`이 연 세션을 `Microsoft 365 Excel/Format cell`이
+    못 쓴다 — 섞으면 실행이 깨진다. 실측(2026-07-28) 흐름도 18개 중 6개가 엑셀 패키지를
+    섞었고, 한 흐름도는 3종을 함께 썼다.
+
+    ## 왜 유도인가
+
+    수기 목록은 카탈로그가 바뀌면 썩는다(이 파일의 다른 유도 함수들과 같은 이유). 액션 이름
+    집합의 겹침으로 판정하되, 표기 꼬리를 정규화한다 — 정규화 전에는 Excel advanced ↔
+    Microsoft 365 Excel이 26%로 임계 아래였다.
+
+    합집합-찾기로 **연결 성분**을 만든다: A↔B와 B↔C가 각각 임계를 넘으면 A·B·C가 한 군이다
+    (Excel advanced ↔ Excel basic ↔ Microsoft 365 Excel이 이렇게 이어진다).
+
+    ⚠ 완벽하지 않다 — `Word ↔ PowerPoint`처럼 파일 조작 액션이 닮아 함께 묶이는 오탐이 있다.
+    그래서 이걸 쓰는 검수 규칙(R19)은 blocker가 아니라 major다.
+    """
+
+    def build() -> tuple[frozenset[str], ...]:
+        by_pkg: dict[str, set[str]] = {}
+        for spec in _iter_specs(catalog):
+            pkg, act = spec.get("package"), spec.get("action")
+            if pkg and act:
+                by_pkg.setdefault(pkg, set()).add(_norm_action(act))
+
+        names = sorted(by_pkg)
+        parent = {n: n for n in names}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                sa, sb = by_pkg[a], by_pkg[b]
+                shared = len(sa & sb)
+                if shared < _COMPETE_MIN_SHARED:
+                    continue
+                if shared / min(len(sa), len(sb)) < _COMPETE_MIN_RATIO:
+                    continue
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[max(ra, rb)] = min(ra, rb)
+
+        groups: dict[str, set[str]] = {}
+        for n in names:
+            groups.setdefault(find(n), set()).add(n)
+        return tuple(sorted(
+            (frozenset(g) for g in groups.values() if len(g) > 1),
+            key=lambda g: (-len(g), sorted(g)[0]),
+        ))
+
+    return _cached(catalog, "competing_packages", build)
+
+
+def derive_packages(catalog) -> tuple[tuple[str, int], ...]:
+    """카탈로그 패키지 목록 — (패키지명, 액션 수), 액션 수 내림차순.
+
+    질의 설계자에게 줄 **어휘 사전**이다. 조사 질의를 만드는 LLM은 [액션 후보 메뉴]를 볼 수
+    없다 — 그건 조사 *결과*라 아직 없다. 그래서 A360 어휘를 모른 채 어휘 검색용 질의를
+    쓰라는 요구를 받고, 업무 문장을 그대로 내놓는다.
+
+    실측(2026-07-28)이 그 대가를 보여준다. 같은 `Recorder/Click`을 찾는데:
+        "네이버 메인에서 증권 클릭하고 국내 금 시세 조회"  → SAP/Click menu  0.315
+        "click element on screen recorder"              → Recorder/Click  0.773
+    패키지 이름이 든 질의는 0.66~0.91, 없는 질의는 0.31~0.49로 갈렸다. 조사 단계가 못 찾은
+    액션을 composer가 escape hatch로 뒤늦게 찾아오고 있었다(같은 턴 12초 뒤, 두 배 점수).
+
+    액션 수를 함께 주는 이유: 어휘가 많은 패키지가 그 영역의 주력이라 선택 힌트가 된다.
+    """
+
+    def build() -> tuple[tuple[str, int], ...]:
+        counts: dict[str, int] = {}
+        for spec in _iter_specs(catalog):
+            if spec.get("package") and spec.get("action"):
+                counts[spec["package"]] = counts.get(spec["package"], 0) + 1
+        return tuple(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    return _cached(catalog, "packages", build)
