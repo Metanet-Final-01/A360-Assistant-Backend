@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 import yaml
@@ -900,6 +903,46 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     assert "dnf update -y" not in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
+
+
+def test_backend_deploy_opensearch_validation_rejects_tab_password():
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise GitHub Actions shell validation")
+
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    )
+    deploy_job = workflow["jobs"]["deploy"]
+    opensearch_step = next(
+        step
+        for step in deploy_job["steps"]
+        if step.get("name") == "Validate OpenSearch host"
+    )
+
+    base_env = {
+        **os.environ,
+        "OPENSEARCH_HOST": "https://search.example.com",
+        "OPENSEARCH_USERNAME": "user",
+    }
+    invalid = subprocess.run(
+        [bash, "-euo", "pipefail", "-c", opensearch_step["run"]],
+        env={**base_env, "OPENSEARCH_PASSWORD": "secret\tvalue"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert invalid.returncode != 0
+    assert "OPENSEARCH_PASSWORD must not contain tabs." in invalid.stderr
+
+    valid = subprocess.run(
+        [bash, "-euo", "pipefail", "-c", opensearch_step["run"]],
+        env={**base_env, "OPENSEARCH_PASSWORD": "secret-value"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
 
 
 def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
