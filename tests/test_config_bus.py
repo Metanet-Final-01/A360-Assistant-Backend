@@ -94,10 +94,13 @@ def test_own_message_is_skipped(redis_on):
     config_bus.start({"budget": lambda: received.append("budget")})
     assert config_bus.wait_ready(), "구독이 안 붙었다"
 
-    config_bus.publish("budget")  # origin == 내 INSTANCE_ID
+    config_bus.publish("budget")            # origin == 내 INSTANCE_ID — 무시돼야 한다
+    _publish_from_other(redis_on, "budget")  # 센티넬: 이게 처리되면 앞의 것도 이미 지나갔다
 
-    time.sleep(0.6)  # 왔다면 처리됐을 시간
-    assert received == [], "자기 메시지를 처리했다 — 불필요하게 세대를 올린다"
+    # pub/sub은 채널 내 순서를 지키므로, 센티넬 1건만 남으면 자기 메시지는 걸러진 것이다.
+    # (고정 sleep보다 결정적이다 — CI 부하에도 흔들리지 않는다.)
+    assert _wait(lambda: received == ["budget"]), f"센티넬을 못 받았다: {received}"
+    assert received == ["budget"], "자기 메시지까지 처리했다 — 불필요하게 세대를 올린다"
 
 
 # --- 무한 루프 방지 ---
@@ -115,9 +118,11 @@ def test_receiving_does_not_republish(redis_on, monkeypatch):
     config_bus.start({"budget": budget.bust_cache_local})  # 로컬 전용을 넘긴다
     assert config_bus.wait_ready(), "구독이 안 붙었다"
 
+    budget._cache = (time.monotonic(), {"global_daily": 1.0})
     _publish_from_other(redis_on, "budget")  # 스파이를 거치지 않는 외부 발행
 
-    time.sleep(0.6)
+    # 캐시가 비워진 시점 = 핸들러가 실제로 돌아간 시점. 그때 재발행이 없었어야 한다.
+    assert _wait(lambda: budget._cache is None), "핸들러가 안 돌았다"
     assert published == [], "수신 처리 중 재발행이 일어났다 — 루프가 된다"
 
 
@@ -191,10 +196,8 @@ def test_unknown_target_is_ignored(redis_on, monkeypatch):
     config_bus.start({"budget": lambda: calls.append("budget")})
     assert config_bus.wait_ready(), "구독이 안 붙었다"
 
-    _publish_from_other(redis_on, "catalog")  # 핸들러 미등록
-    time.sleep(0.4)
-    assert calls == []
-    _publish_from_other(redis_on, "budget")
+    _publish_from_other(redis_on, "catalog")  # 핸들러 미등록 — 무시돼야 한다
+    _publish_from_other(redis_on, "budget")   # 센티넬(순서 보장)
     assert _wait(lambda: calls == ["budget"]), "모르는 target 뒤 정상 메시지를 못 받았다"
 
 
@@ -223,7 +226,7 @@ def test_bust_cache_actually_publishes(redis_on):
         ignore_subscribe_messages=True
     )
     sub.subscribe(config_bus._channel())
-    time.sleep(0.1)
+    assert _wait(lambda: bool(sub.subscribed)), "raw 구독이 안 붙었다"
 
     budget.bust_cache()
     rp.bust_cache()
@@ -252,12 +255,12 @@ def test_restart_does_not_leave_two_subscribers(redis_on):
     config_bus.start({"budget": lambda: None})
     assert config_bus.wait_ready(), "재기동 구독이 안 붙었다"
 
-    time.sleep(1.5)  # 옛 스레드가 스스로 끝날 시간(폴 주기 1초)
-    alive = [
-        t for t in threading.enumerate()
-        if t.name == "config-bust-subscriber" and t.is_alive()
-    ]
-    assert len(alive) == 1, f"구독 스레드가 {len(alive)}개 — 옛 스레드가 되살아났다"
+    def _alive():
+        return [t for t in threading.enumerate()
+                if t.name == "config-bust-subscriber" and t.is_alive()]
+
+    # 옛 스레드는 자기 신호가 켜진 채라 폴 주기(1초) 안에 스스로 끝난다. 되살아났다면 영원히 2개다.
+    assert _wait(lambda: len(_alive()) == 1, timeout=6.0),         f"구독 스레드가 {len(_alive())}개 — 옛 스레드가 되살아났다"
 
 
 def test_publisher_client_is_reused(redis_on, monkeypatch):
@@ -286,7 +289,7 @@ def test_concurrent_publish_does_not_lose_messages(redis_on):
         ignore_subscribe_messages=True
     )
     sub.subscribe(config_bus._channel())
-    time.sleep(0.1)
+    assert _wait(lambda: bool(sub.subscribed)), "raw 구독이 안 붙었다"
 
     workers = [
         threading.Thread(target=lambda: [config_bus.publish("budget") for _ in range(5)])
@@ -307,15 +310,19 @@ def test_concurrent_publish_does_not_lose_messages(redis_on):
     assert got == 20, f"동시 발행 20건 중 {got}건만 도착 — 경합으로 유실됐다"
 
 
-def test_drop_publisher_ignores_stale_client(redis_on):
-    """옛 실패를 이유로 **다른 스레드가 방금 만든** 클라이언트를 닫지 않는다."""
-    stale = config_bus._publisher()
-    config_bus._drop_publisher()          # 현재 것을 버린다
-    fresh = config_bus._publisher()       # 새로 만들어진다
-    assert fresh is not stale
+def test_publish_failure_keeps_client(redis_on, monkeypatch):
+    """발행이 실패해도 **클라이언트를 버리지 않는다** (Qodo #459 3차).
 
-    config_bus._drop_publisher(stale)     # 옛 참조로 버리기 시도 — 무시돼야 한다
-    assert config_bus._publisher() is fresh, "남의(최신) 클라이언트를 닫아버렸다"
+    버리면 ⑴ 다른 스레드가 방금 받아 간 같은 객체를 닫아 그쪽 publish가 use-after-close로
+    실패하고(전파 유실), ⑵ 장애가 이어지는 동안 호출마다 새 클라이언트를 만들어 연결이 쌓인다.
+    redis-py의 ConnectionPool이 끊긴 연결을 알아서 버리므로 객체를 살려 두는 게 맞다.
+    """
+    client = config_bus._publisher()
+    monkeypatch.setattr(client, "publish", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down")))
+
+    config_bus.publish("budget")  # 실패는 삼켜진다
+
+    assert config_bus._publisher() is client, "실패했다고 클라이언트를 버렸다"
 
 
 def test_subscriber_closes_its_client(redis_on, monkeypatch):
@@ -345,7 +352,6 @@ def test_subscriber_closes_its_client(redis_on, monkeypatch):
     config_bus.start({"budget": lambda: None})
     assert config_bus.wait_ready(), "구독이 안 붙었다"
     config_bus.stop()
-    time.sleep(0.3)
 
     assert closed_flags, "구독 클라이언트가 만들어지지 않았다"
-    assert closed_flags[0]["closed"], "구독 클라이언트를 닫지 않았다 — 연결 풀이 남는다"
+    assert _wait(lambda: closed_flags[0]["closed"]), "구독 클라이언트를 닫지 않았다 — 연결 풀이 남는다"

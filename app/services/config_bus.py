@@ -97,28 +97,33 @@ def _channel() -> str:
 def _publisher() -> Any:
     """발행 전용 클라이언트(URL 바뀌면 교체). 연결 churn을 막기 위해 재사용한다.
 
-    락 안에서 교체하고 **락 안에서 참조를 돌려준다** — 돌려준 뒤 닫는 경쟁을 막기 위해
-    호출부는 이 참조로 곧장 publish한다(닫기는 실패 경로에서만 일어난다).
+    🔴 **락은 포인터 교체만 지킨다** (Qodo #459 3차). 닫기는 락 밖에서 한다 — 느린 close()가
+    락을 쥐고 있으면 다른 발행(=admin PUT 경로)이 그만큼 대기한다.
     """
     global _pub_client, _pub_url
     url = _redis_url()
+    old = None
     with _pub_lock:
         if _pub_client is None or _pub_url != url:
             old, _pub_client, _pub_url = _pub_client, _make_client(url), url
-            _close_quietly(old)
-        return _pub_client
+        client = _pub_client
+    _close_quietly(old)  # 락 밖 — URL이 바뀐 경우에만 발생한다
+    return client
 
 
-def _drop_publisher(client: Any = None) -> None:
-    """실패한 클라이언트를 버린다 — 끊긴 연결을 계속 재사용하지 않게.
+def _drop_publisher() -> None:
+    """캐시된 클라이언트를 버린다 — **종료·테스트 정리 전용**이다.
 
-    `client`를 주면 **그게 아직 현재 것일 때만** 버린다. 안 그러면 다른 스레드가 방금 새로
-    만든 정상 클라이언트를, 옛 실패를 이유로 닫아버릴 수 있다(Qodo #459 2차).
+    🔴 발행 **실패 경로에서는 부르지 않는다** (Qodo #459 3차). 다른 스레드가 방금 받아 간
+    같은 객체를 닫으면 그 스레드의 publish가 use-after-close로 실패하는데, 발행 실패는
+    설계상 삼켜지므로 **전파 유실(→TTL까지 지연)** 로 조용히 나타난다.
+
+    실패 시 버릴 필요도 없다: redis-py의 ConnectionPool이 끊긴 연결을 알아서 버리고 다음
+    호출에서 새로 연결한다 — 클라이언트 객체가 영구히 죽지 않는다. 버리면 오히려 장애 동안
+    호출마다 새 클라이언트를 만들어 연결이 쌓인다.
     """
     global _pub_client, _pub_url
     with _pub_lock:
-        if client is not None and _pub_client is not client:
-            return  # 이미 다른 스레드가 교체했다 — 남의 클라이언트를 닫지 않는다
         old, _pub_client, _pub_url = _pub_client, None, None
     _close_quietly(old)
 
@@ -140,13 +145,11 @@ def publish(target: str) -> None:
     """
     if not enabled():
         return
-    client = None
     try:
         payload = json.dumps({"target": target, "origin": _INSTANCE_ID}, ensure_ascii=False)
-        client = _publisher()
-        client.publish(_channel(), payload)
+        _publisher().publish(_channel(), payload)
     except Exception:  # noqa: BLE001 — 전파 실패가 admin PUT을 죽이면 안 된다
-        _drop_publisher(client)
+        # 클라이언트를 버리지 않는다 — 위 _drop_publisher 주석 참고(use-after-close + 연결 누적).
         logger.warning("설정 무효화 전파 실패 (무시): target=%s", target, exc_info=True)
 
 
