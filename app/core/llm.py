@@ -244,7 +244,9 @@ def chat(
     """
     from openai import AuthenticationError, RateLimitError
 
-    model = model or os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+    from app.core import config
+
+    model = model or config.OPENAI_MODEL  # 레지스트리 단일 기본값 — literal 중복 제거 (RPA-294)
     create_kwargs: dict = {"model": model, "messages": messages}
     if response_format is not None:
         create_kwargs["response_format"] = response_format

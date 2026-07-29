@@ -2,7 +2,7 @@ name: Change Assurance Publisher
 
 on:
   workflow_run:
-    workflows: ["Change Assurance (Observe)"]
+    workflows: ["Change Assurance (Warn)"]
     types: [completed]
 
 permissions:
@@ -73,7 +73,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Download evidence from the completed Observe run
+      - name: Download evidence from the completed Warn run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: change-assurance-pr-${{ needs.resolve_pr.outputs.pull_request_number }}-${{ github.event.workflow_run.run_attempt }}
@@ -94,7 +94,7 @@ jobs:
           if [[ ${#entries[@]} -eq 1 && -f "$bootstrap" && ! -L "$bootstrap" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "### Change Assurance publish skipped" >> "$GITHUB_STEP_SUMMARY"
-            echo "The Observe run produced a bootstrap-only unassured bundle." >> "$GITHUB_STEP_SUMMARY"
+            echo "The Warn run produced a bootstrap-only unassured bundle." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 

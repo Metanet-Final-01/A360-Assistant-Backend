@@ -30,7 +30,7 @@ from assurance.change.dependency_checks import (
 )
 from assurance.change.foundation import CONTROL_ORDER, GitRepository
 from assurance.change.schema_validation import SchemaValidationError, validate_json_schema
-from assurance.change.cli import main as cli_main
+from assurance.change.cli import emit_warning_annotations, main as cli_main
 from tests.change_assurance_adapter import FixtureDependencyEnvironment
 
 
@@ -39,7 +39,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "change_assurance" / "scenarios.json"
 MANIFEST_SCHEMA = ROOT / "assurance" / "change" / "schemas" / "change-manifest.schema.json"
 REPORT_SCHEMA = ROOT / "assurance" / "change" / "schemas" / "assurance-report.schema.json"
 POLICY_SCHEMA = ROOT / "assurance" / "change" / "schemas" / "dependency-policy.schema.json"
-WORKFLOW = ROOT / ".github" / "workflows" / "change-assurance-observe.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "change-assurance-warn.yml"
 FIXED_NOW = datetime(2026, 7, 16, tzinfo=timezone.utc)
 FIXED_GIT_DATE = "2026-07-16T00:00:00Z"
 
@@ -109,7 +109,7 @@ def _policy(scenario: dict) -> dict:
         import_map["fixture_sentinel"] = "fixture-sentinel"
     return {
         "schema_version": "1.0",
-        "rollout_mode": "observe",
+        "rollout_mode": "warn",
         "policy_decision_state": "approved_fixture",
         "requirement_files": ["requirements.txt", "requirements-dev.txt"],
         "dependency_paths": ["requirements.txt", "requirements-dev.txt", "pyproject.toml"],
@@ -122,6 +122,7 @@ def _policy(scenario: dict) -> dict:
             "app/agent/",
         ],
         "import_distribution_map": import_map,
+        "approved_dynamic_imports": [],
         "approved_additions": {},
         "license_policy": {
             "allowed_spdx": [
@@ -182,7 +183,7 @@ def test_normal_and_adversarial_fixtures_have_expected_decisions(tmp_path: Path)
             "decision": "not_evaluated",
             "changed_by_assurance": False,
         }
-        assert report["enforcement"] == {"mode": "observe", "blocks_merge": False}
+        assert report["enforcement"] == {"mode": "warn", "blocks_merge": False}
         _assert_artifact_digests(output)
 
 
@@ -667,6 +668,141 @@ def test_assigned_dynamic_import_alias_with_nonliteral_target_is_unassured() -> 
     assert errors == ["task.py:3: non-literal dynamic import cannot be verified"]
 
 
+def test_policy_approved_local_dynamic_import_prefix_is_verified() -> None:
+    imports, errors = parse_imports(
+        "app/agent/registry.py",
+        (
+            b"import importlib\n"
+            b"def load(name):\n"
+            b"    return importlib.import_module(f'{__package__}.{name}')\n"
+        ),
+        approved_dynamic_imports=[
+            {
+                "path": "app/agent/registry.py",
+                "module_prefix": "app.agent.",
+                "approval_ref": "RPA-343",
+            }
+        ],
+    )
+
+    assert errors == []
+    assert any(
+        item.module == "app.agent" and item.kind == "dynamic_approved_prefix"
+        for item in imports
+    )
+
+
+def test_shadowed_package_name_does_not_receive_dynamic_import_approval() -> None:
+    _, errors = parse_imports(
+        "app/agent/registry.py",
+        (
+            b"import importlib\n"
+            b"def load(__package__, name):\n"
+            b"    return importlib.import_module(f'{__package__}.{name}')\n"
+        ),
+        approved_dynamic_imports=[
+            {
+                "path": "app/agent/registry.py",
+                "module_prefix": "app.agent.",
+                "approval_ref": "RPA-343",
+            }
+        ],
+    )
+
+    assert errors == [
+        "app/agent/registry.py:3: non-literal dynamic import cannot be verified"
+    ]
+
+
+def test_live_registry_dynamic_import_matches_the_approved_policy() -> None:
+    policy = json.loads(
+        (ROOT / "assurance" / "change" / "policy" / "dependency-policy.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    imports, errors = parse_imports(
+        "app/agent/registry.py",
+        (ROOT / "app" / "agent" / "registry.py").read_bytes(),
+        approved_dynamic_imports=policy["approved_dynamic_imports"],
+    )
+
+    assert errors == []
+    assert any(
+        item.module == "app.agent" and item.kind == "dynamic_approved_prefix"
+        for item in imports
+    )
+
+
+def test_dynamic_import_approval_does_not_cover_an_external_prefix() -> None:
+    _, errors = parse_imports(
+        "app/agent/registry.py",
+        b"import importlib\nimportlib.import_module(f'requests.{name}')\n",
+        approved_dynamic_imports=[
+            {
+                "path": "app/agent/registry.py",
+                "module_prefix": "app.agent.",
+                "approval_ref": "RPA-343",
+            }
+        ],
+    )
+
+    assert errors == [
+        "app/agent/registry.py:2: non-literal dynamic import cannot be verified"
+    ]
+
+
+def test_warning_annotation_targets_evidence_file_and_line(capsys) -> None:
+    emit_warning_annotations(
+        {
+            "controls": [
+                {
+                    "control_id": "CH-04",
+                    "status": "error",
+                    "reason_code": "DEPENDENCY_DETECTOR_ERROR",
+                    "reason": "Dependency inspection failed.",
+                    "explanation": {
+                        "finding": (
+                            "dep.allowlist: app/agent/registry.py:132: "
+                            "non-literal dynamic import cannot be verified"
+                        ),
+                        "action": "승인된 동적 import 정책 또는 코드를 확인하세요.",
+                    },
+                }
+            ]
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "::warning file=app/agent/registry.py,line=132,"
+        "title=Change Assurance 경고: CH-04 DEPENDENCY_DETECTOR_ERROR::"
+    ) in output
+    assert "승인된 동적 import 정책 또는 코드를 확인하세요." in output
+
+
+def test_warning_annotation_does_not_attach_base_evidence_to_head(capsys) -> None:
+    emit_warning_annotations(
+        {
+            "controls": [
+                {
+                    "control_id": "CH-04",
+                    "status": "error",
+                    "reason_code": "DEPENDENCY_DETECTOR_ERROR",
+                    "reason": "Dependency inspection failed.",
+                    "explanation": {
+                        "finding": "[base] dep.allowlist: removed.py:7: invalid syntax",
+                        "action": "Review the base evidence.",
+                    },
+                }
+            ]
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "::warning file=" not in output
+    assert "::warning title=Change Assurance" in output
+
+
 def test_nested_python_file_does_not_create_a_local_import_root(tmp_path: Path) -> None:
     scenario = {
         "base_files": {"requirements.txt": "", "task.py": "pass\n"},
@@ -1072,8 +1208,17 @@ def test_detector_error_receipt_is_nonpassing_and_schema_valid(tmp_path: Path) -
     schema = json.loads(REPORT_SCHEMA.read_text(encoding="utf-8"))
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(report)
 
+    missing_explanation = json.loads(json.dumps(report))
+    missing_explanation["controls"][0].pop("explanation")
+    with pytest.raises(
+        ValidationError, match="'explanation' is a required property"
+    ):
+        Draft202012Validator(
+            schema, format_checker=FormatChecker()
+        ).validate(missing_explanation)
 
-def test_cli_error_stays_nonblocking_in_observe(tmp_path: Path) -> None:
+
+def test_cli_error_warns_but_stays_nonblocking(tmp_path: Path, capsys) -> None:
     exit_code = cli_main(
         [
             "--repo",
@@ -1091,7 +1236,26 @@ def test_cli_error_stays_nonblocking_in_observe(tmp_path: Path) -> None:
     report = json.loads((tmp_path / "out" / "assurance-report.json").read_text(encoding="utf-8"))
     assert exit_code == 0
     assert report["assurance_decision"] == "unassured"
-    assert report["enforcement"]["blocks_merge"] is False
+    assert report["enforcement"] == {"mode": "warn", "blocks_merge": False}
+    output = capsys.readouterr().out
+    assert "::warning title=Change Assurance 경고: CH-01 DETECTOR_EXECUTION_ERROR::" in output
+    assert "확인/조치:" in output
+
+
+def test_nonpassing_control_contains_evidence_based_operator_guidance(
+    tmp_path: Path,
+) -> None:
+    scenario = _load_scenarios()["fake_dependency"]
+    report, _ = _run_scenario(tmp_path, scenario)
+    control = next(
+        item for item in report["controls"] if item["control_id"] == "CH-04"
+    )
+
+    assert control["status"] == "fail"
+    assert control["explanation"]["finding"]
+    assert "의존성" in control["explanation"]["impact"]
+    assert "확인" in control["explanation"]["action"]
+    assert control["evidence"]["uri"] == "dependency-evidence.json"
 
 
 def test_cli_success_derives_standard_library_change(tmp_path: Path) -> None:

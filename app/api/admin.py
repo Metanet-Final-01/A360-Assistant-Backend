@@ -17,13 +17,14 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app import models
-from app.api.auth import get_optional_user
+from app.api.auth import _bearer, get_optional_user as _get_optional_user
 from app.core.observability_db import get_obs_db
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.rag.retrieval.params import RetrievalParams
 from app.schemas.budget import BudgetLimitsUpdate
 from app.schemas.retrieval import RetrievalParamsUpdate
@@ -32,9 +33,6 @@ from app.services import retrieval_params as rp_service
 from app.services.assurance_evidence import receipt_integrity
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/api/admin", tags=["admin"])
-
 
 def _service_key_ok(request: Request) -> bool:
     """X-API-Key가 OPS_API_KEY와 일치하나 — 머신(M2M) 신원. 사람 로그인 재사용을 대체한다.
@@ -47,6 +45,15 @@ def _service_key_ok(request: Request) -> bool:
         return False
     provided = request.headers.get("X-API-Key", "")
     return bool(provided) and secrets.compare_digest(provided, ops_key)
+
+
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> models.User | None:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    with SessionLocal() as db:
+        return _get_optional_user(credentials=credentials, db=db)
 
 
 def require_admin(
@@ -67,6 +74,15 @@ def require_admin(
     raise HTTPException(
         403, detail={"code": "FORBIDDEN", "message": "관리자만 접근할 수 있습니다."}
     )
+
+
+# Router-level dependencies run before endpoint parameter dependencies. This keeps
+# authentication ahead of observability DB connection attempts for every admin route.
+router = APIRouter(
+    prefix="/api/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 def _parse_since(value: str) -> datetime:
@@ -197,6 +213,19 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
     completeness = completeness if isinstance(completeness, dict) else {}
     human_review = payload.get("human_review")
     human_review = human_review if isinstance(human_review, dict) else None
+    subject = payload.get("subject")
+    subject = subject if isinstance(subject, dict) else {}
+    change_subject = None
+    if row.harness == "change":
+        change_subject = {
+            "repository": subject.get("repository"),
+            "pull_request_number": subject.get("pull_request_number"),
+            "workflow_run_id": subject.get("workflow_run_id"),
+            "run_attempt": subject.get("run_attempt"),
+            "source_event": subject.get("source_event"),
+            "base_sha": subject.get("base_sha"),
+            "head_sha": subject.get("head_sha"),
+        }
     result = {
         "receipt_digest": row.receipt_digest,
         "schema_version": row.schema_version,
@@ -226,6 +255,7 @@ def _assurance_receipt_out(row: models.AssuranceReceipt, *, detail: bool = False
         "resolved_agent_version": row.resolved_agent_version,
         "integrity_valid": receipt_integrity(row),
         "human_review": human_review,
+        "change_subject": change_subject,
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
     if detail:

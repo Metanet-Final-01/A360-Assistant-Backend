@@ -18,10 +18,12 @@ from app.api.admin import router as admin_router
 from app.api.agent import router as agent_router
 from app.api.assurance_writer import router as assurance_writer_router
 from app.api.auth import router as auth_router
+from app.api.catalog import router as catalog_router
 from app.api.debug import router as debug_router
 from app.api.documents import router as documents_router
 from app.api.rag import router as rag_router
 from app.api.sessions import router as sessions_router
+from app.core import config
 from app.core.errors import install_error_handlers
 from app.core.http_logging import register_http_logging
 
@@ -107,12 +109,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="A360 Assistant Backend", version="0.1.0", lifespan=lifespan)
 
+# 기본값은 레지스트리(config.py)가 단일 진실 공급원 — literal 중복 제거 (RPA-294).
+# ⚠️ CORS는 present-but-empty(`FRONTEND_ORIGINS=`)로 허용목록/정규식을 **의도적으로 비우는** 운영
+#    동작이 있다(Qodo #413-2 보존). 반면 공백만인 값(" ")은 실수/패딩이라 미설정으로 봐야 한다
+#    (#413-1, config.get의 공백=미설정 규칙과 일치). → 명시적 빈 문자열만 보존하고, 부재·공백은
+#    레지스트리 기본값으로 저하시킨다.
+def _cors_value(raw: str | None, default: str) -> str:
+    """CORS 값 — 명시적 빈 문자열('')만 '의도적 비우기'로 보존, 부재·공백은 기본값으로 저하한다.
+
+    os.getenv는 **리터럴 키로 호출부에서** 부른다(변수 키 회피) — 설정 레지스트리 래칫
+    (test_config_registry의 동적 키 접근 검사)이 env 읽기를 static하게 찾을 수 있게.
+    """
+    if raw == "":
+        return ""
+    return default if raw is None or raw.strip() == "" else raw
+
+
 frontend_origins = [
     origin.strip()
-    for origin in os.getenv(
-        "FRONTEND_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    ).split(",")
+    for origin in _cors_value(os.getenv("FRONTEND_ORIGINS"), config.FRONTEND_ORIGINS).split(",")
     if origin.strip()
 ]
 
@@ -120,9 +135,8 @@ frontend_origins = [
 # a360-assistant-frontend-<hash>-a360-assistant.vercel.app), so a fixed
 # FRONTEND_ORIGINS entry breaks on each redeploy. Allow any deployment of
 # this Vercel project via regex instead of chasing the hash by hand.
-frontend_origin_regex = os.getenv(
-    "FRONTEND_ORIGIN_REGEX",
-    r"https://a360-assistant-frontend-.*-a360-assistant\.vercel\.app",
+frontend_origin_regex = _cors_value(
+    os.getenv("FRONTEND_ORIGIN_REGEX"), config.FRONTEND_ORIGIN_REGEX
 )
 
 app.add_middleware(
@@ -145,6 +159,7 @@ app.include_router(sessions_router)
 app.include_router(admin_router)
 app.include_router(agent_router)
 app.include_router(assurance_writer_router)
+app.include_router(catalog_router)
 
 
 class EchoRequest(BaseModel):

@@ -71,7 +71,7 @@ def test_known_action_is_allow_candidate_but_never_validated():
     assert result["validated"] is False
     assert result["assurance_status"] == "unassured_observe"
     assert result["business_outcome"]["persisted"] is None
-    assert [item["status"] for item in result["controls"]] == ["pass", "pass"]
+    assert [item["status"] for item in result["controls"]] == ["pass", "pass", "pass"]
 
 
 def test_runtime_observation_fields_are_derived_from_output_policy():
@@ -172,6 +172,53 @@ def test_catalog_closure_uses_the_same_snapshot_as_digest():
 
     assert result["decision"] == "allow_candidate"
     assert result["catalog_digest"].startswith("sha256:")
+
+
+def test_explicit_constraints_are_preserved_at_backend_boundary():
+    payload = recommendation()
+    payload["spec"] = {"constraints": ["승인 전 외부 발송 금지"]}
+
+    result = observe_recommendation_candidate(
+        payload,
+        context(expected_constraints=("승인 전 외부 발송 금지",)),
+        catalog=FixtureCatalog(),
+    )
+
+    assert result["decision"] == "allow_candidate"
+    assert result["controls"][2] == {
+        "control_id": "constraints_preserved", "status": "pass"
+    }
+
+
+def test_dropped_explicit_constraints_are_denied_by_backend_boundary():
+    result = observe_recommendation_candidate(
+        recommendation(),
+        context(expected_constraints=("승인 전 외부 발송 금지",)),
+        catalog=FixtureCatalog(),
+    )
+
+    assert result["decision"] == "deny"
+    assert result["controls"][2] == {
+        "control_id": "constraints_preserved", "status": "fail"
+    }
+    assert any(
+        item["code"] == "CONSTRAINTS_DROPPED"
+        for item in result["boundary_findings"]
+    )
+
+
+def test_unexpected_or_oversized_constraints_are_denied():
+    payload = recommendation()
+    payload["spec"] = {"constraints": ["X" * 501]}
+
+    result = observe_recommendation_candidate(
+        payload, context(), catalog=FixtureCatalog()
+    )
+
+    assert result["decision"] == "deny"
+    assert {
+        item["code"] for item in result["boundary_findings"]
+    } == {"CONSTRAINTS_NOT_NORMALIZED", "CONSTRAINTS_MISMATCH"}
 
 
 def test_documented_flow_editor_metadata_is_allowed():

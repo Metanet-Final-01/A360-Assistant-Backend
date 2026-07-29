@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 import yaml
@@ -21,7 +24,13 @@ from app.services.assurance_evidence import (
     persist_change_receipt,
     receipt_integrity,
 )
-from assurance.change.foundation import AssuranceError, canonical_digest
+from assurance.change.foundation import (
+    ALLOWED_SOURCE_EVENTS,
+    AssuranceError,
+    canonical_bytes,
+    canonical_digest,
+    digest_bytes,
+)
 from assurance.change.transport import load_change_envelope, validate_change_envelope
 from scripts.publish_change_assurance import publish, source_from_event, writer_url
 from tests.test_change_assurance import _load_scenarios, _run_scenario
@@ -76,7 +85,7 @@ def _envelope(tmp_path, scenario_name: str = "good_import"):
     report, output = _run_scenario(tmp_path, scenario)
     source = {
         "repository": report["subject"]["repository"],
-        "workflow_name": "Change Assurance (Observe)",
+        "workflow_name": "Change Assurance (Warn)",
         "workflow_run_id": 12345,
         "run_attempt": 1,
         "event": "pull_request",
@@ -85,6 +94,60 @@ def _envelope(tmp_path, scenario_name: str = "good_import"):
         "pull_request_number": 281,
     }
     return load_change_envelope(output, source=source)
+
+
+def _rewrite_as_legacy_observe_bundle(output: Path) -> None:
+    """Make a checksum-valid pre-Warn artifact bundle for compatibility coverage."""
+    manifest_path = output / "change-manifest.json"
+    report_path = output / "assurance-report.json"
+    integrity_path = output / "evidence-integrity.json"
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    integrity = json.loads(integrity_path.read_text(encoding="utf-8"))
+
+    manifest["policy"]["rollout_mode"] = "observe"
+    manifest_path.write_bytes(canonical_bytes(manifest))
+    manifest_digest = digest_bytes(manifest_path.read_bytes())
+
+    for reference in integrity["evidence"]:
+        if reference["uri"] == "change-manifest.json":
+            reference["sha256"] = manifest_digest
+    integrity_path.write_bytes(canonical_bytes(integrity))
+    integrity_digest = digest_bytes(integrity_path.read_bytes())
+
+    report["enforcement"]["mode"] = "observe"
+    report["manifest_evidence"]["sha256"] = manifest_digest
+    for control in report["controls"]:
+        control.pop("explanation", None)
+        if control["evidence"]["uri"] == "change-manifest.json":
+            control["evidence"]["sha256"] = manifest_digest
+        elif control["evidence"]["uri"] == "evidence-integrity.json":
+            control["evidence"]["sha256"] = integrity_digest
+    report_path.write_bytes(canonical_bytes(report))
+
+    index_path = output / "evidence-index.json"
+    index = {
+        "schema_version": "1.0",
+        "subject_sha": report["subject"]["head_sha"],
+        "artifacts": [
+            {
+                "uri": path.name,
+                "sha256": digest_bytes(path.read_bytes()),
+                "subject_sha": report["subject"]["head_sha"],
+            }
+            for path in sorted(output.glob("*.json"))
+            if path.name != "evidence-index.json"
+        ],
+    }
+    index_path.write_bytes(canonical_bytes(index))
+
+    checksums = [
+        f"{digest_bytes(path.read_bytes()).removeprefix('sha256:')}  {path.name}"
+        for path in sorted(output.glob("*"))
+        if path.is_file() and path.name != "SHA256SUMS"
+    ]
+    (output / "SHA256SUMS").write_text("\n".join(checksums) + "\n", encoding="ascii")
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +169,7 @@ def test_valid_change_artifacts_build_content_addressed_receipt(tmp_path):
     serialized = str(row.receipt_payload)
     assert "installed_distributions" not in serialized
     assert "changes" not in serialized
+    assert row.receipt_payload["subject"]["source_event"] == "pull_request"
 
 
 def test_missing_expected_artifact_cannot_be_promoted_to_observed(tmp_path):
@@ -146,7 +210,7 @@ def test_valid_unassured_report_is_refused_not_promoted(tmp_path):
     report, output = _run_scenario(tmp_path, scenario)
     envelope = load_change_envelope(output, source={
         "repository": report["subject"]["repository"],
-        "workflow_name": "Change Assurance (Observe)",
+        "workflow_name": "Change Assurance (Warn)",
         "workflow_run_id": 12346,
         "run_attempt": 1,
         "event": "pull_request",
@@ -159,7 +223,71 @@ def test_valid_unassured_report_is_refused_not_promoted(tmp_path):
 
     assert row.decision == "unassured"
     assert summary["assurance_verdict"] == "refused"
+    assert row.rollout_mode == "warn"
+    assert row.enforcement_effect == "warned"
+    non_passing = [
+        control
+        for control in row.receipt_payload["controls"]
+        if control["status"] not in {"pass", "not_applicable"}
+    ]
+    assert non_passing
+    assert all(control["reason"] for control in non_passing)
+    assert all(control["explanation"]["action"] for control in non_passing)
     assert receipt_integrity(row) is True
+
+
+def test_legacy_observe_report_is_persisted_without_warn_relabeling(tmp_path):
+    scenario = _load_scenarios()["good_import"]
+    scenario["snapshot"] = {}
+    report, output = _run_scenario(tmp_path, scenario)
+    _rewrite_as_legacy_observe_bundle(output)
+
+    envelope = load_change_envelope(output, source={
+        "repository": report["subject"]["repository"],
+        "workflow_name": "Change Assurance (Warn)",
+        "workflow_run_id": 12347,
+        "run_attempt": 1,
+        "event": "pull_request",
+        "conclusion": "success",
+        "head_sha": report["subject"]["head_sha"],
+        "pull_request_number": 283,
+    })
+    row, summary = build_change_receipt(envelope)
+
+    assert row.rollout_mode == "observe"
+    assert row.enforcement_effect == "none"
+    assert summary["assurance_verdict"] == "refused"
+    assert all(
+        control["explanation"] is None
+        for control in row.receipt_payload["controls"]
+        if control["status"] not in {"pass", "not_applicable"}
+    )
+
+
+def test_warn_report_without_explanation_stays_rejected(tmp_path):
+    envelope = _envelope(tmp_path, "good_import")
+    report = envelope["artifacts"]["assurance-report.json"]
+    report["controls"][0]["status"] = "error"
+    report["controls"][0].pop("explanation", None)
+
+    with pytest.raises(AssuranceError, match="contract validation failed"):
+        validate_change_envelope(envelope)
+
+
+def test_mixed_observe_and_warn_artifacts_stay_rejected(tmp_path):
+    envelope = _envelope(tmp_path, "good_import")
+    report = envelope["artifacts"]["assurance-report.json"]
+    report["enforcement"]["mode"] = "observe"
+    references = envelope["artifacts"]["evidence-index.json"]["artifacts"]
+    report_reference = next(
+        (reference for reference in references if reference["uri"] == "assurance-report.json"),
+        None,
+    )
+    assert report_reference is not None
+    report_reference["sha256"] = canonical_digest(report)
+
+    with pytest.raises(AssuranceError, match="rollout modes do not match"):
+        validate_change_envelope(envelope)
 
 
 def test_valid_deny_report_is_preserved_as_deny(tmp_path):
@@ -195,7 +323,7 @@ def test_checksum_manifest_tampering_is_rejected(tmp_path):
     with pytest.raises(AssuranceError):
         load_change_envelope(output, source={
             "repository": report["subject"]["repository"],
-            "workflow_name": "Change Assurance (Observe)",
+            "workflow_name": "Change Assurance (Warn)",
             "workflow_run_id": 12345,
             "run_attempt": 1,
             "event": "pull_request",
@@ -226,7 +354,7 @@ def test_top_level_symbolic_artifact_directory_is_rejected(tmp_path, monkeypatch
     with pytest.raises(AssuranceError, match="unavailable or symbolic"):
         load_change_envelope(alias, source={
             "repository": report["subject"]["repository"],
-            "workflow_name": "Change Assurance (Observe)",
+            "workflow_name": "Change Assurance (Warn)",
             "workflow_run_id": 12345,
             "run_attempt": 1,
             "event": "pull_request",
@@ -246,12 +374,40 @@ def test_receipt_integrity_detects_change_subject_tampering(tmp_path):
 
 def test_change_receipt_is_visible_through_existing_admin_contract(tmp_path):
     row, _ = build_change_receipt(_envelope(tmp_path))
-    response = _assurance_receipt_out(row, detail=True)
+    response = _assurance_receipt_out(row)
 
     assert response["harness"] == "change"
     assert response["integrity_valid"] is True
     assert response["human_review"]["status"] == "missing"
-    assert response["receipt_payload"]["subject"]["pull_request_number"] == 281
+    assert "receipt_payload" not in response
+    assert response["change_subject"] == {
+        "repository": row.receipt_payload["subject"]["repository"],
+        "pull_request_number": 281,
+        "workflow_run_id": 12345,
+        "run_attempt": 1,
+        "source_event": "pull_request",
+        "base_sha": row.receipt_payload["subject"]["base_sha"],
+        "head_sha": row.receipt_payload["subject"]["head_sha"],
+    }
+
+
+def test_same_pr_follow_up_event_builds_a_distinct_append_only_receipt(tmp_path):
+    initial_envelope = _envelope(tmp_path)
+    follow_up_envelope = deepcopy(initial_envelope)
+    follow_up_envelope["source"]["event"] = "pull_request_review"
+    follow_up_envelope["source"]["workflow_run_id"] = 12346
+
+    initial, _ = build_change_receipt(initial_envelope)
+    follow_up, _ = build_change_receipt(follow_up_envelope)
+
+    initial_subject = initial.receipt_payload["subject"]
+    follow_up_subject = follow_up.receipt_payload["subject"]
+    assert initial_subject["repository"] == follow_up_subject["repository"]
+    assert initial_subject["pull_request_number"] == follow_up_subject["pull_request_number"]
+    assert initial_subject["head_sha"] == follow_up_subject["head_sha"]
+    assert initial_subject["source_event"] == "pull_request"
+    assert follow_up_subject["source_event"] == "pull_request_review"
+    assert initial.receipt_digest != follow_up.receipt_digest
 
 
 def test_exact_change_receipt_retry_is_idempotent(tmp_path):
@@ -338,8 +494,12 @@ def test_writer_endpoint_rejects_admin_or_wrong_bearer(monkeypatch):
     assert response.json()["detail"]["code"] == "INVALID_ASSURANCE_WRITER"
 
 
-def test_writer_endpoint_accepts_only_validated_envelope(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_event", ["pull_request", "pull_request_review"])
+def test_writer_endpoint_accepts_only_validated_envelope(
+    tmp_path, monkeypatch, source_event
+):
     envelope = _envelope(tmp_path)
+    envelope["source"]["event"] = source_event
     expected = {
         "status": "persisted",
         "receipt_digest": "sha256:" + "a" * 64,
@@ -367,6 +527,30 @@ def test_writer_endpoint_accepts_only_validated_envelope(tmp_path, monkeypatch):
     assert response.status_code == 201
     assert response.json() == expected
     assert captured == {"payload": envelope, "db": fake_db}
+
+
+def test_writer_endpoint_rejects_unsupported_source_event(tmp_path, monkeypatch):
+    envelope = _envelope(tmp_path)
+    envelope["source"]["event"] = "push"
+    called = False
+
+    def persist(payload, db):
+        nonlocal called
+        called = True
+
+    monkeypatch.setenv("ASSURANCE_WRITER_TOKEN", "w" * 32)
+    monkeypatch.setenv("ASSURANCE_WRITER_REPOSITORY", envelope["source"]["repository"])
+    monkeypatch.setattr(writer_api, "persist_change_receipt", persist)
+    app.dependency_overrides[get_db] = lambda: object()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/internal/assurance/change-receipts",
+            headers={"Authorization": "Bearer " + "w" * 32},
+            json=envelope,
+        )
+
+    assert response.status_code == 422
+    assert called is False
 
 
 def test_writer_endpoint_rejects_a_different_repository(tmp_path, monkeypatch):
@@ -426,7 +610,7 @@ def test_publisher_derives_identity_only_from_matching_workflow_run():
         "workflow_run": {
             "id": 12345,
             "run_attempt": 2,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -453,7 +637,7 @@ def test_publisher_accepts_review_triggered_assurance_run():
         "workflow_run": {
             "id": 12346,
             "run_attempt": 1,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request_review",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -478,13 +662,19 @@ def test_transport_accepts_review_triggered_follow_up_record(tmp_path):
     assert facts["source"]["event"] == "pull_request_review"
 
 
+def test_writer_source_event_schema_uses_shared_contract():
+    schema = writer_api.ChangePublisherSource.model_json_schema()
+
+    assert set(schema["properties"]["event"]["enum"]) == set(ALLOWED_SOURCE_EVENTS)
+
+
 def test_publisher_accepts_one_sha_resolved_pull_request_when_event_list_is_empty():
     event = {
         "repository": {"full_name": "Metanet-Final-01/A360-Assistant-Backend"},
         "workflow_run": {
             "id": 12345,
             "run_attempt": 2,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -510,7 +700,7 @@ def test_publisher_rejects_resolved_pull_request_that_disagrees_with_event():
         "workflow_run": {
             "id": 12345,
             "run_attempt": 2,
-            "name": "Change Assurance (Observe)",
+            "name": "Change Assurance (Warn)",
             "event": "pull_request",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -587,7 +777,7 @@ def test_publisher_posts_validated_envelope_without_logging_token(tmp_path, monk
 
 
 def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
-    observe = (ROOT / ".github/workflows/change-assurance-observe.yml").read_text(encoding="utf-8")
+    warn = (ROOT / ".github/workflows/change-assurance-warn.yml").read_text(encoding="utf-8")
     publisher = (ROOT / ".github/workflows/change-assurance-publish.yml").read_text(
         encoding="utf-8"
     )
@@ -596,12 +786,12 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
 
     assert "workflow_run:" in workflow_header
     assert "pull_request_target" not in publisher
-    assert "pull_request_review:" in observe
-    assert "types: [submitted, dismissed]" in observe
-    assert "python -m assurance.change.review_evidence" in observe
-    assert "--review-evidence" in observe
-    assert "First rollout: execute only the checker already trusted" in observe
-    assert "grep -q -- '--review-evidence' assurance/change/cli.py" in observe
+    assert "pull_request_review:" in warn
+    assert "types: [submitted, dismissed]" in warn
+    assert "python -m assurance.change.review_evidence" in warn
+    assert "--review-evidence" in warn
+    assert "First rollout: execute only the checker already trusted" in warn
+    assert "grep -q -- '--review-evidence' assurance/change/cli.py" in warn
     assert "actions: read" in workflow_header
     assert "contents: read" in workflow_header
     assert "pull-requests: read" in workflow_header
@@ -625,8 +815,8 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "steps.evidence.outputs.publish == 'true'" in publish_job
     assert "python -m scripts.publish_change_assurance" in publish_job
     assert "python scripts/publish_change_assurance.py" not in publish_job
-    assert "ASSURANCE_WRITER_TOKEN" not in observe
-    assert "secrets." not in observe
+    assert "ASSURANCE_WRITER_TOKEN" not in warn
+    assert "secrets." not in warn
 
 
 def test_backend_deploy_injects_writer_credentials_from_protected_environment():
@@ -645,43 +835,82 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
         for step in deploy_job["steps"]
         if step.get("name") == "Deploy CloudFormation"
     )
+    deploy_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Deploy CloudFormation"
+    )
     opensearch_step = next(
         step for step in deploy_job["steps"] if step.get("name") == "Validate OpenSearch host"
     )
     validate_step = next(
         step for step in deploy_job["steps"] if step.get("name") == "Validate deployment credentials"
     )
+    rag_cache_ttl_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Validate RAG cache TTL"
+    )
     token_parameter = template["Parameters"]["AssuranceWriterToken"]
     opensearch_parameter = template["Parameters"]["ExternalOpenSearchHost"]
+    opensearch_username_parameter = template["Parameters"]["OpenSearchUsername"]
+    opensearch_password_parameter = template["Parameters"]["OpenSearchPassword"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
         "LaunchTemplateData"
     ]["UserData"]["Fn::Base64"][0]
+    user_data_mapping = template["Resources"]["AppLaunchTemplate"]["Properties"][
+        "LaunchTemplateData"
+    ]["UserData"]["Fn::Base64"][1]
 
     assert "ASSURANCE_WRITER_TOKEN" not in str(build_job)
-    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment }}"
+    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment || 'dev' }}"
     assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in deploy_uses
     assert (
         "aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a"
         in deploy_uses
     )
-    assert deploy_job["env"]["STACK_NAME"] == "a360-assistant-${{ inputs.environment }}-backend"
+    assert deploy_job["if"] == "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)"
+    assert deploy_job["env"]["STACK_NAME"] == "a360-assistant-${{ inputs.environment || 'dev' }}-backend"
     assert validate_step["env"]["ASSURANCE_WRITER_TOKEN"] == "${{ secrets.ASSURANCE_WRITER_TOKEN }}"
     assert validate_step["env"]["GHCR_READ_TOKEN"] == "${{ secrets.GHCR_READ_TOKEN }}"
     assert '[ -z "$ASSURANCE_WRITER_TOKEN" ]' in validate_step["run"]
     assert '[ -z "$GHCR_READ_TOKEN" ]' in validate_step["run"]
-    assert 'AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}"' in deploy_script
+    assert deploy_step["env"]["OPENSEARCH_USERNAME"] == "${{ secrets.OPENSEARCH_USERNAME }}"
+    assert deploy_step["env"]["OPENSEARCH_PASSWORD"] == "${{ secrets.OPENSEARCH_PASSWORD }}"
+    assert deploy_step["env"]["RAG_CACHE_ENABLED"] == "${{ inputs.rag_cache_enabled }}"
+    assert deploy_step["env"]["START_BACKEND_CONTAINER"] == "${{ inputs.start_backend_container }}"
+    assert 'AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN"' in deploy_script
     assert 'AssuranceWriterRepository="${{ github.repository }}"' in deploy_script
-    assert 'ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}"' in deploy_script
+    assert 'ExternalOpenSearchHost="$OPENSEARCH_HOST"' in deploy_script
+    assert 'OpenSearchUsername="$OPENSEARCH_USERNAME"' in deploy_script
+    assert 'OpenSearchPassword="$OPENSEARCH_PASSWORD"' in deploy_script
+    assert "AdminApiAllowedSourceCidrs" not in deploy_script
+    assert '${{ secrets.OPENSEARCH_USERNAME }}' not in deploy_script
+    assert '${{ secrets.OPENSEARCH_PASSWORD }}' not in deploy_script
     assert opensearch_step["env"]["OPENSEARCH_HOST"] == "${{ secrets.OPENSEARCH_HOST }}"
+    assert opensearch_step["env"]["OPENSEARCH_USERNAME"] == "${{ secrets.OPENSEARCH_USERNAME }}"
+    assert opensearch_step["env"]["OPENSEARCH_PASSWORD"] == "${{ secrets.OPENSEARCH_PASSWORD }}"
     assert "^https?://[^[:space:]]+$" in opensearch_step["run"]
+    assert "OPENSEARCH_USERNAME must not contain whitespace." in opensearch_step["run"]
+    assert "OPENSEARCH_USERNAME must not contain double quotes or backslashes." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD must not contain double quotes or backslashes." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD must not contain tabs." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD must not contain newlines." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD is required when OPENSEARCH_USERNAME is set." in opensearch_step["run"]
+    assert "OPENSEARCH_USERNAME is required when OPENSEARCH_PASSWORD is set." in opensearch_step["run"]
 
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
     assert opensearch_parameter["NoEcho"] is True
     assert opensearch_parameter["AllowedPattern"] == "^https?://[^\\s]+$"
+    assert opensearch_username_parameter["NoEcho"] is True
+    assert opensearch_username_parameter["AllowedPattern"] == "^$|^[^\"\\\\\\s]+$"
+    assert opensearch_password_parameter["NoEcho"] is True
+    assert opensearch_password_parameter["AllowedPattern"] == "^$|^[^\"\\\\\\t\\r\\n]+$"
+    opensearch_pair_rule = template["Rules"]["OpenSearchCredentialsMustBePaired"]
+    assert "OpenSearchUsername" in str(opensearch_pair_rule)
+    assert "OpenSearchPassword" in str(opensearch_pair_rule)
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
+    assert '"OPENSEARCH_USERNAME": "${OpenSearchUsername}"' in app_secret
+    assert '"OPENSEARCH_PASSWORD": "${OpenSearchPassword}"' in app_secret
     assert "GithubUsername" not in template["Parameters"]
     assert "GITHUB_USERNAME" not in app_secret
     assert "GITHUB_USERNAME" not in user_data
@@ -691,6 +920,34 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "jq -r '.ASSURANCE_WRITER_REPOSITORY // \"\"'" in user_data
     assert "ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN" in user_data
     assert "ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY" in user_data
+    assert "REDIS_URL=${RedisUrl}" in user_data
+    assert "RAG_CACHE_ENABLED=${RagCacheEnabled}" in user_data
+    assert "RAG_CACHE_TTL_SECONDS=${RagCacheTtlSeconds}" in user_data
+    rag_cache_heredoc_opener = "cat >> /opt/a360/.env <<'EOF_RAG_CACHE'"
+    assert rag_cache_heredoc_opener in user_data
+    rag_cache_heredoc_body_start = user_data.index(rag_cache_heredoc_opener) + len(
+        rag_cache_heredoc_opener
+    )
+    rag_cache_heredoc_end = user_data.index("EOF_RAG_CACHE", rag_cache_heredoc_body_start)
+    redis_url_line = user_data.index("REDIS_URL=${RedisUrl}")
+    assert rag_cache_heredoc_body_start < redis_url_line < rag_cache_heredoc_end
+    assert (
+        user_data_mapping["RedisUrl"]["Fn::ImportValue"]["Fn::Sub"]
+        == "${ProjectName}-${Environment}-RedisUrl"
+    )
+    assert template["Parameters"]["RagCacheEnabled"]["Default"] == "true"
+    assert template["Parameters"]["RagCacheEnabled"]["AllowedValues"] == ["true", "false"]
+    assert template["Parameters"]["RagCacheTtlSeconds"]["Default"] == 3600
+    assert 'RAG_CACHE_ENABLED="${RAG_CACHE_ENABLED:-true}"' in deploy_script
+    assert 'START_BACKEND_CONTAINER="${START_BACKEND_CONTAINER:-true}"' in deploy_script
+    assert 'RagCacheEnabled="$RAG_CACHE_ENABLED"' in deploy_script
+    assert "RagCacheTtlSeconds=\"${{ env.RAG_CACHE_TTL_SECONDS }}\"" in deploy_script
+    assert "rag_cache_ttl_seconds" not in deploy_script
+    assert rag_cache_ttl_step["env"]["RAG_CACHE_TTL_SECONDS"] == "${{ inputs.rag_cache_ttl_seconds || '3600' }}"
+    assert "^[0-9]+$" in rag_cache_ttl_step["run"]
+    assert '-lt 1' in rag_cache_ttl_step["run"]
+    assert '-gt 604800' in rag_cache_ttl_step["run"]
+    assert 'RAG_CACHE_TTL_SECONDS=$RAG_CACHE_TTL_SECONDS" >> "$GITHUB_ENV"' in rag_cache_ttl_step["run"]
     assert "OPENSEARCH_HOST=${ExternalOpenSearchHost}" in user_data
     assert "python3" not in user_data
     assert "dnf update -y" not in user_data
@@ -700,11 +957,25 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "upload_bootstrap_logs()" in user_data
     assert "backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID" in user_data
     assert "trap 'upload_bootstrap_logs;" in user_data
+    curl_invocations = [
+        line.strip()
+        for line in user_data.splitlines()
+        if "curl " in line or "curl\t" in line
+    ]
+    assert curl_invocations
+    assert all("--max-time" in line for line in curl_invocations)
+    assert user_data.count("--connect-timeout 1 --max-time 2") == 2
+    upload_calls = [i for i in range(len(user_data)) if user_data.startswith("upload_bootstrap_logs", i)]
+    assert len(upload_calls) == 5  # function def + ERR trap + bootstrap-mode success + health success + health timeout
+    assert user_data.count("cfn-signal --success false") == 2  # ERR trap + health-check-exhausted path
+    sleep_5_last = user_data.rindex("sleep 5")
+    exit_1_last = user_data.rindex("exit 1")
+    assert sleep_5_last < user_data.index("upload_bootstrap_logs", sleep_5_last) < exit_1_last
+    assert sleep_5_last < user_data.index("cfn-signal --success false", sleep_5_last) < exit_1_last
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
     assert "dnf install -y awscli aws-cfn-bootstrap" in user_data
-    assert "dnf install -y docker jq postgresql15" in user_data
-    assert "dnf install -y docker jq curl postgresql15" not in user_data
+    assert "docker" in user_data and "jq" in user_data and "postgresql15" in user_data
     assert user_data.index("dnf install -y awscli aws-cfn-bootstrap") < user_data.index("cfn-signal --success false")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index("mkdir -p /opt/a360/secrets")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index('docker login ghcr.io')
@@ -731,6 +1002,9 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
         for step in deploy_job["steps"]
         if step.get("name") == "Deploy CloudFormation"
     )
+    deploy_step = next(
+        step for step in deploy_job["steps"] if step.get("name") == "Deploy CloudFormation"
+    )
     token_parameter = template["Parameters"]["OpsApiKey"]
     app_secret = template["Resources"]["AppSecret"]["Properties"]["SecretString"]
     user_data = template["Resources"]["AppLaunchTemplate"]["Properties"][
@@ -738,12 +1012,14 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     ]["UserData"]["Fn::Base64"][0]
 
     assert "OPS_API_KEY" not in str(build_job)
-    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment }}"
+    assert deploy_job["environment"] == "backend-deploy-${{ inputs.environment || 'dev' }}"
     assert validate_step["env"]["OPS_API_KEY"] == "${{ secrets.OPS_API_KEY }}"
     assert '[ -z "$OPS_API_KEY" ]' in validate_step["run"]
     assert "exit 1" in validate_step["run"]
     assert "secrets.OPS_API_KEY" not in validate_step["run"]
-    assert 'OpsApiKey="${{ secrets.OPS_API_KEY }}"' in deploy_script
+    assert deploy_step["env"]["OPS_API_KEY"] == "${{ secrets.OPS_API_KEY }}"
+    assert 'OpsApiKey="$OPS_API_KEY"' in deploy_script
+    assert '${{ secrets.OPS_API_KEY }}' not in deploy_script
     assert token_parameter["NoEcho"] is True
     assert token_parameter["AllowedPattern"] == "^$|^[A-Za-z0-9_-]{32,128}$"
     assert '"OPS_API_KEY": "${OpsApiKey}"' in app_secret
@@ -753,6 +1029,46 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     assert "dnf update -y" not in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
+
+
+def test_backend_deploy_opensearch_validation_rejects_tab_password():
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise GitHub Actions shell validation")
+
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    )
+    deploy_job = workflow["jobs"]["deploy"]
+    opensearch_step = next(
+        step
+        for step in deploy_job["steps"]
+        if step.get("name") == "Validate OpenSearch host"
+    )
+
+    base_env = {
+        **os.environ,
+        "OPENSEARCH_HOST": "https://search.example.com",
+        "OPENSEARCH_USERNAME": "user",
+    }
+    invalid = subprocess.run(
+        [bash, "-euo", "pipefail", "-c", opensearch_step["run"]],
+        env={**base_env, "OPENSEARCH_PASSWORD": "secret\tvalue"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert invalid.returncode != 0
+    assert "OPENSEARCH_PASSWORD must not contain tabs." in invalid.stderr
+
+    valid = subprocess.run(
+        [bash, "-euo", "pipefail", "-c", opensearch_step["run"]],
+        env={**base_env, "OPENSEARCH_PASSWORD": "secret-value"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
 
 
 def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
@@ -776,7 +1092,7 @@ def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():
     ]["UserData"]["Fn::Base64"][0]
     assert asg_properties["TargetGroupARNs"] == [
         "StartsBackendContainer",
-        ["BackendTargetGroup"],
+        ["BackendTargetGroup", "BackendInternalTargetGroup"],
         "AWS::NoValue",
     ]
     assert asg_properties["HealthCheckType"] == ["StartsBackendContainer", "ELB", "EC2"]
@@ -805,3 +1121,50 @@ def test_backend_instance_role_can_read_bootstrap_role_secrets():
     assert "${ProjectName}-${Environment}-OpsReaderSecretArn" in policy_text
     assert "${ProjectName}-${Environment}-RagRuntimeSecretArn" in policy_text
     assert "${ProjectName}-${Environment}-RagIngestSecretArn" in policy_text
+
+
+def test_public_alb_blocks_admin_api_and_internal_alb_forwards_vpc_admin_calls():
+    template = yaml.load(
+        (ROOT / "infra/a360-backend-private.yml").read_text(encoding="utf-8"),
+        Loader=_CloudFormationLoader,
+    )
+    resources = template["Resources"]
+
+    for rule_name in ("HttpAdminBlockRule", "HttpsAdminBlockRule"):
+        rule = resources[rule_name]["Properties"]
+        assert rule["Conditions"][0]["Values"] == ["/api/admin/*"]
+        assert rule["Actions"][0]["Type"] == "fixed-response"
+        assert rule["Actions"][0]["FixedResponseConfig"]["StatusCode"] == "403"
+
+    internal_alb = resources["BackendInternalLoadBalancer"]["Properties"]
+    assert internal_alb["Scheme"] == "internal"
+    assert internal_alb["Subnets"]["Fn::Split"][1]["Fn::ImportValue"]["Fn::Sub"] == "${ProjectName}-${Environment}-PrivateAppSubnetIds"
+    assert internal_alb["SecurityGroups"] == ["InternalAlbSecurityGroup"]
+
+    internal_sg = resources["InternalAlbSecurityGroup"]["Properties"]
+    assert internal_sg["SecurityGroupIngress"][0]["CidrIp"]["Fn::ImportValue"]["Fn::Sub"] == "${ProjectName}-${Environment}-VpcCidr"
+
+    app_ingress = resources["AppSecurityGroup"]["Properties"]["SecurityGroupIngress"]
+    assert {"IpProtocol": "tcp", "FromPort": "BackendPort", "ToPort": "BackendPort", "SourceSecurityGroupId": "AlbSecurityGroup"} in app_ingress
+    assert {"IpProtocol": "tcp", "FromPort": "BackendPort", "ToPort": "BackendPort", "SourceSecurityGroupId": "InternalAlbSecurityGroup"} in app_ingress
+
+    listener = resources["BackendInternalHttpListener"]["Properties"]
+    assert listener["DefaultActions"][0]["Type"] == "forward"
+    assert listener["DefaultActions"][0]["TargetGroupArn"] == "BackendInternalTargetGroup"
+
+    asg = resources["AppAutoScalingGroup"]["Properties"]
+    assert asg["TargetGroupARNs"] == [
+        "StartsBackendContainer",
+        ["BackendTargetGroup", "BackendInternalTargetGroup"],
+        "AWS::NoValue",
+    ]
+
+    outputs = template["Outputs"]
+    assert outputs["BackendInternalAlbDnsName"]["Value"] == "BackendInternalLoadBalancer.DNSName"
+    assert outputs["BackendInternalHttpUrl"]["Value"] == "http://${BackendInternalLoadBalancer.DNSName}"
+
+    for rule_name in ("HttpInternalBlockRule", "HttpsInternalBlockRule"):
+        rule = resources[rule_name]["Properties"]
+        assert rule["Conditions"][0]["Values"] == ["/api/internal/*"]
+        assert rule["Actions"][0]["Type"] == "fixed-response"
+        assert rule["Actions"][0]["FixedResponseConfig"]["StatusCode"] == "403"

@@ -13,11 +13,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from assurance.change.foundation import AssuranceError, canonical_bytes
+from assurance.change.foundation import (
+    ALLOWED_SOURCE_EVENTS,
+    AssuranceError,
+    canonical_bytes,
+)
 from assurance.change.transport import load_change_envelope
 
 
-WORKFLOW_NAME = "Change Assurance (Observe)"
+WORKFLOW_NAME = "Change Assurance (Warn)"
 WRITER_PATH = "/api/internal/assurance/change-receipts"
 MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -58,7 +62,7 @@ def source_from_event(
         raise AssuranceError("workflow_run name is not authoritative")
     run_event = run.get("event")
     if (
-        run_event not in {"pull_request", "pull_request_review"}
+        run_event not in ALLOWED_SOURCE_EVENTS
         or run.get("conclusion") != "success"
     ):
         raise AssuranceError("workflow_run is not a successful pull request assurance run")

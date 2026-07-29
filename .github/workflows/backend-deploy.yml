@@ -24,6 +24,15 @@ on:
         description: "Max app instance count"
         required: true
         default: "2"
+      rag_cache_enabled:
+        description: "Enable shared Redis-backed RAG cache"
+        required: true
+        type: boolean
+        default: true
+      rag_cache_ttl_seconds:
+        description: "RAG cache TTL seconds"
+        required: true
+        default: "3600"
       start_backend_container:
         description: "Start backend container after EC2 bootstrap. Set false before DB role bootstrap."
         required: true
@@ -74,11 +83,11 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)
     runs-on: ubuntu-latest
-    environment: backend-deploy-${{ inputs.environment }}
+    environment: backend-deploy-${{ inputs.environment || 'dev' }}
     env:
-      STACK_NAME: a360-assistant-${{ inputs.environment }}-backend
+      STACK_NAME: a360-assistant-${{ inputs.environment || 'dev' }}-backend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -105,10 +114,11 @@ jobs:
             echo "GHCR_READ_TOKEN repository secret is missing." >&2
             exit 1
           fi
-
       - name: Validate OpenSearch host
         env:
           OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
         run: |
           if [ -z "$OPENSEARCH_HOST" ]; then
             echo "OPENSEARCH_HOST secret is required for deployed RAG search." >&2
@@ -118,26 +128,121 @@ jobs:
             echo "OPENSEARCH_HOST must be a non-empty http(s) URL without whitespace." >&2
             exit 1
           fi
+          if [ -n "$OPENSEARCH_USERNAME" ] && ! printf '%s' "$OPENSEARCH_USERNAME" | grep -Eq '^[^[:space:]]+$'; then
+            echo "OPENSEARCH_USERNAME must not contain whitespace." >&2
+            exit 1
+          fi
+          if [ -n "$OPENSEARCH_USERNAME" ] && printf '%s' "$OPENSEARCH_USERNAME" | grep -Eq '["\\]'; then
+            echo 'OPENSEARCH_USERNAME must not contain double quotes or backslashes.' >&2
+            exit 1
+          fi
+          if [ -n "$OPENSEARCH_PASSWORD" ] && printf '%s' "$OPENSEARCH_PASSWORD" | grep -Eq '["\\]'; then
+            echo 'OPENSEARCH_PASSWORD must not contain double quotes or backslashes.' >&2
+            exit 1
+          fi
+          case "$OPENSEARCH_PASSWORD" in
+            *$'\t'*)
+              echo "OPENSEARCH_PASSWORD must not contain tabs." >&2
+              exit 1
+              ;;
+            *$'\r'*|*$'\n'*)
+              echo "OPENSEARCH_PASSWORD must not contain newlines." >&2
+              exit 1
+              ;;
+          esac
+          if [ -n "$OPENSEARCH_USERNAME" ] && [ -z "$OPENSEARCH_PASSWORD" ]; then
+            echo "OPENSEARCH_PASSWORD is required when OPENSEARCH_USERNAME is set." >&2
+            exit 1
+          fi
+          if [ -z "$OPENSEARCH_USERNAME" ] && [ -n "$OPENSEARCH_PASSWORD" ]; then
+            echo "OPENSEARCH_USERNAME is required when OPENSEARCH_PASSWORD is set." >&2
+            exit 1
+          fi
+
+      - name: Validate Slack webhook URL
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            # 값은 SecretsManager의 JSON SecretString에 그대로 보간된다 — 공백/큰따옴표/역슬래시/개행이 있으면
+            # JSON이 깨져 스택 배포가 CloudFormation 단계에서야 실패한다. 여기서 fail-fast로 막는다.
+            if printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '[[:space:]"\\]'; then
+              echo 'SLACK_WEBHOOK_URL must not contain whitespace, double quotes, or backslashes (it is stored in a JSON secret).' >&2
+              exit 1
+            fi
+            case "$SLACK_WEBHOOK_URL" in
+              *$'\r'*|*$'\n'*)
+                echo "SLACK_WEBHOOK_URL must not contain newlines." >&2
+                exit 1
+                ;;
+            esac
+            # CFN AllowedPattern(^$|^https://hooks\.slack\.com/[^\s"\\]+$)과 **동일**하게: 슬래시 뒤
+            # 경로가 최소 1자 있어야 한다. 접두만 보면 'https://hooks.slack.com/'(빈 경로)가 여기선
+            # 통과하고 CFN에서야 실패해 fail-fast가 무너진다(Qodo #439 재리뷰). 가드가 동작을 그대로 읽게.
+            if ! printf '%s' "$SLACK_WEBHOOK_URL" | grep -Eq '^https://hooks\.slack\.com/.+$'; then
+              echo "SLACK_WEBHOOK_URL must be https://hooks.slack.com/<non-empty path> when set." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Validate RAG cache TTL
+        env:
+          RAG_CACHE_TTL_SECONDS: ${{ inputs.rag_cache_ttl_seconds || '3600' }}
+        run: |
+          if ! printf '%s' "$RAG_CACHE_TTL_SECONDS" | grep -Eq '^[0-9]+$'; then
+            echo "rag_cache_ttl_seconds must contain only digits." >&2
+            exit 1
+          fi
+          if [ "$RAG_CACHE_TTL_SECONDS" -lt 1 ] || [ "$RAG_CACHE_TTL_SECONDS" -gt 604800 ]; then
+            echo "rag_cache_ttl_seconds must be between 1 and 604800." >&2
+            exit 1
+          fi
+          echo "RAG_CACHE_TTL_SECONDS=$RAG_CACHE_TTL_SECONDS" >> "$GITHUB_ENV"
 
       - name: Deploy CloudFormation
+        env:
+          FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
+          OPENSEARCH_USERNAME: ${{ secrets.OPENSEARCH_USERNAME }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          OPS_API_KEY: ${{ secrets.OPS_API_KEY }}
+          ASSURANCE_WRITER_TOKEN: ${{ secrets.ASSURANCE_WRITER_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALERT_GLOBAL_DAILY_USD: ${{ vars.ALERT_GLOBAL_DAILY_USD }}
+          ALERT_5XX_DAILY: ${{ vars.ALERT_5XX_DAILY }}
+          RAG_CACHE_ENABLED: ${{ inputs.rag_cache_enabled }}
+          START_BACKEND_CONTAINER: ${{ inputs.start_backend_container }}
         run: |
+          RAG_CACHE_ENABLED="${RAG_CACHE_ENABLED:-true}"
+          START_BACKEND_CONTAINER="${START_BACKEND_CONTAINER:-true}"
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
             --template-file infra/a360-backend-private.yml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              Environment="${{ inputs.environment }}" \
+              Environment="${{ inputs.environment || 'dev' }}" \
               ContainerImage="${{ needs.build.outputs.image_uri }}" \
-              FrontendOrigins="${{ secrets.FRONTEND_ORIGINS }}" \
-              OpenAiApiKey="${{ secrets.OPENAI_API_KEY }}" \
-              VoyageApiKey="${{ secrets.VOYAGE_API_KEY }}" \
-              JwtSecret="${{ secrets.JWT_SECRET }}" \
-              ExternalOpenSearchHost="${{ secrets.OPENSEARCH_HOST }}" \
-              GithubToken="${{ secrets.GHCR_READ_TOKEN }}" \
-              OpsApiKey="${{ secrets.OPS_API_KEY }}" \
-              AssuranceWriterToken="${{ secrets.ASSURANCE_WRITER_TOKEN }}" \
+              FrontendOrigins="$FRONTEND_ORIGINS" \
+              OpenAiApiKey="$OPENAI_API_KEY" \
+              VoyageApiKey="$VOYAGE_API_KEY" \
+              JwtSecret="$JWT_SECRET" \
+              ExternalOpenSearchHost="$OPENSEARCH_HOST" \
+              OpenSearchUsername="$OPENSEARCH_USERNAME" \
+              OpenSearchPassword="$OPENSEARCH_PASSWORD" \
+              GithubToken="$GHCR_READ_TOKEN" \
+              OpsApiKey="$OPS_API_KEY" \
+              AssuranceWriterToken="$ASSURANCE_WRITER_TOKEN" \
               AssuranceWriterRepository="${{ github.repository }}" \
+              SlackWebhookUrl="$SLACK_WEBHOOK_URL" \
+              AlertGlobalDailyUsd="$ALERT_GLOBAL_DAILY_USD" \
+              Alert5xxDaily="$ALERT_5XX_DAILY" \
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
               MaxCapacity="${{ inputs.max_capacity || '2' }}" \
-              StartBackendContainer="${{ inputs.start_backend_container }}"
+              RagCacheEnabled="$RAG_CACHE_ENABLED" \
+              RagCacheTtlSeconds="${{ env.RAG_CACHE_TTL_SECONDS }}" \
+              StartBackendContainer="$START_BACKEND_CONTAINER"

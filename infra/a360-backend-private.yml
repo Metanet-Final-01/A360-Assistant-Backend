@@ -65,6 +65,25 @@ Parameters:
     Type: String
     Default: Metanet-Final-01/A360-Assistant-Backend
     AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+  SlackWebhookUrl:
+    Type: String
+    Default: ""
+    NoEcho: true
+    AllowedPattern: "^$|^https://hooks\\.slack\\.com/[^\\s\"\\\\]+$"
+    ConstraintDescription: SlackWebhookUrl must be empty or an https://hooks.slack.com/... URL with no whitespace, quotes, or backslashes (it is interpolated into a JSON secret).
+    Description: Slack Incoming Webhook for backend alerts (RPA-189/192/324). Empty = alerts disabled.
+  AlertGlobalDailyUsd:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^(0*[1-9][0-9]*(\\.[0-9]+)?|0*\\.[0-9]*[1-9][0-9]*)$"
+    ConstraintDescription: AlertGlobalDailyUsd must be empty (disabled) or a positive number incl. sub-1 (e.g. 5, 0.5); 0 is rejected because the app treats <=0 as disabled.
+    Description: Daily global LLM cost alert threshold in USD (RPA-324). Empty = that alert disabled.
+  Alert5xxDaily:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[1-9][0-9]*$"
+    ConstraintDescription: Alert5xxDaily must be empty (disabled) or a positive integer count.
+    Description: Daily 5xx count alert threshold (RPA-324). Empty = that alert disabled.
   BackendPort:
     Type: Number
     Default: 8000
@@ -73,6 +92,27 @@ Parameters:
     NoEcho: true
     AllowedPattern: "^https?://[^\\s]+$"
     ConstraintDescription: ExternalOpenSearchHost must be a non-empty http(s) URL without whitespace.
+  OpenSearchUsername:
+    Type: String
+    Default: ""
+    NoEcho: true
+    AllowedPattern: "^$|^[^\"\\\\\\s]+$"
+    ConstraintDescription: OpenSearchUsername must not contain whitespace, double quotes, or backslashes when provided.
+  OpenSearchPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+    AllowedPattern: "^$|^[^\"\\\\\\t\\r\\n]+$"
+    ConstraintDescription: OpenSearchPassword must not contain double quotes, backslashes, tabs, or newlines.
+  RagCacheEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  RagCacheTtlSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 1
+    MaxValue: 604800
   StartBackendContainer:
     Type: String
     Default: "true"
@@ -81,6 +121,19 @@ Parameters:
   LogRetentionDays:
     Type: Number
     Default: 14
+
+Rules:
+  OpenSearchCredentialsMustBePaired:
+    Assertions:
+      - Assert:
+          Fn::Or:
+            - Fn::And:
+                - !Equals [!Ref OpenSearchUsername, ""]
+                - !Equals [!Ref OpenSearchPassword, ""]
+            - Fn::And:
+                - !Not [!Equals [!Ref OpenSearchUsername, ""]]
+                - !Not [!Equals [!Ref OpenSearchPassword, ""]]
+        AssertDescription: OpenSearchUsername and OpenSearchPassword must both be empty or both be set.
 
 Conditions:
   HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
@@ -94,8 +147,11 @@ Resources:
       SecretString: !Sub |
         {
           "OPENAI_API_KEY": "${OpenAiApiKey}",
+          "SLACK_WEBHOOK_URL": "${SlackWebhookUrl}",
           "GITHUB_TOKEN": "${GithubToken}",
           "VOYAGE_API_KEY": "${VoyageApiKey}",
+          "OPENSEARCH_USERNAME": "${OpenSearchUsername}",
+          "OPENSEARCH_PASSWORD": "${OpenSearchPassword}",
           "JWT_SECRET": "${JwtSecret}",
           "OPS_API_KEY": "${OpsApiKey}",
           "ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}",
@@ -122,6 +178,24 @@ Resources:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
 
+  InternalAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal Backend ALB security group for VPC-only Ops/Admin access
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp:
+            Fn::ImportValue:
+              Fn::Sub: "${ProjectName}-${Environment}-VpcCidr"
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -134,6 +208,10 @@ Resources:
           FromPort: !Ref BackendPort
           ToPort: !Ref BackendPort
           SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: !Ref BackendPort
+          ToPort: !Ref BackendPort
+          SourceSecurityGroupId: !Ref InternalAlbSecurityGroup
       SecurityGroupEgress:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
@@ -281,8 +359,8 @@ Resources:
               exec > >(tee -a /var/log/a360-bootstrap.log /var/log/cloud-init-output.log) 2>&1
               echo "[a360-bootstrap] starting user-data"
               dnf install -y awscli aws-cfn-bootstrap
-              IMDS_TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
-              INSTANCE_ID=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
+              IMDS_TOKEN=$(curl -fsS --connect-timeout 1 --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" || true)
+              INSTANCE_ID=$(curl -fsS --connect-timeout 1 --max-time 2 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id || echo unknown-instance)
               upload_bootstrap_logs() {
                 aws s3 cp /var/log/a360-bootstrap.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/a360-bootstrap.log" || true
                 aws s3 cp /var/log/cloud-init-output.log "s3://${ArtifactBucketName}/backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID/cloud-init-output.log" || true
@@ -296,6 +374,7 @@ Resources:
                   --stack ${AWS::StackName} \
                   --resource AppAutoScalingGroup \
                   --region ${AWS::Region}
+                upload_bootstrap_logs
                 exit 0
               fi
 
@@ -341,7 +420,14 @@ Resources:
               OPS_API_KEY=$OPS_API_KEY
               ASSURANCE_WRITER_TOKEN=$ASSURANCE_WRITER_TOKEN
               ASSURANCE_WRITER_REPOSITORY=$ASSURANCE_WRITER_REPOSITORY
+              ALERT_GLOBAL_DAILY_USD=${AlertGlobalDailyUsd}
+              ALERT_5XX_DAILY=${Alert5xxDaily}
               EOF
+              cat >> /opt/a360/.env <<'EOF_RAG_CACHE'
+              REDIS_URL=${RedisUrl}
+              RAG_CACHE_ENABLED=${RagCacheEnabled}
+              RAG_CACHE_TTL_SECONDS=${RagCacheTtlSeconds}
+              EOF_RAG_CACHE
               jq -r 'to_entries[] | select((.key == "OPS_API_KEY" or .key == "ASSURANCE_WRITER_TOKEN" or .key == "ASSURANCE_WRITER_REPOSITORY") | not) | "\(.key)=\(.value)"' /opt/a360/secrets/app.json >> /opt/a360/.env
 
               docker rm -f a360-backend || true
@@ -362,6 +448,11 @@ Resources:
                 fi
                 sleep 5
               done
+              upload_bootstrap_logs
+              /opt/aws/bin/cfn-signal --success false \
+                --stack ${AWS::StackName} \
+                --resource AppAutoScalingGroup \
+                --region ${AWS::Region}
               exit 1
             - ArtifactBucketName:
                 Fn::ImportValue:
@@ -393,6 +484,9 @@ Resources:
               RagRuntimeSecretArn:
                 Fn::ImportValue:
                   Fn::Sub: "${ProjectName}-${Environment}-RagRuntimeSecretArn"
+              RedisUrl:
+                Fn::ImportValue:
+                  Fn::Sub: "${ProjectName}-${Environment}-RedisUrl"
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -425,6 +519,48 @@ Resources:
       UnhealthyThresholdCount: 3
       Matcher:
         HttpCode: "200"
+
+  BackendInternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${ProjectName}-${Environment}-VpcId"
+      Protocol: HTTP
+      Port: !Ref BackendPort
+      TargetType: instance
+      HealthCheckPath: /health/live
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+
+  BackendInternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      SecurityGroups: [!Ref InternalAlbSecurityGroup]
+      Subnets:
+        Fn::Split:
+          - ","
+          - Fn::ImportValue:
+              Fn::Sub: "${ProjectName}-${Environment}-PrivateAppSubnetIds"
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "120"
+
+  BackendInternalHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref BackendInternalLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendInternalTargetGroup
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -559,7 +695,7 @@ Resources:
               Fn::Sub: "${ProjectName}-${Environment}-PrivateAppSubnetIds"
       TargetGroupARNs: !If
         - StartsBackendContainer
-        - [!Ref BackendTargetGroup]
+        - [!Ref BackendTargetGroup, !Ref BackendInternalTargetGroup]
         - !Ref AWS::NoValue
       HealthCheckType: !If [StartsBackendContainer, ELB, EC2]
       HealthCheckGracePeriod: !If [StartsBackendContainer, 300, !Ref AWS::NoValue]
@@ -582,6 +718,12 @@ Outputs:
     Value: !GetAtt ApplicationLoadBalancer.DNSName
   BackendHttpUrl:
     Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+  BackendInternalAlbDnsName:
+    Description: Internal Backend ALB DNS name for Ops/Admin calls inside the VPC.
+    Value: !GetAtt BackendInternalLoadBalancer.DNSName
+  BackendInternalHttpUrl:
+    Description: Internal Backend HTTP URL for Ops/Admin calls inside the VPC.
+    Value: !Sub "http://${BackendInternalLoadBalancer.DNSName}"
   BackendHttpsUrl:
     Condition: HasCertificate
     Value: !Sub "https://${ApplicationLoadBalancer.DNSName}"

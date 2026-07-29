@@ -91,6 +91,45 @@ def test_engine_rebuilt_on_url_change(monkeypatch):
         _reset_singleton()
 
 
+def test_normalize_shared_url_helper():
+    """공유 정규화 함수: 드라이버 미지정·축약형은 psycopg(v3)로, 이미 명시된 건 불변 (RPA-322).
+
+    앱 DB와 관측 DB가 이 한 함수를 공유한다 — 복사하면 한쪽만 고쳐져 갈린다(CONVENTIONS §9).
+    """
+    from app.db import normalize_sqlalchemy_url
+
+    assert normalize_sqlalchemy_url("postgresql://h:5432/d") == "postgresql+psycopg://h:5432/d"
+    # postgres:// 축약형(Heroku·일부 콘솔) — SQLAlchemy 2.0이 거부하므로 정규화 대상
+    assert normalize_sqlalchemy_url("postgres://h:5432/d") == "postgresql+psycopg://h:5432/d"
+    # 이미 드라이버가 명시됐거나 다른 방언은 불변
+    assert normalize_sqlalchemy_url("postgresql+psycopg://h/d") == "postgresql+psycopg://h/d"
+    assert normalize_sqlalchemy_url("sqlite:///:memory:") == "sqlite:///:memory:"
+    # 빈 문자열은 통과 — "미설정=unavailable" 판정을 깨지 않는다
+    assert normalize_sqlalchemy_url("") == ""
+
+
+def test_libpq_url_selects_psycopg_v3_driver_not_psycopg2(monkeypatch):
+    """CloudFormation이 주는 postgresql://(드라이버 미지정)를 psycopg(v3) 엔진으로 뜬다 (RPA-322).
+
+    정규화가 없으면 SQLAlchemy 2.0이 기본 DBAPI psycopg2를 고르는데, 이 이미지엔 psycopg(v3)만
+    있어 관측 DB 연결이 ModuleNotFoundError로 죽고 관측 쓰기가 조용히 전부 유실된다. URL 문자열만
+    (대리 지표) 보지 않고 **엔진이 실제로 무슨 드라이버로 떴는지**까지 본다 — 이게 동작이 읽는 값.
+    """
+    monkeypatch.setenv(
+        "OBSERVABILITY_DATABASE_URL",
+        "postgresql://u:pw@obs-host:5432/a360_obs?sslmode=require",
+    )
+    _reset_singleton()
+    try:
+        # 단일 chokepoint에서 스킴에 드라이버가 박힌다
+        assert obs.observability_url().startswith("postgresql+psycopg://")
+        # create_engine은 연결 없이 방언을 결정한다 — driver가 psycopg2면 프로덕션에서 죽는다
+        engine = obs.observability_sessionmaker().kw["bind"]
+        assert engine.dialect.driver == "psycopg"
+    finally:
+        _reset_singleton()
+
+
 def test_ensure_schema_noop_when_unset(monkeypatch):
     """URL 미설정이면 스키마 보장은 no-op(False) — 앱 DB는 Alembic이 관리한다."""
     monkeypatch.delenv("OBSERVABILITY_DATABASE_URL", raising=False)

@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from .evidence import validate_manifest, validate_report
-from .foundation import AssuranceError, GIT_SHA, SCHEMA_VERSION, canonical_bytes, digest_bytes
+from .foundation import (
+    ALLOWED_SOURCE_EVENTS,
+    AssuranceError,
+    GIT_SHA,
+    SCHEMA_VERSION,
+    canonical_bytes,
+    digest_bytes,
+)
 from .schema_validation import SchemaValidationError, validate_json_schema
 
 
@@ -127,10 +134,10 @@ def _validate_ref(
 def _validate_source(source: Any) -> dict[str, Any]:
     if not isinstance(source, dict) or set(source) != _SOURCE_FIELDS:
         raise AssuranceError("publisher source fields do not match the transport contract")
-    if source.get("workflow_name") != "Change Assurance (Observe)":
+    if source.get("workflow_name") != "Change Assurance (Warn)":
         raise AssuranceError("publisher workflow is not authoritative")
     if (
-        source.get("event") not in {"pull_request", "pull_request_review"}
+        source.get("event") not in ALLOWED_SOURCE_EVENTS
         or source.get("conclusion") != "success"
     ):
         raise AssuranceError("publisher source is not a successful pull request workflow")
@@ -236,6 +243,8 @@ def validate_change_envelope(envelope: Any) -> dict[str, Any]:
             raise AssuranceError("manifest base SHA does not match the report")
         if manifest.get("subject", {}).get("head_sha") != source["head_sha"]:
             raise AssuranceError("manifest head SHA does not match the workflow source")
+        if manifest.get("policy", {}).get("rollout_mode") != report["enforcement"]["mode"]:
+            raise AssuranceError("change manifest and report rollout modes do not match")
         policy_digest = manifest.get("policy", {}).get("sha256")
         manifest_digest = digests["change-manifest.json"]
         diff_digest = manifest.get("subject", {}).get("diff_sha256")

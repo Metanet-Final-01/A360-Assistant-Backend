@@ -5,7 +5,13 @@ LLM/DB 없이 검증한다. "v1/v2가 각자 위치에서 온전히 import되고
 위임한다"는 계약과 "버전 추가 시 목록이 코드 수정 없이 반영된다"는 원칙을 CI에서 지킨다.
 """
 
+import ast
 import importlib
+import json
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -74,6 +80,107 @@ def test_version_isolation_v1_plan_v2_agentic():
     g2 = importlib.import_module("app.agent.v2.recommend.graph")
     assert hasattr(g1, "build_graph") and not hasattr(g1, "build_agent_graph")
     assert hasattr(g2, "build_agent_graph")
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "v", "v1x", "..", "../v1", "v1/../v2", "v1/..", "/etc/passwd", "v1.meta"]
+)
+def test_meta_file_rejects_non_version_names(bad):
+    """`vN` 규칙에 안 맞는 이름은 경로를 만들기 전에 막는다 (Qodo #448).
+
+    `_meta()`가 이 경로를 `exec_module`로 **실행**하므로, `_discover()`가 쓰는 규칙(`^v\\d+$`)을
+    여기서도 걸어야 한다 — 안 걸면 둘이 서로 다른 '유효한 버전'을 갖게 되고, 구분자·상위 이동이
+    든 값이 흘러들면 의도치 않은 파일을 실행할 수 있다.
+    """
+    from app.agent.registry import _meta, _meta_file
+
+    assert _meta_file(bad) is None
+    assert _meta(bad) == {}  # 호출부 계약: 못 읽으면 빈 dict(목록 조회는 계속 동작)
+
+
+def _declared_meta(version: str) -> dict | None:
+    """`vN/meta.py`가 선언한 VERSION_META를 **코드 실행 없이** 파싱한다 (못 정하면 None).
+
+    구현(`registry._meta`)과 **독립된 오라클**이다 — 같은 로더로 기대값을 만들면 로더가 늘 `{}`를
+    돌려줘도 통과하는 동어반복이 된다. meta.py는 dict 리터럴이라 ast로 그대로 읽힌다.
+
+    ⚠️ 경로는 프로덕션 `_meta_file()`과 **같은 방식**으로 찾는다(`__path__` 전체 순회, 첫 히트).
+       오라클이 구현과 다른 폴더를 보면 그 자체가 오검증이다 (Qodo #448).
+    ⚠️ 깨진 meta.py에 **예외를 던지지 않는다**: 프로덕션은 그 경우 `{}`로 폴백해 목록을 계속
+       내주는 게 계약이라, 오라클이 크래시하면 테스트가 구현보다 엄격해진다. 기대값을 못 만들면
+       None을 돌려 호출부가 그 버전을 건너뛴다.
+    """
+    import app.agent
+
+    for root in app.agent.__path__:
+        path = Path(root) / version / "meta.py"
+        if not path.is_file():
+            continue
+        try:
+            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+                if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "VERSION_META" for t in node.targets
+                ):
+                    declared = ast.literal_eval(node.value)
+                    # 프로덕션 `_meta()`도 `isinstance(meta, dict)`가 아니면 {}로 폴백한다.
+                    # dict가 아니면 기대값을 못 만드는 것이지 실패가 아니다(호출부가 건너뛴다).
+                    return declared if isinstance(declared, dict) else None
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError, TypeError):
+            return None  # 프로덕션도 {} 폴백 — 기대값을 못 만들 뿐 실패는 아니다
+        return None  # 파일은 있으나 VERSION_META 선언이 없음
+    return None
+
+
+def test_available_versions_does_not_import_agent_stacks():
+    """목록 조회가 **에이전트 전체 스택을 로드하지 않는다** — 콜드 컨테이너 지연의 원인 (RPA-190).
+
+    `_meta()`가 `import_module("app.agent.vN.meta")`를 쓰면 파이썬이 부모 패키지
+    `app.agent.vN/__init__.py`를 먼저 실행해 analysis·orchestrator·recommend까지 끌어온다.
+    그래서 LLM도 안 부르는 목록 조회가 실측 **7.4초**(관측 p95 8,094ms)였다.
+
+    ⚠️ **서브프로세스(콜드 인터프리터)로 본다.** 같은 프로세스에서 재면 다른 테스트가 이미
+       v1·v2를 import해 둔 상태라(예: test_version_isolation_…) 실행 순서에 따라 통과해버린다 —
+       그건 이 회귀를 못 잡는 가짜 초록이다.
+    """
+    code = textwrap.dedent(
+        """
+        import json, sys
+        from app.agent import available_versions
+        versions = available_versions()
+        heavy = sorted(
+            m for m in sys.modules
+            if m.startswith("app.agent.v")
+            and any(k in m for k in ("orchestrator", "recommend", "analysis", "verify", "prompts"))
+        )
+        print(json.dumps({
+            "versions": [{"id": v["id"], "label": v["label"], "description": v["description"]}
+                         for v in versions],
+            "heavy": heavy,
+        }))
+        """
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(  # noqa: S603 — 같은 인터프리터로 우리 코드만 실행
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=repo_root, timeout=180
+    )
+    assert proc.returncode == 0, f"서브프로세스 실패:\n{proc.stderr}"
+    data = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert data["heavy"] == [], (
+        "목록 조회가 에이전트 스택을 import했다 — vN/meta.py를 부모 패키지 경유로 읽고 있다: "
+        f"{data['heavy'][:5]}"
+    )
+    # 가벼워지기만 하고 메타를 못 읽으면 label이 id로 폴백돼 조용히 빈 껍데기가 된다.
+    # "안 무겁다"와 "제대로 읽었다"를 **둘 다** 본다.
+    assert data["versions"], "버전 목록이 비었다"
+    for v in data["versions"]:
+        declared = _declared_meta(v["id"])
+        if declared is None:
+            continue  # meta.py 없는 버전은 프로덕션이 id 폴백을 허용 — 테스트가 더 엄격하면 안 된다
+        assert v["label"] == (declared.get("label") or v["id"]), f"{v['id']}: label이 meta.py와 다르다"
+        assert v["description"] == (declared.get("description") or ""), (
+            f"{v['id']}: description이 meta.py와 다르다"
+        )
 
 
 def test_dispatcher_keeps_public_symbol():

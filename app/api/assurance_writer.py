@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.db import get_db
 from app.services.assurance_evidence import persist_change_receipt
-from assurance.change.foundation import AssuranceError
+from assurance.change.foundation import AssuranceError, SourceEvent
 
 
 router = APIRouter(prefix="/api/internal/assurance", tags=["assurance-writer"])
@@ -26,10 +26,10 @@ class ChangePublisherSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repository: str = Field(min_length=3, max_length=200)
-    workflow_name: Literal["Change Assurance (Observe)"]
+    workflow_name: Literal["Change Assurance (Warn)"]
     workflow_run_id: int = Field(ge=1)
     run_attempt: int = Field(ge=1)
-    event: Literal["pull_request"]
+    event: SourceEvent
     conclusion: Literal["success"]
     head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     pull_request_number: int = Field(ge=1)

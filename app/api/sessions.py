@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import delete, func, select
@@ -31,8 +31,9 @@ from app.core import config
 from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
 from app.db import get_db
-from app.schemas import ProgressEvent, Recommendation
-from app.services import alerts, budget
+from app.schemas import AnalysisResult, ProgressEvent, Recommendation
+from app.schemas.analysis import normalize_constraints
+from app.services import alerts, budget, turn_stream
 from app.services.assurance_evidence import persist_output_receipt
 from app.services.output_assurance import (
     OutputBoundaryContext,
@@ -40,6 +41,7 @@ from app.services.output_assurance import (
     finalize_persistence_observation,
     observe_recommendation_candidate,
 )
+from app.services.session_title import normalize_title, suggest_session_title
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +127,10 @@ _SOLUTION_RE = re.compile(r"^[a-z0-9][a-z0-9 ._-]{0,48}$")
 
 
 class SessionPatch(BaseModel):
-    """세션 부분 수정 — 지금은 solution만."""
+    """Update a session solution and/or display title."""
 
-    solution: str
+    solution: str | None = None
+    title: str | None = Field(None, max_length=60)
 
 
 @router.patch("/{session_id}")
@@ -144,12 +147,60 @@ def patch_session(
     — 이 엔드포인트가 그 수단이다("a360"으로 PATCH하면 원복). 프론트 대응은 RPA-286.
     """
     session = _owned_session_or_404(session_id, db, user)  # 소유권 검사
-    solution = (payload.solution or "").strip().lower()
+    if payload.solution is None:
+        if payload.title is None:
+            raise HTTPException(status_code=422, detail="No session value to update")
+        title = normalize_title(payload.title)
+        if title is None:
+            raise HTTPException(status_code=422, detail="Invalid title format")
+        session.title = title
+        db.commit()
+        return _session_out(session)
+
+    solution = payload.solution.strip().lower()
     if not _SOLUTION_RE.match(solution):
         raise HTTPException(status_code=422, detail="solution 형식이 올바르지 않습니다")
     session.solution = solution
+    if payload.title is not None:
+        title = normalize_title(payload.title)
+        if title is None:
+            raise HTTPException(status_code=422, detail="Invalid title format")
+        session.title = title
     db.commit()
     return _session_out(session)
+
+
+@router.post("/{session_id}/title-suggestion")
+def suggest_title(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> dict:
+    """Generate a session title from the latest one or two user messages.
+
+    This endpoint is called asynchronously by the client after a completed turn.
+    A title-generation failure preserves the current title instead of affecting chat.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    rows = db.execute(
+        select(models.ChatMessage)
+        .where(models.ChatMessage.session_id == session.id)
+        .where(models.ChatMessage.role == "user")
+        .order_by(models.ChatMessage.created_at.desc())
+        .limit(2)
+    ).scalars().all()
+    with usage_context(
+        component="chat", user_id=user.id if user else None, session_id=session.id
+    ):
+        title = suggest_session_title(
+            [row.content for row in reversed(rows)], session_id=session.id
+        )
+    if title is None:
+        return {**_session_out(session), "updated": False}
+
+    session.title = title
+    db.commit()
+    return {**_session_out(session), "updated": True}
 
 
 @router.delete("/{session_id}", status_code=204)
@@ -295,7 +346,7 @@ def _save_recommendation(
     source: str, parent_version: int | None, change_summary: str | None = None,
     request_id: str | None = None, requested_agent_version: str | None = None,
     resolved_agent_version: str | None = None, agent_registry_snapshot: Any = None,
-    producer_advisory: Any = None,
+    producer_advisory: Any = None, expected_constraints: list[str] | None = None,
 ) -> dict:
     """새 추천안 버전을 저장한다 (version은 세션 내 max+1). 새 세션 사용(스트리밍 후에도 안전).
 
@@ -314,6 +365,7 @@ def _save_recommendation(
         resolved_agent_version=resolved_agent_version,
         agent_registry_snapshot=agent_registry_snapshot,
         producer_advisory=producer_advisory,
+        expected_constraints=tuple(normalize_constraints(expected_constraints or [])),
     )
     try:
         observation = observe_recommendation_candidate(payload, boundary_context)
@@ -463,6 +515,9 @@ def save_edited_recommendation(
         source=payload.source, parent_version=payload.parent_version if payload.parent_version is not None else base.version,
         change_summary=payload.change_summary,
         request_id=_current_request_id(),
+        expected_constraints=(
+            ((base.payload or {}).get("spec") or {}).get("constraints") or []
+        ),
     )
     return saved
 
@@ -471,12 +526,19 @@ def save_edited_recommendation(
 def export_recommendation(
     session_id: str,
     version: int,
+    fmt: str = Query(
+        "json",
+        alias="format",
+        pattern="^(json|docx)$",
+        description="내보내기 형식 — json(기계 교환·재적재, 기본) | docx(사람이 읽는 서식 문서, FR-17)",
+    ),
     db: Session = Depends(get_db),
     user: models.User | None = Depends(get_optional_user),
-) -> JSONResponse:
-    """확정된 추천안(흐름도)을 다운로드용 JSON으로 내보낸다 (FR-17).
+) -> Response:
+    """확정된 추천안(흐름도)을 다운로드용으로 내보낸다 (FR-17).
 
-    지정 버전의 Recommendation 페이로드를 메타 봉투에 담아 attachment로 반환한다.
+    - format=json(기본): Recommendation 페이로드를 메타 봉투에 담은 JSON — 기계 교환·재적재용.
+    - format=docx: 담당자가 검토·공유·결재에 쓸 Word 서식 문서(흐름·근거·변수·전제·질문카드).
     라우트는 4세그먼트라 /recommendations·/recommendations/latest와 충돌하지 않는다.
     """
     session = _owned_session_or_404(session_id, db, user)
@@ -490,17 +552,152 @@ def export_recommendation(
         raise HTTPException(
             404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
         )
+    exported_at = datetime.now(timezone.utc).isoformat()
+    if fmt == "docx":
+        # 무거운 렌더러(python-docx)는 docx 경로에서만 로드한다 — JSON 경로 import 비용 0.
+        from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+        try:
+            content = build_recommendation_docx(
+                row.payload,
+                session_id=str(session.id),
+                version=row.version,
+                source=row.source,
+                exported_at=exported_at,
+            )
+        except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로 (Qodo #421)
+            logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+            raise HTTPException(
+                500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+            ) from exc
+        filename = f"recommendation-{session.id}-v{row.version}.docx"
+        return Response(
+            content=content,
+            media_type=DOCX_MEDIA_TYPE,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     envelope = {
         "schema_version": "1.0",
         "session_id": str(session.id),
         "recommendation_version": row.version,
         "source": row.source,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": exported_at,
         "recommendation": row.payload,
     }
     filename = f"recommendation-{session.id}-v{row.version}.json"
     return JSONResponse(
         content=envelope,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+_MAX_FLOW_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — 캡처 흐름도 PNG 한 장이면 충분
+_MAX_FLOW_IMAGE_COUNT = 20  # 페이지 분할 흐름도 최대 장수 (RPA-334) — 초과 시 413 TOO_MANY_IMAGES
+_MAX_FLOW_IMAGES_TOTAL_BYTES = 48 * 1024 * 1024  # 흐름도 합계 상한 48MB (RPA-334, Qodo #445) — 다중 이미지 메모리 폭증 차단
+
+
+def _sniff_image_kind(data: bytes) -> str | None:
+    """매직 바이트로 PNG/JPEG만 통과시킨다 — content-type 헤더는 위조 가능하니 바이트로 판정."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    return None
+
+
+@router.post("/{session_id}/recommendations/{version}/export/docx")
+async def export_recommendation_docx(
+    session_id: str,
+    version: int,
+    flow_images: list[UploadFile] = File(
+        default=[],
+        description=(
+            "프론트가 캡처한 흐름도 이미지들(PNG/JPEG, 0~20장, 선택) — 같은 필드명 반복 파트. "
+            "각 장이 별도 페이지에 순서대로 임베드됨 (RPA-334)"
+        ),
+    ),
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> Response:
+    """추천안을 Word(.docx) 서식 문서로 내보낸다 — 프론트 캡처 흐름도 임베드 지원 (FR-17, RPA-296).
+
+    `GET .../export?format=docx`는 데이터만 담은 문서다. 흐름도(FR-18)는 프론트가 트리에서
+    그리므로 백엔드가 서버에서 캡처할 수 없다 — 프론트가 캡처한 PNG/JPEG를 multipart로 보내면
+    이 POST가 "추천 흐름"에 그대로 임베드한다. 이미지 없이 불러도 데이터 문서로 동작한다.
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    row = db.execute(
+        select(models.RecommendationVersion).where(
+            models.RecommendationVersion.session_id == session.id,
+            models.RecommendationVersion.version == version,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(
+            404, detail={"code": "NO_RECOMMENDATION", "message": "해당 버전의 추천안이 없습니다."}
+        )
+    # 흐름도 이미지(0~N장)를 장마다 크기·매직바이트로 검증하고 합계 용량까지 바운드한다.
+    # 개수 초과 포함 **모든 예외 경로에서** UploadFile 핸들을 닫는다(finally) — 검증(개수 초과)을
+    # try 밖에서 raise하면 그 경로만 close를 놓친다(Qodo #445). 다중 이미지는 최악 20×8MB로
+    # 메모리를 20배 키우므로 누적 합계 상한으로도 막는다(단일 이미지 8MB → 다중 48MB로 바운드).
+    image_bytes_list: list[bytes] = []
+    try:
+        if len(flow_images) > _MAX_FLOW_IMAGE_COUNT:
+            raise HTTPException(
+                413,
+                detail={
+                    "code": "TOO_MANY_IMAGES",
+                    "message": f"흐름도 이미지는 최대 {_MAX_FLOW_IMAGE_COUNT}장까지 첨부할 수 있습니다.",
+                },
+            )
+        total_bytes = 0
+        for image in flow_images:
+            # MAX+1까지만 읽어 장당 메모리를 바운드한다 — 초과면 413.
+            data = await image.read(_MAX_FLOW_IMAGE_BYTES + 1)
+            if len(data) > _MAX_FLOW_IMAGE_BYTES:
+                raise HTTPException(
+                    413, detail={"code": "IMAGE_TOO_LARGE", "message": "흐름도 이미지가 너무 큽니다(최대 8MB)."}
+                )
+            if _sniff_image_kind(data) is None:
+                raise HTTPException(
+                    400, detail={"code": "INVALID_IMAGE", "message": "흐름도 이미지는 PNG/JPEG만 허용됩니다."}
+                )
+            total_bytes += len(data)
+            if total_bytes > _MAX_FLOW_IMAGES_TOTAL_BYTES:
+                raise HTTPException(
+                    413,
+                    detail={
+                        "code": "IMAGES_TOO_LARGE",
+                        "message": "흐름도 이미지 총 용량이 너무 큽니다(최대 48MB).",
+                    },
+                )
+            image_bytes_list.append(data)
+    finally:
+        for image in flow_images:
+            await image.close()
+
+    from app.services.recommendation_docx import DOCX_MEDIA_TYPE, build_recommendation_docx
+
+    try:
+        # 렌더는 CPU/IO 바운드(python-docx ZIP 저장·이미지 파싱) → 이벤트 루프 밖 threadpool에서 (Qodo).
+        content = await run_in_threadpool(
+            build_recommendation_docx,
+            row.payload,
+            session_id=str(session.id),
+            version=row.version,
+            source=row.source,
+            exported_at=datetime.now(timezone.utc).isoformat(),
+            flow_images=image_bytes_list,
+        )
+    except Exception as exc:  # noqa: BLE001 — 렌더 실패는 500 트레이스백 대신 표준 {code,message}로
+        logger.exception("추천안 docx 렌더 실패 (session=%s v=%s)", session.id, row.version)
+        raise HTTPException(
+            500, detail={"code": "DOCX_RENDER_FAILED", "message": "문서 생성에 실패했습니다."}
+        ) from exc
+    filename = f"recommendation-{session.id}-v{row.version}.docx"
+    return Response(
+        content=content,
+        media_type=DOCX_MEDIA_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -961,7 +1158,7 @@ def _persist_chat_turn(
 
 def _persist_turn_result(
     session_id: uuid.UUID, rec_analysis_id: uuid.UUID | None, document_id: uuid.UUID | None,
-    user_message: str, result: dict,
+    user_message: str, result: dict, expected_constraints: list[str] | None = None,
 ) -> dict:
     """반환 결과를 저장하고, 프론트에 줄 최종 done.data를 만든다.
 
@@ -994,6 +1191,12 @@ def _persist_turn_result(
 
     ar = result.get("analysis_result")
     rec = result.get("updated_recommendation")
+
+    if ar is not None:
+        candidate = dict(ar) if isinstance(ar, dict) else ar
+        if isinstance(candidate, dict):
+            candidate["constraints"] = normalize_constraints(candidate.get("constraints"))
+        ar = AnalysisResult.model_validate(candidate).model_dump(mode="json")
 
     # 선언한 type의 산출물이 실제로 있어야 한다 (없으면 성공 done 대신 error)
     if rtype == "analysis" and ar is None:
@@ -1042,6 +1245,9 @@ def _persist_turn_result(
             resolved_agent_version=result.get("resolved_agent_version"),
             agent_registry_snapshot=_agent_registry_snapshot(),
             producer_advisory=result.get("violations"),
+            expected_constraints=(
+                ar.get("constraints", []) if ar is not None else expected_constraints
+            ),
         )
         out.update(saved)  # id, version, parent_version, source, change_summary, created_at
         out["recommendation"] = rec
@@ -1563,6 +1769,11 @@ async def agent_turn(
         # targets 좌표로 결정론 수행한다 (백엔드는 흐름도 구조를 해석하지 않는다).
         agent_context["card_values"] = payload.card_values or {}
     rec_analysis_id, document_id = ctx["rec_analysis_id"], ctx["document_id"]
+    expected_constraints = normalize_constraints(
+        (agent_context.get("analysis") or {}).get("constraints")
+        if isinstance(agent_context.get("analysis"), dict)
+        else []
+    )
 
     # 턴 노드 타임라인 관측(RPA-105) — 스트림을 지나는 stage/error/done을 버퍼링해 턴
     # 종료 시 일괄 적재. request_id는 미들웨어가 심은 ContextVar에서 (같은 요청 묶음 키).
@@ -1570,7 +1781,28 @@ async def agent_turn(
 
     turn_request_id = get_request_id()
 
-    async def sse():
+    # 재개 가능한 턴 (RPA-339) — 이벤트를 공유 버퍼에 미러링해, 새로고침으로 연결이 끊겨도
+    # 같은 턴을 이어받게 한다. 이미 도는 턴이 있으면 새로 시작하지 않고 그 id로 재구독하라고
+    # 알린다(새로고침 연타로 LLM 턴이 중복 실행되는 것을 막는다).
+    # Redis 미설정이면 claim이 항상 None이라 이 분기는 없는 것과 같다(기존 동작 보존).
+    turn_id = turn_stream.new_turn_id()
+    buffer_ok, busy_turn_id = await turn_stream.claim(str(session_key), turn_id)
+    if busy_turn_id:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "TURN_IN_PROGRESS",
+                "message": "이미 진행 중인 턴이 있습니다 — 해당 턴을 이어받으세요.",
+                "turn_id": busy_turn_id,
+            },
+        )
+    # 버퍼가 살아 있을 때만 "끊겨도 계속 생성"으로 동작한다. 없으면 기존 절약 정책(RPA-106:
+    # 끊기면 즉시 중단)을 그대로 쓴다 — 이어받을 수단이 없는데 비용만 쓰는 건 손해다.
+    # 🔴 설정(REDIS_URL 유무)이 아니라 **실제 선점 성공**으로 판단한다 (Qodo #455): URL은 있는데
+    #    Redis가 죽었으면 끊긴 뒤에도 생성만 계속하고 재개도 안 돼 양쪽 다 손해다.
+    resumable = buffer_ok
+
+    async def _frames():
         result_data = None
         saw_error = False
         disconnected = False
@@ -1616,8 +1848,9 @@ async def agent_turn(
                 ):
                     # 조용한 구간엔 heartbeat만 흘려 연결을 살린다 (RPA-233, CloudFront 60초 idle).
                     # 끊긴 클라이언트엔 보내지 않고 즉시 턴을 중단한다 — 계속 소비하면 비용만 나간다.
+                    # (재개 가능하면 중단하지 않는다 — 끊긴 건 '전송'뿐이고 결과는 버퍼로 간다, RPA-339)
                     if event is _HEARTBEAT:
-                        if await request.is_disconnected():
+                        if not resumable and await request.is_disconnected():
                             logger.info("클라이언트 끊김 — 턴 중단(heartbeat): session=%s", session_key)
                             _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
                             disconnected = True
@@ -1637,7 +1870,9 @@ async def agent_turn(
                     # 완료되고 끝. BaseHTTPMiddleware 조합에선 Starlette 자동 취소가 보장되지
                     # 않아 이벤트 경계마다 명시적으로 확인한다.
                     # done 전 끊김 → 미완성 턴 폐기(저장 안 함). done 후 끊김 → 저장 + 전송만 생략.
-                    if await request.is_disconnected():
+                    # ⚠️ 재개 가능하면(RPA-339) 이 절약을 끄고 끝까지 생성한다 — 새로고침한
+                    #    사용자가 이어받아야 하므로 '미완성 폐기'가 곧 답변 유실이 된다.
+                    if not resumable and await request.is_disconnected():
                         logger.info("클라이언트 끊김 — 턴 중단: session=%s", session_key)
                         _tev("error", "agent", "클라이언트 연결 끊김 — 턴 중단")
                         disconnected = True
@@ -1650,7 +1885,7 @@ async def agent_turn(
             # done이 마지막 이벤트면 루프가 끊김 체크 없이 끝난다(선처리 continue) — 최종
             # 전송 전에 한 번 더 확인해, 죽은 클라이언트로의 yield(전송 예외 → turn_events
             # 적재 누락)를 막는다 (CodeRabbit #165). 저장은 그대로 진행된다.
-            if not disconnected and await request.is_disconnected():
+            if not resumable and not disconnected and await request.is_disconnected():
                 logger.info("클라이언트 끊김 — 응답 전송 생략: session=%s", session_key)
                 _tev("error", "agent", "클라이언트 연결 끊김 — 전송 생략")
                 disconnected = True
@@ -1660,7 +1895,12 @@ async def agent_turn(
                 persistence_result["_backend_request_id"] = turn_request_id
                 persistence_result["_backend_requested_agent_version"] = payload.agent_version
                 final = _persist_turn_result(
-                    session_key, rec_analysis_id, document_id, message, persistence_result
+                    session_key,
+                    rec_analysis_id,
+                    document_id,
+                    message,
+                    persistence_result,
+                    expected_constraints=expected_constraints,
                 )
                 # 대화 누적 게이지 — compact 턴은 intake가 없어 갱신 안 함(다음 대화 턴에서 압축값 반영).
                 # best-effort: 게이지 조회 실패가 정상 응답을 error로 바꾸지 않게 한다.
@@ -1685,7 +1925,8 @@ async def agent_turn(
             _tev("error", "agent", "처리 시간이 너무 길어 중단했습니다")
             # 이미 끊긴 클라이언트에 yield하다 취소되면 아래 turn_events 적재가 건너뛰어진다.
             # 완료 응답과 같은 경계로 전송만 생략하고 관측 기록은 끝까지 저장한다.
-            if not await request.is_disconnected():
+            # (재개 가능하면 프레임은 항상 만든다 — 실제 전송 여부는 sse() 래퍼가 정한다.)
+            if resumable or not await request.is_disconnected():
                 yield ProgressEvent(
                     event="error", stage="agent", message="처리 시간이 너무 길어 중단했습니다"
                 ).to_sse()
@@ -1706,6 +1947,156 @@ async def agent_turn(
         # 타임라인 일괄 적재 — 스트림이 정상 종료된 뒤 한 번 (best-effort, threadpool).
         # 클라이언트가 중간에 끊으면 여기 못 오지만, 끊김 처리는 별도 과제(HIGH todo).
         await run_in_threadpool(_save_turn_events, session_key, turn_request_id, tev)
+
+    async def sse():
+        """생성(_frames)과 **전달**을 분리한다 (RPA-339).
+
+        모든 프레임을 재개 버퍼에 남기고, 살아 있는 클라이언트에만 흘린다. 끊기면 전송만
+        멈추고 생성은 `_frames`가 끝까지 진행한다 — 그래야 새로고침한 사용자가 같은 턴을
+        이어받고, DB 저장(`_persist_turn_result`)도 정상적으로 일어난다.
+
+        첫 프레임으로 `stage="turn_started"` + `data.turn_id`를 내려 프론트가 재구독 키를
+        확보하게 한다. `ProgressEvent.event`가 Literal이라 새 이벤트 타입을 만들지 않고
+        기존 계약 안에서 stage 값만 추가한다(가산적 — 모르는 stage는 무시하면 그만).
+        """
+        client_gone = False
+        try:
+            # ⚠️ 재개가 켜졌을 때만 낸다. 꺼져 있으면 turn_id는 쓸 데가 없고, 무엇보다
+            #    "REDIS_URL 미설정이면 도입 전과 같은 프레임 열"이라는 이 기능의 전제가 깨진다.
+            if resumable:
+                head = ProgressEvent(
+                    event="stage", stage="turn_started",
+                    data={"turn_id": turn_id, "resumable": True},
+                ).to_sse()
+                await turn_stream.publish(str(session_key), turn_id, head)
+                yield head
+            async for frame in _frames():
+                await turn_stream.publish(str(session_key), turn_id, frame)
+                if client_gone:
+                    continue
+                if resumable and await request.is_disconnected():
+                    logger.info(
+                        "클라이언트 끊김 — 전송 중단, 생성은 계속: session=%s turn=%s",
+                        session_key, turn_id,
+                    )
+                    client_gone = True
+                    continue
+                yield frame
+        finally:
+            # 정상 종료·취소·예외 어느 쪽이든 종료 마커를 남긴다 — 안 남기면 재구독자가
+            # 끝을 모르고 TTL까지 기다리고, 활성 키가 남아 다음 턴이 409로 막힌다.
+            # ⚠️ 정리에는 **시간 제한**이 있어야 한다 (Qodo #455 2차). 맨 shield만 걸면 Redis가
+            #    hang일 때 요청 완료가 무기한 멈추고, 취소돼도 정리 태스크가 배경에 무한정 남는다.
+            #    이 모듈에 이미 있는 경계를 쓴다 — `_wait_for_cleanup`: 1초 상한, 초과 시 취소 +
+            #    결과 수거, 바깥 취소는 그대로 전파. 새 정리 규약을 또 만들지 않는다.
+            close_task = asyncio.ensure_future(turn_stream.close(str(session_key), turn_id))
+            await _wait_for_cleanup(close_task, "turn_stream close")
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+_RESUME_BLOCK_MS = 1000  # follow 한 번의 대기 — 짧게 여러 번 돌아야 재끊김에 빨리 반응한다
+
+
+@router.get("/{session_id}/turns/{turn_id}/stream")
+async def resume_turn_stream(
+    session_id: str,
+    turn_id: str,
+    after: str | None = Query(None, description="마지막으로 받은 이벤트 id — 그 다음부터 재생"),
+    db: Session = Depends(get_db),
+    user: models.User | None = Depends(get_optional_user),
+) -> StreamingResponse:
+    """진행 중이거나 방금 끝난 턴을 이어받는다 — 새로고침해도 답변이 계속 흐르게 (RPA-339).
+
+    원래 SSE가 끊겨도 생성은 계속되고 모든 프레임이 버퍼에 남는다. 여기서 `after` **다음**부터
+    재생한 뒤 실시간으로 이어 붙이므로, 프론트는 **끊긴 적 없는 것과 같은 프레임 열**을 받는다
+    (프레임 원문을 가공 없이 보관·재생한다).
+
+    - `after` 미지정 = 처음부터. 프론트가 마지막 id를 모르면 화면을 통째로 다시 그린다.
+    - 각 프레임 앞에 `id:` 줄을 붙여 다음 재구독 커서를 알려준다(SSE 표준 필드).
+    - 소유권은 `_owned_session_or_404`가 보고, 버퍼 키가 **세션 네임스페이스** 안이라
+      검사한 대상과 읽는 대상이 일치한다(남의 turn_id는 여기서 존재하지 않는다).
+    """
+    session = _owned_session_or_404(session_id, db, user)
+    if not turn_stream.enabled():
+        raise HTTPException(
+            503,
+            detail={"code": "RESUME_UNAVAILABLE", "message": "턴 재개가 비활성화되어 있습니다."},
+        )
+    # 커서는 **경계에서** 검증한다 (Qodo #455 2차). 형식이 깨진 값을 그대로 Redis로 넘기면
+    # replay/follow가 예외를 삼켜 빈 결과를 주고, 엔드포인트는 그걸 '조용한 구간'으로 오해해
+    # 상한까지(상한 0이면 무기한) heartbeat만 흘린다 — 클라이언트 입력 오류가 영구 스트림이 된다.
+    after = (after or "").strip() or None
+    if after is not None and not re.fullmatch(r"\d+-\d+", after):
+        raise HTTPException(
+            400,
+            detail={"code": "INVALID_CURSOR", "message": "after는 <밀리초>-<시퀀스> 형식이어야 합니다."},
+        )
+    session_key = str(session.id)
+    try:
+        turn_exists = await turn_stream.exists(session_key, turn_id)
+    except turn_stream.TurnStreamUnavailable as exc:
+        # 버퍼를 못 읽는 것과 "그런 턴이 없다"는 다르다 — 404로 뭉개면 클라이언트가 재시도를 포기한다.
+        raise HTTPException(
+            503,
+            detail={"code": "RESUME_UNAVAILABLE", "message": "재개 버퍼에 접근할 수 없습니다."},
+        ) from exc
+    if not turn_exists:
+        raise HTTPException(
+            404,
+            detail={"code": "TURN_NOT_FOUND", "message": "이어받을 턴이 없습니다(만료되었거나 없음)."},
+        )
+
+    async def sse():
+        cursor = after or "0-0"
+        # 1) 밀린 구간 따라잡기 — 페이지 단위로 받아 **받는 즉시** 흘린다.
+        #    토큰 단위 버퍼라 긴 턴이면 엔트리가 수천 개다. 전량을 리스트로 만들면 첫 바이트까지
+        #    지연되고 메모리도 튄다 (Qodo #455).
+        # 🔴 버퍼 오류는 **종결 조건**이다 (Qodo #455 4차). 읽기 헬퍼가 예외를 삼키고 빈 값을 주면
+        #    "아직 새 프레임 없음"과 구분이 안 돼, Redis가 죽은 뒤에도 상한까지(상한 0이면 무기한)
+        #    heartbeat만 흘리고 폴링마다 경고 로그를 쌓는다. 오류를 받으면 error 프레임 하나 주고
+        #    끊어 클라이언트가 재시도하게 한다.
+        try:
+            # 1) 밀린 구간 따라잡기 — 페이지 단위로 받아 **받는 즉시** 흘린다.
+            #    토큰 단위 버퍼라 긴 턴이면 엔트리가 수천 개다. 전량을 리스트로 만들면 첫 바이트까지
+            #    지연되고 메모리도 튄다 (Qodo #455).
+            async for entry_id, frame, is_end in turn_stream.replay(session_key, turn_id, after):
+                cursor = entry_id
+                if is_end:
+                    return
+                yield f"id: {entry_id}\n{frame}"
+            # 2) 실시간 이어받기 — 끝 마커를 못 본 경우를 대비해 턴 상한으로 바운드한다.
+            #    ⚠️ TURN_MAX_DURATION_SEC=0은 "상한 끔"이 계약이다(_iter_with_heartbeat와 같은 해석).
+            #       그대로 더하면 deadline이 현재시각이라 루프가 한 번도 안 돌아 재개가 죽는다 (Qodo #455).
+            max_sec = _turn_max_sec()
+            deadline = (time.monotonic() + max_sec) if max_sec > 0 else None
+            while deadline is None or time.monotonic() < deadline:
+                rows = await turn_stream.follow(session_key, turn_id, cursor, _RESUME_BLOCK_MS)
+                if not rows:
+                    # 커서가 종료 마커보다 뒤면(유효한 형식의 미래 id 등) follow는 영원히 빈손이다 —
+                    # 마지막 엔트리를 직접 보고 끝났으면 닫는다 (Qodo #455 3차). 형식 검증은 이 경우를
+                    # 못 잡는다(형식은 맞다). 조용할 때만 확인하므로 비용도 없다.
+                    if await turn_stream.ended(session_key, turn_id):
+                        return
+                    # 조용한 구간에도 연결을 살려 둔다 (원 스트림과 같은 이유 — CloudFront 60초 idle).
+                    yield _SSE_HEARTBEAT_FRAME
+                    continue
+                for entry_id, frame, is_end in rows:
+                    cursor = entry_id
+                    if is_end:
+                        return
+                    yield f"id: {entry_id}\n{frame}"
+        except turn_stream.TurnStreamUnavailable:
+            # 경고는 turn_stream이 exc_info와 함께 이미 남겼다 — 여기서 또 남기면 같은 사건이
+            # 두 줄로 쌓인다 (Qodo #455 5차). 여기선 스트림 종결만 담당한다.
+            yield ProgressEvent(
+                event="error", stage="agent", message="재개 스트림이 중단되었습니다 — 다시 시도해주세요."
+            ).to_sse()
+            return
 
     return StreamingResponse(
         sse(),

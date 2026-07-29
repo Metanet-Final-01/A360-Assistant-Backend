@@ -168,6 +168,10 @@ class FlowSpec(BaseModel):
     error_policy: list[str] = Field(default_factory=list, description="예외 상황별 기대 처리")
     unknowns: list[SpecUnknown] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list, description="생성이 임의로 정한 전제(명시 강제)")
+    constraints: list[str] = Field(
+        default_factory=list,
+        description="문서나 사용자 발화에 명시된 자동화 제약·필수 조건",
+    )
 
 
 class TriggerRecommendation(BaseModel):
