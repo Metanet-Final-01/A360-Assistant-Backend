@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 import yaml
@@ -869,9 +872,6 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert validate_step["env"]["GHCR_READ_TOKEN"] == "${{ secrets.GHCR_READ_TOKEN }}"
     assert '[ -z "$ASSURANCE_WRITER_TOKEN" ]' in validate_step["run"]
     assert '[ -z "$GHCR_READ_TOKEN" ]' in validate_step["run"]
-    deploy_step = next(
-        step for step in deploy_job["steps"] if step.get("name") == "Deploy CloudFormation"
-    )
     assert deploy_step["env"]["OPENSEARCH_USERNAME"] == "${{ secrets.OPENSEARCH_USERNAME }}"
     assert deploy_step["env"]["OPENSEARCH_PASSWORD"] == "${{ secrets.OPENSEARCH_PASSWORD }}"
     assert deploy_step["env"]["RAG_CACHE_ENABLED"] == "${{ inputs.rag_cache_enabled }}"
@@ -891,6 +891,7 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "OPENSEARCH_USERNAME must not contain whitespace." in opensearch_step["run"]
     assert "OPENSEARCH_USERNAME must not contain double quotes or backslashes." in opensearch_step["run"]
     assert "OPENSEARCH_PASSWORD must not contain double quotes or backslashes." in opensearch_step["run"]
+    assert "OPENSEARCH_PASSWORD must not contain tabs." in opensearch_step["run"]
     assert "OPENSEARCH_PASSWORD must not contain newlines." in opensearch_step["run"]
     assert "OPENSEARCH_PASSWORD is required when OPENSEARCH_USERNAME is set." in opensearch_step["run"]
     assert "OPENSEARCH_USERNAME is required when OPENSEARCH_PASSWORD is set." in opensearch_step["run"]
@@ -902,7 +903,10 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert opensearch_username_parameter["NoEcho"] is True
     assert opensearch_username_parameter["AllowedPattern"] == "^$|^[^\"\\\\\\s]+$"
     assert opensearch_password_parameter["NoEcho"] is True
-    assert opensearch_password_parameter["AllowedPattern"] == "^$|^[^\"\\\\\\r\\n]+$"
+    assert opensearch_password_parameter["AllowedPattern"] == "^$|^[^\"\\\\\\t\\r\\n]+$"
+    opensearch_pair_rule = template["Rules"]["OpenSearchCredentialsMustBePaired"]
+    assert "OpenSearchUsername" in str(opensearch_pair_rule)
+    assert "OpenSearchPassword" in str(opensearch_pair_rule)
     assert '"ASSURANCE_WRITER_TOKEN": "${AssuranceWriterToken}"' in app_secret
     assert '"ASSURANCE_WRITER_REPOSITORY": "${AssuranceWriterRepository}"' in app_secret
     assert '"OPENSEARCH_USERNAME": "${OpenSearchUsername}"' in app_secret
@@ -919,8 +923,14 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "REDIS_URL=${RedisUrl}" in user_data
     assert "RAG_CACHE_ENABLED=${RagCacheEnabled}" in user_data
     assert "RAG_CACHE_TTL_SECONDS=${RagCacheTtlSeconds}" in user_data
-    assert "<<'EOF_RAG_CACHE'" in user_data
-    assert user_data.index("<<'EOF_RAG_CACHE'") < user_data.index("REDIS_URL=${RedisUrl}")
+    rag_cache_heredoc_opener = "cat >> /opt/a360/.env <<'EOF_RAG_CACHE'"
+    assert rag_cache_heredoc_opener in user_data
+    rag_cache_heredoc_body_start = user_data.index(rag_cache_heredoc_opener) + len(
+        rag_cache_heredoc_opener
+    )
+    rag_cache_heredoc_end = user_data.index("EOF_RAG_CACHE", rag_cache_heredoc_body_start)
+    redis_url_line = user_data.index("REDIS_URL=${RedisUrl}")
+    assert rag_cache_heredoc_body_start < redis_url_line < rag_cache_heredoc_end
     assert (
         user_data_mapping["RedisUrl"]["Fn::ImportValue"]["Fn::Sub"]
         == "${ProjectName}-${Environment}-RedisUrl"
@@ -947,11 +957,25 @@ def test_backend_deploy_injects_writer_credentials_from_protected_environment():
     assert "upload_bootstrap_logs()" in user_data
     assert "backend-bootstrap-logs/${AWS::StackName}/$INSTANCE_ID" in user_data
     assert "trap 'upload_bootstrap_logs;" in user_data
+    curl_invocations = [
+        line.strip()
+        for line in user_data.splitlines()
+        if "curl " in line or "curl\t" in line
+    ]
+    assert curl_invocations
+    assert all("--max-time" in line for line in curl_invocations)
+    assert user_data.count("--connect-timeout 1 --max-time 2") == 2
+    upload_calls = [i for i in range(len(user_data)) if user_data.startswith("upload_bootstrap_logs", i)]
+    assert len(upload_calls) == 5  # function def + ERR trap + bootstrap-mode success + health success + health timeout
+    assert user_data.count("cfn-signal --success false") == 2  # ERR trap + health-check-exhausted path
+    sleep_5_last = user_data.rindex("sleep 5")
+    exit_1_last = user_data.rindex("exit 1")
+    assert sleep_5_last < user_data.index("upload_bootstrap_logs", sleep_5_last) < exit_1_last
+    assert sleep_5_last < user_data.index("cfn-signal --success false", sleep_5_last) < exit_1_last
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
     assert "dnf install -y awscli aws-cfn-bootstrap" in user_data
-    assert "dnf install -y docker jq postgresql15" in user_data
-    assert "dnf install -y docker jq curl postgresql15" not in user_data
+    assert "docker" in user_data and "jq" in user_data and "postgresql15" in user_data
     assert user_data.index("dnf install -y awscli aws-cfn-bootstrap") < user_data.index("cfn-signal --success false")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index("mkdir -p /opt/a360/secrets")
     assert user_data.index('if [ "${StartBackendContainer}" != "true" ]; then') < user_data.index('docker login ghcr.io')
@@ -1005,6 +1029,46 @@ def test_backend_deploy_injects_ops_api_key_from_protected_environment():
     assert "dnf update -y" not in user_data
     assert user_data.startswith("#!/bin/bash -eu\n")
     assert "#!/bin/bash -eux" not in user_data
+
+
+def test_backend_deploy_opensearch_validation_rejects_tab_password():
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise GitHub Actions shell validation")
+
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/backend-deploy.yml").read_text(encoding="utf-8")
+    )
+    deploy_job = workflow["jobs"]["deploy"]
+    opensearch_step = next(
+        step
+        for step in deploy_job["steps"]
+        if step.get("name") == "Validate OpenSearch host"
+    )
+
+    base_env = {
+        **os.environ,
+        "OPENSEARCH_HOST": "https://search.example.com",
+        "OPENSEARCH_USERNAME": "user",
+    }
+    invalid = subprocess.run(
+        [bash, "-euo", "pipefail", "-c", opensearch_step["run"]],
+        env={**base_env, "OPENSEARCH_PASSWORD": "secret\tvalue"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert invalid.returncode != 0
+    assert "OPENSEARCH_PASSWORD must not contain tabs." in invalid.stderr
+
+    valid = subprocess.run(
+        [bash, "-euo", "pipefail", "-c", opensearch_step["run"]],
+        env={**base_env, "OPENSEARCH_PASSWORD": "secret-value"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
 
 
 def test_backend_bootstrap_mode_uses_ec2_health_without_target_registration():

@@ -141,6 +141,10 @@ jobs:
             exit 1
           fi
           case "$OPENSEARCH_PASSWORD" in
+            *$'\t'*)
+              echo "OPENSEARCH_PASSWORD must not contain tabs." >&2
+              exit 1
+              ;;
             *$'\r'*|*$'\n'*)
               echo "OPENSEARCH_PASSWORD must not contain newlines." >&2
               exit 1
