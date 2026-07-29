@@ -80,12 +80,19 @@ Warn에서는 비통과 판정을 GitHub 경고로 표시하지만 기존 병합
    trusted base SHA의 `requirements.txt`·`requirements-dev.txt`만 설치해 실제 import 검사 환경을 준비한다.
 7. 패키지 제거는 HEAD 전체의 Python import를 다시 조사한다. 참조가 남으면 `deny`, 안정적인 import-root
    매핑으로 제거를 증명하면 해당 version·취약점·license 검사는 적용하지 않는다.
+8. 비리터럴 동적 import는 기본적으로 `unassured`다. 예외는 `approved_dynamic_imports`에 파일 경로,
+   정적으로 확인 가능한 로컬 모듈 prefix, Jira 승인 근거가 모두 고정된 경우뿐이다. 승인 prefix 밖의
+   동적 import는 같은 파일에서도 예외를 적용하지 않는다.
 
 CI는 PR head를 분석 대상 checkout으로만 두고, 별도 checkout의 정확한 base SHA에서 검사기와 정책을 실행한다.
 allowlist 기준선은 merge-base이고, 검사 실행 환경은 trusted base SHA의 고정 requirements를 설치한 환경이다. PR head의
 요구사항이나 코드는 설치하지 않으므로 신규·변경 의존성이 trusted 환경에 없거나 실제 import를 증명할 수 없으면 보수적으로
 `deny` 또는 `unassured`가 된다. 결정론적 정상 fixture는 test-only adapter로 검사 로직을 검증한다. 향후 보호된 사전 구축
 runner와 검토된 offline snapshot은 `RPA-183` 승격 준비에서 다룬다.
+
+Warn 비통과 근거에 `파일:줄`이 있으면 GitHub annotation을 해당 경로와 줄에 연결한다. PR 작성자는
+`Change Assurance (Warn)` 검사 상세뿐 아니라 PR의 파일 annotation에서 발견 내용과 확인·조치 안내를 볼 수 있다.
+경로를 확정할 수 없는 전역 오류는 기존처럼 검사 상세와 Actions Summary에만 표시한다.
 
 RPA-180을 처음 추가하는 이 PR의 base에는 검사기가 없다. 이 부트스트랩 실행은 PR head의 검사기를 신뢰하는 대신
 `BOOTSTRAP_UNASSURED.md`만 남긴다. RPA-180이 dev에 병합된 다음 PR부터 base의 검사기가 실행된다. workflow 자체의 변경 보호와
