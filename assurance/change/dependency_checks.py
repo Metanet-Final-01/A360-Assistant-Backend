@@ -34,7 +34,27 @@ def _module_package(path: str) -> str:
     return ".".join(package_parts)
 
 
-def _dynamic_import_prefix(path: str, expression: ast.expr) -> str | None:
+def _package_name_is_unshadowed(tree: ast.AST) -> bool:
+    """Return whether ``__package__`` can only resolve to Python's module global."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg) and node.arg == "__package__":
+            return False
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if node.id == "__package__":
+                return False
+        if isinstance(node, ast.alias) and node.asname == "__package__":
+            return False
+        if isinstance(node, ast.ExceptHandler) and node.name == "__package__":
+            return False
+    return True
+
+
+def _dynamic_import_prefix(
+    path: str,
+    expression: ast.expr,
+    *,
+    package_name_is_unshadowed: bool,
+) -> str | None:
     """Return the statically bounded prefix of a non-literal import target."""
     if not isinstance(expression, ast.JoinedStr):
         return None
@@ -48,6 +68,7 @@ def _dynamic_import_prefix(path: str, expression: ast.expr) -> str | None:
             and isinstance(value, ast.FormattedValue)
             and isinstance(value.value, ast.Name)
             and value.value.id == "__package__"
+            and package_name_is_unshadowed
         ):
             prefix = _module_package(path)
             continue
@@ -95,6 +116,7 @@ def parse_imports(
 
     typing_aliases: set[str] = set()
     type_checking_aliases: set[str] = set()
+    package_name_is_unshadowed = _package_name_is_unshadowed(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -241,7 +263,13 @@ def parse_imports(
             )
         else:
             module_prefix = (
-                _dynamic_import_prefix(path, node.args[0]) if node.args else None
+                _dynamic_import_prefix(
+                    path,
+                    node.args[0],
+                    package_name_is_unshadowed=package_name_is_unshadowed,
+                )
+                if node.args
+                else None
             )
             approval = _approved_dynamic_import(
                 path,
@@ -507,7 +535,9 @@ def _new_imports(
         else:
             base_imports, base_errors = [], []
         errors.extend(head_errors)
-        errors.extend(base_errors)
+        # Keep base-only parser failures in the receipt, but mark them so a
+        # GitHub annotation is never attached to a potentially shifted HEAD line.
+        errors.extend(f"[base] {error}" for error in base_errors)
         existing = {item.key for item in base_imports}
         additions.extend(item for item in head_imports if item.key not in existing)
     deduped = {(item.path, *item.key): item for item in additions}

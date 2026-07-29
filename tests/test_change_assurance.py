@@ -692,6 +692,28 @@ def test_policy_approved_local_dynamic_import_prefix_is_verified() -> None:
     )
 
 
+def test_shadowed_package_name_does_not_receive_dynamic_import_approval() -> None:
+    _, errors = parse_imports(
+        "app/agent/registry.py",
+        (
+            b"import importlib\n"
+            b"def load(__package__, name):\n"
+            b"    return importlib.import_module(f'{__package__}.{name}')\n"
+        ),
+        approved_dynamic_imports=[
+            {
+                "path": "app/agent/registry.py",
+                "module_prefix": "app.agent.",
+                "approval_ref": "RPA-343",
+            }
+        ],
+    )
+
+    assert errors == [
+        "app/agent/registry.py:3: non-literal dynamic import cannot be verified"
+    ]
+
+
 def test_live_registry_dynamic_import_matches_the_approved_policy() -> None:
     policy = json.loads(
         (ROOT / "assurance" / "change" / "policy" / "dependency-policy.json").read_text(
@@ -756,6 +778,29 @@ def test_warning_annotation_targets_evidence_file_and_line(capsys) -> None:
         "title=Change Assurance 경고: CH-04 DEPENDENCY_DETECTOR_ERROR::"
     ) in output
     assert "승인된 동적 import 정책 또는 코드를 확인하세요." in output
+
+
+def test_warning_annotation_does_not_attach_base_evidence_to_head(capsys) -> None:
+    emit_warning_annotations(
+        {
+            "controls": [
+                {
+                    "control_id": "CH-04",
+                    "status": "error",
+                    "reason_code": "DEPENDENCY_DETECTOR_ERROR",
+                    "reason": "Dependency inspection failed.",
+                    "explanation": {
+                        "finding": "[base] dep.allowlist: removed.py:7: invalid syntax",
+                        "action": "Review the base evidence.",
+                    },
+                }
+            ]
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "::warning file=" not in output
+    assert "::warning title=Change Assurance" in output
 
 
 def test_nested_python_file_does_not_create_a_local_import_root(tmp_path: Path) -> None:

@@ -45,6 +45,8 @@ def _workflow_escape(value: str) -> str:
 def _warning_locations(finding: str) -> list[tuple[str, int, str]]:
     locations: dict[tuple[str, int], str] = {}
     for detail in finding.split(" / "):
+        if detail.strip().startswith("[base]"):
+            continue
         match = EVIDENCE_LOCATION.search(detail)
         if match is None:
             continue
