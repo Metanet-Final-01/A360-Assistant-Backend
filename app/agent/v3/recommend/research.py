@@ -17,7 +17,11 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from app.agent.knowledge.derive import derive_structural_actions
+from app.agent.knowledge.derive import (
+    derive_competing_packages,
+    derive_packages,
+    derive_structural_actions,
+)
 
 from ..orchestrator.jsonio import chat_json
 from ..verify.checker import derive_session_registry
@@ -30,13 +34,23 @@ _PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "research_querie
 # recommend 검색은 액션 후보 메뉴용 — 문서 페이지 오염 방지 (v2 계약 유지).
 ACTION_SOURCE_TYPES = ["action_schema", "bot_example"]
 _SEARCH_LIMIT = 5
-_MAX_UNITS = 8           # 기능 단위 상한 — 질의 폭주 방지
-_MAX_MENU_ACTIONS = 14   # Dossier 액션 메뉴 상한 (스펙 포함이라 토큰 비용이 큼)
+# 기능 단위·메뉴 상한. 스펙에 운영 골격 요구(priority=should, source=inferred)가 들어오면서
+# 조사 대상이 업무 요구 + 골격 요구로 늘었다 — 상한을 그대로 두면 골격 질의가 업무 질의를
+# 밀어내(실제로 자동화할 기능이 메뉴에서 빠져) 조용히 품질이 내려간다. 그래서 폭을 넓히되,
+# 우선순위는 코드로 강제한다(_expand_queries: must 먼저, should는 남는 자리).
+# 검색은 병렬 I/O라 단위 증가 비용이 작고, 메뉴 증가만 프롬프트 토큰에 비례한다.
+_MAX_UNITS = 10          # 기능 단위 상한 — 질의 폭주 방지
+_MAX_MENU_ACTIONS = 18   # Dossier 액션 메뉴 상한 (스펙 포함이라 토큰 비용이 큼)
 # 사용자 제공 카탈로그의 메뉴 상한 — 검색으로 좁힐 수 없어 전량을 싣지만, 프롬프트가
 # 무한정 커지는 것은 막는다. 검색 경로보다 훨씬 넉넉하다(실제 카탈로그는 보통 수십 개라
 # 이 값에 닿지 않고, 닿으면 잘린 사실을 프롬프트·로그·진행 메시지 셋 다에 남긴다).
 _MAX_USER_MENU_ACTIONS = 200
 _DOC_BG_LIMIT = 3        # 배경 지식(doc_page) 검색 건수
+# 기능 단위의 최고 점수가 '가장 잘 찾힌 단위'의 이 비율 미만이면 검색이 약한 것으로 본다.
+# 절대값이 아니라 상대 비율인 이유: 재정렬 점수의 절대 크기는 질의·모델마다 달라 임계를
+# 박아두면 모델을 바꾸는 순간 거짓말이 된다. 실측(2026-07-28) 웹 조작 0.315 / 메일 0.471
+# = 0.67로 이 선에 걸린다.
+_WEAK_UNIT_RATIO = 0.7
 
 
 # 제어 흐름 구조 액션 후보 — 카탈로그에 실재하는 것만 메뉴에 실린다. 요구사항 문장에는
@@ -120,6 +134,7 @@ def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, s
 
 class _ResearchUnit(BaseModel):
     topic: str = ""
+    packages: list[str] = Field(default_factory=list)  # 이 기능을 풀 A360 패키지 (질의 앵커)
     ko_query: str = ""
     en_query: str = ""
 
@@ -128,16 +143,74 @@ class _ResearchPlan(BaseModel):
     units: list[_ResearchUnit] = Field(default_factory=list)
 
 
-def _expand_queries(spec: dict) -> list[_ResearchUnit]:
-    """FlowSpec 요구를 기능 단위로 묶어 (한국어, 영어) 질의 쌍을 만든다 (LLM 1회, 경량)."""
-    req_lines = "\n".join(
-        f"- [{r.get('req_id')}] {r.get('text', '')}" for r in spec.get("requirements") or []
-    )
+def _split_by_priority(spec: dict) -> tuple[list[dict], list[dict]]:
+    """요구를 (must, should)로 가른다. priority 미기재는 must로 본다(spec_builder 기본값)."""
+    musts: list[dict] = []
+    shoulds: list[dict] = []
+    for r in spec.get("requirements") or []:
+        (shoulds if r.get("priority") == "should" else musts).append(r)
+    return musts, shoulds
+
+
+_MAX_QUERY_PACKAGES = 2  # 질의 앞에 붙일 패키지 수 상한 — 더 붙이면 동작 어휘가 묻힌다
+
+
+def _package_vocabulary(catalog) -> tuple[str, set[str]]:
+    """(프롬프트에 실을 패키지 목록 문자열, 실재 패키지 이름 집합).
+
+    카탈로그에서 유도한다 — 실측 120개, 약 500토큰이라 LLM 호출 증가 없이 실을 수 있다.
+    """
+    try:
+        pkgs = derive_packages(catalog) if catalog is not None else ()
+    except Exception as e:  # noqa: BLE001 — 어휘 사전이 없어도 조사는 굴러가야 한다
+        logger.warning("패키지 어휘 유도 실패 — 사전 없이 질의 설계: %s", e)
+        return "", set()
+    if not pkgs:
+        return "", set()
+    return ", ".join(f"{p}({n})" for p, n in pkgs), {p for p, _ in pkgs}
+
+
+def _with_packages(query: str, packages: list[str], known: set[str]) -> str:
+    """질의 앞에 카탈로그 패키지명을 붙인다 — 어휘 검색(BM25)이 액션을 맞히게 하는 앵커다.
+
+    LLM이 고른 것 중 **카탈로그에 실재하는 이름만** 쓴다(환각 앵커가 검색을 오염시키지
+    않게). 코드가 붙이는 이유: 프롬프트로 부탁만 하면 빠뜨리는 질의가 생기는데, 그 질의는
+    조용히 점수가 반토막 난다(실측 0.31~0.49 대 0.66~0.91).
+    """
+    picked = [p for p in packages if p in known][:_MAX_QUERY_PACKAGES]
+    return f"{' '.join(picked)} {query}".strip() if picked else query
+
+
+def _expand_queries(spec: dict, package_list: str = "") -> list[_ResearchUnit]:
+    """FlowSpec 요구를 기능 단위로 묶어 (한국어, 영어) 질의 쌍을 만든다 (LLM 1회, 경량).
+
+    must(업무)와 should(운영 골격)를 프롬프트에서 갈라 보여 준다 — 섞어 주면 계획자가
+    골격 요구로 단위를 채워 업무 기능이 조사에서 빠진다(그러면 그 기능은 흐름도에 아예
+    못 들어간다). 강등 경로도 같은 순서를 지킨다.
+    """
+    musts, shoulds = _split_by_priority(spec)
+
+    def _lines(reqs: list[dict]) -> str:
+        return "\n".join(f"- [{r.get('req_id')}] {r.get('text', '')}" for r in reqs) or "(없음)"
+
     try:
         plan = chat_json(
             [
                 {"role": "system", "content": _PROMPT},
-                {"role": "user", "content": f"[목표]\n{spec.get('goal', '')}\n\n[요구사항]\n{req_lines}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"[목표]\n{spec.get('goal', '')}\n\n"
+                        f"[필수 요구(must) — 먼저 빠짐없이 덮을 것]\n{_lines(musts)}\n\n"
+                        f"[운영 골격 요구(should) — 남는 자리에 크게 묶을 것]\n{_lines(shoulds)}"
+                        + (
+                            f"\n\n[카탈로그 패키지 — 이름(액션 수). 여기 있는 이름만 packages에 쓸 것]\n"
+                            f"{package_list}"
+                            if package_list
+                            else ""
+                        )
+                    ),
+                },
             ],
             purpose="recommend",
             model_cls=_ResearchPlan,
@@ -147,11 +220,96 @@ def _expand_queries(spec: dict) -> list[_ResearchUnit]:
             return units
     except (ValueError, RuntimeError) as e:
         logger.warning("research 질의 확장 실패 — 요구 원문 질의로 강등: %s", e)
-    # 강등: 요구 텍스트를 그대로 한국어 질의로 (영어 질의 없음 — 다국어 임베딩에 맡긴다)
+    # 강등: 요구 텍스트를 그대로 한국어 질의로 (영어 질의 없음 — 다국어 임베딩에 맡긴다).
+    # must를 앞에 둬 상한에 걸려도 업무 요구가 먼저 살아남게 한다.
     return [
         _ResearchUnit(topic=r.get("req_id") or "", ko_query=r.get("text") or "")
-        for r in (spec.get("requirements") or [])[:_MAX_UNITS]
+        for r in (musts + shoulds)[:_MAX_UNITS]
     ]
+
+
+def _interleave(
+    unit_ranked: list[list[tuple[tuple[str, str], float]]], limit: int
+) -> list[tuple[tuple[str, str], float]]:
+    """단위별 상위부터 라운드로빈으로 뽑는다 — 단위 사이에서는 점수를 비교하지 않는다.
+
+    모든 단위가 1위를 먼저 내고, 그다음 2위를 낸다. 임계값도 배분 비율도 없어서 단위 수가
+    몇이든 자연히 공평해지고, 후보가 적은 단위는 알아서 빠진다.
+    """
+    out: list[tuple[tuple[str, str], float]] = []
+    seen: set[tuple[str, str]] = set()
+    depth_max = max((len(r) for r in unit_ranked), default=0)
+    for depth in range(depth_max):
+        for ranked in unit_ranked:
+            if depth >= len(ranked):
+                continue
+            key, score = ranked[depth]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((key, score))
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _competing_note(catalog, packages: set[str]) -> str:
+    """메뉴에 같은 일을 하는 패키지가 여럿 실렸을 때 붙이는 안내.
+
+    **후보에서 빼지 않는다 — 다 주되 하나만 고르라고 알린다.** 어느 쪽이 맞는지는 업무와
+    실행 환경이 정하지 검색 점수가 정하지 않는다: 실측(2026-07-28)에서 엑셀 서식 액션은
+    `Microsoft 365 Excel`에만 있고 `Excel advanced`에는 아예 없어서, 점수로 한쪽을 접었으면
+    테두리 설정이 영영 불가능해졌을 것이다.
+
+    지금까지 메뉴가 평평한 목록이라 모델이 경쟁 관계를 볼 방법이 없었고, 흐름도 18개 중
+    6개가 엑셀 패키지를 섞었다(한 개는 3종을 함께 썼다).
+    """
+    try:
+        groups = derive_competing_packages(catalog) if catalog is not None else ()
+    except Exception as e:  # noqa: BLE001 — 안내가 없어도 메뉴는 나가야 한다
+        logger.warning("경쟁 패키지 유도 실패 — 안내 생략: %s", e)
+        return ""
+    lines = [
+        "- " + " · ".join(sorted(g & packages))
+        for g in groups
+        if len(g & packages) > 1
+    ]
+    if not lines:
+        return ""
+    return (
+        "\n[⚠ 같은 일을 하는 경쟁 패키지 — 각 줄에서 **하나만** 골라 흐름도 전체에서 일관되게 "
+        "쓸 것. 패키지마다 세션이 따로라 섞으면 세션이 이어지지 않아 실행이 깨진다. "
+        "필요한 액션이 한쪽에만 있으면 그 패키지로 통일한다]\n" + "\n".join(lines)
+    )
+
+
+def _discouraged_note(catalog, packages: set[str]) -> str:
+    """메뉴에 **신규 개발 비권장** 패키지가 실렸을 때 붙이는 안내.
+
+    경쟁 패키지 안내와 같은 원칙이다 — 후보에서 빼지 않고, 왜 나중 순위인지를 알린다.
+    빼 버리면 그 패키지에만 있는 액션이 필요한 경우(마이그레이션 봇 유지보수 등)에
+    자동화가 통째로 막힌다.
+
+    비권장 여부는 카탈로그가 패키지 개요 문서에서 유도한다(`discouraged_packages`) —
+    패키지 이름을 코드나 프롬프트에 박지 않는다.
+    """
+    lookup = getattr(catalog, "discouraged_packages", None)
+    if not callable(lookup):
+        return ""
+    try:
+        flagged = {p: r for p, r in lookup().items() if p in packages}
+    except Exception as e:  # noqa: BLE001 — 안내가 없어도 메뉴는 나가야 한다
+        logger.warning("비권장 패키지 유도 실패 — 안내 생략: %s", e)
+        return ""
+    if not flagged:
+        return ""
+    lines = [f"- {pkg} — {reason}" for pkg, reason in sorted(flagged.items())]
+    return (
+        "\n[⚠ 신규 개발 비권장 패키지 — 공식 문서가 신규 봇 개발에 권장하지 않는다고 명시한 "
+        "패키지다. 같은 일을 하는 다른 패키지의 액션이 메뉴에 있으면 **그쪽을 쓴다.** "
+        "여기에만 있는 액션이라 대안이 없을 때만 쓰고, 그 이유를 rationale에 남긴다]\n"
+        + "\n".join(lines)
+    )
 
 
 def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
@@ -234,14 +392,16 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
 
     retriever = ctx.retriever
     catalog = ctx.catalog
-    units = _expand_queries(spec)
+    package_list, known_packages = _package_vocabulary(catalog)
+    units = _expand_queries(spec, package_list)
 
     queries: list[str] = []
-    for u in units:
-        if u.ko_query.strip():
-            queries.append(u.ko_query.strip())
-        if u.en_query.strip():
-            queries.append(u.en_query.strip())
+    query_unit: list[int] = []  # queries[i]가 어느 기능 단위에서 나왔는지 (집계에 필요)
+    for idx, u in enumerate(units):
+        for q in (u.ko_query.strip(), u.en_query.strip()):
+            if q:
+                queries.append(_with_packages(q, u.packages, known_packages))
+                query_unit.append(idx)
     emit({"event": "stage", "stage": "searching",
           "message": f"액션 카탈로그 조사 중 ({len(units)}개 기능, 질의 {len(queries)}건)",
           "data": {"queries": [q[:80] for q in queries]}})
@@ -256,16 +416,41 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     results = await asyncio.gather(*(_search(q, ACTION_SOURCE_TYPES, _SEARCH_LIMIT) for q in queries))
     bg_hits = await _search(spec.get("goal") or "", ["doc_page"], _DOC_BG_LIMIT) if spec.get("goal") else []
 
-    # (pkg, act)별 최고 점수 집계 — RRF/rerank 점수 내림차순 상위만 메뉴에 올린다.
-    best: dict[tuple[str, str], float] = {}
-    for hits in results:
+    # (pkg, act)별 최고 점수를 **기능 단위 안에서만** 집계한다.
+    #
+    # 재정렬 점수는 (질의, 문서) 쌍의 관련도라 **질의가 다르면 비교 대상이 아니다** — 어려운
+    # 질의는 모든 후보가 낮게 나온다. 전역 정렬로 자르면 그 단위가 통째로 밀린다:
+    # 실측(2026-07-28) 웹 조작 단위 최고점 0.315 < 엑셀 단위 최저점 0.35라, 웹 조작 후보
+    # 10건 중 3건만 메뉴에 남고 잘린 7건에 `Browser/Open`이 들어 있었다(네이버에 접속하는
+    # 액션이 사라진 것). 단위 안에서만 점수를 비교하고 단위 사이는 라운드로빈으로 나눈다.
+    per_unit: list[dict[tuple[str, str], float]] = [{} for _ in units]
+    for qi, hits in enumerate(results):
         sink.extend(hits)
+        bucket = per_unit[query_unit[qi]]
         for h in hits:
             pkg, act = h.get("package_name"), h.get("action_name")
             if pkg and act:
                 key = (pkg, act)
-                best[key] = max(best.get(key, 0.0), h.get("score") or 0.0)
-    ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_MENU_ACTIONS]
+                bucket[key] = max(bucket.get(key, 0.0), h.get("score") or 0.0)
+
+    unit_ranked = [sorted(b.items(), key=lambda kv: kv[1], reverse=True) for b in per_unit]
+    ranked = _interleave(unit_ranked, _MAX_MENU_ACTIONS)
+
+    # 검색이 약한 단위 감지 — 지금은 **기록만** 한다(후보를 버리지 않는다).
+    # 절대 임계는 오늘 실측에 과적합될 뿐이라 상대 기준을 쓰고, 임계가 실제로 갈리는지
+    # 몇 턴 관측한 뒤에 '버리기·재질의' 같은 행동을 붙인다.
+    unit_top = [(units[i].topic or f"단위{i + 1}", (r[0][1] if r else 0.0), len(r))
+                for i, r in enumerate(unit_ranked)]
+    for topic, top_score, n in unit_top:
+        logger.info("조사 단위 '%s' — 후보 %d건, 최고 점수 %.3f", topic, n, top_score)
+    peak = max((s for _, s, _ in unit_top), default=0.0)
+    weak = [t for t, s, _ in unit_top if peak > 0 and s < peak * _WEAK_UNIT_RATIO]
+    if weak:
+        logger.warning(
+            "검색이 약한 기능 단위: %s — 최고 점수가 상위 단위의 %.0f%% 미만이다. "
+            "그 기능의 액션이 메뉴에 부실하게 실렸을 수 있다(질의가 업무 문장에 가까울수록 그렇다).",
+            ", ".join(weak), _WEAK_UNIT_RATIO * 100,
+        )
 
     blocks: list[str] = []
     menu_actions: list[tuple[str, str]] = []
@@ -287,6 +472,14 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     if extra_blocks:
         blocks.append("\n[구조·세션 액션 — 자동 보완: 반복·분기·예외 처리와 세션 여닫기는 반드시 이 표기를 사용]")
         blocks.extend(extra_blocks)
+
+    menu_packages = {p for p, _ in menu_actions}
+    rival = _competing_note(catalog, menu_packages)
+    if rival:
+        blocks.append(rival)
+    stale = _discouraged_note(catalog, menu_packages)
+    if stale:
+        blocks.append(stale)
 
     background = "\n".join(
         f"- {h.get('title')}: {(h.get('content') or '')[:200]}" for h in bg_hits
