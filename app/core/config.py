@@ -99,6 +99,28 @@ REGISTRY: dict[str, EnvSpec] = {
         doc="OpenAI API 키. ⚠️ Windows Machine env가 .env를 가리는 함정 이력 있음"),
     "OPENAI_MODEL": EnvSpec("gpt-5.4-mini", group="llm", doc="기본 LLM 모델"),
     "MAX_LLM_CONCURRENCY": EnvSpec("3", cast=int, group="llm", doc="에이전트 LLM 동시 호출 상한"),
+    "COMPOSE_MAX_TOKENS": EnvSpec(
+        "32000", cast=int, group="llm",
+        doc="흐름도 compose 한 호출의 출력 토큰 상한 (0=미지정, provider 기본값). 낮으면 JSON이 "
+            "잘려 후보가 탈락한다. ⚠ 추론 토큰도 이 상한을 함께 먹는다 — COMPOSE_REASONING과 한 쌍",
+    ),
+    "COMPOSE_JSON_MODE": EnvSpec(
+        "1", cast=int, group="llm",
+        doc="흐름도 생성에 JSON mode 적용 (0=끔). 끄면 문법 깨진 출력으로 후보가 탈락할 수 있음",
+    ),
+    "SPEC_USE_ANALYSIS": EnvSpec(
+        "1", cast=int, group="llm",
+        doc="요구사항 정형화가 analyze 분해 결과를 입력에 싣는지 (0=원문만 본다). A/B 측정용",
+    ),
+    "COMPOSE_REASONING": EnvSpec(
+        "low", group="llm",
+        doc="흐름도 구조 단계에만 거는 추론 강도 (none|low|medium|high|xhigh, 빈 값=미지정). "
+            "추론 토큰은 출력으로 과금되고 COMPOSE_MAX_TOKENS 상한을 함께 먹는다",
+    ),
+    "COMPOSE_FILL_CHUNK": EnvSpec(
+        "8", cast=int, group="llm",
+        doc="값 채우기 한 호출이 맡는 액션 수 상한. 크게 두면 한 호출로 합쳐진다(분할 해제)",
+    ),
     # 검색은 LLM 상한과 다른 자원에 부딪힌다 — rag/store/db.py 동기 풀 max_size=20과
     # Voyage 임베딩·리랭커 레이트 리밋이다(검색 1건 = 임베딩 1 + 리랭크 1, 실측 1.4초).
     # 단계별 검색 채널(RPA-298)이 팬아웃을 곱하므로 별도 상한을 둔다. 기본 8 = 커넥션
