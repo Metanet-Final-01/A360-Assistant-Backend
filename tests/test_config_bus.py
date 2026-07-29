@@ -274,3 +274,78 @@ def test_publisher_client_is_reused(redis_on, monkeypatch):
     config_bus.publish("budget")
     config_bus.publish("retrieval_params")
     assert len(made) == 1, f"발행 {3}회에 클라이언트를 {len(made)}개 만들었다"
+
+
+def test_concurrent_publish_does_not_lose_messages(redis_on):
+    """동시 발행이 서로의 클라이언트를 닫아 메시지를 잃지 않는다 (Qodo #459 2차).
+
+    발행 실패는 설계상 삼켜지므로, 이 경합은 예외가 아니라 **전파 유실(→ TTL까지 지연)** 로
+    조용히 나타난다. 그래서 "예외 안 남"이 아니라 **받은 개수**로 검증한다.
+    """
+    sub = fakeredis.FakeRedis(server=redis_on, decode_responses=True).pubsub(
+        ignore_subscribe_messages=True
+    )
+    sub.subscribe(config_bus._channel())
+    time.sleep(0.1)
+
+    workers = [
+        threading.Thread(target=lambda: [config_bus.publish("budget") for _ in range(5)])
+        for _ in range(4)
+    ]
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join(timeout=10)
+
+    got = 0
+    deadline = time.time() + 3.0
+    while time.time() < deadline and got < 20:
+        message = sub.get_message(timeout=0.3)
+        if message and message.get("type") == "message":
+            got += 1
+    sub.close()
+    assert got == 20, f"동시 발행 20건 중 {got}건만 도착 — 경합으로 유실됐다"
+
+
+def test_drop_publisher_ignores_stale_client(redis_on):
+    """옛 실패를 이유로 **다른 스레드가 방금 만든** 클라이언트를 닫지 않는다."""
+    stale = config_bus._publisher()
+    config_bus._drop_publisher()          # 현재 것을 버린다
+    fresh = config_bus._publisher()       # 새로 만들어진다
+    assert fresh is not stale
+
+    config_bus._drop_publisher(stale)     # 옛 참조로 버리기 시도 — 무시돼야 한다
+    assert config_bus._publisher() is fresh, "남의(최신) 클라이언트를 닫아버렸다"
+
+
+def test_subscriber_closes_its_client(redis_on, monkeypatch):
+    """구독 루프가 종료될 때 **클라이언트까지** 닫는다 (Qodo #459 2차).
+
+    재연결마다 새 클라이언트를 만드는데 pubsub만 닫으면 연결 풀이 남는다(Redis flapping 시
+    누적). 누수는 기능 동작으로는 드러나지 않으므로 — 안 닫아도 테스트가 다 통과한다 —
+    close 호출 자체를 관측한다.
+    """
+    closed_flags: list[dict] = []
+    current = config_bus._make_client
+
+    def _tracking(url):
+        client = current(url)
+        flag = {"closed": False}
+        real_close = client.close
+
+        def _close(*a, **k):
+            flag["closed"] = True
+            return real_close(*a, **k)
+
+        client.close = _close
+        closed_flags.append(flag)
+        return client
+
+    monkeypatch.setattr(config_bus, "_make_client", _tracking)
+    config_bus.start({"budget": lambda: None})
+    assert config_bus.wait_ready(), "구독이 안 붙었다"
+    config_bus.stop()
+    time.sleep(0.3)
+
+    assert closed_flags, "구독 클라이언트가 만들어지지 않았다"
+    assert closed_flags[0]["closed"], "구독 클라이언트를 닫지 않았다 — 연결 풀이 남는다"

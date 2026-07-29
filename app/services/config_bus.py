@@ -56,6 +56,11 @@ _lock = threading.Lock()
 # (Qodo #459). URL이 바뀌면 교체하고, 실패하면 버려 다음 호출이 새로 연결한다.
 _pub_client: Any = None
 _pub_url: str | None = None
+# 🔴 발행 클라이언트는 **락으로 지킨다** (Qodo #459 2차). 동기화 없이 공유 전역을 바꾸고 닫으면,
+# 한 스레드가 막 닫은 클라이언트로 다른 스레드가 publish를 시도한다 — 실패는 삼켜지므로
+# 예외가 아니라 **전파 유실(→ TTL까지 지연)** 로 조용히 나타난다. admin PUT은 드물지만
+# 동시 호출이 불가능하지 않고, 조용히 틀리는 실패 모드라 방어 비용이 더 싸다.
+_pub_lock = threading.Lock()
 # 구독이 실제로 붙었는지 — pub/sub은 보존이 없어 구독 전 발행은 그냥 사라진다. 기동 직후
 # 발행이 유실되는 창을 호출부(주로 테스트)가 기다릴 수 있게 신호로 노출한다.
 _ready = threading.Event()
@@ -90,19 +95,31 @@ def _channel() -> str:
 
 
 def _publisher() -> Any:
-    """발행 전용 클라이언트(URL 바뀌면 교체). 연결 churn을 막기 위해 재사용한다."""
+    """발행 전용 클라이언트(URL 바뀌면 교체). 연결 churn을 막기 위해 재사용한다.
+
+    락 안에서 교체하고 **락 안에서 참조를 돌려준다** — 돌려준 뒤 닫는 경쟁을 막기 위해
+    호출부는 이 참조로 곧장 publish한다(닫기는 실패 경로에서만 일어난다).
+    """
     global _pub_client, _pub_url
     url = _redis_url()
-    if _pub_client is None or _pub_url != url:
-        old, _pub_client, _pub_url = _pub_client, _make_client(url), url
-        _close_quietly(old)
-    return _pub_client
+    with _pub_lock:
+        if _pub_client is None or _pub_url != url:
+            old, _pub_client, _pub_url = _pub_client, _make_client(url), url
+            _close_quietly(old)
+        return _pub_client
 
 
-def _drop_publisher() -> None:
-    """발행 실패 후 캐시된 클라이언트를 버린다 — 끊긴 연결을 계속 재사용하지 않게."""
+def _drop_publisher(client: Any = None) -> None:
+    """실패한 클라이언트를 버린다 — 끊긴 연결을 계속 재사용하지 않게.
+
+    `client`를 주면 **그게 아직 현재 것일 때만** 버린다. 안 그러면 다른 스레드가 방금 새로
+    만든 정상 클라이언트를, 옛 실패를 이유로 닫아버릴 수 있다(Qodo #459 2차).
+    """
     global _pub_client, _pub_url
-    old, _pub_client, _pub_url = _pub_client, None, None
+    with _pub_lock:
+        if client is not None and _pub_client is not client:
+            return  # 이미 다른 스레드가 교체했다 — 남의 클라이언트를 닫지 않는다
+        old, _pub_client, _pub_url = _pub_client, None, None
     _close_quietly(old)
 
 
@@ -123,11 +140,13 @@ def publish(target: str) -> None:
     """
     if not enabled():
         return
+    client = None
     try:
         payload = json.dumps({"target": target, "origin": _INSTANCE_ID}, ensure_ascii=False)
-        _publisher().publish(_channel(), payload)
+        client = _publisher()
+        client.publish(_channel(), payload)
     except Exception:  # noqa: BLE001 — 전파 실패가 admin PUT을 죽이면 안 된다
-        _drop_publisher()
+        _drop_publisher(client)
         logger.warning("설정 무효화 전파 실패 (무시): target=%s", target, exc_info=True)
 
 
@@ -162,7 +181,7 @@ def _run(handlers: Mapping[str, Callable[[], None]], stop_event: threading.Event
     """
     delay = _RECONNECT_MIN_SEC
     while not stop_event.is_set():
-        pubsub = None
+        pubsub = client = None
         try:
             client = _make_client(_redis_url())
             pubsub = client.pubsub(ignore_subscribe_messages=True)
@@ -183,7 +202,10 @@ def _run(handlers: Mapping[str, Callable[[], None]], stop_event: threading.Event
             stop_event.wait(delay)
             delay = min(delay * 2, _RECONNECT_MAX_SEC)
         finally:
+            # 재연결마다 새 클라이언트를 만들므로 pubsub만 닫으면 연결 풀이 남는다
+            # (Redis flapping 시 누적) — 클라이언트까지 명시적으로 닫는다 (Qodo #459 2차).
             _close_quietly(pubsub)
+            _close_quietly(client)
 
 
 def start(handlers: Mapping[str, Callable[[], None]]) -> bool:
