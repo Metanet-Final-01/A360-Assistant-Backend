@@ -83,12 +83,26 @@ async def lifespan(app: FastAPI):
     from app.core.scheduler import start_scheduler, stop_scheduler
 
     start_scheduler()
+    # 설정 캐시 무효화 전파 구독 (RPA-275) — 다른 인스턴스의 admin PUT을 즉시 반영한다.
+    # ASG MaxCapacity=2라 전파가 없으면 PUT을 안 받은 인스턴스가 TTL(30초)까지 옛 상한·
+    # 옛 검색 파라미터로 동작한다.
+    # ⚠️ 핸들러는 **로컬 전용** bust여야 한다 — 전파하는 bust_cache()를 주면 수신할 때마다
+    #    다시 발행해 무한 루프가 된다. REDIS_URL 미설정이면 start()가 no-op(TTL로만 수렴).
+    from app.services import budget as budget_service
+    from app.services import config_bus
+    from app.services import retrieval_params as rp_service
+
+    config_bus.start({
+        "retrieval_params": rp_service.bust_cache_local,
+        "budget": budget_service.bust_cache_local,
+    })
     # /api/rag/search 전용 커넥션 풀(부하테스트로 확인된 요청별-신규연결 병목 대응)
     from app.rag.store.pool import close_pools, open_pools
 
     await open_pools()
     yield
     stop_scheduler()
+    config_bus.stop()
     await close_pools()
     # 에이전트가 타는 동기 검색 경로의 재사용 자원 (RPA-219) — 지연 생성이라 여기선 정리만 한다.
     from app.rag.retrieval.embed import close_shared_client as close_external_client
