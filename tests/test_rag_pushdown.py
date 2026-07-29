@@ -295,34 +295,116 @@ def test_pushdown_gets_its_own_cache_namespace():
     assert rag_cache.search_key(*_KEY_ARGS) != rag_cache.search_key(*_KEY_ARGS, pushdown=True)
 
 
+def test_every_search_mode_gets_a_distinct_cache_namespace():
+    """pushdown×collapse 네 조합이 전부 다른 키여야 한다 — 하나라도 겹치면 서로의 결과를 읽는다."""
+    keys = {
+        rag_cache.search_key(*_KEY_ARGS, pushdown=p, collapse=c)
+        for p in (False, True) for c in (False, True)
+    }
+    assert len(keys) == 4
+
+
+# ── 7. 조각 접기: k개가 서로 다른 k개 액션이 되게 ────────────────────────────
+
+@pytest.fixture
+def _stub_chunked(monkeypatch):
+    """한 액션이 문서 조각 여러 행으로 나뉜 실제 코퍼스 모양(Email/Send 4조각)을 흉내낸다."""
+    calls = []
+
+    def _fake_hybrid(conn, os_client, query, limit=5, params=None, source_types=None):
+        calls.append({"limit": limit})
+        return [
+            {"id": "s1", "source_type": "action_schema", "package_name": "Email",
+             "action_name": "Send", "rerank_score": 0.95},
+            {"id": "s2", "source_type": "action_schema", "package_name": "Email",
+             "action_name": "Send", "rerank_score": 0.94},
+            {"id": "s3", "source_type": "action_schema", "package_name": "Email",
+             "action_name": "Send", "rerank_score": 0.93},
+            {"id": "c1", "source_type": "action_schema", "package_name": "Email",
+             "action_name": "Connect", "rerank_score": 0.80},
+        ]
+
+    monkeypatch.setattr(rag_service, "_hybrid_search", _fake_hybrid)
+    monkeypatch.setattr(rag_service.opensearch_client, "get_shared_client", lambda: None)
+
+    class _Conn:
+        def __enter__(self): return None
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(rag_service.db, "connection", lambda: _Conn())
+    monkeypatch.setattr(rag_cache, "get_search", lambda key: None)
+    monkeypatch.setattr(rag_cache, "put_search", lambda key, value: None)
+    return calls
+
+
+def test_collapse_returns_distinct_actions_keeping_the_best_chunk(_stub_chunked):
+    """조각 3개가 상위를 채워도 k칸이 서로 다른 액션으로 찬다 — 최고 점수 조각만 남는다."""
+    out = rag_service.search_actions(
+        "이메일 첨부 발송", k=2, source_types=["action_schema"],
+        pushdown=True, collapse_by_action=True,
+    )
+    assert [r["id"] for r in out] == ["s1", "c1"]
+
+
+def test_collapse_overfetches_to_pay_for_the_folding(_stub_chunked):
+    """접히며 줄어드는 만큼을 미리 벌지 않으면 k칸을 못 채운다."""
+    rag_service.search_actions(
+        "q", k=5, source_types=["action_schema"], pushdown=True, collapse_by_action=True
+    )
+    assert _stub_chunked[0]["limit"] == 5 * rag_service._COLLAPSE_OVERFETCH
+
+
+def test_collapse_leaves_keyless_rows_alone(_stub_service):
+    """package/action이 없는 행(doc_page)은 키가 (None, None)로 같다 — 접으면 하나만 남아
+    문서 검색이 망가진다. 스텁은 키 없는 행 2건(action_schema 1 + doc_page 1)을 준다."""
+    out = rag_service.search_actions("q", k=5, collapse_by_action=True)
+    assert [r["id"] for r in out] == ["a", "d"]
+
+
+def test_collapse_off_by_default(_stub_chunked):
+    """기본 경로는 조각을 그대로 돌려준다 — v1·v2 기준선."""
+    out = rag_service.search_actions("q", k=3, source_types=["action_schema"], pushdown=True)
+    assert [r["id"] for r in out] == ["s1", "s2", "s3"]
+
+
 # ── 6. 배선: 누가 push-down을 켜는가 ─────────────────────────────────────────
 
 def test_hybrid_retriever_defaults_to_legacy_behaviour():
     from app.services.agent_retriever import HybridRetriever, get_hybrid_retriever
 
     assert HybridRetriever().pushdown is False
+    assert HybridRetriever().collapse_by_action is False
     assert get_hybrid_retriever().pushdown is False
+    assert get_hybrid_retriever().collapse_by_action is False
     assert get_hybrid_retriever(pushdown=True).pushdown is True
+    assert get_hybrid_retriever(collapse_by_action=True).collapse_by_action is True
 
 
-def test_retriever_forwards_its_pushdown_flag(monkeypatch):
+def test_retriever_forwards_its_flags(monkeypatch):
     from app.services import agent_retriever
 
     seen = {}
     monkeypatch.setattr(
         agent_retriever, "search_actions",
-        lambda q, k, source_types, pushdown: seen.update(pushdown=pushdown) or [],
+        lambda q, k, source_types, pushdown, collapse_by_action: seen.update(
+            pushdown=pushdown, collapse=collapse_by_action
+        ) or [],
     )
-    agent_retriever.HybridRetriever(pushdown=True).search("q", 4, ["action_schema"])
-    assert seen["pushdown"] is True
+    agent_retriever.HybridRetriever(pushdown=True, collapse_by_action=True).search(
+        "q", 4, ["action_schema"]
+    )
+    assert seen == {"pushdown": True, "collapse": True}
 
 
-def test_no_version_opts_into_pushdown():
-    """모든 버전이 인자 없이 부른다 — 후단 필터가 현재 기준선이다.
+def test_only_v3_opts_into_pushdown():
+    """v3만 push-down을 켜고 v1·v2는 후단 필터 기준선을 유지한다.
 
-    원래 이 테스트는 "v4만 pushdown=True"를 못 박았다. v4가 폐기되면서 pushdown을 켜는
-    버전이 하나도 없어졌다 — `get_hybrid_retriever(pushdown=...)` 자체는 살아 있으므로
-    v3에 켤 수 있고, 켤 때 이 테스트가 그 사실을 드러낸다(조용히 바뀌지 않게).
+    원래는 "v4만 pushdown=True"였고, v4 폐기 후 켜는 버전이 하나도 없는 상태를 못 박고
+    있었다. v3가 이어받았다 — 후단 필터의 창(min(k*3, 20))을 doc_page(코퍼스의 92%)가
+    독식해 액션 후보가 굶던 문제가 이 버전에서 실측됐기 때문이다.
+
+    v1·v2를 분리해 두는 이유: 얼린 기준선이라 검색 폭이 같이 움직이면 버전 간 비교가
+    무의미해진다.
 
     **파일 원문**을 읽는다. `_make_retriever`를 부르면 실제 인프라에 붙고, 함수 객체를
     inspect하면 conftest의 autouse 스텁이 갈아끼운 람다가 잡힌다(둘 다 이 사실을 못 본다).
@@ -332,7 +414,12 @@ def test_no_version_opts_into_pushdown():
     import app.agent as agent_pkg
 
     agent_root = Path(agent_pkg.__file__).parent
-    for version in ("v1", "v2", "v3"):
+
+    for version in ("v1", "v2"):
         source = (agent_root / version / "retrieval.py").read_text(encoding="utf-8")
         assert "get_hybrid_retriever()" in source
         assert "pushdown" not in source, f"{version}는 후단 필터 기준선을 유지해야 한다"
+
+    v3_source = (agent_root / "v3" / "retrieval.py").read_text(encoding="utf-8")
+    assert "get_hybrid_retriever(pushdown=True, collapse_by_action=True)" in v3_source
+    assert "get_hybrid_retriever()" not in v3_source
