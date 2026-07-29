@@ -236,3 +236,41 @@ def test_bust_cache_actually_publishes(redis_on):
             got.append(json.loads(message["data"])["target"])
     sub.close()
     assert sorted(got) == ["budget", "retrieval_params"], f"발행되지 않았다: {got}"
+
+
+def test_restart_does_not_leave_two_subscribers(redis_on):
+    """stop()이 join 타임아웃으로 스레드를 남겨도, 다음 start()가 **되살리지 않는다** (Qodo #459).
+
+    정지 신호를 모듈 공유 Event 하나로 두면 start()의 clear가 죽어가던 스레드를 되살려
+    구독자가 둘이 된다 — 핸들러가 중복 호출되고 좀비가 남는다. 신호를 스레드별로 두면
+    옛 스레드는 자기 신호가 켜진 채라 스스로 끝난다.
+    """
+    config_bus.start({"budget": lambda: None})
+    assert config_bus.wait_ready(), "구독이 안 붙었다"
+
+    config_bus.stop(timeout=0.0)  # join 타임아웃 재현 — 참조만 지우고 스레드는 남는다
+    config_bus.start({"budget": lambda: None})
+    assert config_bus.wait_ready(), "재기동 구독이 안 붙었다"
+
+    time.sleep(1.5)  # 옛 스레드가 스스로 끝날 시간(폴 주기 1초)
+    alive = [
+        t for t in threading.enumerate()
+        if t.name == "config-bust-subscriber" and t.is_alive()
+    ]
+    assert len(alive) == 1, f"구독 스레드가 {len(alive)}개 — 옛 스레드가 되살아났다"
+
+
+def test_publisher_client_is_reused(redis_on, monkeypatch):
+    """발행마다 클라이언트를 새로 만들지 않는다 — 연결 풀이 쌓여 정리가 GC에 의존한다 (Qodo #459)."""
+    made: list[str] = []
+    current = config_bus._make_client
+
+    def _counting(url):
+        made.append(url)
+        return current(url)
+
+    monkeypatch.setattr(config_bus, "_make_client", _counting)
+    config_bus.publish("budget")
+    config_bus.publish("budget")
+    config_bus.publish("retrieval_params")
+    assert len(made) == 1, f"발행 {3}회에 클라이언트를 {len(made)}개 만들었다"
