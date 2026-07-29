@@ -92,8 +92,10 @@ def test_registry_drives_validation_not_hardcoded_literal(monkeypatch):
     monkeypatch.setattr(agent_mod, "default_version", lambda: "v2", raising=False)
 
     assert sessions_api.AgentTurnRequest(message="안녕", agent_version="v3").agent_version == "v3"
+    # 미지 버전 예시는 실물이 없는 번호를 쓴다 — 예전엔 "v4"였는데 v4가 실제로 생기면서
+    # (스텁 레지스트리라 통과는 하지만) "미지"라는 의도가 오독을 부른다.
     with pytest.raises(ValueError):
-        sessions_api.AgentTurnRequest(message="안녕", agent_version="v4")
+        sessions_api.AgentTurnRequest(message="안녕", agent_version="v9")
 
 
 def test_version_omitted_is_allowed_without_registry():

@@ -160,8 +160,16 @@ def _candidate_summary(item: dict) -> dict:
 )
 def search(
     pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank",
-    params: RetrievalParams | None = None,
+    params: RetrievalParams | None = None, source_types: list[str] | None = None,
 ) -> list[dict]:
+    """source_types를 주면 **두 branch 모두**에 타입 필터를 내려보낸다 (RPA-298 push-down).
+
+    한쪽에만 걸면 안 되는 이유가 경로마다 다르다:
+      - vector에만 → BM25가 다른 타입을 후보 풀에 밀어 넣어 융합 순위를 오염시킨다.
+      - BM25에만 → OpenSearch 장애로 저하되는 순간(bm25_hits=[]) 필터가 통째로 사라진다.
+    또 mode="vector"는 융합 전에 조기 반환하므로, 필터가 db.search 안에 있어야 그 경로도
+    덮인다 — _fuse_candidates에 넣으면 vector 모드가 그냥 우회한다.
+    """
     params = params or RetrievalParams.from_config()
     try:
         query_embedding = embed_query(query)
@@ -169,7 +177,10 @@ def search(
         raise RuntimeError(f"임베딩 설정 오류: {e}")
 
     pool = params.candidate_pool_size
-    vector_hits = db.search(pg_conn, query_embedding, limit=pool if mode != "vector" else limit)
+    vector_hits = db.search(
+        pg_conn, query_embedding, limit=pool if mode != "vector" else limit,
+        source_types=source_types,
+    )
 
     if mode == "vector":
         return [{**h, "retrieval_source": "vector"} for h in vector_hits[:limit]]
@@ -177,7 +188,9 @@ def search(
     bm25_hits: list[dict] = []
     bm25_error: str | None = None
     try:
-        bm25_hits = opensearch_client.keyword_search(os_client, query, size=pool)
+        bm25_hits = opensearch_client.keyword_search(
+            os_client, query, size=pool, source_types=source_types
+        )
     except Exception as e:
         # BM25는 보강 신호이므로, OpenSearch가 응답하지 않으면 벡터 단독 검색으로 저하시킨다.
         # 단, 저하 여부를 결과에 남겨야 "BM25가 원래 안 잡힌 건지 장애로 빠진 건지" 구분 가능하다.
@@ -226,6 +239,7 @@ def search(
 async def search_async(
     pg_conn, os_client, query: str, limit: int = 5, mode: str = "hybrid_rerank",
     http_client=None, params: RetrievalParams | None = None,
+    source_types: list[str] | None = None,
 ) -> list[dict]:
     """search()의 비동기 버전 — /api/rag/search 전용. 벡터 검색(임베딩→pgvector)과
     BM25 검색은 서로 입력이 다른 독립 조회라(BM25는 임베딩이 필요 없다) asyncio.gather로
@@ -243,7 +257,10 @@ async def search_async(
             query_embedding = await embed_query_async(query, client=http_client)
         except RuntimeError as e:
             raise RuntimeError(f"임베딩 설정 오류: {e}") from e
-        return await db.search_async(pg_conn, query_embedding, limit=pool if mode != "vector" else limit)
+        return await db.search_async(
+            pg_conn, query_embedding, limit=pool if mode != "vector" else limit,
+            source_types=source_types,
+        )
 
     if mode == "vector":
         vector_hits = await _vector_branch()
@@ -251,7 +268,9 @@ async def search_async(
 
     async def _bm25_branch() -> tuple[list[dict], str | None]:
         try:
-            return await opensearch_client.keyword_search_async(os_client, query, size=pool), None
+            return await opensearch_client.keyword_search_async(
+                os_client, query, size=pool, source_types=source_types
+            ), None
         except Exception as e:  # noqa: BLE001 — sync 버전과 동일하게 BM25 실패는 저하만, 전체 실패 아님
             logger.warning("BM25 검색 실패(async) — dense-only로 저하: %s", e)  # 무음 저하 방지(RPA-156)
             return [], str(e)

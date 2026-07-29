@@ -37,10 +37,16 @@ VarRef)다. composer 명시가 1차이고 `$var$` 파싱이 교차 보정한다 
 유도한다(derive_session_registry) — 커버리지가 상수 3개 패키지에 갇히지 않게.
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 
+from app.agent.knowledge import derive as knowledge_derive
+from app.agent.knowledge import lexicon
+
 from .catalog import CatalogLookup
+
+logger = logging.getLogger(__name__)
 
 # 본문(children)을 가질 수 있는 컨테이너 액션. A360에는 임의 병합점이 없어
 # 분기/반복 블록이 끝나면 다음 형제로 이어진다 — 컨테이너만 children을 갖는다.
@@ -51,10 +57,14 @@ from .catalog import CatalogLookup
 # 헛위반(R6)을 만든다 — 실제로 구 봇 JSON 표기(ErrorHandler/try)가 전부 불일치해
 # 에이전트가 Loop/If/Try를 올바르게 써도 재생성을 유발했다. A360에서 본문을 갖는 건
 # 이 제어 흐름 패키지들뿐이므로 패키지로 판정하고, 본문이 없는 게 명백한 액션만 뺀다.
-CONTAINER_PACKAGES: frozenset[str] = frozenset(
-    {"Loop", "If", "Step", "Error handler", "Trigger loop"}
-)
+# 공용 지식층에서 온다 — A360 언어 수준 어휘라 카탈로그 재적재로 거짓이 되지 않는다.
+CONTAINER_PACKAGES: frozenset[str] = lexicon.CONTAINER_PACKAGES
+
 # 컨테이너 패키지 소속이지만 본문(children)을 갖지 않는 액션 — 제어 이동/신호뿐이다.
+# ⚠ 이 3쌍은 **현행 카탈로그에 전부 부재**다(llm_agent 소싱 이후 표기가 바뀌었다). 그래서
+# `Loop/Break`가 컨테이너로 오판돼 "본문 없는 컨테이너"(R14) 헛위반이 났다. 이제
+# `container_exceptions(catalog)`가 카탈로그에서 실재 액션으로 유도하고, 이 상수는
+# 유도가 빈 결과를 낼 때(카탈로그 순회 불가·테스트 스텁)의 폴백으로만 남는다.
 NON_CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
     {
         ("Loop", "loopPackageBreakAction"),
@@ -64,9 +74,27 @@ NON_CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def is_container(package: str | None, action: str | None) -> bool:
-    """이 액션이 children(본문)을 가질 수 있는 컨테이너인지 판정한다 — R6 기준."""
-    return package in CONTAINER_PACKAGES and (package, action) not in NON_CONTAINER_ACTIONS
+def container_exceptions(catalog=None) -> frozenset[tuple[str, str]]:
+    """카탈로그에서 유도한 '본문 없는 컨테이너 액션'. 유도가 비면 수기 상수 폴백."""
+    if catalog is None:
+        return NON_CONTAINER_ACTIONS
+    return knowledge_derive.derive_container_exceptions(catalog) or NON_CONTAINER_ACTIONS
+
+
+def is_container(
+    package: str | None,
+    action: str | None,
+    *,
+    non_container: frozenset[tuple[str, str]] | None = None,
+) -> bool:
+    """이 액션이 children(본문)을 가질 수 있는 컨테이너인지 판정한다 — R6 기준.
+
+    `non_container`를 안 주면 수기 상수를 쓴다(하위호환). 카탈로그를 아는 호출부는
+    `container_exceptions(catalog)` 결과를 넘겨 Break·Continue·Throw를 표기 세대와
+    무관하게 제외시킨다.
+    """
+    exceptions = NON_CONTAINER_ACTIONS if non_container is None else non_container
+    return lexicon.is_container(package, action, non_container=exceptions)
 
 # RADIO/SELECT처럼 값이 정해진 선택지 안에 있어야 하는 타입 (R4 대상).
 _ENUM_TYPES = {"RADIO", "SELECT"}
@@ -113,7 +141,7 @@ _ANON = "__anon__"
 class Violation:
     """검수 위반 한 건. repair 프롬프트가 rule·location·message·spec_excerpt를 쓴다."""
 
-    rule: str  # "R1"~"R12"
+    rule: str  # "R1"~"R18"
     location: str  # 트리 경로, 예: "actions[1].children[0]"
     message: str
     package: str | None = None
@@ -232,7 +260,12 @@ def _is_number(value) -> bool:
         return False
 
 
-def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[Violation]:
+def _check_action(
+    action: dict,
+    catalog: CatalogLookup,
+    location: str,
+    non_container: frozenset[tuple[str, str]] | None = None,
+) -> list[Violation]:
     """액션 하나를 R1(카탈로그 존재)·R2~R5(파라미터)·R6(children 컨테이너)로 검사하고 children을 재귀한다."""
     violations: list[Violation] = []
     pkg, act = action.get("package"), action.get("action")
@@ -254,7 +287,7 @@ def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[V
         violations.extend(_check_parameters(action, spec, location))
 
     # R6: children은 컨테이너 액션에만
-    if children and not is_container(pkg, act):
+    if children and not is_container(pkg, act, non_container=non_container):
         violations.append(
             Violation(
                 "R6", location,
@@ -264,7 +297,9 @@ def _check_action(action: dict, catalog: CatalogLookup, location: str) -> list[V
         )
 
     for i, child in enumerate(children):
-        violations.extend(_check_action(child, catalog, f"{location}.children[{i}]"))
+        violations.extend(
+            _check_action(child, catalog, f"{location}.children[{i}]", non_container)
+        )
     return violations
 
 
@@ -274,8 +309,11 @@ def run_checks(actions: list[dict], catalog: CatalogLookup) -> list[Violation]:
     actions: RecommendedAction.model_dump() 리스트 또는 동형 dict 리스트.
     """
     violations: list[Violation] = []
+    # 컨테이너 예외는 카탈로그에서 한 번만 유도해 트리 전체에 내려보낸다 — 수기 3쌍은
+    # 현행 표기와 어긋나 Loop/Break를 컨테이너로 오판했다(container_exceptions 참조).
+    non_container = container_exceptions(catalog)
     for i, action in enumerate(actions):
-        violations.extend(_check_action(action, catalog, f"actions[{i}]"))
+        violations.extend(_check_action(action, catalog, f"actions[{i}]", non_container))
     return violations
 
 
@@ -284,68 +322,91 @@ def run_checks(actions: list[dict], catalog: CatalogLookup) -> list[Violation]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def derive_session_registry(catalog=None) -> tuple[frozenset, frozenset]:
-    """세션 opener/closer 집합을 수기 상수 + 카탈로그 메타에서 유도한다.
+    """세션 opener/closer 집합을 **카탈로그에서 유도**한다. 수기 상수는 폴백이다.
 
-    - opener/closer 1순위: 스펙의 session_role — v2 문서 카탈로그 빌드가 패키지 단위로
-      유도해 싣는 명시 신호(48패키지 실측). 표기 세대와 무관하게 동작한다.
-    - opener 2순위: 스펙 return_type이 SESSION인 액션(구 JAR 카탈로그의 cloudExcelOpen형).
-    - closer 보강: opener를 보유한 패키지에서 액션명이 close / end+session 패턴인 액션.
-      (구 카탈로그엔 닫기 구조 신호가 없어 이름 휴리스틱 — opener 보유 패키지로 좁혀 오탐 방지.)
+    유도 본체는 공용 지식층(`app.agent.knowledge.derive`)이다 — 같은 규칙을 버전마다
+    복제하면 한쪽만 고쳐질 때 "검수가 잡는 결함"과 "채점이 세는 결함"이 갈린다.
+    유도 규칙(session_role 1순위 → return_type=SESSION → SESSION 파라미터 게이팅 등)은
+    그쪽 독스트링을 보라.
 
-    카탈로그가 순회를 지원하지 않으면(iter_action_schemas 부재 — 테스트 스텁) 상수만
-    반환한다. 실제 세션 패키지는 상수 4개보다 훨씬 많아 유도가 커버리지를 넓힌다.
+    반환 타입은 v3 계약 그대로 (openers, closers) 튜플이다 — 지식층은 usable 플래그를 든
+    SessionRegistry를 주지만, v3 호출부 전체가 튜플 언패킹을 하고 있어 경계에서 눕힌다.
+
+    ⚠ 유도가 비면(카탈로그 순회 불가·테스트 스텁) 수기 상수 7쌍으로 떨어진다. 그 상수는
+    **현행 카탈로그에 없는 세대의 표기**라 R7/R8이 한 번도 발화하지 못한 이력이 있다
+    (RPA-141). 즉 폴백은 '검사가 죽지 않게' 하는 장치이지 정확한 어휘가 아니다.
     """
-    openers = set(SESSION_OPENERS)
-    closers = set(SESSION_CLOSERS)
-    iter_fn = getattr(catalog, "iter_action_schemas", None)
-    if callable(iter_fn):
-        try:
-            specs = [s for s in iter_fn() if isinstance(s, dict)]
-        except Exception:  # noqa: BLE001 — 유도 실패가 검사 자체를 막으면 안 된다(상수 폴백)
-            specs = []
-        for s in specs:
-            pkg, act = s.get("package"), s.get("action")
-            if not pkg or not act:
-                continue
-            role = s.get("session_role")  # v2 문서 카탈로그의 명시 신호 (1순위)
-            if role == "opener":
-                openers.add((pkg, act))
-            elif role == "closer":
-                closers.add((pkg, act))
-            rt = s.get("return_type")  # 구 JAR 카탈로그 신호 (2순위)
-            if isinstance(rt, str) and rt.strip().upper() == "SESSION":
-                openers.add((pkg, act))
-        opener_pkgs = {p for p, _ in openers}
-        for s in specs:
-            pkg, act = s.get("package"), s.get("action")
-            if not pkg or not act or pkg not in opener_pkgs:
-                continue
-            low = act.lower()
-            if "close" in low or ("end" in low and "session" in low):
-                closers.add((pkg, act))
-    return frozenset(openers), frozenset(closers)
+    registry = knowledge_derive.derive_session_registry(
+        catalog,
+        fallback_openers=SESSION_OPENERS,
+        fallback_closers=SESSION_CLOSERS,
+    )
+    if not getattr(registry, "usable", False):
+        logger.info("세션 레지스트리 유도 실패(source=%s) — 수기 상수 폴백",
+                    getattr(registry, "source", "?"))
+    return frozenset(registry.openers), frozenset(registry.closers)
+
+
+def _norm_param(name: object) -> str:
+    return name.replace(" ", "").lower() if isinstance(name, str) else ""
 
 
 def _is_session_param(name: object) -> bool:
-    """세션 이름을 담는 파라미터인지 — 표기 세대에 무관하게 판정한다.
+    """세션 **이름**을 담는 파라미터인지 — 표기 세대에 무관하게 판정한다.
 
-    구 JAR "session"/"sessionName"(SESSION_PARAM_NAMES)과 v2 문서 라벨 "Session name"을
-    모두 잡도록 정규화 부분 일치("session" 포함)로 본다.
+    구 JAR "session"/"sessionName"과 v2 문서 라벨 "Session name", 그리고 패키지명을 앞에
+    단 "Microsoft 365 Excel session"까지 잡아야 한다. 그래서 "session으로 끝나는가"로 본다.
+
+    ⚠ "session을 **포함**하는가"로 보면 안 된다 — 세션의 *속성*을 담은 파라미터가 같이
+    걸린다. 실측(2026-07-29): `Excel advanced/Open`이 `Session type='New'`와
+    `Session name='$sExcelSession$'`을 함께 갖는데, 포함 판정이 파라미터 순서대로 훑다가
+    `Session type`을 먼저 만나 **세션 이름을 'New'로 읽었다.** 그 결과 여는 액션은
+    ("Excel advanced","New")로 등록되고, `$sExcelSession$`을 쓰는 Write·Filter는 "열려
+    있지 않은 세션"(R7)이, 'New'는 "열고 안 닫은 세션"(R8)이 됐다 — 배선이 완벽한
+    흐름도에서 오탐 4건. 위반 수는 신뢰도를 깎으므로 계측 자체가 오염된다.
     """
-    return isinstance(name, str) and "session" in name.replace(" ", "").lower()
+    norm = _norm_param(name)
+    return norm.endswith("session") or norm.endswith("sessionname")
+
+
+def _unwrap_var(value: str) -> str:
+    """A360 변수 참조 표기 `$name$`를 벗겨 이름만 남긴다.
+
+    같은 세션을 여는 쪽은 리터럴로(`outlookSession`), 쓰는 쪽은 변수 참조로(`$outlookSession$`)
+    적는 일이 흔하다. 벗기지 않으면 R7/R8이 **하나의 세션을 둘로 세어** "열지 않고 닫는다"와
+    "열고 닫지 않는다"를 동시에 낸다 — 짝이 맞는 흐름도에서 나오는 오탐이라 게이트 판정과
+    신뢰도 감점을 함께 오염시킨다.
+    """
+    inner = value.strip()
+    if len(inner) > 2 and inner.startswith("$") and inner.endswith("$"):
+        stripped = inner[1:-1].strip()
+        # `$a$-$b$` 같은 합성 표현은 이름 하나가 아니므로 건드리지 않는다.
+        if stripped and "$" not in stripped:
+            return stripped
+    return inner
 
 
 def _session_name(action: dict) -> str | None:
     """액션의 세션 파라미터 값을 세션 이름으로 반환. 없으면 None.
 
     'Default'도 유효한 세션 이름이다 — A360에서 Default 세션도 명시적으로 열어야 한다.
+
+    한 액션이 세션 파라미터를 둘 이상 가지면 **"…session name"이 이긴다** — 파라미터
+    순서에 기대면 카탈로그의 필드 나열 순서가 판정을 가른다.
     """
+    fallback = None
     for p in action.get("parameters", []):
-        if _is_session_param(p.get("name")):
-            value = p.get("value")
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
+        name = p.get("name")
+        if not _is_session_param(name):
+            continue
+        value = p.get("value")
+        if not (isinstance(value, str) and value.strip()):
+            continue
+        if _norm_param(name).endswith("sessionname"):
+            return _unwrap_var(value)
+        if fallback is None:
+            fallback = _unwrap_var(value)
+    return fallback
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -366,12 +427,13 @@ def _if_role(action_name: str | None) -> str:
 
 
 def _eh_role(action_name: str | None) -> str:
-    """Error handler 패키지 액션의 역할 판정 — 'try'|'catch'|'finally'|'other'."""
-    low = (action_name or "").lower()
-    for role in ("finally", "catch", "try"):
-        if role in low:
-            return role
-    return "other"
+    """Error handler 패키지 액션의 역할 판정 — 'try'|'catch'|'finally'|'throw'|'other'.
+
+    공용 지식층에 위임한다. 이 함수는 knowledge 층 이관 때 남은 수기 사본이었고 'throw'를
+    몰라서 Throw를 'other'로 흘려보냈다 — R18(조건 없는 Throw)이 한 건도 발화하지 못한
+    원인이다. 기존 호출부는 전부 try/catch/finally와만 비교하므로 'throw' 추가는 무해하다.
+    """
+    return lexicon.eh_role(action_name)
 
 
 def _split_units(actions: list[dict]) -> list[tuple[str, list[tuple[int, dict]]]]:
@@ -623,14 +685,23 @@ class _SessionWalker:
                 )
 
     def finish(self) -> None:
-        """순회 종료 — 남은 열림을 R8로 보고한다."""
+        """순회 종료 — 남은 열림을 R8로 보고한다.
+
+        **어디에 닫기를 두라는지까지 말한다.** 실측(2026-07-29): 이 지적을 받은 수리가
+        여는 액션 **바로 뒤**에 닫기를 넣어 R8을 없앴다 — 브라우저를 열자마자 닫고 그 뒤
+        클릭들이 죽은 화면에서 도는 흐름도가 됐는데, 가중합은 줄었으니 채택됐다.
+        자리를 안 알려주면 수리는 가장 가까운 자리에 놓는다.
+        """
         for (pkg, name), stack in self.opened.items():
             shown = name if name != _ANON else "(이름 미지정)"
             for step_id, location in stack:
                 self.violations.append(
                     Violation(
                         "R8", location,
-                        f"세션 '{shown}'을(를) 연 뒤 닫지 않았습니다 (닫는 액션이 없습니다).",
+                        f"세션 '{shown}'을(를) 연 뒤 닫지 않았습니다 (닫는 액션이 없습니다). "
+                        "닫는 액션은 **이 세션을 쓰는 마지막 액션 뒤**에 두세요 — Error handler가 "
+                        "있으면 Finally에, 없으면 흐름 끝에. 여는 액션 바로 뒤에 두면 이후 작업이 "
+                        "닫힌 세션에서 돌게 됩니다.",
                         package=pkg, step_id=step_id,
                     )
                 )
@@ -720,10 +791,12 @@ class _DataflowWalker:
     오탐을 막기 위한 관대화다.
     """
 
-    def __init__(self, var_types: dict[str, str], catalog: CatalogLookup, check_r9: bool) -> None:
+    def __init__(self, var_types: dict[str, str], catalog: CatalogLookup, check_r9: bool,
+                 openers: frozenset = frozenset()) -> None:
         self.var_types = var_types  # 선언 변수 name -> type (대문자)
         self.catalog = catalog
         self.check_r9 = check_r9
+        self.openers = openers      # 세션을 **만드는** 액션 — 카탈로그가 알려준다
         self.defined: set[str] = set()
         self.maybe: set[str] = set()
         self.produced_sites: dict[str, tuple[str, str | None]] = {}  # name -> (location, step_id)
@@ -745,7 +818,25 @@ class _DataflowWalker:
 
     def _process(self, action: dict, location: str, step_id: str | None) -> None:
         pkg, act = action.get("package"), action.get("action")
-        consumes = _explicit_refs(action, "consumes") + _inferred_consumes(action)
+        declared = set(_explicit_refs(action, "produces"))
+        # 세션을 여는 액션은 그 세션을 **만든다** — 카탈로그가 opener라고 말해 주므로
+        # produces 선언이 없어도 안다. 값 단계가 이 필드를 빠뜨리는 일이 실측된다
+        # (2026-07-29: 조각 셋 중 하나가 Excel 블록 전체의 produces·consumes를 통째로
+        # 비웠다 — 파라미터는 `$sExcelSession$`로 전부 일관됐는데도). 그때 여는 액션이
+        # 자기 세션 파라미터 때문에 "정의 전 사용"으로 지목됐다. **정의하는 당사자다.**
+        derived = set()
+        if (pkg, act) in self.openers:
+            opened = _session_name(action)
+            if opened:
+                derived.add(opened)
+        produces = declared | derived
+        # `$var$` 추론은 **이 액션이 만드는 변수**를 소비로 세지 않는다. 결과를 담을 변수를
+        # 파라미터로 지정하는 액션(추출·읽기·세션 열기)은 그 자리에 `$이름$`을 적는데, 그건
+        # 읽는 게 아니라 **출력 칸**이다 — 세면 "자기가 만들기 전에 자기가 쓴다"가 된다.
+        # 누적 갱신(nCount = nCount + 1)은 consumes에 **명시**하므로 아래 explicit로 남는다.
+        consumes = _explicit_refs(action, "consumes") + [
+            n for n in _inferred_consumes(action) if n not in produces
+        ]
         for name in consumes:
             self.consumed_names.add(name)
             if self.check_r9 and name not in self.defined and name not in self.maybe:
@@ -758,8 +849,10 @@ class _DataflowWalker:
                 )
                 self.maybe.add(name)  # 같은 변수로 위반을 도배하지 않는다 — 최초 1회만
         self._check_types(action, location, step_id)
-        for name in _explicit_refs(action, "produces"):
-            self.defined.add(name)
+        self.defined |= produces
+        # R10(생산했는데 아무도 안 씀)은 **명시 선언만** 센다 — 유도한 세션까지 넣으면
+        # 지금까지 안 나던 경고가 규칙 변경만으로 무더기로 생긴다.
+        for name in declared:
             self.produced_sites.setdefault(name, (location, step_id))
 
     def _check_types(self, action: dict, location: str, step_id: str | None) -> None:
@@ -859,7 +952,8 @@ def run_dataflow_checks(flow: dict, catalog: CatalogLookup) -> list[Violation]:
         for a in _iter_all_actions(step.get("actions") or [])
     )
 
-    walker = _DataflowWalker(var_types, catalog, check_r9=has_declared)
+    openers, _closers = derive_session_registry(catalog)
+    walker = _DataflowWalker(var_types, catalog, check_r9=has_declared, openers=openers)
     walker.defined |= {n for n in input_vars if n}
     for step in steps:
         walker.walk(step.get("actions") or [], "actions", step.get("step_id"))
@@ -875,10 +969,36 @@ def _iter_all_actions(actions: list[dict]):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# R13~R14 — 제어 흐름 구조 정합 (v3, 무LLM)
+# R13~R14, R17~R18 — 제어 흐름 구조 정합 (v3, 무LLM)
 # 0374 JIRA 봇 실측 결함의 일반화: Try–Catch 사이 이물 형제, Continue의 Loop 오용,
 # 빈 컨테이너 본문 — 전부 surgeon의 move/wrap으로 기계 수리가 가능한 유형이다.
+#
+# R17·R18은 2026-07-28 실측(네이버 금 시세 12턴)에서 무검출로 새던 두 유형이다:
+#   R17 — children 없는 Step 노드. Step은 순수 구획이라 자식이 없으면 **아무것도 실행하지
+#         않는데**, 라벨이 업무를 주장해서("'증권' 버튼 클릭") 요구를 이행한 것처럼 보인다.
+#         한 산출물에 9개까지 나왔고 그 흐름도가 신뢰도 최고점을 받았다 — 빈칸이 점수를 받는다.
+#   R18 — Catch·분기 밖의 Throw. Throw는 오류를 '발생'시키므로 정상 경로에 있으면 매 실행
+#         터지고 뒤 액션이 전부 죽는다. 실측에서 «성공 완료 표시», 최상위 «오류 재던지기»로
+#         나왔다 — 라벨은 정상 종료를 주장하는데 액션은 정반대다.
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _has_work(actions: list[dict]) -> bool:
+    """Step 스캐폴드를 뚫고 **실제로 실행되는 액션**이 하나라도 있는가.
+
+    Step은 순수 구획이라 그 자체로는 아무것도 실행하지 않는다. 그래서 "children이 있는가"로
+    빈 Try를 판정하면, Try 안에 라벨만 붙은 빈 Step을 하나 넣는 것으로 규칙이 충족된 것처럼
+    보인다 — 보호 대상은 여전히 0인데 지적만 사라진다. 실제 실행되는 액션을 기준으로 본다.
+    """
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        if a.get("package") == "Step":
+            if _has_work(a.get("children") or []):
+                return True
+        else:
+            return True
+    return False
+
 
 def _is_loop_signal(action_name: str | None) -> bool:
     """Break/Continue류 제어 신호 판정 — 표기 세대 변화(RPA-141)에 견디게 부분 문자열로."""
@@ -886,67 +1006,153 @@ def _is_loop_signal(action_name: str | None) -> bool:
     return "break" in low or "continue" in low
 
 
-def run_structure_checks(steps: list[dict]) -> list[Violation]:
+def run_structure_checks(
+    steps: list[dict],
+    non_container: frozenset[tuple[str, str]] | None = None,
+    closers: frozenset[tuple[str, str]] | None = None,
+    openers: frozenset[tuple[str, str]] | None = None,
+) -> list[Violation]:
     """제어 흐름 구조 정합 검사 (R13~R14).
 
-    R13 (Error handler 구조, error):
-      - Try의 바로 다음 형제가 Catch/Finally가 아님 — A360에서 Try 다음엔 Catch가 와야
-        하며, 사이에 낀 일반 액션은 보호도 안 되고 구조도 깨진다 → Try의 children으로
-        옮기라는 수리 지시가 된다.
-      - Catch/Finally가 Try 블록에 붙어 있지 않음 (직전 형제가 Try/Catch가 아님).
-      - Try 본문(children)이 비어 있음 (warning — 보호 대상 없는 장식 Try).
+    R13 (Error handler 구조) — 조건마다 심각도가 다르다:
+      - Try의 바로 다음 형제가 Catch/Finally가 아님 (**blocker**) — 짝 없는 Try는 A360이
+        저장·실행을 거부한다. R1(없는 액션 사용)과 같은 급이라 major로 두면 **실행되지 않는
+        봇이 그대로 출고된다**(실측 2026-07-28: Try 3개 대 Catch 1개인 흐름도가 신뢰도
+        0.13으로 나갔다). 사이에 낀 액션은 Try의 children으로 옮기라는 수리 지시가 된다.
+      - Catch/Finally가 Try 블록에 붙어 있지 않음 (**blocker**, 같은 이유).
+      - Try 본문에 실제 실행되는 액션이 없음 (major) — 빈 Step 스캐폴드만 있는 것도 포함.
+      - 최상위 Try 블록이 둘 이상 (major) — 앞 블록의 Finally가 뒤 블록의 세션을 닫는다.
+      - Error handler 블록 **뒤에 업무가 남음** (major) — 그 업무는 보호를 못 받고, Finally가
+        이미 닫은 세션 위에서 돈다. `closers`를 줘야 판정한다(정리 액션과 업무를 갈라야 하므로).
+      - Try·Catch·Finally가 **단계 경계로 갈림** (warning) — 실행 시퀀스로는 인접하지만
+        한 덩어리로 안 그려지고 편집이 깨지기 쉽다 → merge_step 수리 지시가 된다.
     R14 (Loop 구조):
       - Continue/Break가 Loop 본문(조상) 밖에서 사용됨 (error) — Continue를 '반복 처리'로
         오용하면 반복 없이 지나간다.
       - Loop 컨테이너의 본문이 비어 있음 (warning) — 반복할 액션이 밖에 있다는 신호.
+    R17 (비실행 스캐폴드, error): children 없는 Step 노드.
+    R18 (조건 없는 Throw, error): Catch·분기 children 밖의 Throw.
+
+    ## 단계 경계를 넘는 인접성
+
+    최상위 형제 인접성은 **step 경계를 넘어** 본다. steps[]는 화면·문서의 구획일 뿐이고
+    (`exportFlow.js`가 step을 마크다운 헤딩으로만 쓴다) 실행 시퀀스는 step을 가로질러
+    이어지기 때문이다. 단계별로만 보면 step-2=Try / step-3=Catch / step-4=Finally가
+    "붙어 있지 않다" error 3건으로 잡히는데, 실행 의미는 멀쩡하고 진짜 문제는 렌더가
+    한 덩어리로 안 묶이는 것이다(프론트 `buildSegments`는 같은 step의 연속 형제만 컬럼으로
+    가른다). 그래서 이 경우는 error가 아니라 **warning 1건 + merge_step 지시**로 가른다.
+    children 배열은 step을 가로지를 수 없으므로 이 구분이 적용되지 않는다.
     """
     violations: list[Violation] = []
 
-    def walk(actions: list[dict], path: str, step_id: str | None, loop_depth: int) -> None:
-        n = len(actions)
+    def eh_adjacency(seq: list[dict], locs: list[str], sids: list[str | None]) -> None:
+        """Error handler 형제 인접성 (R13) — seq는 같은 실행 시퀀스의 형제들이다."""
+        n = len(seq)
+        for idx, a in enumerate(seq):
+            if a.get("package") != "Error handler":
+                continue
+            act = a.get("action")
+            role = _eh_role(act)
+            loc, sid = locs[idx], sids[idx]
+            if role == "try":
+                nxt = seq[idx + 1] if idx + 1 < n else None
+                nxt_role = (
+                    _eh_role(nxt.get("action"))
+                    if nxt is not None and nxt.get("package") == "Error handler"
+                    else None
+                )
+                if nxt_role not in ("catch", "finally"):
+                    violations.append(Violation(
+                        "R13", loc,
+                        "Try 다음에는 Catch(또는 Finally)가 바로 와야 합니다 — 짝 없는 Try는 "
+                        "A360이 저장·실행을 거부합니다. 보호할 액션은 Try의 children으로 옮기고, "
+                        "Try 바로 뒤에 Catch를 두세요.",
+                        package=a.get("package"), action=act, step_id=sid,
+                        severity="blocker",
+                    ))
+            elif role in ("catch", "finally"):
+                prev = seq[idx - 1] if idx > 0 else None
+                prev_role = (
+                    _eh_role(prev.get("action"))
+                    if prev is not None and prev.get("package") == "Error handler"
+                    else None
+                )
+                shown = "Catch" if role == "catch" else "Finally"
+                # catch는 try/catch(다중 catch) 뒤, finally는 try/catch 뒤에만 유효하다.
+                if prev_role not in ("try", "catch"):
+                    violations.append(Violation(
+                        "R13", loc,
+                        f"{shown}가 Try 블록에 붙어 있지 않습니다 (직전 형제가 Try/Catch가 아님) — "
+                        "짝이 깨진 예외 처리는 A360이 저장·실행을 거부합니다. "
+                        "Try 바로 뒤로 옮기거나 Try와 쌍을 맞추세요.",
+                        package=a.get("package"), action=act, step_id=sid,
+                        severity="blocker",
+                    ))
+                elif sids[idx - 1] != sid:
+                    violations.append(Violation(
+                        "R13", loc,
+                        f"{shown}가 Try와 다른 단계에 있습니다 — Try·Catch·Finally는 한 단계 안의 "
+                        "연속한 형제여야 화면에 한 덩어리로 그려집니다. 이 단계를 앞 단계와 "
+                        "합치세요(merge_step).",
+                        package=a.get("package"), action=act, step_id=sid, severity="warning",
+                    ))
+
+    def walk(
+        actions: list[dict], path: str, step_id: str | None, loop_depth: int, guarded: bool
+    ) -> None:
+        """노드 단위 검사 + 재귀. 형제 인접성(R13)은 eh_adjacency가 따로 본다.
+
+        guarded: 조상에 Catch나 분기(If)가 있는가 — R18(조건 없는 Throw)의 판정 기준.
+        """
         for idx, a in enumerate(actions):
             pkg, act = a.get("package"), a.get("action")
             loc = f"{path}[{idx}]"
             children = a.get("children") or []
+            role = _eh_role(act) if pkg == "Error handler" else None
 
-            if pkg == "Error handler":
-                role = _eh_role(act)
-                if role == "try":
-                    nxt = actions[idx + 1] if idx + 1 < n else None
-                    nxt_role = (
-                        _eh_role(nxt.get("action"))
-                        if nxt is not None and nxt.get("package") == "Error handler"
-                        else None
-                    )
-                    if nxt_role not in ("catch", "finally"):
-                        violations.append(Violation(
-                            "R13", loc,
-                            "Try 다음에는 Catch(또는 Finally)가 바로 와야 합니다 — 사이에 다른 "
-                            "액션이 끼면 A360 구조가 깨집니다. 보호할 액션은 Try의 children으로 옮기세요.",
-                            package=pkg, action=act, step_id=step_id,
-                        ))
-                    if not children:
-                        violations.append(Violation(
-                            "R13", loc,
-                            "Try 본문(children)이 비어 있습니다 — 보호할 작업을 Try 안에 넣으세요.",
-                            package=pkg, action=act, step_id=step_id, severity="warning",
-                        ))
-                elif role in ("catch", "finally"):
-                    prev = actions[idx - 1] if idx > 0 else None
-                    prev_role = (
-                        _eh_role(prev.get("action"))
-                        if prev is not None and prev.get("package") == "Error handler"
-                        else None
-                    )
-                    # catch는 try/catch(다중 catch) 뒤, finally는 try/catch 뒤에만 유효하다.
-                    if prev_role not in ("try", "catch"):
-                        shown = "Catch" if role == "catch" else "Finally"
-                        violations.append(Violation(
-                            "R13", loc,
-                            f"{shown}가 Try 블록에 붙어 있지 않습니다 (직전 형제가 Try/Catch가 아님) — "
-                            "Try 바로 뒤로 옮기거나 Try와 쌍을 맞추세요.",
-                            package=pkg, action=act, step_id=step_id,
-                        ))
+            if role == "try" and not _has_work(children):
+                # major다(warning 아님). 실측(2026-07-29) 4턴 중 3턴이 예외 처리 골격만
+                # 만들고 그 안을 비웠다 — 한 턴은 Try/Catch/Finally 셋이 다 비어 업무
+                # 액션이 아예 없었다. warning(가중치 1)으로는 교정 압력이 사실상 0이라
+                # refine이 손대지 않는다. 빈 Try는 "오류를 처리한다"는 요구를 이행한
+                # 시늉만 낸 것이므로 결함으로 센다.
+                violations.append(Violation(
+                    "R13", loc,
+                    "Try 본문(children)이 비어 있습니다 — 예외 처리 틀만 있고 보호하는 작업이 "
+                    "없습니다. 본 업무 액션을 Try의 children으로 옮기세요(업무가 Try 밖에 "
+                    "있으면 오류가 나도 Catch가 잡지 못합니다).",
+                    package=pkg, action=act, step_id=step_id,
+                ))
+
+            if role == "throw" and not guarded:
+                violations.append(Violation(
+                    "R18", loc,
+                    "Throw는 오류를 발생시키는 액션입니다 — Catch 안이나 조건 분기(If) 안이 "
+                    "아니면 실행할 때마다 무조건 터져 이후 액션이 전부 실행되지 않습니다. "
+                    "조건이 있으면 If children으로 감싸고, 오류 전파가 목적이면 Catch children으로 "
+                    "옮기세요. 정상 완료 표시가 목적이라면 Throw가 아닌 다른 액션을 쓰세요.",
+                    package=pkg, action=act, step_id=step_id,
+                ))
+
+            # R17 — Step은 순수 구획이라 children이 없으면 아무것도 실행하지 않는다.
+            if pkg == "Step" and not children:
+                violations.append(Violation(
+                    "R17", loc,
+                    "children이 없는 Step은 아무것도 실행하지 않습니다 — 라벨이 업무를 주장해도 "
+                    "실제로는 빈칸입니다. 이 작업을 수행하는 실제 액션으로 교체하거나, 대응 액션이 "
+                    "카탈로그에 없으면 노드를 지우고 notes에 '자동화 불가'로 남기세요.",
+                    package=pkg, action=act, step_id=step_id,
+                ))
+            elif pkg == "Step" and len(children) == 1:
+                # Step은 **여러** 액션을 논리 단위로 묶는 구획이다. 하나를 감싸면 트리만 한 겹
+                # 깊어지고 얻는 게 없다 — 실측(2026-07-29)에서 업무 액션 12개에 Step 7개가 붙었고
+                # 그중 다섯이 자식 하나짜리였다. 실행은 되므로 warning이다.
+                violations.append(Violation(
+                    "R17", loc,
+                    "자식이 하나뿐인 Step은 묶는 일을 하지 않습니다 — Step은 여러 액션을 논리 "
+                    "단위로 묶을 때만 쓰고, 하나면 그 액션을 Step 자리에 바로 두세요.",
+                    package=pkg, action=act, step_id=step_id, severity="warning",
+                ))
 
             if pkg == "Loop":
                 if _is_loop_signal(act):
@@ -957,18 +1163,265 @@ def run_structure_checks(steps: list[dict]) -> list[Violation]:
                             "필요하면 Loop(이터레이터) 컨테이너로 감싸고 반복할 액션을 그 children에 넣으세요.",
                             package=pkg, action=act, step_id=step_id,
                         ))
-                elif is_container(pkg, act) and not children:
+                elif is_container(pkg, act, non_container=non_container) and not children:
                     violations.append(Violation(
                         "R14", loc,
                         "Loop 본문(children)이 비어 있습니다 — 반복할 액션들을 Loop 안에 넣으세요.",
                         package=pkg, action=act, step_id=step_id, severity="warning",
                     ))
 
-            child_depth = loop_depth + (1 if pkg == "Loop" and is_container(pkg, act) else 0)
-            walk(children, f"{loc}.children", step_id, child_depth)
+            child_depth = loop_depth + (
+                1 if pkg == "Loop" and is_container(pkg, act, non_container=non_container) else 0
+            )
+            child_path = f"{loc}.children"
+            eh_adjacency(children, [f"{child_path}[{i}]" for i in range(len(children))],
+                         [step_id] * len(children))
+            walk(children, child_path, step_id, child_depth,
+                 guarded or role == "catch" or pkg == "If")
+
+    # 최상위 형제 인접성은 step 경계를 넘어 하나의 시퀀스로 본다 (docstring 참고).
+    top: list[dict] = []
+    top_locs: list[str] = []
+    top_sids: list[str | None] = []
+    for step in steps:
+        sid = step.get("step_id")
+        for idx, a in enumerate(step.get("actions") or []):
+            top.append(a)
+            top_locs.append(f"actions[{idx}]")
+            top_sids.append(sid)
+    eh_adjacency(top, top_locs, top_sids)
+
+    # 최상위 Try 블록은 하나다 (R13, major).
+    #
+    # ## 진짜 피해는 세션이 아니라 '실패를 삼킨 채 계속 도는 것'이다
+    #
+    # 처음엔 "앞 블록의 Finally가 뒤 블록이 쓸 세션을 닫는다"를 근거로 삼았는데, 실측
+    # (2026-07-29)에서 Try 3덩어리인 흐름도가 **R7 위반 0건**으로 나왔다 — 각 블록이 자기가
+    # 연 것만 닫았고 뒤에서 쓰지 않았다. 세션 피해는 R7이 이미 정확히 잡으므로 이 규칙의
+    # 근거로는 약하다.
+    #
+    # 같은 흐름도에서 실제로 깨진 것은 이쪽이다: step-1 Try가 `tGoldRates`를 만들고 실패 시
+    # Catch가 기록·안전 종료를 하는데, **Error handler 블록은 정상 종료하므로 step-2가 그대로
+    # 실행된다.** step-2는 `tGoldRates`를 소비하지만 그 전제를 검사하지 않는다. 즉 앞이
+    # 실패했는데 뒤가 빈 값으로 계속 돈다 — 무인 실행에서 가장 나쁜 종류의 실패다.
+    #
+    # 지적문이 '합치기'만 요구하면 수리가 어렵다(최상위 노드 여러 개를 옮기는 다중 연산).
+    # 성공 플래그 가드로 감싸는 길을 함께 제시해 국소 편집으로도 풀 수 있게 한다.
+    #
+    # 반복 항목 하나의 실패를 격리하는 **중첩** Try(Loop children 안)는 정당하므로 세지 않는다
+    # — 여기서 보는 것은 top-level 형제로 나란히 선 블록뿐이다.
+    top_tries = [
+        (loc, sid) for a, loc, sid in zip(top, top_locs, top_sids, strict=True)
+        if a.get("package") == "Error handler" and _eh_role(a.get("action")) == "try"
+    ]
+    if len(top_tries) > 1:
+        loc, sid = top_tries[1]
+        violations.append(Violation(
+            "R13", loc,
+            f"최상위 Try 블록이 {len(top_tries)}개입니다 — 앞 블록이 실패해 Catch로 빠져도 "
+            "Error handler 블록 자체는 정상 종료하므로 **뒤 블록이 그대로 실행됩니다.** "
+            "뒤 블록은 앞 블록의 성공을 전제로 도는데(앞에서 만든 변수·세션을 쓰는데) 그 전제를 "
+            "검사하지 않습니다. 셋 중 하나로 고치세요: ① 두 Try의 children을 하나의 Try로 합친다 "
+            "(가장 깔끔), ② 앞 Try 끝에 성공 플래그를 세우고 뒤 블록을 그 플래그 If로 감싼다, "
+            "③ 뒤 블록의 업무를 앞 Try의 children 끝으로 옮긴다. 반복 항목의 실패 격리가 "
+            "목적이라면 형제가 아니라 Loop children 안에 중첩하세요.",
+            package="Error handler", action="Try", step_id=sid,
+        ))
+
+    violations.extend(_post_block_work(top, top_locs, top_sids, closers))
 
     for step in steps:
-        walk(step.get("actions") or [], "actions", step.get("step_id"), 0)
+        walk(step.get("actions") or [], "actions", step.get("step_id"), 0, False)
+        violations.extend(_idle_session(step.get("actions") or [], "actions",
+                                        step.get("step_id"), openers, closers))
+    return violations
+
+
+def _idle_session(
+    actions: list[dict],
+    path: str,
+    step_id: str | None,
+    openers: frozenset[tuple[str, str]] | None,
+    closers: frozenset[tuple[str, str]] | None,
+) -> list[Violation]:
+    """여는 액션 **바로 뒤**에 닫는 액션이 오는 자리를 R8(major)로 보고한다 — 재귀.
+
+    그 세션에서는 아무 일도 일어나지 않고, 뒤따르는 작업은 닫힌 세션 위에서 돈다.
+    빈 Try(R13)·빈 Loop(R14)·빈 Step(R17)과 같은 종류의 결함이 세션에 나타난 것이다.
+
+    실측(2026-07-29)에서 이건 **수리가 만들었다.** R8("연 뒤 닫지 않았습니다")을 받은 surgeon이
+    닫기를 여는 액션 바로 뒤에 넣었고, R8이 사라져 가중합이 줄었으므로 채택됐다 — 브라우저를
+    열자마자 닫고 그 뒤 클릭들이 죽은 화면에서 도는 흐름도가 그렇게 나왔다. 지적이 자리를
+    말해주지 않으면 수리는 가장 가까운 자리를 고른다.
+
+    레지스트리가 없으면 검사하지 않는다(R7/R8과 같은 침묵 원칙).
+    """
+    if not openers or not closers:
+        return []
+    out: list[Violation] = []
+    for idx, a in enumerate(actions):
+        if not isinstance(a, dict):
+            continue
+        loc = f"{path}[{idx}]"
+        key = (a.get("package"), a.get("action"))
+        nxt = actions[idx + 1] if idx + 1 < len(actions) else None
+        if key in openers and isinstance(nxt, dict):
+            nkey = (nxt.get("package"), nxt.get("action"))
+            # 같은 패키지의 닫기가 바로 뒤 — 사이에 그 세션을 쓰는 액션이 하나도 없다.
+            if nkey in closers and nkey[0] == key[0]:
+                out.append(Violation(
+                    "R8", loc,
+                    f"'{key[0]}' 세션을 연 **바로 뒤**에 닫고 있습니다 — 그 사이에 아무 작업도 "
+                    "없어 이 세션은 아무 일도 하지 않고, 뒤따르는 작업은 닫힌 세션에서 돌게 "
+                    "됩니다. 닫는 액션을 이 세션을 쓰는 마지막 액션 뒤로(Error handler가 있으면 "
+                    "Finally로) 옮기세요.",
+                    package=key[0], action=key[1], step_id=step_id,
+                ))
+        out.extend(_idle_session(a.get("children") or [], f"{loc}.children",
+                                 step_id, openers, closers))
+    return out
+
+
+def _post_block_work(
+    top: list[dict],
+    locs: list[str],
+    sids: list[str | None],
+    closers: frozenset[tuple[str, str]] | None,
+) -> list[Violation]:
+    """Error handler 블록 **뒤에 남은 업무**를 R13(major)로 보고한다.
+
+    Try가 하나뿐이어도 그 안에 업무의 일부만 들어가는 일이 반복됐다 — 흐름도를 step 시퀀스로
+    먼저 깔고 Try를 앞쪽 몇 단계에만 씌우는 형태다. 그러면 두 가지가 동시에 깨진다:
+    뒤쪽 업무는 **보호를 못 받고**, 블록의 Finally가 **아직 쓸 세션을 미리 닫는다.**
+    Try가 둘인 경우(위 검사)와 증상이 같은데 규칙이 못 보던 자리다.
+
+    블록 뒤에 와도 되는 것(compose_agent.md [운영 골격]과 같은 목록):
+      · 세션·리소스 정리 — `closers`로 판정한다.
+      · 결과 알림 — 본 업무 성공에 의존하므로 If 가드 안에 두라고 되어 있다. If 서브트리는
+        통째로 통과시킨다(안을 따지면 가드의 취지와 어긋난다).
+      · Step은 구획일 뿐이라 통과시키고 안을 본다.
+
+    `closers`가 없으면(레지스트리 유도 실패·테스트 스텁) **검사하지 않는다** — 정리 액션을
+    업무로 오인해 무고한 흐름도를 흔드는 쪽이 더 나쁘다(R7/R8과 같은 침묵 원칙).
+    """
+    if not closers:
+        return []
+    last_eh = max(
+        (i for i, a in enumerate(top) if a.get("package") == "Error handler"), default=-1
+    )
+    if last_eh < 0 or last_eh == len(top) - 1:
+        return []
+
+    found: list[tuple[str, dict]] = []
+
+    def scan(actions: list[dict], path: str) -> None:
+        for idx, a in enumerate(actions):
+            if not isinstance(a, dict):
+                continue
+            pkg, act = a.get("package"), a.get("action")
+            loc = f"{path}[{idx}]"
+            if pkg == "If":            # 성공 가드 안의 후속 처리 — 허용
+                continue
+            if pkg == "Step":          # 구획 — 뚫고 본다
+                scan(a.get("children") or [], f"{loc}.children")
+                continue
+            if (pkg, act) in closers:  # 정리 — 허용
+                continue
+            found.append((loc, a))
+
+    for i in range(last_eh + 1, len(top)):
+        scan([top[i]], locs[i].rsplit("[", 1)[0])
+
+    if not found:
+        return []
+    loc, first = found[0]
+    names = " · ".join(f"{a.get('package')}/{a.get('action')}" for _l, a in found[:4])
+    sid = sids[min(last_eh + 1, len(sids) - 1)]
+    return [Violation(
+        "R13", loc,
+        f"Error handler 블록 뒤에 업무 액션이 {len(found)}개 남아 있습니다({names}) — "
+        "이 액션들은 오류가 나도 Catch가 잡지 못하고, 블록의 Finally가 이미 닫은 세션 위에서 "
+        "실행됩니다. 업무는 Try의 children으로 옮기고, 블록 뒤에는 정리(세션 닫기)와 "
+        "성공 가드(If) 안의 결과 알림만 남기세요.",
+        package=first.get("package"), action=first.get("action"), step_id=sid,
+    )]
+
+
+def run_package_checks(steps: list[dict], catalog=None) -> list[Violation]:
+    """패키지 선택 검사 — R19(경쟁 패키지 혼용, major) + R20(신규 개발 비권장, warning).
+
+    R19 — 같은 일을 하는 경쟁 패키지를 한 흐름도에서 섞어 썼는가.
+
+    A360에는 같은 일을 하는 패키지가 여럿이다(스프레드시트 4종, 메일 5종). **세션 모델이
+    각자**라 `Excel advanced/Open`이 연 세션을 `Microsoft 365 Excel/Format cell`이 못 쓴다 —
+    실행 시 "세션 없음"으로 깨진다. 실측(2026-07-28): 흐름도 18개 중 6개가 엑셀 패키지를
+    섞었고 한 개는 3종을 함께 썼다.
+
+    역할군은 `derive_competing_packages`가 카탈로그에서 유도한다. 유도가 완벽하지 않아
+    (`Word ↔ PowerPoint` 같은 오탐이 있다) blocker가 아니라 major다 — 실행 불가가 확실한
+    R13(짝 없는 Try)과 달리 여기는 정당한 병용이 있을 수 있다.
+
+    **먼저 등장한 패키지를 기준으로 삼는다.** 흐름도가 이미 그쪽으로 세션을 열었을 가능성이
+    높고, 수리 지시가 "나중 것을 먼저 것으로 바꿔라"로 명확해진다.
+    """
+    if catalog is None:
+        return []
+    # 두 검사는 근거가 달라 서로의 결측에 걸리지 않아야 한다 — 경쟁 역할군 유도가 비어도
+    # 비권장 표시는 볼 수 있고, 그 반대도 마찬가지다.
+    groups = knowledge_derive.derive_competing_packages(catalog)
+    lookup = getattr(catalog, "discouraged_packages", None)
+    discouraged = lookup() if callable(lookup) else {}
+    if not groups and not discouraged:
+        return []
+
+    first: dict[str, tuple[str, str, str | None]] = {}  # package -> (location, action, step_id)
+    order: list[str] = []
+
+    def walk(actions: list[dict], path: str, step_id: str | None) -> None:
+        for idx, a in enumerate(actions):
+            pkg, act = a.get("package"), a.get("action")
+            loc = f"{path}[{idx}]"
+            if pkg and pkg not in first:
+                first[pkg] = (loc, act or "", step_id)
+                order.append(pkg)
+            walk(a.get("children") or [], f"{loc}.children", step_id)
+
+    for step in steps:
+        walk(step.get("actions") or [], "actions", step.get("step_id"))
+
+    violations: list[Violation] = []
+    for group in groups:
+        used = [p for p in order if p in group]
+        if len(used) < 2:
+            continue
+        keep = used[0]
+        for pkg in used[1:]:
+            loc, act, sid = first[pkg]
+            violations.append(Violation(
+                "R19", loc,
+                f"'{pkg}'와 '{keep}'는 같은 일을 하는 패키지인데 한 흐름도에서 함께 쓰였습니다 — "
+                f"패키지마다 세션이 따로라 '{keep}'가 연 세션을 '{pkg}'가 이어받을 수 없습니다. "
+                f"둘 중 하나로 통일하세요(필요한 액션이 한쪽에만 있으면 그 패키지 쪽으로).",
+                package=pkg, action=act, step_id=sid,
+            ))
+
+    # R20 — 신규 개발 비권장 패키지 사용 (warning).
+    #
+    # 공식 개요 문서가 "신규 봇 개발에 권장하지 않는다"고 명시한 패키지다. 액션 스펙에는
+    # 그 사실이 없어 메뉴에서는 멀쩡한 후보로 보이고, 검색 점수도 정상 패키지와 비슷하게
+    # 나온다. 실행이 깨지는 결함은 아니므로(마이그레이션 봇 유지보수에서는 정당하다)
+    # warning이다 — 대안이 정말 없을 수도 있어 blocker·major로 막지 않는다.
+    for pkg in order:
+        if pkg not in discouraged:
+            continue
+        loc, act, sid = first[pkg]
+        violations.append(Violation(
+            "R20", loc,
+            f"'{pkg}'는 신규 봇 개발에 권장되지 않는 패키지입니다 — {discouraged[pkg]} "
+            f"같은 일을 하는 다른 패키지의 액션이 있으면 그쪽으로 바꾸세요. "
+            f"이 패키지에만 있는 액션이라 대안이 없다면 그 이유를 rationale에 남기세요.",
+            package=pkg, action=act, step_id=sid, severity="warning",
+        ))
     return violations
 
 
@@ -1089,7 +1542,9 @@ def run_flow_checks(
     reg = registry or derive_session_registry(catalog)
     violations.extend(run_session_checks(steps, reg, emit_r12=True))
     violations.extend(run_dataflow_checks(flow, catalog))
-    violations.extend(run_structure_checks(steps))
+    violations.extend(run_structure_checks(steps, container_exceptions(catalog),
+                                           closers=reg[1], openers=reg[0]))
+    violations.extend(run_package_checks(steps, catalog))
     violations.extend(run_environment_checks(flow, catalog))
 
     # R12a: 규모 있는 흐름도에 예외 처리 구조가 아예 없음 (A360 표준 골격 위배 — warning)

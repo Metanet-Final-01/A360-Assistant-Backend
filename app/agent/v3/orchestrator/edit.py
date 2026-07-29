@@ -36,7 +36,14 @@ from .generate import resolve_catalog_context
 from .harness import attach_confidence, verify_and_repair
 from .render import render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
-from .tools import build_kb_tools, describe_tool_calls, execute_tool_calls, sink_to_sources, tool_calls_data
+from .tools import (
+    ACTION_SOURCE_TYPES,
+    build_kb_tools,
+    describe_tool_calls,
+    execute_tool_calls,
+    sink_to_sources,
+    tool_calls_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,13 +146,16 @@ def _is_premise_only_edit(out_flow: dict, in_flow: dict) -> bool:
     )
 
 
-def _apply_to_flow(base: dict, ops: EditOps) -> tuple[dict, int, list[str]]:
+def _apply_to_flow(base: dict, ops: EditOps, catalog=None) -> tuple[dict, int, list[str]]:
     """base(원본)의 사본에 id를 붙이고 ops를 적용한 뒤, id 제거·정규화·order 재정렬한 흐름도를
     반환한다. (flow, 적용_수, 실패_사유들). base는 건드리지 않는다 — 재시도 때 같은 id를 다시
-    붙일 수 있어야(프롬프트에 보여준 id와 일치) 하기 때문이다."""
+    붙일 수 있어야(프롬프트에 보여준 id와 일치) 하기 때문이다.
+
+    `catalog`를 주면 없는 액션을 들여오는 연산이 걸러진다 — 그 사유는 errors에 담겨
+    `_retry_message`로 모델에 되돌아간다(사용자 수정 요청은 재요청 기회가 1회 있다)."""
     work = copy.deepcopy(base)
     annotate_ids(work)
-    applied, errors = apply_edit_ops(work, ops.operations)
+    applied, errors = apply_edit_ops(work, ops.operations, catalog=catalog)
     strip_ids(work)
     work = _coerce_flow(work)  # 새 액션의 value_source 기본값·리스트 정규화
     renumber(work)             # 형제마다 order 1..N
@@ -310,7 +320,10 @@ async def edit_node(state: TurnState) -> dict:
     ctx = await resolve_catalog_context(state)
     is_a360 = ctx is not None and ctx.is_a360
     sink: list[dict] = []
-    tools = build_kb_tools(sink, ctx) if ctx is not None else []
+    # edit의 산출물은 EditOps(액션 교체·삽입)라 **액션 어휘**가 필요하다 — qa처럼 전체를
+    # 열어 두면 doc_page(코퍼스 92%)가 검색 상위를 채우고, action이 null인 package_overview
+    # 행이 LLM에 그대로 흘러가 액션명을 지어낼 재료가 된다. recommend와 같은 제한을 건다.
+    tools = build_kb_tools(sink, ctx, source_types=ACTION_SOURCE_TYPES) if ctx is not None else []
     llm = _make_llm()
     runnable = llm.bind_tools(tools) if tools else llm
 
@@ -370,7 +383,7 @@ async def edit_node(state: TurnState) -> dict:
     # 연산 일부만 적용되고 나머지가 실패한(errors 비어있지 않은) 경우도 '미완결'로 본다 —
     # 실패한 연산을 삼키고 applied>0을 성공으로 처리하면 사용자가 요청한 수정 일부가 조용히
     # 누락된다. 유효 id를 재안내해 1회 재요청하고, 재요청도 완결되지 않으면 정직하게 저하한다.
-    flow, applied, errors = _apply_to_flow(base, ops)
+    flow, applied, errors = _apply_to_flow(base, ops, catalog=ctx.catalog)
     if applied == 0 or errors or _is_noop_edit(flow, base):
         logger.info("edit 연산 미완결(적용 %d, 실패 %s) — 유효 id 재안내 후 1회 재요청", applied, errors[:3])
         messages.append(response)
@@ -383,7 +396,7 @@ async def edit_node(state: TurnState) -> dict:
             return {"turn_type": TYPE_ANSWER, "answer": _CANT_APPLY, "sources": sink_to_sources(sink)}
         if not ops.operations:
             return {"turn_type": TYPE_ANSWER, "answer": ops.answer or _CANT_APPLY, "sources": sink_to_sources(sink)}
-        flow, applied, errors = _apply_to_flow(base, ops)
+        flow, applied, errors = _apply_to_flow(base, ops, catalog=ctx.catalog)
         if applied == 0 or errors or _is_noop_edit(flow, base):
             logger.warning("edit 재요청 후에도 미완결(적용 %d, 실패 %s) — 답변으로 저하", applied, errors[:3])
             return {"turn_type": TYPE_ANSWER, "answer": _CANT_APPLY, "sources": sink_to_sources(sink)}

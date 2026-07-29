@@ -18,6 +18,7 @@ name/label/type/required/options/default). shortlist는 이 스펙으로 후보 
 
 import json
 import logging
+import re
 import threading
 import time
 
@@ -102,6 +103,28 @@ _CATALOG_TTL_SEC = 600.0
 _CATALOG_DB_TIMEOUT_SEC = 10
 
 
+# 패키지 개요가 "신규 개발에는 쓰지 마라"고 말하는 문장 패턴. 패키지 이름이 아니라 **문장**을
+# 찾는다 — 이름을 박아 두면 카탈로그가 바뀔 때 조용히 틀린다.
+_DISCOURAGED_RE = re.compile(
+    r"(do not recommend using this package|not recommended for new bot|deprecated)",
+    re.IGNORECASE,
+)
+# 이유로 실을 문장 — 매칭된 지점이 포함된 문장 하나를 잘라 그대로 보여 준다.
+# 줄바꿈으로는 자르지 않는다: 개요 본문이 줄 단위로 접혀 있어 문장 중간에서 끊긴다.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _discouraged_reason(content: str) -> str | None:
+    """개요 본문에서 '권장하지 않는다'는 문장을 찾아 돌려준다. 없으면 None."""
+    if not _DISCOURAGED_RE.search(content):
+        return None
+    flat = " ".join(content.split())
+    for sentence in _SENTENCE_SPLIT_RE.split(flat):
+        if _DISCOURAGED_RE.search(sentence):
+            return sentence[:200]
+    return flat[:200]
+
+
 class BackendCatalog:
     """rag_documents(action_schema)의 metadata.schema를 (package_name, action_name)으로 조회.
 
@@ -129,6 +152,8 @@ class BackendCatalog:
         self._reloading_index = False
         self._reloading_triggers = False
         self._reloading_package_labels = False
+        # 비권장 패키지는 개요 문서에서 1회 유도하면 끝이라 TTL 재적재 대상이 아니다.
+        self._discouraged: dict[str, str] | None = None
         self._lock = threading.Lock()
 
     @staticmethod
@@ -382,6 +407,56 @@ class BackendCatalog:
         테스트 스텁에 없어도 duck-typing 폴백으로 동작하도록 사용처가 getattr로 조회한다.)
         """
         yield from self._ensure_index().values()
+
+    def discouraged_packages(self) -> dict[str, str]:
+        """{패키지명: 권장하지 않는 이유} — `package_overview` 본문에서 **유도**한다.
+
+        A360에는 신규 개발에 쓰면 안 되는 패키지가 있다(마이그레이션 호환용 등). 액션 스펙
+        (`action_schema`)에는 그 사실이 없어서 액션 메뉴만 보면 멀쩡한 후보로 보이고,
+        검색 점수도 정상 패키지와 비슷하게 나온다 — 실측에서 `Browser/Open`이 0.91로 1위였는데
+        흐름도가 레거시 패키지의 페이지 열기 액션을 골랐다.
+
+        패키지 이름을 코드에 박지 않는다. 문서가 "권장하지 않는다"고 말하는 문장을 찾아
+        그 패키지를 표시할 뿐이라, 문서가 바뀌면 판정도 따라간다.
+        """
+        if self._discouraged is None:
+            with self._lock:
+                if self._discouraged is None:
+                    self._discouraged = self._load_discouraged()
+        return self._discouraged
+
+    def _load_discouraged(self) -> dict[str, str]:
+        from app.rag.store import db
+
+        try:
+            conn = db.connect(connect_timeout=_CATALOG_DB_TIMEOUT_SEC)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SET statement_timeout = {int(_CATALOG_DB_TIMEOUT_SEC * 1000)}")
+                    cur.execute(
+                        """
+                        SELECT package_name, content
+                        FROM rag_documents
+                        WHERE source_type = 'package_overview' AND package_name IS NOT NULL
+                        ORDER BY package_name, chunk_index
+                        """
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — 안내가 없어도 추천은 나가야 한다
+            logger.warning("package_overview 조회 실패 — 비권장 패키지 안내 없이 진행", exc_info=True)
+            return {}
+
+        out: dict[str, str] = {}
+        for package_name, content in rows:
+            if package_name in out or not isinstance(content, str):
+                continue
+            reason = _discouraged_reason(content)
+            if reason:
+                out[package_name] = reason
+        logger.info("비권장 패키지 유도: %d건 (%s)", len(out), ", ".join(sorted(out)) or "-")
+        return out
 
     def list_package_catalog(self) -> list[dict]:
         """전체 카탈로그 — 흐름도 편집기 피커(RPA-313)용.

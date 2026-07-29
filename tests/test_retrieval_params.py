@@ -122,10 +122,14 @@ def test_fuse_applies_weights_to_ordering():
 def _patch_search_io(monkeypatch, capture):
     """검색 I/O(임베딩·벡터·BM25)를 스텁으로 갈아끼우고 후보 풀 크기를 기록한다."""
     monkeypatch.setattr(hs, "embed_query", lambda q: [0.1, 0.2])
+    # source_types는 push-down(RPA-298)으로 추가된 인자다. 이 테스트가 보는 건 후보 풀
+    # 크기뿐이라 값은 안 쓰지만, 받아주지 않으면 TypeError로 죽는다.
     monkeypatch.setattr(hs.db, "search",
-                        lambda conn, emb, limit: (capture.__setitem__("vector_limit", limit), [_hit("a")])[1])
+                        lambda conn, emb, limit, source_types=None:
+                        (capture.__setitem__("vector_limit", limit), [_hit("a")])[1])
     monkeypatch.setattr(hs.opensearch_client, "keyword_search",
-                        lambda client, q, size: (capture.__setitem__("bm25_size", size), [_hit("a")])[1])
+                        lambda client, q, size, source_types=None:
+                        (capture.__setitem__("bm25_size", size), [_hit("a")])[1])
 
 
 def test_search_defaults_to_config_pool(monkeypatch):

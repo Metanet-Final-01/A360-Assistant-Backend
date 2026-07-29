@@ -7,6 +7,7 @@ R16: platform 메타(windows=False) 패키지 사용 — warning.
 
 from app.agent.v3.verify.checker import (
     DEFAULT_TARGET_OS,
+    SESSION_CLOSERS,
     SESSION_OPENERS,
     _is_session_param,
     derive_session_registry,
@@ -73,7 +74,22 @@ def test_session_registry_reads_v2_session_role():
     openers, closers = derive_session_registry(_Cat(specs))
     assert ("Google Sheets", "Open spreadsheet") in openers
     assert ("Google Sheets", "Close") in closers
-    assert set(SESSION_OPENERS) <= set(openers)  # 수기 상수 유지 — 구 카탈로그 호환
+    # 🔴 계약 변경: 수기 상수는 **폴백**이지 항상 합쳐지는 것이 아니다.
+    # 예전엔 유도 결과에 상수를 늘 union했는데, 그 상수는 현행 카탈로그에 없는 세대의 표기라
+    # 죽은 이름을 되살려 오탐을 만든다. 유도가 성공하면 카탈로그가 진실 원천이다.
+    assert not (set(SESSION_OPENERS) & set(openers)), "유도 성공 시 죽은 표기를 안 섞는다"
+
+
+def test_session_registry_falls_back_when_derivation_is_empty():
+    """유도가 비면 상수로 떨어진다 — '검사가 죽지 않게' 하는 장치다.
+
+    카탈로그 순회가 안 되는 경로(테스트 스텁·구 어댑터)에서 R7/R8이 통째로 침묵하는 것보다,
+    부정확해도 상수로 도는 편이 낫다.
+    """
+    openers, closers = derive_session_registry(_Cat([]))
+
+    assert set(SESSION_OPENERS) <= set(openers)
+    assert set(SESSION_CLOSERS) <= set(closers)
 
 
 def test_session_param_predicate_covers_doc_label_notation():

@@ -1,0 +1,18 @@
+{
+  "_comment": "정답 봇 표기 → KB 카탈로그 표기 수동 교정 (RPA-298 Phase 0-1). build_gold_flows가 자동 사상보다 먼저 본다. 자동 사상의 근거·동률 후보는 정답흐름도/vocabulary.json에 남으므로 그걸 보고 여기에 적는다.",
+  "_rule": "⚠️ 에이전트 출력을 보고 채우지 말 것 — 답안지를 예측에 맞춰 고쳐 쓰는 순환이 된다. 근거는 (a) 카탈로그의 파라미터 구조와 (b) 정답 봇이 그 액션에 실제로 넣은 파라미터 값, 이 둘만 쓴다. why에 그 근거를 남긴다.",
+  "_format": "\"봇패키지/봇액션\": {\"kb\": [\"KB 패키지\", \"KB 액션\"], \"why\": \"근거\"}  |  [\"KB 패키지\", \"KB 액션\"]  |  null(사상 없음 강제)",
+
+  "Rest/restGet": {
+    "kb": ["REST Web Services", "Get method"],
+    "why": "자동 사상은 'Get file stream'과 유사도 동률(0.85)이라 사전순으로 잘못 골랐다. 정답 봇의 파라미터가 uriOption=\"text\"(응답을 텍스트로 받음)라 파일 스트림 액션이 아니다. Get file stream은 'Assign file to a variable'이 필수인 바이너리 내려받기 전용이다."
+  },
+  "File/copyFiles": {
+    "kb": ["File", "Copy Desktop file"],
+    "why": "KB가 Control Room 파일 복사와 데스크톱 파일 복사로 갈려 유사도가 0.333까지 떨어졌다. 정답 봇의 sourceFilePath가 둘 다 file:/// 로컬 경로이고, 봇 파라미터 isSize/isDate가 'Copy Desktop file'의 Size/Date 필터 파라미터와 1:1로 대응한다(Copy Control Room file에는 없다)."
+  },
+  "File/downloadTo": {
+    "kb": ["File", "Copy Control Room file"],
+    "why": "구 표기 downloadTo는 Control Room 저장소 파일을 봇 러너로 내려받는 액션이다. 정답 봇 4건 전부 source가 repository:/// 이고, 파라미터 3개(source/destination/overwrite)가 'Copy Control Room file'의 3개(Control Room file/Target file path/Overwrite existing file)와 정확히 대응한다."
+  }
+}

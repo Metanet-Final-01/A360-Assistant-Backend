@@ -223,6 +223,7 @@ def chat(
     model: str | None = None,
     session_id: uuid.UUID | None = None,
     response_format: dict | None = None,
+    meta: dict | None = None,
 ) -> str:
     """Chat Completions 호출 후 응답 텍스트를 반환하고 사용량을 기록한다.
 
@@ -235,6 +236,11 @@ def chat(
       - Structured Outputs: {"type": "json_schema", "json_schema": {...}}
       - 최소 JSON mode:     {"type": "json_object"}
     반환은 str 그대로이며, JSON 파싱·검증은 호출부(agent)가 한다.
+
+    meta: dict를 주면 `finish_reason`·`output_tokens`·`content_chars`를 채워 준다(제자리).
+    파싱이 깨졌을 때 **잘림인지 문법 오류인지**를 가르는 유일한 결정적 신호가 finish_reason인데,
+    반환값이 str뿐이라 호출부가 알 방법이 없었다 — 그래서 진단이 "JSON 구문 오류" 한 줄로
+    끝나고 원인을 정황으로만 추측하게 됐다. 반환 계약은 그대로 두고 out-param으로만 준다.
     """
     from openai import AuthenticationError, RateLimitError
 
@@ -286,7 +292,13 @@ def chat(
         latency_ms=latency_ms,
         session_id=session_id,
     )
-    return response.choices[0].message.content or ""
+    choice = response.choices[0]
+    content = choice.message.content or ""
+    if meta is not None:
+        meta["finish_reason"] = getattr(choice, "finish_reason", None)
+        meta["output_tokens"] = usage.completion_tokens if usage else None
+        meta["content_chars"] = len(content)
+    return content
 
 
 def record_usage(

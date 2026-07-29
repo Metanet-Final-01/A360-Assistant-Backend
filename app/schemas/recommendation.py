@@ -56,6 +56,11 @@ class RecommendedAction(BaseModel):
     order: int
     package: str = Field(description="예: 'Excel_MS'")
     action: str = Field(description="예: 'GoToCell'")
+    # ⚠️ Optional + default 고정. v1~v3가 같은 스키마로 자기 산출물을 검증하므로 필수화하면
+    # req_id를 안 내는 구버전 출력이 통째로 검증 거부된다(버전 비교 셀렉터가 깨진다).
+    req_id: str | None = Field(
+        None, description="이 액션이 담당하는 FlowSpec 요구 id — 누락 추적의 앵커"
+    )
     label: str | None = Field(None, description="사람용 라벨, 예: '셀로 이동'")
     parameters: list[ActionParameter] = Field(default_factory=list)
     children: list["RecommendedAction"] = Field(
@@ -134,6 +139,12 @@ class SpecRequirement(BaseModel):
     text: str
     priority: Literal["must", "should"] = "must"
     source: Literal["doc", "chat", "inferred"] = "chat"
+    # 이 요구가 업무 분석의 어느 단계에서 왔나. must 요구의 **입도를 고정**하는 앵커다
+    # (RPA-298): 같은 문서로 3회 실행했더니 분석은 매번 7단계로 같은데 must 요구가
+    # 5·7·5로 갈렸고, 그러면 must_coverage의 **분모**가 달라져 실행 간 점수 비교가
+    # 성립하지 않는다(심판 결정론 점수의 50%, 하드 게이트, flow_confidence가 전부 이 값을 탄다).
+    # should·접착제 요구는 단계에 매이지 않으므로 None이다.
+    step_id: str | None = Field(None, description="대응하는 업무 분석 단계 id (must 요구만)")
 
 
 class SpecUnknown(BaseModel):
@@ -179,11 +190,45 @@ class TriggerRecommendation(BaseModel):
     sources: list[RagSource] = Field(default_factory=list)
 
 
+class BotMeta(BaseModel):
+    """봇 저장 메타 — 사람이 Control Room에 옮길 때 **첫 화면**에서 요구받는 항목 (설계 제약 #15).
+
+    ⚠️ **골드셋으로 채점되지 않는다.** 정답 봇 JSON에 이 정보가 없기 때문이다 — 최상위 키가
+    `breakpoints/nodes/packages/triggers/variables/workItemTemplateName`뿐이고, 이름은
+    파일명에서 오고 폴더는 Control Room이 저장할 때 붙인다(실측). 공식 문서 코퍼스에도
+    "봇을 어떻게 이름 짓고 어디 두는가"를 다루는 페이지가 없다(검색 결과 릴리스 노트뿐).
+    그래서 이 필드들의 목적은 점수가 아니라 **비전문가가 옮길 때 빈칸 앞에서 멈추지 않는 것**이다.
+
+    각 필드의 출처를 의도적으로 갈랐다 — 근거 없는 값을 지어내지 않기 위해서다(설계 §5.2-G):
+      - `name`   — 에이전트가 업무 목표에서 **제안**한다. 사람이 바꿔도 그만인 값이라
+                   지어내도 손해가 없는 유일한 항목이다.
+      - `folder` — **자리표시자만.** 사용자 작업공간 경로는 업무 데이터지 동작 옵션이
+                   아니다(제약 #10). 추측하면 존재하지 않는 경로를 확신 있게 적게 된다.
+      - `target_os` / `run_mode` — **결정론.** LLM에 묻지 않는다. 각각 검수기의
+                   `target_os(flow)`(R16)와 트리거 유무(R15)가 이미 내리는 판단이라,
+                   여기서 따로 판단하면 경고와 출력이 어긋난다.
+    """
+
+    name: str | None = Field(None, description="제안 봇 이름 — 업무 목표에서 유도 (사람이 바꿔도 됨)")
+    folder: str | None = Field(
+        None, description="저장 폴더. 사용자 작업공간 경로라 에이전트는 자리표시자만 남긴다"
+    )
+    target_os: Literal["windows", "macos"] | None = Field(
+        None, description="대상 러너 OS — spec.assumptions에서 결정론으로 읽는다 (R16과 같은 출처)"
+    )
+    run_mode: Literal["attended", "unattended"] | None = Field(
+        None, description="트리거가 붙으면 unattended, 없으면 attended (R15와 같은 판단)"
+    )
+
+
 class Recommendation(BaseModel):
     """추천안 전체 — 이 JSON이 최종 내보내기 형식이자 골드셋 채점 대상이다."""
 
     schema_version: str = "1.0"
     steps: list[StepRecommendation]
+    bot_meta: BotMeta | None = Field(
+        None, description="봇 저장 메타(이름·폴더·OS·실행 방식) — 제약 #15. 채점 대상 아님"
+    )
     variables: list[BotVariable] = Field(default_factory=list)
     notes: str | None = Field(None, description="전제·주의사항, 예: 'Knox 메일은 Email 패키지 기준'")
     trigger: TriggerRecommendation | None = Field(

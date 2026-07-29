@@ -141,14 +141,29 @@ def refresh_index(client: OpenSearch) -> None:
     client.indices.refresh(index=config.OPENSEARCH_INDEX)
 
 
-def _keyword_search_body(query: str, size: int) -> dict:
+def _keyword_search_body(query: str, size: int, source_types: list[str] | None = None) -> dict:
+    """source_types를 주면 BM25 질의 자체에 타입 필터를 건다 (RPA-298 push-down).
+
+    filter 절에 두는 이유: `must`에 넣으면 term이 BM25 점수에 섞여 같은 타입 안에서의
+    상대 순위가 흔들린다. `filter`는 점수에 기여하지 않으므로, 걸러진 집합 안의 순위가
+    필터 없을 때의 그 타입 순위와 동일하게 유지된다.
+    source_type은 색인 매핑상 keyword라 terms 질의가 분석기를 타지 않는다.
+    """
+    match = {
+        "multi_match": {
+            "query": query,
+            "fields": ["title^2", "content"],
+            "type": "best_fields",
+        }
+    }
+    if not source_types:
+        return {"size": size, "query": match}
     return {
         "size": size,
         "query": {
-            "multi_match": {
-                "query": query,
-                "fields": ["title^2", "content"],
-                "type": "best_fields",
+            "bool": {
+                "must": [match],
+                "filter": [{"terms": {"source_type": list(source_types)}}],
             }
         },
     }
@@ -158,14 +173,28 @@ def _keyword_search_results(resp_json: dict) -> list[dict]:
     return [{**hit["_source"], "score": hit["_score"]} for hit in resp_json["hits"]["hits"]]
 
 
-@log_call("bm25_search", capture_args=("query", "size"), capture_result=lambda r: {"count": len(r)})
-def keyword_search(client: OpenSearch, query: str, size: int) -> list[dict]:
-    resp = client.search(index=config.OPENSEARCH_INDEX, body=_keyword_search_body(query, size))
+@log_call(
+    "bm25_search", capture_args=("query", "size", "source_types"),
+    capture_result=lambda r: {"count": len(r)},
+)
+def keyword_search(
+    client: OpenSearch, query: str, size: int, source_types: list[str] | None = None
+) -> list[dict]:
+    resp = client.search(
+        index=config.OPENSEARCH_INDEX, body=_keyword_search_body(query, size, source_types)
+    )
     return _keyword_search_results(resp)
 
 
-@log_call("bm25_search", capture_args=("query", "size"), capture_result=lambda r: {"count": len(r)})
-async def keyword_search_async(client: httpx.AsyncClient, query: str, size: int) -> list[dict]:
-    resp = await client.post(f"/{config.OPENSEARCH_INDEX}/_search", json=_keyword_search_body(query, size))
+@log_call(
+    "bm25_search", capture_args=("query", "size", "source_types"),
+    capture_result=lambda r: {"count": len(r)},
+)
+async def keyword_search_async(
+    client: httpx.AsyncClient, query: str, size: int, source_types: list[str] | None = None
+) -> list[dict]:
+    resp = await client.post(
+        f"/{config.OPENSEARCH_INDEX}/_search", json=_keyword_search_body(query, size, source_types)
+    )
     resp.raise_for_status()
     return _keyword_search_results(resp.json())

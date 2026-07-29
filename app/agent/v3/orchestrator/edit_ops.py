@@ -106,6 +106,14 @@ class EditOps(BaseModel):
 # id 부착 · 아웃라인 렌더 (프롬프트 입력용)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ⚠ 아래 세 순회는 **LLM이 방금 낸 흐름도** 위에서도 돈다(compose 값 단계). `_coerce_flow`는
+# actions 리스트의 비-dict 항목을 보정만 건너뛰고 **제거하지는 않으므로**, 문자열 하나가 섞여
+# 들어오면 `a[_ID]`·`a.pop`이 TypeError로 턴을 통째로 죽인다. 값이 비는 것과 턴이 죽는 것은
+# 무게가 다르다 — 이상한 항목은 건너뛰고 나머지를 살린다(검수가 그 자리를 지적한다).
+def _dicts(actions) -> list[dict]:
+    return [a for a in (actions or []) if isinstance(a, dict)]
+
+
 def annotate_ids(flow: dict) -> dict:
     """흐름도의 모든 액션에 pre-order로 임시 id(n1, n2…)를 제자리에 붙인다.
 
@@ -113,49 +121,64 @@ def annotate_ids(flow: dict) -> dict:
     """
     counter = [0]
 
-    def walk(actions: list[dict]) -> None:
-        for a in actions:
+    def walk(actions) -> None:
+        for a in _dicts(actions):
             counter[0] += 1
             a[_ID] = f"n{counter[0]}"
-            walk(a.get("children") or [])
+            walk(a.get("children"))
 
-    for step in flow.get("steps", []):
-        walk(step.get("actions") or [])
+    for step in _dicts(flow.get("steps")):
+        walk(step.get("actions"))
     return flow
 
 
 def strip_ids(flow: dict) -> None:
     """전이 id를 모두 제거한다(스키마에 남기지 않는다)."""
-    def walk(actions: list[dict]) -> None:
-        for a in actions:
+    def walk(actions) -> None:
+        for a in _dicts(actions):
             a.pop(_ID, None)
-            walk(a.get("children") or [])
+            walk(a.get("children"))
 
-    for step in flow.get("steps", []):
-        walk(step.get("actions") or [])
+    for step in _dicts(flow.get("steps")):
+        walk(step.get("actions"))
 
 
 def renumber(flow: dict) -> None:
     """형제 그룹마다 order를 1부터 다시 매긴다 — 연산 적용으로 뒤틀린 순서를 정규화."""
-    def walk(actions: list[dict]) -> None:
-        for i, a in enumerate(actions):
+    def walk(actions) -> None:
+        for i, a in enumerate(_dicts(actions)):
             a["order"] = i + 1
-            walk(a.get("children") or [])
+            walk(a.get("children"))
 
-    for step in flow.get("steps", []):
-        walk(step.get("actions") or [])
+    for step in _dicts(flow.get("steps")):
+        walk(step.get("actions"))
+
+
+_OUTLINE_PARAM_CAP = 8
 
 
 def render_outline(flow: dict) -> str:
-    """id·패키지/액션·라벨·파라미터를 담은 계층 아웃라인 — LLM이 대상 id를 고르는 근거."""
+    """id·패키지/액션·라벨·파라미터를 담은 계층 아웃라인 — LLM이 대상 id를 고르는 근거.
+
+    파라미터는 **값이 있는 것부터** 싣고, 비어 있는 것은 개수만 남긴다. 액션당 상한이 있어
+    앞에서부터 자르면 비어 있는 선택 파라미터가 자리를 다 먹고 정작 채워진 값이 잘려 나간다
+    — 실측(2026-07-29)에서 파라미터 24개짜리 메일 발송 액션의 앞 8칸 중 4칸이 `None`이었다.
+    L2 채점관과 surgeon이 보는 것은 이 아웃라인 하나뿐이라, 여기서 잘린 값은 없는 값이 된다.
+    """
     lines: list[str] = []
 
     def fmt_params(a: dict) -> str:
-        ps = a.get("parameters") or []
+        ps = [p for p in (a.get("parameters") or []) if isinstance(p, dict)]
         if not ps:
             return ""
-        parts = [f"{p.get('name')}={p.get('value')!r}" for p in ps[:8]]
-        return "  params: " + ", ".join(parts)
+        filled = [p for p in ps if p.get("value") not in (None, "", [], {})]
+        empty = len(ps) - len(filled)
+        parts = [f"{p.get('name')}={p.get('value')!r}" for p in filled[:_OUTLINE_PARAM_CAP]]
+        if len(filled) > _OUTLINE_PARAM_CAP:
+            parts.append(f"…{len(filled) - _OUTLINE_PARAM_CAP}개 더")
+        if empty:
+            parts.append(f"[미지정 {empty}개]")
+        return "  params: " + ", ".join(parts) if parts else ""
 
     def walk(actions: list[dict], depth: int) -> None:
         for a in actions:
@@ -425,15 +448,63 @@ _APPLIERS = {
 }
 
 
-def apply_edit_ops(flow: dict, ops: list[EditOp]) -> tuple[int, list[str]]:
+def _pair(spec: dict | None) -> tuple[str | None, str | None]:
+    spec = spec or {}
+    return spec.get("package"), spec.get("action")
+
+
+def _introduced_actions(flow: dict, op: EditOp) -> list[tuple[str | None, str | None]]:
+    """이 연산이 흐름도에 **새로 들여오는** (package, action) 목록.
+
+    move·remove는 이미 있는 노드를 옮길 뿐이라 비어 있다. update는 기존 노드의 정체를
+    바꾸므로, 한쪽 필드만 주면 대상 노드의 현재 값과 합쳐 판정한다.
+    """
+    if op.op == "insert":
+        return [_pair(op.action)] if op.action else []
+    if op.op == "wrap":
+        out = [_pair(op.container)] if op.container else []
+        return out + [_pair(s) for s in (op.siblings_after or [])]
+    if op.op == "update" and (op.package or op.action_name):
+        loc = _locate(flow, op.target)
+        if loc is None:
+            # 대상을 못 찾으면 판단을 보류한다 — 여기서 걸러 버리면 "카탈로그에 없는 액션
+            # Foo/None"이라는 엉뚱한 사유가 나가고, 진짜 원인(앞선 remove가 그 서브트리를
+            # 지웠다 등)이 묻힌다. applier가 정확한 사유를 내게 넘긴다.
+            return []
+        cur = loc[0][loc[1]]
+        return [(op.package or cur.get("package"), op.action_name or cur.get("action"))]
+    return []
+
+
+def apply_edit_ops(flow: dict, ops: list[EditOp], catalog=None) -> tuple[int, list[str]]:
     """연산들을 순서대로 flow에 제자리 적용한다. (적용_수, 실패_사유들)을 반환한다.
 
     한 연산이 실패해도 나머지는 계속 시도한다 — 실패 사유는 재요청 피드백에 쓴다.
     호출 측이 이후 strip_ids/renumber로 정규화한다.
+
+    `catalog`를 주면 **카탈로그에 없는 액션을 들여오는 연산은 적용하지 않는다.** 수리는
+    흐름도를 고치라고 부른 것이지 없는 액션을 심으라고 부른 게 아닌데, 그동안 검증 없이
+    받아 왔다. 실측(2026-07-29 09:17 턴): 한 라운드가
+    `Excel advanced/Excel advanced/Set border` · `Step/Step/Step` · `Email/Email/Connect`
+    (패키지명을 액션 칸에 겹쳐 적은 꼴)를 4건 중 4건 "적용"해 가중치가 0→410으로 뛰었다.
+    R1은 이런 액션을 blocker로 잡지만 그건 **심어진 다음**이고, 그 라운드는 어차피 회귀
+    가드에 폐기되므로 수리 예산만 태운다. 여기서 막으면 사유가 다음 라운드 피드백으로
+    돌아가 모델이 표기를 고칠 기회도 생긴다.
     """
     applied = 0
     errors: list[str] = []
     for i, op in enumerate(ops):
+        if catalog is not None:
+            unknown = [
+                f"{p}/{a}" for p, a in _introduced_actions(flow, op)
+                if not (p and a and catalog.get_action_schema(p, a) is not None)
+            ]
+            if unknown:
+                errors.append(
+                    f"op[{i}] {op.op}: 카탈로그에 없는 액션 {', '.join(unknown)} — 적용하지 않음. "
+                    "package와 action을 카탈로그 표기 그대로 나눠 적으세요"
+                )
+                continue
         try:
             ok = _APPLIERS[op.op](flow, op)
         except Exception as e:  # noqa: BLE001 — 한 연산 실패가 전체를 죽이지 않게

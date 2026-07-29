@@ -130,6 +130,62 @@ _ACTION_ALIASES: dict[tuple[str, str], frozenset] = {
 CONTAINER_PKG_KEYS = frozenset({"loop", "if", "step", "errorhandler", "triggerloop"})
 
 
+# ── 기능 등가 도메인 (RPA-298) ───────────────────────────────────────────────
+#
+# **왜 필요한가.** 엄격 채점은 `pkg_key`가 다르면 유사도를 0으로 하드 게이트한다. 그래서
+# 정답 봇이 `Email/emailConnect`로 한 일을 에이전트가 `Microsoft 365 Outlook/Connect`로
+# 하면 0점이다. 실측(케이스 01, v4): n_pred 19 · n_matched 3인데 불일치 16건 중 대부분이
+# 이런 **대안 경로**였다 — 틀린 게 아니라 다른 패키지로 같은 일을 했다.
+#
+# 우리가 정한 정답 기준은 "비전문가가 흐름도를 보고 Control Room에 손으로 넣으면
+# **돌아간다**"이다. 그 기준에서는 두 경로가 모두 성공이다. 엄격 채점은 그걸 못 잰다.
+#
+# **묶는 기준: 같은 자원을 조작하는가.** 사람이 손으로 옮길 때 서로 바꿔도 그 업무 단계가
+# 성립해야만 같은 도메인이다. 아래는 의도적으로 **묶지 않은** 것들이다:
+#   - `OCR` ↔ `Recorder` — 픽셀 판독과 UI 객체 제어는 결과가 다르다.
+#   - `Google Sheets` ↔ `Excel advanced` — 로컬 .xlsx 경로를 못 연다.
+#   - `Python Script` ↔ `VBScript` ↔ `DLL` — "외부 코드 실행"으로 묶으면 사람이 옮길 게
+#     완전히 달라진다.
+#   - `Rest` ↔ 전용 패키지(`Jira` 등) — REST는 **범용 전송**이라 도메인이 없다. 정답의
+#     호출 대상(URL)을 봐야 하므로 이 표로는 못 푼다(별도 항목).
+#
+# ⚠️ **이 표는 정답셋과 카탈로그만 보고 썼다 — 에이전트 출력은 보지 않았다.** 예측을 보고
+#    등가를 늘리면 답안지를 예측에 맞춰 고쳐 쓰는 것(순환)이 된다. 표를 늘릴 때도 같은
+#    규율을 지킬 것. 실제로 어떤 등가가 발동했는지는 `equiv_pairs`로 매 채점에 남으므로
+#    사후 감사가 가능하다.
+#
+# 여기 없는 패키지는 도메인이 곧 자기 자신이라 엄격 채점과 동작이 같다.
+_PKG_DOMAIN = {
+    # 메일 — 같은 사서함에 붙어 읽고 보낸다
+    "email": "mail", "gmail": "mail", "microsoft365outlook": "mail",
+    "microsoftoutlook(macos)": "mail", "applemail": "mail",
+    # 스프레드시트 — 같은 통합 문서를 연다 (클라우드 백엔드가 다른 Google Sheets·
+    # Apple Numbers는 제외: 로컬 경로를 못 연다)
+    "excel_adv": "spreadsheet", "excelbasic": "spreadsheet", "excel_365": "spreadsheet",
+    # 워드 문서
+    "word": "worddoc", "applepages": "worddoc",
+    # 프레젠테이션
+    "powerpoint": "slides", "applekeynote": "slides",
+    # 클라우드 파일 저장소 — 원격 폴더에 올리고 내린다
+    "googledrive": "cloudfiles", "microsoft365onedrive": "cloudfiles",
+    "box": "cloudfiles", "sharepoint": "cloudfiles",
+    # 브라우저 구동 — 같은 페이지를 열고 요소를 다룬다
+    "browser": "webauto", "webautomation": "webauto",
+    # 팀 채팅
+    "slack": "chat", "microsoftteams": "chat",
+    # 평문/구분자 텍스트 파일
+    "csvtxt": "textfiles", "textfile": "textfiles",
+    # 일정
+    "googlecalendar": "calendar", "microsoft365calendar": "calendar",
+    "applecalendar": "calendar",
+}
+
+
+def capability_domain(pkg_key: str) -> str:
+    """패키지 정준 키 → 기능 도메인. 표에 없으면 자기 자신(= 엄격 채점과 동일)."""
+    return _PKG_DOMAIN.get(pkg_key, pkg_key)
+
+
 def is_scaffold(package: str, action: str) -> bool:
     """순수 구획(Step)·주석(Comment) 여부 — 골드/예측 양쪽에서 액션 지표 제외 대상.
 
@@ -211,15 +267,30 @@ def similarity(a: frozenset, b: frozenset) -> float:
 class CanonAction:
     """비교 가능한 정규화 액션 — (패키지 정준 키, 의미 토큰 집합, 원 표기)."""
 
-    __slots__ = ("pkg_key", "tokens", "raw")
+    __slots__ = ("pkg_key", "domain", "tokens", "raw")
 
     def __init__(self, package: str, action: str):
         self.pkg_key = canon_package(package)
+        self.domain = capability_domain(self.pkg_key)
         self.tokens = action_tokens(self.pkg_key, package, action)
         self.raw = (package, action)
 
     def sim(self, other: "CanonAction") -> float:
+        """엄격 유사도 — 패키지가 다르면 0. 기존 기준선 채점이 이걸 쓴다."""
         if self.pkg_key != other.pkg_key:
+            return 0.0
+        return similarity(self.tokens, other.tokens)
+
+    def equiv_sim(self, other: "CanonAction") -> float:
+        """기능 등가 유사도 — 패키지 대신 **자원 도메인**으로 게이트한다 (RPA-298).
+
+        도메인이 표에 없는 패키지는 도메인 = 자기 자신이라 `sim`과 결과가 같다.
+        즉 이 축은 엄격 채점을 **완화만** 하며, 새로 맞는 쌍만 생긴다(단조).
+
+        토큰 유사도는 그대로 쓴다 — 도메인이 같아도 하는 일이 다르면
+        (`mail/Connect` vs `mail/Send`) 토큰이 안 겹쳐 여전히 안 맞는다.
+        """
+        if self.domain != other.domain:
             return 0.0
         return similarity(self.tokens, other.tokens)
 

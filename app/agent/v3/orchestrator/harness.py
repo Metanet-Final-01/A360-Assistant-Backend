@@ -1,4 +1,4 @@
-"""verify harness v3 — 검수(R1~R12) + surgeon(EditOps) 기반 refine 루프 + confidence 합성.
+"""verify harness v3 — 검수(R1~R18) + surgeon(EditOps) 기반 refine 루프 + confidence 합성.
 
 v2와의 차이:
 - 검사: run_flow_checks(L0 정적 + L1 데이터플로우·세션·골격) — R9~R12 포함, 세션
@@ -53,7 +53,7 @@ def _rule_rank(rule: str | None) -> int:
 
 
 def collect_violations(flow: dict, catalog: CatalogLookup) -> list[dict]:
-    """흐름도 전체를 R1~R12로 검사한다 (세션 레지스트리는 카탈로그에서 유도)."""
+    """흐름도 전체를 R1~R18로 검사한다 (세션 레지스트리는 카탈로그에서 유도)."""
     registry = derive_session_registry(catalog)
     return [v.as_dict() for v in run_flow_checks(flow, catalog, registry)]
 
@@ -130,12 +130,28 @@ def compute_flow_confidence(
 ) -> float:
     """흐름도 수준 신뢰도 — "이 봇이 업무를 하는가" (액션 수준과 다른 질문, 설계 §6).
 
-    must 커버리지 × blocker 감쇠 × 시뮬레이션 통과율 × 카드 완만 감쇠. 카드는 해소 시
+    must 커버리지 × 결함 감쇠 × 시뮬레이션 통과율 × 카드 완만 감쇠. 카드는 해소 시
     재산정으로 자동 회복된다. 신호가 없는 축은 중립(1.0)으로 둔다.
+
+    ## 결함 감쇠에 major를 넣는 이유
+
+    오래도록 blocker만 셌다. 그 사이 "실행되지 않는데 실행되는 척"하는 결함들이 major로
+    올라왔는데(빈 Step 스캐폴드, 조건 없는 Throw, 경쟁 패키지 혼용, 갈라진 Try 블록),
+    그것들이 **신뢰도에 0의 영향**이었다. 실측(2026-07-29): 세션을 열지 않고 닫고, 변수를
+    정의 전에 쓰고, Try가 둘로 갈린 흐름도가 major 4건을 달고도 blocker가 없다는 이유로
+    감쇠 1.00을 받았다 — 그 넷을 전부 고쳐도 숫자가 그대로였다.
+
+    수리 루프가 실제로 고치는 것이 대부분 major라, 이 항이 없으면 **수리 → 재검증 →
+    신뢰도 상승**이라는 되먹임 자체가 성립하지 않는다.
+
+    계수는 blocker(0.8)보다 확연히 완만하게 둔다 — major는 '실행 불가 확정'이 아니라
+    '실행이 의심스럽다'이고, 유도 기반 규칙(R19 경쟁 패키지 등)은 오탐 여지도 있다.
     """
     base = must_coverage if must_coverage is not None else 1.0
     blockers = sum(1 for f in findings if f.severity == "blocker")
+    majors = sum(1 for f in findings if f.severity == "major")
     base *= 0.8 ** blockers
+    base *= 0.95 ** majors
     if sim_pass_rate is not None:
         base *= max(0.3, sim_pass_rate)  # 경로 일부 실패가 0으로 폭락시키지 않게 하한
     base *= max(0.7, 1.0 - 0.05 * blocking_cards)
@@ -221,6 +237,44 @@ def _error_findings(findings: list[Finding]) -> list[Finding]:
     return [f for f in findings if f.severity != "warning"]
 
 
+def _op_line(op) -> str:
+    """EditOp 한 건을 한 줄로 — 관측 이벤트에 실을 요약."""
+    tail = op.target or (",".join(op.targets) if op.targets else "") or op.step_id or ""
+    where = f" {op.position or ''}{(' ' + op.anchor) if op.anchor else ''}".rstrip()
+    what = ""
+    if op.action:
+        what = f" {op.action.get('package')}/{op.action.get('action')}"
+    elif op.container:
+        what = f" {op.container.get('package')}/{op.container.get('action')}"
+    elif op.parameters:
+        what = f" ({len(op.parameters)}개 파라미터)"
+    return f"{op.op} {tail}{where}{what}".strip()
+
+
+def _emit_round(
+    round_no: int, ops: list, applied: int, errors: list[str],
+    verdict: str, before: int, after: int | None,
+) -> None:
+    """수리 라운드 한 번의 **제안·적용·채택**을 관측 이벤트로 남긴다.
+
+    이게 없으면 수리가 헛돌 때 원인을 못 가른다 — 연산을 못 냈는지, 냈는데 적용에 실패했는지
+    (id가 앞선 remove로 사라지는 등), 적용은 됐는데 가중합이 안 줄었는지는 처방이 전혀 다르다.
+    실측(2026-07-29): 게이트 2라운드 + refine 2라운드가 전부 폐기됐는데, 로그가 logger.info라
+    (루트 로거 WARNING) 어느 경우인지 토큰 수로도 역산할 수 없었다.
+    """
+    delta = f"{before}→{after}" if after is not None else str(before)
+    emit({
+        "event": "stage", "stage": "verifying",
+        "message": f"수리 라운드 {round_no} · 연산 {len(ops)}건 중 {applied}건 적용 — {verdict}",
+        "data": {
+            "round": round_no, "verdict": verdict, "applied": applied,
+            "weight": delta,
+            "ops": [_op_line(o) for o in ops][:12],
+            "errors": list(errors)[:6],
+        },
+    })
+
+
 def refine_flow(
     flow: dict,
     catalog: CatalogLookup,
@@ -228,6 +282,9 @@ def refine_flow(
     extra_findings: list[Finding] | None = None,
     max_rounds: int = MAX_REFINE_ROUNDS,
     purpose: str = "verify",
+    rules: frozenset[str] | None = None,
+    note: str = "",
+    caption: str | None = None,
 ) -> dict:
     """findings(정적 위반 + 심판/L2/L3 지시)를 surgeon EditOps 패치로 반복 교정한다.
 
@@ -236,16 +293,26 @@ def refine_flow(
     소진 / 연속 무개선 2회. extra_findings(심판 이식 지시 등)는 첫 라운드에만 싣는다 —
     적용 여부를 정적 재검증으로 판정할 수 없으므로 반복 강제하면 진동한다.
 
+    `rules`를 주면 그 규칙의 위반만 findings와 회귀 가드 축에 넣는다 — **값이 아직 없는
+    구조 단계**를 교정할 때 쓴다. 그때 R2~R5(파라미터)·R9~R11(변수 흐름)까지 세면 "필수
+    파라미터가 비었다"가 목록을 덮어 정작 구조 결함이 묻히고, 가중합도 값 단계가 채울
+    항목에 좌우된다. `note`는 그 호출에만 붙는 추가 지시(예: 파라미터를 채우지 마라).
+
     반환: {"flow", "violations", "repaired"}.
     """
+    def _scoped(fs: list[Finding]) -> list[Finding]:
+        return fs if rules is None else [f for f in fs if f.rule in rules]
+
     violations = collect_violations(flow, catalog)
     findings, _cards = from_violations_dicts(violations)
+    findings = _scoped(findings)
     round_findings = findings + list(extra_findings or [])
     if not _error_findings(round_findings):
         return {"flow": flow, "violations": violations, "repaired": False}
 
     emit({"event": "stage", "stage": "verifying",
-          "message": f"검수 위반 {len(violations)}건 · 개선 지시 {len(extra_findings or [])}건 교정 중",
+          "message": caption or
+          f"검수 위반 {len(violations)}건 · 개선 지시 {len(extra_findings or [])}건 교정 중",
           "data": {"violations": [
               {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
               for v in violations
@@ -272,6 +339,7 @@ def refine_flow(
             f"[스펙 발췌]\n{excerpts}"
             + (f"\n\n[수리용 액션 스펙 — 세션 여닫기·반복·분기·예외 처리를 삽입(insert/wrap)할 때 이 표기 사용]\n{repair_menu}"
                if repair_menu else "")
+            + (f"\n\n{note}" if note else "")
         )
         try:
             ops = chat_json(
@@ -281,17 +349,17 @@ def refine_flow(
             )
         except (ValueError, RuntimeError) as e:
             logger.warning("surgeon 라운드 %d 출력 실패 — 현재본 유지: %s", round_no, e)
+            _emit_round(round_no, [], 0, [], "출력 실패", current_weight, None)
             break
         if not ops.operations:  # 고칠 방법이 없다는 정직한 신호 — 가짜 성공 방지
-            logger.info("surgeon 라운드 %d: 연산 없음 — 종료", round_no)
+            _emit_round(round_no, [], 0, [], "연산 없음", current_weight, None)
             break
 
-        applied, errors = apply_edit_ops(work, ops.operations)
-        if errors:
-            logger.info("surgeon 라운드 %d: 연산 %d개 적용, 실패 %s", round_no, applied, errors)
+        applied, errors = apply_edit_ops(work, ops.operations, catalog=catalog)
         strip_ids(work)
         renumber(work)
         if applied == 0:
+            _emit_round(round_no, ops.operations, 0, errors, "적용 실패", current_weight, None)
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
@@ -299,10 +367,25 @@ def refine_flow(
 
         new_violations = collect_violations(work, catalog)
         new_findings, _ = from_violations_dicts(new_violations)
+        new_findings = _scoped(new_findings)
         new_weight = weight(_error_findings(new_findings))
-        # 회귀 가드 — 정적 가중합이 줄었을 때만 채택. 이식 지시가 걸려 있는 라운드는
-        # '정적 악화 없음(<=)'까지 허용한다 (이식은 정적 신호에 안 잡히는 개선이므로).
-        if new_weight < current_weight or (extras_pending and new_weight <= current_weight):
+        # 회귀 가드 — 정적 가중합이 줄었을 때만 채택.
+        #
+        # 이식 지시(L2/L3)가 걸린 라운드는 '정적 악화 없음(<=)'까지 허용해 왔다. 정적 신호에
+        # 안 잡히는 개선이 있을 수 있어서다. 그런데 그 관용이 **순서를 흔드는 라운드**에도
+        # 적용돼 사고가 났다 — 실측(2026-07-29): `move n2 before n7` 한 줄이 `Browser/Open`을
+        # 클릭 두 개 뒤로 옮겼는데 가중합이 50→50이라 채택됐다. 브라우저를 열기 전에 클릭하는
+        # 흐름도가 그렇게 나왔다. 정적 검수는 이걸 못 본다: `Recorder/Click`은 브라우저 세션을
+        # 파라미터로 받지 않아 R7의 의존 그래프에 안 걸린다.
+        #
+        # 그래서 관용은 **덧붙이기만 하는 라운드**에만 준다. 기존 액션을 옮기거나 지우는 연산이
+        # 섞였으면 정적 가중합이 **실제로 줄어야** 받는다 — 순서·구성을 건드리는 변경은
+        # 증거를 요구한다. 정당한 재배치(변수 정의 전 사용 해소 등)는 어차피 가중합을 줄인다.
+        disruptive = any(o.op in ("move", "remove") for o in ops.operations)
+        lenient = extras_pending and not disruptive
+        if new_weight < current_weight or (lenient and new_weight <= current_weight):
+            _emit_round(round_no, ops.operations, applied, errors, "채택",
+                        current_weight, new_weight)
             current, current_violations = work, new_violations
             current_weight = new_weight
             repaired = True
@@ -313,8 +396,8 @@ def refine_flow(
             if not _error_findings(round_findings):
                 break
         else:
-            logger.info("surgeon 라운드 %d: 가중합 %d→%d 개선 없음 — 폐기",
-                        round_no, current_weight, new_weight)
+            _emit_round(round_no, ops.operations, applied, errors, "개선 없어 폐기",
+                        current_weight, new_weight)
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break

@@ -22,11 +22,17 @@ class MatchResult:
     gold_unmatched: list[int] = field(default_factory=list)
 
 
-def greedy_match(pred: list[CanonAction], gold: list[CanonAction]) -> MatchResult:
+def greedy_match(
+    pred: list[CanonAction], gold: list[CanonAction], *, equivalent: bool = False
+) -> MatchResult:
+    """탐욕 1:1 매칭. equivalent=True면 패키지 대신 기능 도메인으로 게이트한다 (RPA-298).
+
+    등가 축은 엄격 축의 **완화**라 매칭이 줄어들 수 없다(같은 패키지면 도메인도 같다).
+    """
     cands = []
     for i, p in enumerate(pred):
         for j, g in enumerate(gold):
-            s = p.sim(g)
+            s = p.equiv_sim(g) if equivalent else p.sim(g)
             if s >= MATCH_THRESHOLD:
                 cands.append((s, -abs(i - j), i, j))
     cands.sort(reverse=True)  # 유사도 desc, 위치차 asc
@@ -100,6 +106,7 @@ def score_case(
     pred = [CanonAction(p, a) for p, a in pred_raw]
     gold = [CanonAction(p, a) for p, a in gold_raw]
     match = greedy_match(pred, gold)
+    equiv = greedy_match(pred, gold, equivalent=True)
 
     # KB 달성 가능성: 골드 액션마다 KB 전체에서 최고 유사도
     kb_by_pkg: dict[str, list[CanonAction]] = {}
@@ -139,6 +146,18 @@ def score_case(
     n_gold_core = sum(core_flags)
     n_match_core = sum(1 for j in matched_gold if core_flags[j])
 
+    # 등가 축에서 **패키지가 달라 새로 맞은** 쌍만 따로 남긴다 — 이게 대안 경로의 실물이다.
+    equiv_detail = []
+    for p in sorted(equiv.pairs, key=lambda x: x["gold_j"]):
+        pc, gc = pred[p["pred_i"]], gold[p["gold_j"]]
+        if pc.pkg_key == gc.pkg_key:
+            continue  # 엄격 축에서도 맞았을 쌍 — 새로 얻은 게 없다
+        equiv_detail.append({
+            "pred": list(pc.raw), "gold": list(gc.raw),
+            "domain": pc.domain, "sim": p["sim"],
+        })
+    n_cross = len(equiv_detail)
+
     return {
         "n_pred": len(pred),
         "n_gold": len(gold),
@@ -153,6 +172,16 @@ def score_case(
             "n_gold_core": n_gold_core,
             "n_gold_boilerplate": len(gold) - n_gold_core,
         },
+        # 기능 등가 — 다른 패키지로 같은 자원을 다룬 것도 성공으로 친다 (RPA-298).
+        # `n_cross`는 그중 **패키지가 실제로 달라서** 새로 맞은 건수다. 0이면 이 축이
+        # 엄격 축과 동일한 결과라는 뜻 = 이 케이스에 대안 경로가 없었다.
+        "action_equiv": {
+            **_prf(len(equiv.pairs), len(pred), len(gold)),
+            "n_matched": len(equiv.pairs),
+            "n_cross_package": n_cross,
+        },
+        # 어떤 등가가 발동했는지 — 도메인 표는 사람 판단이라 사후 감사가 가능해야 한다.
+        "equiv_pairs": equiv_detail,
         "package": package_prf(pred, gold),
         "order_score": order_score(match),
         "kb_gaps": gap_detail,
