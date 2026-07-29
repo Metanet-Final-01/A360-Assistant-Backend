@@ -122,6 +122,20 @@ def test_service_api_key_passes(monkeypatch):
     assert r.status_code == 200
 
 
+def test_service_api_key_does_not_open_auth_db_session(monkeypatch):
+    monkeypatch.setenv("OPS_API_KEY", "s3cr3t-ops-key")
+    app.dependency_overrides[get_obs_db] = lambda: FakeDB()
+
+    def fail_sessionlocal():
+        raise AssertionError("service-key admin auth must not open the app DB session")
+
+    monkeypatch.setattr(admin_api, "SessionLocal", fail_sessionlocal)
+    with TestClient(app) as c:
+        r = c.get("/api/admin/llm-usage/stats", headers={"X-API-Key": "s3cr3t-ops-key"})
+
+    assert r.status_code == 200
+
+
 def test_service_api_key_wrong_403(monkeypatch):
     """틀린 API 키는 403."""
     monkeypatch.setenv("OPS_API_KEY", "s3cr3t-ops-key")

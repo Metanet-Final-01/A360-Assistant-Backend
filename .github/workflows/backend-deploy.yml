@@ -83,11 +83,11 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_stack == true)
     runs-on: ubuntu-latest
-    environment: backend-deploy-${{ inputs.environment }}
+    environment: backend-deploy-${{ inputs.environment || 'dev' }}
     env:
-      STACK_NAME: a360-assistant-${{ inputs.environment }}-backend
+      STACK_NAME: a360-assistant-${{ inputs.environment || 'dev' }}-backend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -114,7 +114,6 @@ jobs:
             echo "GHCR_READ_TOKEN repository secret is missing." >&2
             exit 1
           fi
-
       - name: Validate OpenSearch host
         env:
           OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
@@ -211,13 +210,17 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ALERT_GLOBAL_DAILY_USD: ${{ vars.ALERT_GLOBAL_DAILY_USD }}
           ALERT_5XX_DAILY: ${{ vars.ALERT_5XX_DAILY }}
+          RAG_CACHE_ENABLED: ${{ inputs.rag_cache_enabled }}
+          START_BACKEND_CONTAINER: ${{ inputs.start_backend_container }}
         run: |
+          RAG_CACHE_ENABLED="${RAG_CACHE_ENABLED:-true}"
+          START_BACKEND_CONTAINER="${START_BACKEND_CONTAINER:-true}"
           aws cloudformation deploy \
             --stack-name "${STACK_NAME}" \
             --template-file infra/a360-backend-private.yml \
             --capabilities CAPABILITY_NAMED_IAM \
             --parameter-overrides \
-              Environment="${{ inputs.environment }}" \
+              Environment="${{ inputs.environment || 'dev' }}" \
               ContainerImage="${{ needs.build.outputs.image_uri }}" \
               FrontendOrigins="$FRONTEND_ORIGINS" \
               OpenAiApiKey="$OPENAI_API_KEY" \
@@ -236,6 +239,6 @@ jobs:
               InstanceType="${{ inputs.instance_type || 't3.medium' }}" \
               DesiredCapacity="${{ inputs.desired_capacity || '1' }}" \
               MaxCapacity="${{ inputs.max_capacity || '2' }}" \
-              RagCacheEnabled="${{ inputs.rag_cache_enabled }}" \
+              RagCacheEnabled="$RAG_CACHE_ENABLED" \
               RagCacheTtlSeconds="${{ env.RAG_CACHE_TTL_SECONDS }}" \
-              StartBackendContainer="${{ inputs.start_backend_container }}"
+              StartBackendContainer="$START_BACKEND_CONTAINER"
