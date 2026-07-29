@@ -677,12 +677,16 @@ def _apply_patches(
         if not isinstance(nid, str):
             unknown += 1
             continue
-        if allowed is not None and nid not in allowed:
-            out_of_scope += 1
-            continue
+        # **존재 여부를 먼저 본다.** 범위를 먼저 보면 지어낸 id가 전부 '남의 몫'으로 분류돼
+        # unknown이 영영 0이 된다(조각의 allowed는 흐름도에서 잘라 만든 거라 그 안의 id는
+        # 반드시 존재한다). 둘은 처방이 다르다 — 남의 몫은 프롬프트 범위 지시가 약한 것이고,
+        # 없는 id는 모델이 id를 지어낸 것이다.
         node = index.get(nid)
         if node is None:
             unknown += 1
+            continue
+        if allowed is not None and nid not in allowed:
+            out_of_scope += 1
             continue
         if nid in seen:
             continue          # 같은 id를 두 번 내면 첫 번째만 쓴다
@@ -1219,18 +1223,20 @@ async def _compose_candidate(
         if notes:
             outline["notes"] = " · ".join(filter(None, [outline.get("notes"), *notes]))
 
-        # 값이 하나도 안 붙은 액션 수 — 이 단계가 실제로 무엇을 놓쳤는지 재는 유일한 숫자다.
+        # 이 단계가 실제로 무엇을 놓쳤는지 재는 숫자 — **패치를 하나도 못 받은 노드 수**다.
+        # 필드가 비었는지로 세면 안 된다: 파라미터가 원래 없는 컨테이너(Try·Finally·Step)가
+        # 섞여 들어오고, produces만 받은 노드를 '안 채워졌다'로 잘못 센다. 조각의 allowed는
+        # 흐름도를 겹치지 않게 나눈 것이라 patched는 노드당 최대 1이고, total - patched가
+        # 정확히 '아무도 안 건드린 노드' 수다.
         # (실측 2026-07-29: 한 호출로 19개를 맡겼을 때 Catch·Finally 4개가 통째로 비었는데,
         #  그때는 이 숫자가 없어서 검수 R3가 5건 뜬 뒤에야 알았다.)
-        empty = sum(
-            1 for n in _node_index(outline).values() if not n.get("parameters")
-        )
-        if failed or unknown or strayed or empty:
+        unpatched = total - patched
+        if failed or unknown or strayed or unpatched:
             emit({"event": "stage", "stage": "recommending",
                   "message": f"값 채우기 결과 — 액션 {total}개 중 {patched}개 반영",
                   "data": {"candidate": cid, "actions": total, "patched": patched,
                            "unknown_ids": unknown, "out_of_scope_ids": strayed,
-                           "no_params": empty, "failed_chunks": failed,
+                           "unpatched": unpatched, "failed_chunks": failed,
                            "chunks": len(chunks), "variables_added": added}})
         if failed == len(chunks):
             logger.warning("후보 %s 값 채우기 전량 실패 — 구조만으로 진행", cid)

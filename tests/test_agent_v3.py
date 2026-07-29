@@ -1556,6 +1556,49 @@ def test_조각은_자기_몫만_쓴다():
     assert acts[1]["parameters"][0]["value"] == "제 몫"
 
 
+def test_지어낸_id와_남의_몫을_가른다():
+    """둘은 처방이 다르다 — 남의 몫은 프롬프트 범위 지시가 약한 것이고, 없는 id는 모델이
+    id를 지어낸 것이다. 범위를 먼저 보면 지어낸 id가 전부 '남의 몫'이 되어 unknown이
+    영영 0이 된다 (조각의 allowed는 흐름도에서 잘라 만든 거라 그 안의 id는 반드시 존재한다).
+    """
+    from app.agent.v3.recommend import graph as g
+
+    outline = {"steps": [{"actions": [_act("A", "x"), _act("B", "y")]}]}
+    g._edit_ops.annotate_ids(outline)
+
+    applied, unknown, strayed = g._apply_patches(
+        outline,
+        [{"id": "n1", "parameters": [_param("p", "v")]},   # 제 몫
+         {"id": "n2", "parameters": [_param("p", "v")]},   # 실재하지만 남의 몫
+         {"id": "n999", "parameters": [_param("p", "v")]}, # 아예 없는 id
+         {"id": 7, "parameters": []}],                     # id가 문자열도 아니다
+        allowed={"n1"},
+    )
+    assert (applied, unknown, strayed) == (1, 2, 1)
+
+
+def test_안_채워진_노드는_필드가_아니라_패치로_센다():
+    """파라미터가 원래 없는 컨테이너(Try·Step)를 '안 채워졌다'로 세면 안 되고, produces만
+    받은 노드도 채워진 것이다. 셀 것은 **아무도 안 건드린 노드**다.
+    """
+    from app.agent.v3.recommend import graph as g
+
+    outline = {"steps": [{"actions": [
+        _act("Error handler", "Try", children=[_act("Browser", "Open")]),
+        _act("Step", "Step"),
+    ]}]}
+    g._edit_ops.annotate_ids(outline)
+    total = g._count_actions(outline)
+
+    # Try는 파라미터 없이, Open은 produces만 받았다 — 둘 다 '패치를 받은' 노드다
+    patched, _u, _o = g._apply_patches(outline, [
+        {"id": "n1", "parameters": []},
+        {"id": "n2", "produces": [{"name": "sBrowser", "role": "session"}]},
+    ], allowed={"n1", "n2"})
+
+    assert (total, patched, total - patched) == (3, 2, 1)   # 남은 하나가 진짜 누락(n3)
+
+
 def test_전이_id는_흐름도에_남지_않는다():
     """id는 값 단계가 노드를 가리키는 임시 좌표다 — 스키마로 새 나가면 안 된다."""
     from app.agent.v3.recommend import graph as g
