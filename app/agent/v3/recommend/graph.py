@@ -656,18 +656,31 @@ def _node_index(flow: dict) -> dict[str, dict]:
     return index
 
 
-def _apply_patches(outline: dict, patches: list[dict]) -> tuple[int, int]:
-    """값 패치를 id로 제자리에 넣는다. (반영한 노드 수, 못 찾은 id 수).
+def _apply_patches(
+    outline: dict, patches: list[dict], allowed: set[str] | None = None
+) -> tuple[int, int, int]:
+    """값 패치를 id로 제자리에 넣는다. (반영, 없는 id, 범위 밖 id).
 
     구조는 손대지 않는다 — 패치에 구조가 없으니 손댈 수단 자체가 없다. 없는 id는 조용히
     버린다: 그 노드는 값이 빈 채로 남고, 필수 파라미터가 비면 R3가 질문 카드로 올린다.
+
+    `allowed`는 **이번 조각이 맡은 id**다. 조각들은 흐름도 전체를 맥락으로 보므로 남의 몫을
+    함께 내는 일이 생기는데, 그걸 받으면 나중에 병합된 조각이 앞 조각의 값을 덮어써 결과가
+    조각 순서에 좌우된다. 각자 제 몫만 쓰게 막고, 넘어온 개수는 세어 관측에 남긴다 —
+    프롬프트나 모델이 회귀하면 이 숫자가 먼저 움직인다.
     """
     index = _node_index(outline)
-    applied = unknown = 0
+    applied = unknown = out_of_scope = 0
     seen: set[str] = set()
     for p in patches:
         nid = p.get("id")
-        node = index.get(nid) if isinstance(nid, str) else None
+        if not isinstance(nid, str):
+            unknown += 1
+            continue
+        if allowed is not None and nid not in allowed:
+            out_of_scope += 1
+            continue
+        node = index.get(nid)
         if node is None:
             unknown += 1
             continue
@@ -678,7 +691,7 @@ def _apply_patches(outline: dict, patches: list[dict]) -> tuple[int, int]:
             if field in p:
                 node[field] = p[field]
         applied += 1
-    return applied, unknown
+    return applied, unknown, out_of_scope
 
 
 def _merge_variables(outline: dict, adds: list[dict]) -> int:
@@ -1166,8 +1179,10 @@ async def _compose_candidate(
         f"[요구사항 스펙]\n{_render_spec_block(spec)}\n\n"
         f"[액션별 파라미터 스펙]\n{_action_spec_block(outline, getattr(ctx, 'catalog', None))}"
     )
-    _edit_ops.annotate_ids(outline)
+    # annotate_ids도 try 안이다 — 순회 중간에 터지면 일부 노드에 id가 붙은 채로 남고,
+    # finally의 strip_ids가 그걸 걷어내야 스키마로 새 나가지 않는다.
     try:
+        _edit_ops.annotate_ids(outline)
         chunks = _fill_chunks(outline, config.COMPOSE_FILL_CHUNK)
         if not chunks:
             return outline
@@ -1187,15 +1202,16 @@ async def _compose_candidate(
             for i, ids in enumerate(chunks)
         ))
 
-        patched = unknown = failed = added = 0
+        patched = unknown = failed = added = strayed = 0
         notes: list[str] = []
-        for part in parts:
+        for ids, part in zip(chunks, parts):
             if part is None:
                 failed += 1
                 continue
-            a, u = _apply_patches(outline, part.get("nodes") or [])
+            a, u, o = _apply_patches(outline, part.get("nodes") or [], allowed=set(ids))
             patched += a
             unknown += u
+            strayed += o
             added += _merge_variables(outline, part.get("variables_add") or [])
             note = (part.get("notes") or "").strip()
             if note:
@@ -1209,13 +1225,13 @@ async def _compose_candidate(
         empty = sum(
             1 for n in _node_index(outline).values() if not n.get("parameters")
         )
-        if failed or unknown or empty:
+        if failed or unknown or strayed or empty:
             emit({"event": "stage", "stage": "recommending",
                   "message": f"값 채우기 결과 — 액션 {total}개 중 {patched}개 반영",
                   "data": {"candidate": cid, "actions": total, "patched": patched,
-                           "unknown_ids": unknown, "no_params": empty,
-                           "failed_chunks": failed, "chunks": len(chunks),
-                           "variables_added": added}})
+                           "unknown_ids": unknown, "out_of_scope_ids": strayed,
+                           "no_params": empty, "failed_chunks": failed,
+                           "chunks": len(chunks), "variables_added": added}})
         if failed == len(chunks):
             logger.warning("후보 %s 값 채우기 전량 실패 — 구조만으로 진행", cid)
         return outline   # 값이 비어도 구조는 살린다(R3가 질문 카드로 승격한다)

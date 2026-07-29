@@ -877,13 +877,13 @@ def test_값은_자리가_아니라_id로_붙는다():
     g._edit_ops.annotate_ids(outline)
 
     # 가운데(n2)를 빠뜨리고, 없는 id(n9)까지 낸 응답
-    applied, unknown = g._apply_patches(outline, [
+    applied, unknown, strayed = g._apply_patches(outline, [
         {"id": "n1", "parameters": [{"name": "URL", "value": "u"}]},
         {"id": "n3", "parameters": [{"name": "session", "value": "s"}]},
         {"id": "n9", "parameters": [{"name": "x", "value": "y"}]},
     ])
 
-    assert (applied, unknown) == (2, 1)
+    assert (applied, unknown, strayed) == (2, 1, 0)   # allowed 미지정이면 범위 검사를 안 한다
     acts = outline["steps"][0]["actions"]
     assert acts[0]["parameters"][0]["value"] == "u"
     assert not acts[1].get("parameters")                          # Click은 값 없이 남는다
@@ -1506,6 +1506,54 @@ def test_조각은_상한을_넘지_않는다():
         chunks = g._fill_chunks(deep, cap)
         assert all(len(c) <= cap for c in chunks), f"cap={cap}에서 조각이 상한을 넘었다"
         assert sum(len(c) for c in chunks) == total, f"cap={cap}에서 노드가 새거나 겹쳤다"
+
+
+def test_액션에_이상한_항목이_섞여도_턴이_죽지_않는다():
+    """`_coerce_flow`는 actions의 비-dict 항목을 보정만 건너뛰고 **제거하지 않는다.**
+    그 리스트 위에서 id 순회가 돌면 `a[_ID]`가 TypeError로 턴을 통째로 죽인다 —
+    값이 비는 것과 턴이 죽는 것은 무게가 다르다 (Qodo #460).
+    """
+    from app.agent.v3.orchestrator.edit_ops import annotate_ids, renumber, strip_ids
+
+    flow = {"steps": [
+        "이건 단계가 아니다",
+        {"actions": [_act("A", "x", children=["이건 액션이 아니다", _act("B", "y")]), None]},
+    ]}
+
+    annotate_ids(flow)      # 터지지 않는다
+    renumber(flow)
+    acts = flow["steps"][1]["actions"]
+    assert acts[0]["_id"] == "n1" and acts[0]["children"][1]["_id"] == "n2"
+
+    strip_ids(flow)
+    assert "_id" not in acts[0] and "_id" not in acts[0]["children"][1]
+
+
+def test_조각은_자기_몫만_쓴다():
+    """조각은 흐름도 전체를 맥락으로 보므로 남의 몫을 함께 낼 수 있다. 그걸 받으면 나중에
+    병합된 조각이 앞 조각의 값을 덮어써 결과가 조각 순서에 좌우된다 (Qodo #460).
+    """
+    from app.agent.v3.recommend import graph as g
+
+    outline = {"steps": [{"actions": [_act("A", "x"), _act("B", "y")]}]}
+    g._edit_ops.annotate_ids(outline)
+
+    # 조각 1(n1 담당)이 n2까지 함께 냈다 — n2는 조각 2의 몫이다
+    applied, unknown, strayed = g._apply_patches(
+        outline,
+        [{"id": "n1", "parameters": [_param("p", "내 몫")]},
+         {"id": "n2", "parameters": [_param("p", "남의 몫")]}],
+        allowed={"n1"},
+    )
+    assert (applied, unknown, strayed) == (1, 0, 1)
+
+    acts = outline["steps"][0]["actions"]
+    assert acts[0]["parameters"][0]["value"] == "내 몫"
+    assert not acts[1].get("parameters"), "범위 밖 패치가 적용됐다"
+
+    # 조각 2가 제 몫을 내면 그때 채워진다 — 순서가 결과를 가르지 않는다
+    g._apply_patches(outline, [{"id": "n2", "parameters": [_param("p", "제 몫")]}], allowed={"n2"})
+    assert acts[1]["parameters"][0]["value"] == "제 몫"
 
 
 def test_전이_id는_흐름도에_남지_않는다():

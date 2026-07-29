@@ -106,6 +106,14 @@ class EditOps(BaseModel):
 # id 부착 · 아웃라인 렌더 (프롬프트 입력용)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ⚠ 아래 세 순회는 **LLM이 방금 낸 흐름도** 위에서도 돈다(compose 값 단계). `_coerce_flow`는
+# actions 리스트의 비-dict 항목을 보정만 건너뛰고 **제거하지는 않으므로**, 문자열 하나가 섞여
+# 들어오면 `a[_ID]`·`a.pop`이 TypeError로 턴을 통째로 죽인다. 값이 비는 것과 턴이 죽는 것은
+# 무게가 다르다 — 이상한 항목은 건너뛰고 나머지를 살린다(검수가 그 자리를 지적한다).
+def _dicts(actions) -> list[dict]:
+    return [a for a in (actions or []) if isinstance(a, dict)]
+
+
 def annotate_ids(flow: dict) -> dict:
     """흐름도의 모든 액션에 pre-order로 임시 id(n1, n2…)를 제자리에 붙인다.
 
@@ -113,37 +121,37 @@ def annotate_ids(flow: dict) -> dict:
     """
     counter = [0]
 
-    def walk(actions: list[dict]) -> None:
-        for a in actions:
+    def walk(actions) -> None:
+        for a in _dicts(actions):
             counter[0] += 1
             a[_ID] = f"n{counter[0]}"
-            walk(a.get("children") or [])
+            walk(a.get("children"))
 
-    for step in flow.get("steps", []):
-        walk(step.get("actions") or [])
+    for step in _dicts(flow.get("steps")):
+        walk(step.get("actions"))
     return flow
 
 
 def strip_ids(flow: dict) -> None:
     """전이 id를 모두 제거한다(스키마에 남기지 않는다)."""
-    def walk(actions: list[dict]) -> None:
-        for a in actions:
+    def walk(actions) -> None:
+        for a in _dicts(actions):
             a.pop(_ID, None)
-            walk(a.get("children") or [])
+            walk(a.get("children"))
 
-    for step in flow.get("steps", []):
-        walk(step.get("actions") or [])
+    for step in _dicts(flow.get("steps")):
+        walk(step.get("actions"))
 
 
 def renumber(flow: dict) -> None:
     """형제 그룹마다 order를 1부터 다시 매긴다 — 연산 적용으로 뒤틀린 순서를 정규화."""
-    def walk(actions: list[dict]) -> None:
-        for i, a in enumerate(actions):
+    def walk(actions) -> None:
+        for i, a in enumerate(_dicts(actions)):
             a["order"] = i + 1
-            walk(a.get("children") or [])
+            walk(a.get("children"))
 
-    for step in flow.get("steps", []):
-        walk(step.get("actions") or [])
+    for step in _dicts(flow.get("steps")):
+        walk(step.get("actions"))
 
 
 _OUTLINE_PARAM_CAP = 8
