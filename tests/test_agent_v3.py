@@ -1735,21 +1735,19 @@ def test_계측_경로는_temperature를_고정한다():
         src = inspect.getsource(mod)
         assert "temperature=config.measure_temperature()" in src, f"{name}에 안 걸렸다"
 
-    # 빈 값이면 인자를 안 보낸다(공급자 기본값) — 되돌릴 통로
+    # 빈 값이면 인자를 안 보낸다(공급자 기본값) — 되돌릴 통로. 호출 시점 읽기라 setenv로 충분하다.
     import os
-    from importlib import reload
     old = os.environ.get("MEASURE_TEMPERATURE")
     try:
-        os.environ["MEASURE_TEMPERATURE"] = ""
-        assert reload(v3config).measure_temperature() is None
+        os.environ["MEASURE_TEMPERATURE"] = " "
+        assert v3config.measure_temperature() is None
         os.environ["MEASURE_TEMPERATURE"] = "이건 숫자가 아니다"
-        assert reload(v3config).measure_temperature() is None, "오타가 예외로 터지면 안 된다"
+        assert v3config.measure_temperature() is None, "오타가 예외로 터지면 안 된다"
     finally:
         if old is None:
             os.environ.pop("MEASURE_TEMPERATURE", None)
         else:
             os.environ["MEASURE_TEMPERATURE"] = old
-        reload(v3config)
 
 
 def test_chat이_temperature를_거부당하면_떼고_살린다(monkeypatch):
@@ -1781,6 +1779,70 @@ def test_chat이_temperature를_거부당하면_떼고_살린다(monkeypatch):
     assert out == "{}"
     assert len(calls) == 2, "한 번 거부당하고 한 번 더 시도해야 한다"
     assert "temperature" in calls[0] and "temperature" not in calls[1]
+
+
+def test_error_경로는_산출물_미생성으로_감점되지_않는다():
+    """실측(2026-07-30): 커버리지 1.0 · 검수 위반 0건인 흐름도가 신뢰도 0.67에 머물렀고,
+    병목이 시뮬레이션 0.667이었다. 실패 판정이 이것이었다:
+
+        "Try 초반 Browser/Open 이후 오류로 중단되어 … 전혀 수행되지 않음 — 기대 산출물 미생성"
+
+    `error` 경로는 **정의상** Try 중간에 멈춘 경로라 산출물이 나올 수 없다. 그걸 결함으로
+    세면 (a) Error handler를 갖춘 흐름도만 error 경로가 생기므로 **오류 처리를 한 쪽이
+    벌점을 받고**, (b) 경로 3개짜리 흐름도의 통과율 상한이 2/3에 고정돼 신뢰도 천장이
+    0.67이 된다. 판정 기준에서 그 적용을 명시적으로 막아야 한다.
+    """
+    from pathlib import Path
+
+    from app.agent.v3.verify import simulate
+
+    text = (Path(simulate.__file__).resolve().parent.parent
+            / "prompts" / "simulate_judge.md").read_text(encoding="utf-8")
+
+    assert "이 기준을 적용하지 마세요" in text, "목표달성 기준의 error 예외가 없다"
+    assert "정의상 산출물이 만들어지지 않습니다" in text
+    # 무엇을 물어야 하는지도 함께 적어야 한다 — 빼기만 하면 판정관이 기준을 잃는다
+    assert "안전하게 실패했나" in text
+    # 오류 처리를 갖춘 쪽이 벌점을 받는 역설을 명시한다(예시가 규칙을 이기는 전례가 많았다)
+    assert "낮은 점수를 받습니다" in text
+
+
+def test_error_트레이스는_Error_handler가_있을_때만_생긴다():
+    """error 경로가 감점이면 Error handler를 넣는 것 자체가 손해가 된다 — 그 구조를 확인한다."""
+    from app.agent.v3.verify.simulate import build_traces
+
+    plain = {"steps": [{"step_id": "s1", "actions": [_act("Browser", "Open")]}]}
+    assert set(build_traces(plain)) == {"happy", "alt"}
+
+    guarded = {"steps": [{"step_id": "s1", "actions": [
+        _act("Error handler", "Try", children=[_act("Browser", "Open")]),
+        _act("Error handler", "Catch", children=[_act("Error handler", "Throw")]),
+    ]}]}
+    assert set(build_traces(guarded)) == {"happy", "alt", "error"}
+
+
+def test_읽는_경로도_temperature를_고정한다():
+    """실측(2026-07-30): 같은 PDF(549,142바이트)를 세 번 올렸는데 parsed_content 해시가 세 번
+    다 달랐다. 정형화에만 temperature를 걸어도 그 **입력**이 흔들리면 소용이 없다 —
+    파싱·분석까지 같은 값을 써야 한다.
+    """
+    import inspect
+
+    from app.agent.v3 import analysis
+    from app.services.parser import vision
+
+    assert "temperature=core_config.measure_temperature()" in inspect.getsource(vision)
+    assert inspect.getsource(analysis).count("temperature=config.measure_temperature()") == 2, \
+        "analyze는 첫 호출과 교정 회차 둘 다 고정해야 한다"
+
+
+def test_measure_temperature는_한_곳에서만_해석된다():
+    """파서(app/services)와 에이전트(app/agent)가 각자 읽으면 두 기본값이 갈린다."""
+    from app.agent.v3 import config as v3config
+    from app.core import config as core_config
+
+    assert v3config.measure_temperature() == core_config.measure_temperature() == 0.0
+    assert "MEASURE_TEMPERATURE" in core_config.REGISTRY
 
 
 def test_L3_판정이_관측에_남는다():

@@ -150,16 +150,9 @@ COMPOSE_COVERAGE_RETRY = int(os.getenv("COMPOSE_COVERAGE_RETRY", "0"))
 # ⚠ 생성 경로(구조·값·수리)에는 걸지 않는다. 거기서 다양성은 자산이고, 구조 단계는 이미
 # 추론 강도로 다룬다. 재현성이 필요한 것은 **재는 쪽**이다.
 # 모델이 이 인자를 거부하면 `core.llm.chat`이 떼고 재시도한다(재현성은 잃고 호출은 산다).
-MEASURE_TEMPERATURE = os.getenv("MEASURE_TEMPERATURE", "0").strip()
-
-
+# 구현은 `app.core.config` 한 곳이다 — 파서(app/services)도 같은 값을 써야 하는데
+# 여기서 따로 읽으면 두 기본값이 갈린다. 에이전트 호출부는 이 이름으로 계속 쓴다.
 def measure_temperature() -> float | None:
-    """계측 경로에 걸 temperature. 빈 값·비수치면 None(= 인자를 안 보낸다).
+    from app.core.config import measure_temperature as _core
 
-    함수로 두는 이유: 모듈 전역을 읽으면 임포트 시점에 얼어 테스트가 monkeypatch로
-    갈아끼울 수 없다. 이 레포는 "선언은 중앙, 읽기는 접근 시점"이 계약이다.
-    """
-    try:
-        return float(MEASURE_TEMPERATURE) if MEASURE_TEMPERATURE else None
-    except ValueError:
-        return None
+    return _core()

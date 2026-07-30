@@ -19,6 +19,8 @@ from pydantic import ValidationError
 from app.core import llm
 from app.schemas import AnalysisResult
 
+from . import config
+
 logger = logging.getLogger(__name__)
 
 # JSON mode — 펜스·서론 없이 유효 JSON 객체를 강제. 스키마 검증은 Pydantic이 한다.
@@ -170,12 +172,16 @@ def _repair(messages: list[dict], bad_output: str, error: Exception) -> str:
             ),
         },
     ]
-    return llm.chat(repair_messages, purpose="analyze", response_format=_RESPONSE_FORMAT)
+    return llm.chat(repair_messages, purpose="analyze", response_format=_RESPONSE_FORMAT,
+                    temperature=config.measure_temperature())
 
 
 def _run_analysis(messages: list[dict]) -> AnalysisResult:
     """LLM 호출 → 파싱 → 1회 교정 → 정규화. analyze/analyze_text의 공통 경로."""
-    raw = llm.chat(messages, purpose="analyze", response_format=_RESPONSE_FORMAT)
+    # 분석은 정형화의 **입력**이다 — 여기가 흔들리면 아래 전부가 흔들린다
+    # (config.MEASURE_TEMPERATURE 주석의 실측 참고).
+    raw = llm.chat(messages, purpose="analyze", response_format=_RESPONSE_FORMAT,
+                   temperature=config.measure_temperature())
     try:
         result = _parse_analysis(raw)
     except (json.JSONDecodeError, ValidationError) as first_error:

@@ -128,9 +128,10 @@ REGISTRY: dict[str, EnvSpec] = {
     ),
     "MEASURE_TEMPERATURE": EnvSpec(
         "0", group="llm",
-        doc="계측 경로(요구사항 정형화·L2 커버리지·L3 시뮬레이션)에 거는 temperature. "
-            "빈 값=인자 미전송(공급자 기본 ≈1.0). 재는 도구는 같은 입력에 같은 답을 내야 한다 "
-            "— 같은 문서에서 요구가 6·8·10건으로 갈린 실측이 있다. 생성 경로엔 걸지 않는다",
+        doc="**읽고 재는** 경로에 거는 temperature — 문서 파싱·분석·요구사항 정형화·"
+            "L2 커버리지·L3 시뮬레이션. 빈 값=인자 미전송(공급자 기본 ≈1.0). 같은 입력에 "
+            "같은 답이 나와야 비교가 성립한다 — 같은 PDF가 매번 다르게 파싱된 실측이 있다. "
+            "생성 경로(구조·값·수리)엔 걸지 않는다",
     ),
     # 검색은 LLM 상한과 다른 자원에 부딪힌다 — rag/store/db.py 동기 풀 max_size=20과
     # Voyage 임베딩·리랭커 레이트 리밋이다(검색 1건 = 임베딩 1 + 리랭크 1, 실측 1.4초).
@@ -260,6 +261,22 @@ def get(key: str):
     if raw == "" and spec.cast is not str:
         return None  # 빈 기본값에 숫자 cast를 적용하면 ValueError — 부재는 None으로
     return spec.cast(raw)
+
+
+def measure_temperature() -> float | None:
+    """읽고 재는 경로에 걸 temperature. 빈 값·비수치면 None(= 인자를 안 보낸다).
+
+    `MEASURE_TEMPERATURE`는 str로 선언돼 있다(빈 값으로 "인자 미전송"을 표현해야 하는데
+    cast=float면 빈 값이 None이 되어 0과 구분되지 않는 경계가 생긴다). 그 해석을 여기
+    한 곳에 둔다 — 파서(app/services)와 에이전트(app/agent) 양쪽이 이 함수를 쓴다.
+    호출 시점에 읽으므로 테스트가 monkeypatch로 갈아끼울 수 있다.
+    """
+    raw = (os.getenv("MEASURE_TEMPERATURE") or REGISTRY["MEASURE_TEMPERATURE"].default or "").strip()
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        logger.warning("MEASURE_TEMPERATURE가 숫자가 아님(%r) — 인자를 보내지 않는다", raw)
+        return None
 
 
 def __getattr__(name: str):

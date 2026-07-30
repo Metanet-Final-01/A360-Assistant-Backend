@@ -20,6 +20,8 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from app.core import config as core_config
+
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """당신은 업무정의서 이미지의 충실한 전사기입니다.
@@ -174,6 +176,11 @@ def _extract_page(blobs: list[bytes], model: str | None, session_id: uuid.UUID |
         purpose="vision_parse",
         model=model,
         session_id=session_id,
+        # 파싱은 **읽는 일**이다 — 같은 문서는 같은 텍스트가 나와야 한다. 실측(2026-07-30):
+        # 같은 PDF(같은 파일명·549,142바이트)를 세 번 올렸는데 parsed_content 해시가 세 번
+        # 다 달랐다. 그 편차가 분석 → 정형화 → 조사 질의 → 구조로 그대로 흘러, 아래 단계에
+        # temperature를 고정해도 설정 A/B가 성립하지 않았다(요구 6·8·9·10건).
+        temperature=core_config.measure_temperature(),
     ))
 
 
