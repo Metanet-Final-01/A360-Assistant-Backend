@@ -1722,7 +1722,8 @@ def test_계측_경로는_temperature를_고정한다():
     요구사항이 6·8·10건으로 갈렸고 오류 정책은 있다가 없어졌다. 입력이 같고 이력도 없으니
     남는 변수는 샘플링뿐이었다 — temperature가 어디에도 설정돼 있지 않았다(공급자 기본 ≈1.0).
 
-    재는 도구(정형화·L2·L3)는 같은 입력에 같은 답을 내야 한다. 생성 경로는 건드리지 않는다.
+    재는 도구(분석·정형화·L2·L3)는 같은 입력에 같은 답을 내야 한다. 생성 경로는 건드리지
+    않는다. 비전 파싱도 걸지 않는다 — 효과가 없다는 실측이 있다(RPA-351, 아래 전용 테스트).
     """
     import inspect
 
@@ -1821,19 +1822,32 @@ def test_error_트레이스는_Error_handler가_있을_때만_생긴다():
     assert set(build_traces(guarded)) == {"happy", "alt", "error"}
 
 
-def test_읽는_경로도_temperature를_고정한다():
-    """실측(2026-07-30): 같은 PDF(549,142바이트)를 세 번 올렸는데 parsed_content 해시가 세 번
-    다 달랐다. 정형화에만 temperature를 걸어도 그 **입력**이 흔들리면 소용이 없다 —
-    파싱·분석까지 같은 값을 써야 한다.
-    """
+def test_분석도_temperature를_고정한다():
+    """분석은 정형화의 **입력**이다 — 여기가 흔들리면 아래 전부가 흔들린다."""
     import inspect
 
     from app.agent.v3 import analysis
-    from app.services.parser import vision
 
-    assert "temperature=core_config.measure_temperature()" in inspect.getsource(vision)
     assert inspect.getsource(analysis).count("temperature=config.measure_temperature()") == 2, \
         "analyze는 첫 호출과 교정 회차 둘 다 고정해야 한다"
+
+
+def test_비전_파싱에는_temperature를_걸지_않는다():
+    """처음에는 걸었다 — 스펙 편차의 근원이 문서 파싱이었고(같은 PDF의 parsed_content 해시가
+    매번 달랐다) 샘플링을 고정하면 잡힐 것이라 봤다.
+
+    그런데 RPA-351에서 재보니 **0을 걸고도 출력이 550 대 1,388로 갈렸다** — 가설이 반증됐다.
+    실제로 편차를 줄인 것은 프롬프트 쪽이었다. 효과가 없는 조치를 근거처럼 남겨 두면
+    다음 사람이 그걸 믿고 "파싱은 이미 고정됐다"고 읽는다. 그래서 뺐고, 다시 들어오지
+    않도록 잰다.
+    """
+    import inspect
+
+    from app.services.parser import vision
+
+    src = inspect.getsource(vision)
+    assert "measure_temperature" not in src, \
+        "비전 파싱에 temperature가 되돌아왔다 — 효과가 없다는 실측이 있다(RPA-351)"
 
 
 def test_measure_temperature는_한_곳에서만_해석된다():
