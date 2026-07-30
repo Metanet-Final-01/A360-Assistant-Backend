@@ -691,6 +691,103 @@ def test_structural_complement_adds_session_and_control_flow():
     assert all(FakeCatalog().get_action_schema(p, a) is not None for p, a in out)
 
 
+class _LoopCatalog:
+    """구조 보완 예산 규율을 재기 위한 최소 카탈로그 — 실제 카탈로그의 모양을 따른다."""
+
+    _ROWS = [
+        # 트리거 — 흐름도 steps에 안 들어간다(별도 노드가 추천한다)
+        {"package": "Trigger loop", "action": "Email Trigger",
+         "parameters": [{"name": "Host", "type": "TEXT", "required": True}]},
+        {"package": "Trigger loop", "action": "Handle", "parameters": []},
+        # 도메인 전용 이터레이터 — SESSION을 받아야 도는데 그 세션을 열 패키지가 메뉴에 없다
+        {"package": "Loop", "action": "For each mail in mail box",
+         "parameters": [{"name": "Session name", "type": "SESSION", "required": True}]},
+        {"package": "Loop", "action": "For each channel in a team",
+         "parameters": [{"name": "Session name", "type": "SESSION", "required": True}]},
+        # 범용 제어 흐름 — 어느 흐름도든 필요하다
+        {"package": "Loop", "action": "Loop action for data iteration",
+         "parameters": [{"name": "Iterator", "type": "SELECT", "required": True}]},
+        {"package": "Loop", "action": "For each row in table",
+         "parameters": [{"name": "Table variable", "type": "VARIABLE", "required": True}]},
+        {"package": "Loop", "action": "Break", "parameters": []},
+        {"package": "Error handler", "action": "Try", "parameters": []},
+        # 세션 여닫기 — 닫기는 SESSION을 **받는 것이 당연하다**
+        {"package": "Email", "action": "Connect", "return_type": "SESSION",
+         "parameters": [{"name": "Host", "type": "TEXT", "required": True}]},
+        {"package": "Email", "action": "Disconnect",
+         "parameters": [{"name": "Session name", "type": "SESSION", "required": True}]},
+    ]
+
+    def get_action_schema(self, package, action):
+        for r in self._ROWS:
+            if (r["package"], r["action"]) == (package, action):
+                return r
+        return None
+
+    def iter_action_schemas(self):
+        yield from self._ROWS
+
+
+def test_구조_보완은_트리거와_도메인_이터레이터를_싣지_않는다(caplog):
+    """실측(2026-07-30): 메뉴 12,304자 중 루프 변형 31개가 6,434자(52%)를 먹고 업무 액션은
+    18개 3,456자(28%)였다. 그 31개는 저장된 흐름도 80건에서 **한 번도 쓰이지 않았다.**
+
+    세션 여닫기(①)에는 관련성 필터가 있는데 구조 액션(②)에는 없어서, '전량 유도'가 그대로
+    메뉴가 된 것이 원인이다. 판별 기준은 카탈로그 데이터에서 나온다 — `SESSION`을 요구하는
+    이터레이터는 그 세션을 열 패키지가 메뉴에 없으면 애초에 쓸 수 없다.
+    """
+    import logging
+
+    from app.agent.v3.recommend.research import structural_complement
+
+    cat = _LoopCatalog()
+    with caplog.at_level(logging.INFO, logger="app.agent.v3.recommend.research"):
+        out = structural_complement(cat, {"Email"})
+
+    # 범용 제어 흐름은 남는다
+    assert ("Loop", "Loop action for data iteration") in out
+    assert ("Loop", "For each row in table") in out
+    assert ("Loop", "Break") in out
+    assert ("Error handler", "Try") in out
+    # 트리거는 통째로 빠진다 — 흐름도 steps에 들어가지 않는다
+    assert not any(pkg == "Trigger loop" for pkg, _ in out)
+    # SESSION을 요구하는 이터레이터도 빠진다 (검색 경로가 맡는다 — 그쪽은 상한이 없다)
+    assert ("Loop", "For each mail in mail box") not in out
+    assert ("Loop", "For each channel in a team") not in out
+    # ⚠ 세션 여닫기는 SESSION을 받아도 남는다 — 받는 것이 당연하고, 이미 메뉴 패키지로 좁혀졌다
+    assert ("Email", "Connect") in out
+    assert ("Email", "Disconnect") in out
+    # 조용히 자르지 않는다 — 무엇이 빠졌는지 로그에 남는다
+    assert "구조 보완에서 제외" in caplog.text
+    assert "For each mail in mail box" in caplog.text
+
+
+def test_세션_판정은_이상한_타입에_안_터진다():
+    """`type`이 문자열이 아닐 수 있다(Qodo) — 카탈로그 스펙은 DB의 JSON 메타데이터에서 오고
+    사용자 제공 카탈로그도 같은 통로다. 판정 하나를 못 해서 조사를 통째로 잃으면 안 된다.
+    """
+    from app.agent.v3.recommend.research import _needs_session, structural_complement
+
+    assert _needs_session({"parameters": [{"name": "s", "type": "SESSION"}]}) is True
+    assert _needs_session({"parameters": [{"name": "s", "type": " session "}]}) is True
+    assert _needs_session({"parameters": [{"name": "s", "type": "TEXT"}]}) is False
+    # 터지지 않고 'SESSION 아님'으로 본다
+    for 이상한 in (0, 1, 3.14, True, [], {}, ["SESSION"], None):
+        assert _needs_session({"parameters": [{"name": "s", "type": 이상한}]}) is False
+    assert _needs_session({"parameters": ["문자열 항목", None]}) is False
+    assert _needs_session({"parameters": None}) is False
+    assert _needs_session(None) is False
+
+    class _Broken(_LoopCatalog):
+        _ROWS = [
+            {"package": "Loop", "action": "Break", "parameters": [{"name": "x", "type": 7}]},
+            {"package": "Loop", "action": "Continue", "parameters": "리스트가 아니다"},
+        ]
+
+    # 조사 조립이 판정 실패로 죽지 않는다
+    assert {a for _p, a in structural_complement(_Broken(), set())} == {"Break", "Continue"}
+
+
 def test_앵커_리포트가_덮이지_않은_분석_단계를_짚는다(caplog):
     """must가 분석 단계에 안 붙으면 실행마다 입도가 달라져 must_coverage 분모가 흔들린다.
 
@@ -2798,6 +2895,47 @@ def test_interleave는_중복과_짧은_단위를_견딘다():
     out = _interleave([a, b, c], 10)
     assert [k for k, _ in out] == [("P", "x"), ("P", "공유")]
     assert _interleave([], 5) == []
+    assert _interleave([], None) == []
+
+
+def test_중복은_그_단위의_차례를_소모하지_않는다():
+    """실측(2026-07-30): 「국내 금 클릭」 단위가 후보 9개를 갖고도 **1개만** 올렸다.
+    1위 `Browser/Open`은 「웹 열기」가, 2위 `Mouse/Click`은 「증권 버튼 클릭」이 먼저
+    가져갔는데, 앞서 구현은 중복이면 `continue`로 그 깊이를 통째로 잃었다 — 다음 순위로
+    내려가지 않았다. 클릭 단위 둘이 합쳐 3개만 올린 원인이 이것이다.
+    """
+    from app.agent.v3.recommend.research import _interleave
+
+    웹열기 = [(("Browser", "Open"), 0.90)]
+    클릭A = [(("Mouse", "Click"), 0.49), (("Recorder", "Double click"), 0.42)]
+    # 상위 둘이 앞 단위와 겹친다 — 자기 몫은 3위 이후에 있다
+    클릭B = [(("Browser", "Open"), 0.48), (("Mouse", "Click"), 0.47),
+            (("Recorder", "Click"), 0.41), (("Recorder", "Right click"), 0.39)]
+
+    keys = [k for k, _ in _interleave([웹열기, 클릭A, 클릭B], None)]
+
+    # 클릭B가 겹침 때문에 굶지 않는다 — 첫 라운드에 이미 자기 몫을 하나 얻는다
+    assert keys[:3] == [("Browser", "Open"), ("Mouse", "Click"), ("Recorder", "Click")]
+    # 세 단위의 고유 후보 5개가 빠짐없이, 중복 없이 올라간다
+    assert len(keys) == len(set(keys)) == 5
+    assert set(keys) == {("Browser", "Open"), ("Mouse", "Click"),
+                         ("Recorder", "Double click"), ("Recorder", "Click"),
+                         ("Recorder", "Right click")}
+
+
+def test_검색_유래_메뉴에는_상한이_없다():
+    """18이라는 값에 근거가 없었다 — v3 최초의 14를 단위 상한 8→10에 맞춰 비례로 올린 것이다.
+    게다가 단위가 10개면 깊이 1까지만 완주해도 20칸이 필요해 **최대 단위 수에서는 깊이 1조차
+    못 채웠다.** 실측에서 그 절단이 요소 클릭 액션을 0.084점 차로 잘라냈다.
+    """
+    from app.agent.v3.recommend import research
+
+    assert research._MAX_MENU_ACTIONS is None, "검색 유래 메뉴에 상한이 돌아왔다"
+
+    # 상한이 없어도 무제한이 아니다 — 후보 풀 자체가 구조적으로 유한하다
+    units = [[((f"P{u}", f"a{i}"), 1.0 - i * 0.01) for i in range(5)] for u in range(10)]
+    assert len(research._interleave(units, None)) == 50    # 10단위 × 질의당 5
+    assert len(research._interleave(units, 18)) == 18      # 상한을 주면 지킨다(호출부는 안 준다)
 
 
 def test_잘림과_형식오류를_finish_reason으로_가른다():
