@@ -7,7 +7,9 @@ L2 시맨틱 채점·심판·시뮬레이션·질문 카드가 공유하는 단�
 읽히고, unknowns는 수집만 한다(생성 중 되묻기 금지 — 카드로 사후 전환).
 """
 
+import hashlib
 import logging
+import re
 from pathlib import Path
 
 from app.schemas.recommendation import FlowSpec
@@ -24,6 +26,21 @@ _PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "spec_builder.md
 MAX_DOC_CHARS = 12000
 DOC_OPEN = "<<<DOC>>>"
 DOC_CLOSE = "<<<END DOC>>>"
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def _spec_digest(texts) -> str:
+    """요구 문구 묶음 → 짧은 지문. 같은 스펙이면 같은 값, 문구가 하나만 달라도 다른 값.
+
+    공백만 정규화하고 **순서는 지킨다** — 요구 순서가 바뀐 것도 다른 스펙이다(조사 질의
+    순서와 구조 배치가 거기서 갈린다). 비교용이므로 12자면 충분하다.
+    """
+    joined = "␟".join(_WS_RE.sub(" ", (t or "").strip()) for t in texts if t)
+    if not joined:
+        return "-"
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
 
 
 def fence_document(document: str) -> str:
@@ -142,13 +159,30 @@ def build_flow_spec(state: dict, document: str | None) -> dict:
         seen.add(rid)
     log_anchor_report(d, analysis)
     # A/B를 사후 추적할 수 있게 어느 쪽으로 돌았는지 관측에 남긴다 — 스펙 품질 비교의 기준선이다.
-    musts = [r for r in d.get("requirements") or [] if r.get("priority", "must") == "must"]
+    #
+    # ## 요구 지문(fingerprint)을 함께 남기는 이유
+    #
+    # 같은 문서를 여러 턴 돌려 compose 설정(추론 강도 등)을 비교해 왔는데, **스펙이 턴마다
+    # 달랐다** — 실측(2026-07-29) 네 턴에서 총요구 8→9→10→11, must는 6→7→7→7, 오류 정책이
+    # "안전 종료"에서 "제한 재시도"로 바뀌었다. 재시도 요구가 붙은 턴은 구조가 26액션·6단
+    # 중첩으로 커졌는데, 그걸 한동안 추론 강도 탓으로 읽었다.
+    #
+    # compose 아래 층을 비교하려면 **입력이 같았는지** 먼저 확인해야 한다. 요구 문구를
+    # 정규화해 해시로 남기면 두 턴의 스펙이 같은지 쿼리 한 번으로 갈린다 — 문구 전체를
+    # 실으면 이벤트가 비대해지고 프론트가 읽는 페이로드가 아니라서 지문만 둔다.
+    reqs = [r for r in d.get("requirements") or [] if isinstance(r, dict)]
+    musts = [r for r in reqs if r.get("priority", "must") == "must"]
+    policy = [p for p in (d.get("error_policy") or []) if isinstance(p, str)]
     emit({
         "event": "stage", "stage": "analyzing",
-        "message": f"요구사항 {len(d.get('requirements') or [])}건 정형화"
+        "message": f"요구사항 {len(reqs)}건 정형화"
                    f" ({'분석 기반' if config.SPEC_USE_ANALYSIS else '원문만'})",
         "data": {"use_analysis": bool(config.SPEC_USE_ANALYSIS),
-                 "musts": len(musts), "총요구": len(d.get("requirements") or [])},
+                 "musts": len(musts), "총요구": len(reqs),
+                 "req_digest": _spec_digest(r.get("text") for r in reqs),
+                 "must_digest": _spec_digest(r.get("text") for r in musts),
+                 "error_policy_n": len(policy),
+                 "error_policy_digest": _spec_digest(policy)},
     })
     emit_spec_frame(d, f"요구사항 {len(d.get('requirements') or [])}건 정형화")
     return d
