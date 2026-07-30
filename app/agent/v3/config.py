@@ -137,3 +137,29 @@ COMPOSE_FILL_CHUNK = int(os.getenv("COMPOSE_FILL_CHUNK", "8"))
 # 재측정 절차: 같은 문서로 0/1 한 턴씩, 스펙 지문(req_digest)이 같은지 먼저 확인하고
 # `flow_confidence` · 게이트 커버리지 미달 건수 · R1 건수 · 턴 비용을 비교한다.
 COMPOSE_COVERAGE_RETRY = int(os.getenv("COMPOSE_COVERAGE_RETRY", "0"))
+
+# 계측 경로(요구사항 정형화 · L2 커버리지 · L3 시뮬레이션)에 거는 temperature.
+# 빈 값이면 인자를 안 보낸다(공급자 기본값 ≈ 1.0 — 기존 동작).
+#
+# 왜 0인가: 이 셋은 **재는 도구**다. 같은 입력에 다른 답을 내면 그 아래 모든 비교가 무효가 된다.
+# 실측(2026-07-30): 같은 업무정의서를 세션마다 새로 올려(=대화 이력 없음) 세 턴 돌렸는데
+# 요구사항이 6·8·10건으로 갈렸고 오류 정책은 있다가 없어졌다. 입력이 같고 이력도 없으니
+# 남는 변수는 샘플링뿐이었다. 그 편차가 조사 질의 수·구조 크기·커버리지 분모를 모두 흔들어
+# 추론 강도 A/B도, 커버리지 보완 토글 A/B도 성립하지 않았다 — 한동안 그 차이를 설정 탓으로 읽었다.
+#
+# ⚠ 생성 경로(구조·값·수리)에는 걸지 않는다. 거기서 다양성은 자산이고, 구조 단계는 이미
+# 추론 강도로 다룬다. 재현성이 필요한 것은 **재는 쪽**이다.
+# 모델이 이 인자를 거부하면 `core.llm.chat`이 떼고 재시도한다(재현성은 잃고 호출은 산다).
+MEASURE_TEMPERATURE = os.getenv("MEASURE_TEMPERATURE", "0").strip()
+
+
+def measure_temperature() -> float | None:
+    """계측 경로에 걸 temperature. 빈 값·비수치면 None(= 인자를 안 보낸다).
+
+    함수로 두는 이유: 모듈 전역을 읽으면 임포트 시점에 얼어 테스트가 monkeypatch로
+    갈아끼울 수 없다. 이 레포는 "선언은 중앙, 읽기는 접근 시점"이 계약이다.
+    """
+    try:
+        return float(MEASURE_TEMPERATURE) if MEASURE_TEMPERATURE else None
+    except ValueError:
+        return None

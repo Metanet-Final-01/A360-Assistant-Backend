@@ -224,6 +224,7 @@ def chat(
     session_id: uuid.UUID | None = None,
     response_format: dict | None = None,
     meta: dict | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Chat Completions 호출 후 응답 텍스트를 반환하고 사용량을 기록한다.
 
@@ -241,6 +242,13 @@ def chat(
     파싱이 깨졌을 때 **잘림인지 문법 오류인지**를 가르는 유일한 결정적 신호가 finish_reason인데,
     반환값이 str뿐이라 호출부가 알 방법이 없었다 — 그래서 진단이 "JSON 구문 오류" 한 줄로
     끝나고 원인을 정황으로만 추측하게 됐다. 반환 계약은 그대로 두고 out-param으로만 준다.
+
+    temperature: 미지정이면 create()에 전달하지 않는다(공급자 기본값 — 기존 동작 무변경).
+    **정형화·채점처럼 같은 입력이면 같은 답이 나와야 하는 호출은 0을 준다.** 실측
+    (2026-07-30): 같은 업무정의서를 세션마다 새로 올려(=대화 이력 없음) 세 턴 돌렸는데
+    요구사항이 6·8·10건으로 갈렸다. 표본이 같고 이력도 없으니 남는 변수는 샘플링뿐이었다.
+    그 편차가 아래 모든 단계(조사 질의·구조·커버리지 분모)를 흔들어 설정 A/B가 성립하지 않았다.
+    모델이 이 인자를 거부하면 떼고 한 번 더 시도한다 — 재현성을 잃어도 호출은 살린다.
     """
     from openai import AuthenticationError, RateLimitError
 
@@ -250,11 +258,22 @@ def chat(
     create_kwargs: dict = {"model": model, "messages": messages}
     if response_format is not None:
         create_kwargs["response_format"] = response_format
+    if temperature is not None:
+        create_kwargs["temperature"] = temperature
     from openai import APIConnectionError, APITimeoutError
 
     started = time.monotonic()
     try:
-        response = _get_client().chat.completions.create(**create_kwargs)
+        try:
+            response = _get_client().chat.completions.create(**create_kwargs)
+        except (AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError):
+            raise  # 인프라 실패는 아래 전용 핸들러가 맡는다 — temperature 탓으로 돌리지 않는다
+        except Exception:
+            if "temperature" not in create_kwargs:
+                raise
+            logger.warning("%s: 모델이 temperature를 거부 — 떼고 재시도(재현성 없음)", purpose)
+            create_kwargs.pop("temperature")
+            response = _get_client().chat.completions.create(**create_kwargs)
     except AuthenticationError as e:
         # 인증 실패도 관측에 남긴다 — 키 만료·교체 사고는 "어느 시점부터 전부 실패했나"를
         # 봐야 원인을 좁힐 수 있는데, 여기가 비어 있으면 그 흔적이 없다(#279 리뷰).

@@ -1549,12 +1549,12 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
             "must_coverage": must_cov, "sim_pass_rate": sim_rate,
             "blockers": n_blockers, "majors": n_majors, "warnings": n_warnings,
             "blocking_cards": blocking_cards, "cards": len(cards),
-            # 각 항의 곱 — 작은 값이 병목이다
+            # 각 항의 곱 — 작은 값이 병목이다. 카드는 **감점하지 않으므로 항이 없다**
+            # (입력 대기 ≠ 결함 — compute_flow_confidence 주석 참고). 개수만 위에 남긴다.
             "factors": {
                 "coverage": round(f_cov, 3),
                 "defects": round(0.8 ** n_blockers * 0.95 ** n_majors, 3),
                 "simulation": round(f_sim, 3),
-                "cards": round(max(0.7, 1.0 - 0.05 * blocking_cards), 3),
             },
             # 시뮬레이션 항이 하한에 붙었는지 — 붙었으면 실제 통과율은 더 낮다
             "sim_at_floor": sim_rate is not None and sim_rate < 0.3,

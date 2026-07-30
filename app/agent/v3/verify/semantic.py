@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from ..orchestrator import edit_ops
+from .. import config
 from ..orchestrator.jsonio import chat_json
 
 _PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "semantic_verify.md").read_text(encoding="utf-8")
@@ -83,6 +84,8 @@ def run_semantic_check(spec: dict, flow: dict, *, purpose: str = "verify_semanti
         ],
         purpose=purpose,
         model_cls=CoverageReport,
+        # 채점관이 흔들리면 must_coverage가 흔들리고, 그건 신뢰도에 **곱해지는** 축이다.
+        temperature=config.measure_temperature(),
     )
     # 앵커 무결성: LLM이 스펙에 없는 req_id를 만들어내면 버리고, 같은 req_id 중복은
     # 첫 판정만 남긴다 (환각·중복 채점 차단).

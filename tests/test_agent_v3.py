@@ -453,10 +453,27 @@ def test_flow_confidence_composition():
                                           "message": "", "severity": "error"}])
     full = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
     dinged = compute_flow_confidence(must_coverage=1.0, findings=findings, sim_pass_rate=1.0)
-    carded = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0, blocking_cards=2)
     assert full == 1.0
     assert dinged == pytest.approx(0.8)  # blocker 1건 → ×0.8
-    assert carded == pytest.approx(0.9)  # 카드 2장 → ×0.9
+
+
+def test_입력_대기는_감점하지_않는다():
+    """액션 수준은 처음부터 그랬다 — "카드가 붙은 R3는 결함이 아니라 입력 대기"(설계 관찰 3).
+    그런데 흐름도 수준에서는 같은 R3가 카드로 승격된 뒤 **다시** 감점했다.
+
+    실측(2026-07-30): 커버리지 1.0 · blocker 0 · major 0인 흐름도가 0.47을 받았고 감점의
+    절반이 blocking 카드 11건이었다. 카드 11건은 업무정의서에 값이 없다는 뜻이라, 흐름도
+    품질을 재는 숫자가 입력의 미확정 정보량에 좌우됐다. 게다가 6건 이상은 하한 0.7에
+    박혀 11건과 20건이 구분되지도 않았다.
+    """
+    clean = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
+    for n in (0, 1, 2, 6, 11, 40):
+        got = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0,
+                                      blocking_cards=n)
+        assert got == clean, f"카드 {n}장이 감점했다: {got} != {clean}"
+    # 카드가 있어도 결함·커버리지·시뮬레이션은 그대로 반영된다
+    assert compute_flow_confidence(must_coverage=0.5, findings=[], sim_pass_rate=1.0,
+                                   blocking_cards=11) == pytest.approx(0.5)
 
 
 def test_major도_신뢰도를_깎는다():
@@ -1700,6 +1717,89 @@ def test_안_채워진_노드는_필드가_아니라_패치로_센다():
     assert (total, patched, total - patched) == (3, 2, 1)   # 남은 하나가 진짜 누락(n3)
 
 
+def test_계측_경로는_temperature를_고정한다():
+    """실측(2026-07-30): 같은 업무정의서를 세션마다 새로 올려(=대화 이력 없음) 세 턴 돌렸는데
+    요구사항이 6·8·10건으로 갈렸고 오류 정책은 있다가 없어졌다. 입력이 같고 이력도 없으니
+    남는 변수는 샘플링뿐이었다 — temperature가 어디에도 설정돼 있지 않았다(공급자 기본 ≈1.0).
+
+    재는 도구(정형화·L2·L3)는 같은 입력에 같은 답을 내야 한다. 생성 경로는 건드리지 않는다.
+    """
+    import inspect
+
+    from app.agent.v3 import config as v3config
+    from app.agent.v3.orchestrator import spec as spec_mod
+    from app.agent.v3.verify import semantic, simulate
+
+    assert v3config.measure_temperature() == 0.0
+    for mod, name in ((spec_mod, "spec_builder"), (semantic, "L2"), (simulate, "L3")):
+        src = inspect.getsource(mod)
+        assert "temperature=config.measure_temperature()" in src, f"{name}에 안 걸렸다"
+
+    # 빈 값이면 인자를 안 보낸다(공급자 기본값) — 되돌릴 통로
+    import os
+    from importlib import reload
+    old = os.environ.get("MEASURE_TEMPERATURE")
+    try:
+        os.environ["MEASURE_TEMPERATURE"] = ""
+        assert reload(v3config).measure_temperature() is None
+        os.environ["MEASURE_TEMPERATURE"] = "이건 숫자가 아니다"
+        assert reload(v3config).measure_temperature() is None, "오타가 예외로 터지면 안 된다"
+    finally:
+        if old is None:
+            os.environ.pop("MEASURE_TEMPERATURE", None)
+        else:
+            os.environ["MEASURE_TEMPERATURE"] = old
+        reload(v3config)
+
+
+def test_chat이_temperature를_거부당하면_떼고_살린다(monkeypatch):
+    """모델이 이 인자를 안 받으면 호출 자체가 죽는다 — 재현성은 잃어도 턴은 살려야 한다."""
+    from app.core import llm
+
+    calls = []
+
+    class _Resp:
+        choices = [type("C", (), {"message": type("M", (), {"content": "{}"})(),
+                                  "finish_reason": "stop"})()]
+        usage = None
+
+    class _Client:
+        class chat:  # noqa: N801
+            class completions:  # noqa: N801
+                @staticmethod
+                def create(**kw):
+                    calls.append(dict(kw))
+                    if "temperature" in kw:
+                        raise ValueError("Unsupported parameter: 'temperature'")
+                    return _Resp()
+
+    monkeypatch.setattr(llm, "_get_client", lambda: _Client())
+    monkeypatch.setattr(llm, "_record_usage", lambda *a, **k: None, raising=False)
+
+    out = llm.chat([{"role": "user", "content": "x"}], purpose="t", temperature=0)
+
+    assert out == "{}"
+    assert len(calls) == 2, "한 번 거부당하고 한 번 더 시도해야 한다"
+    assert "temperature" in calls[0] and "temperature" not in calls[1]
+
+
+def test_L3_판정이_관측에_남는다():
+    """실측(2026-07-30): 시뮬레이션(0.667)이 신뢰도의 병목이었는데 **어느 경로가 왜 실패했는지**
+    볼 방법이 없었다. 통과율은 신뢰도에 곱해지는 축인데 근거가 저장되지 않았다.
+
+    특히 「판정관이 판정하지 않음(누락)」과 진짜 결함은 처방이 정반대라 갈려야 한다.
+    """
+    import inspect
+
+    from app.agent.v3.verify import simulate
+
+    src = inspect.getsource(simulate)
+    assert "def _emit_verdicts" in src
+    assert "_emit_verdicts(report" in src, "run_simulation이 호출해야 한다"
+    for key in ("pass_rate", "failed", "unjudged", "judged", "traces"):
+        assert f'"{key}"' in src, f"{key}가 안 남는다"
+
+
 def test_신뢰도는_분해해서_관측에_남는다():
     """실측(2026-07-30): 검수 위반 0건짜리 흐름도가 0.15를 받았는데 어느 항이 눌렀는지
     알 수 없었다 — scorecard는 partial 이벤트라 turn_events에 저장되지 않고, 남는 것은
@@ -1718,10 +1818,11 @@ def test_신뢰도는_분해해서_관측에_남는다():
                 "blocking_cards", "factors", "sim_at_floor"):
         assert f'"{key}"' in body, f"{key}가 관측에 안 남는다"
 
-    # 산식의 네 항이 모두 factors에 있어야 병목을 가릴 수 있다
-    factors_block = body[body.index('"factors": {'):]
-    for term in ("coverage", "defects", "simulation", "cards"):
-        assert f'"{term}"' in factors_block[:400], f"factors에 {term} 항이 없다"
+    # 산식의 세 항이 모두 factors에 있어야 병목을 가릴 수 있다 (카드는 감점 항이 아니다)
+    factors_block = body[body.index('"factors": {'):body.index('"factors": {') + 300]
+    for term in ("coverage", "defects", "simulation"):
+        assert f'"{term}"' in factors_block, f"factors에 {term} 항이 없다"
+    assert '"cards"' not in factors_block, "카드는 감점하지 않으므로 factors에 없어야 한다"
 
 
 def test_신뢰도_분해가_산식과_같은_계수를_쓴다():
@@ -1733,8 +1834,8 @@ def test_신뢰도_분해가_산식과_같은_계수를_쓴다():
          Finding(layer="L0", severity="major", rule="R7", message="y")]
     got = compute_flow_confidence(must_coverage=0.6, findings=f,
                                   sim_pass_rate=0.1, blocking_cards=3)
-    # factors가 곱한 값과 같아야 한다: 0.6 × (0.8^1 × 0.95^1) × max(0.3,0.1) × max(0.7,0.85)
-    expect = round(min(1.0, max(0.05, 0.6 * (0.8 * 0.95) * 0.3 * 0.85)), 2)
+    # factors가 곱한 값과 같아야 한다: 0.6 × (0.8^1 × 0.95^1) × max(0.3, 0.1). 카드 항은 없다.
+    expect = round(min(1.0, max(0.05, 0.6 * (0.8 * 0.95) * 0.3)), 2)
     assert got == expect, f"{got} != {expect}"
     # 시뮬레이션 하한이 실제로 걸린다 — sim_at_floor가 그걸 알려주는 이유
     assert compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=0.1,
