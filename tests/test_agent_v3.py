@@ -804,6 +804,107 @@ def test_게이트는_partial도_지적한다(monkeypatch):
     assert not any("시나리오" in f.message for f in cov_findings)
 
 
+def test_refine_루프도_줄어든_라운드를_반려한다(monkeypatch):
+    """게이트 수리에만 크기 가드가 있어 refine 루프는 뚫려 있었다 — 같은 판정을 써야 한다.
+
+    지우면 가중합이 **떨어진다**(정적 검수는 없는 것을 지적하지 못한다). 즉 이 루프에서
+    액션을 지우는 라운드는 회귀 가드를 오히려 쉽게 통과한다.
+    """
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.orchestrator.edit_ops import EditOp, EditOps
+
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Browser", "Open"), _act("Recorder", "Click"), _act("Excel_MS", "SetCell"),
+    ]}]}
+    monkeypatch.setattr(harness, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "emit_flow_frame", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "chat_json",
+                        lambda *a, **k: EditOps(operations=[EditOp(op="remove", target="n3")]))
+    # 지우면 위반이 사라지는 상황을 만든다 — 가중합만 보면 '개선'이다
+    calls = [0]
+
+    def _violations(f, _cat):
+        calls[0] += 1
+        n = harness_count(f)
+        return [] if n < 3 else [{"rule": "R7", "location": "actions[2]",
+                                  "step_id": "s1", "message": ""}]
+
+    def harness_count(f):
+        from app.agent.v3.orchestrator.edit_ops import count_actions
+        return count_actions(f)
+
+    monkeypatch.setattr(harness, "collect_violations", _violations)
+    out = harness.refine_flow(flow, FakeCatalog(), max_rounds=1)
+
+    assert not out["repaired"], "액션을 지워 위반을 없앤 라운드가 채택됐다"
+    assert len(out["flow"]["steps"][0]["actions"]) == 3
+
+
+def test_크기_판정은_한_함수를_공유한다():
+    """게이트 수리와 refine이 다른 함수를 쓰면 한쪽만 고쳐질 때 다른 쪽으로 같은 일이 성립한다."""
+    from app.agent.v3.orchestrator import edit_ops, harness
+    from app.agent.v3.recommend import graph as g
+
+    assert g._repair_regression is edit_ops.shrink_reason
+    assert harness.shrink_reason is edit_ops.shrink_reason
+    assert g._count_actions is edit_ops.count_actions
+
+
+def test_커버리지_미달은_수리가_아니라_조사로_간다():
+    """수리에게는 카탈로그가 없어 '액션이 없다'는 지적에 매번 빈 Step으로 답한다.
+    그 지적은 요구 문구를 검색어로 삼아 조사로 돌린다 (실측 2026-07-29).
+    """
+    from app.agent.v3.recommend import graph as g
+    from app.agent.v3.verify.findings import Finding
+
+    spec = {"requirements": [
+        {"req_id": "req-1", "text": "엑셀 표에 테두리 서식을 적용한다"},
+        {"req_id": "req-2", "text": "완성된 표를 메일로 발송한다"},
+        {"req_id": "req-3", "text": "이건 커버됐다"},
+    ]}
+    findings = [
+        Finding(layer="L2", severity="major", req_id="req-1", message="req-1 missing"),
+        Finding(layer="L2", severity="major", req_id="req-2", message="req-2 partial"),
+        Finding(layer="L2", severity="major", req_id="req-1", message="중복은 한 번만"),
+        Finding(layer="L2", severity="major", req_id=None, message="req_id 없는 조언은 제외"),
+    ]
+
+    gaps = g._coverage_gaps(findings, spec)
+
+    assert [x["req_id"] for x in gaps] == ["req-1", "req-2"]
+    # 검색어는 요구 문구 그대로 — 조사 단계도 한국어 질의를 보낸다
+    assert gaps[0]["query"] == "엑셀 표에 테두리 서식을 적용한다"
+    assert len(gaps) <= g._MAX_NEEDS
+
+    user = g._coverage_retry_user("기본 지시", gaps)
+    assert "엑셀 표에 테두리 서식을 적용한다" in user
+    assert "빈 `Step`으로 자리를 잡지 마라" in user, "때우는 길을 막아야 한다"
+    assert "R17" in user
+
+
+def test_커버리지_보완은_끌_수_있다():
+    """턴당 LLM 2회가 늘어나는 변경이라 같은 문서로 켜고/끄고 재야 한다."""
+    from app.agent.v3 import config as v3config
+    from app.core.config import REGISTRY
+
+    assert v3config.COMPOSE_COVERAGE_RETRY in (0, 1)
+    assert REGISTRY["COMPOSE_COVERAGE_RETRY"].cast is int
+
+
+def test_스펙_지문으로_턴_간_입력_동일성을_가른다():
+    """같은 문서인데 스펙이 턴마다 달랐다(실측 총요구 8→9→10→11, 오류정책 변경).
+    compose 설정을 비교하려면 **입력이 같았는지** 먼저 갈려야 한다.
+    """
+    from app.agent.v3.orchestrator.spec import _spec_digest
+
+    a = ["웹에서 표를 추출한다", "엑셀에 쓴다"]
+    assert _spec_digest(a) == _spec_digest(["웹에서  표를 추출한다 ", "엑셀에 쓴다"]), "공백은 무시"
+    assert _spec_digest(a) != _spec_digest(["엑셀에 쓴다", "웹에서 표를 추출한다"]), "순서도 스펙이다"
+    assert _spec_digest(a) != _spec_digest(a + ["메일로 보낸다"])
+    assert _spec_digest([]) == "-"
+    assert len(_spec_digest(a)) == 12
+
+
 def test_수리가_흐름을_줄이면_반려한다():
     """실측(2026-07-29 01:49): 게이트 수리가 「req-4~7 missing」을 받고 그 요구를 담당하던
     엑셀·메일 단계를 지우고 notes에 '자동화 불가'로 적어 냈다 — 액션 ~20개 → 4개.
