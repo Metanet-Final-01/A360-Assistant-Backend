@@ -136,9 +136,19 @@ _SESSION_PARAM_TYPE = "SESSION"
 
 
 def _needs_session(spec: dict | None) -> bool:
-    """이 액션이 SESSION 파라미터를 요구하는가 — 특정 시스템에 묶였다는 신호."""
+    """이 액션이 SESSION 파라미터를 요구하는가 — 특정 시스템에 묶였다는 신호.
+
+    `type`이 문자열이 아닐 수 있다(Qodo). 카탈로그 스펙은 DB의 JSON 메타데이터에서 오고
+    사용자 제공 카탈로그도 같은 통로를 쓰므로, 여기 들어오는 값은 사실상 외부 입력이다.
+    `(p.get("type") or "").upper()`는 truthy 비문자열(예: 숫자)에서 AttributeError로 터지고,
+    그러면 `structural_complement` 전체가 죽어 **Dossier 조립이 실패한다** — 판정 하나를
+    못 해서 조사를 통째로 잃는 것은 균형이 안 맞는다. 문자열이 아니면 SESSION이 아니다.
+    """
     for p in (spec or {}).get("parameters") or []:
-        if isinstance(p, dict) and (p.get("type") or "").upper() == _SESSION_PARAM_TYPE:
+        if not isinstance(p, dict):
+            continue
+        t = p.get("type")
+        if isinstance(t, str) and t.strip().upper() == _SESSION_PARAM_TYPE:
             return True
     return False
 

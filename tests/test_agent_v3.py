@@ -757,6 +757,32 @@ def test_구조_보완은_트리거와_도메인_이터레이터를_싣지_않�
     assert "For each mail in mail box" in caplog.text
 
 
+def test_세션_판정은_이상한_타입에_안_터진다():
+    """`type`이 문자열이 아닐 수 있다(Qodo) — 카탈로그 스펙은 DB의 JSON 메타데이터에서 오고
+    사용자 제공 카탈로그도 같은 통로다. 판정 하나를 못 해서 조사를 통째로 잃으면 안 된다.
+    """
+    from app.agent.v3.recommend.research import _needs_session, structural_complement
+
+    assert _needs_session({"parameters": [{"name": "s", "type": "SESSION"}]}) is True
+    assert _needs_session({"parameters": [{"name": "s", "type": " session "}]}) is True
+    assert _needs_session({"parameters": [{"name": "s", "type": "TEXT"}]}) is False
+    # 터지지 않고 'SESSION 아님'으로 본다
+    for 이상한 in (0, 1, 3.14, True, [], {}, ["SESSION"], None):
+        assert _needs_session({"parameters": [{"name": "s", "type": 이상한}]}) is False
+    assert _needs_session({"parameters": ["문자열 항목", None]}) is False
+    assert _needs_session({"parameters": None}) is False
+    assert _needs_session(None) is False
+
+    class _Broken(_LoopCatalog):
+        _ROWS = [
+            {"package": "Loop", "action": "Break", "parameters": [{"name": "x", "type": 7}]},
+            {"package": "Loop", "action": "Continue", "parameters": "리스트가 아니다"},
+        ]
+
+    # 조사 조립이 판정 실패로 죽지 않는다
+    assert {a for _p, a in structural_complement(_Broken(), set())} == {"Break", "Continue"}
+
+
 def test_앵커_리포트가_덮이지_않은_분석_단계를_짚는다(caplog):
     """must가 분석 단계에 안 붙으면 실행마다 입도가 달라져 must_coverage 분모가 흔들린다.
 
