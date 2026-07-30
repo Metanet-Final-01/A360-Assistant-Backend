@@ -172,14 +172,53 @@ def compute_flow_confidence(
     계수는 blocker(0.8)보다 확연히 완만하게 둔다 — major는 '실행 불가 확정'이 아니라
     '실행이 의심스럽다'이고, 유도 기반 규칙(R19 경쟁 패키지 등)은 오탐 여지도 있다.
     """
-    base = must_coverage if must_coverage is not None else 1.0
+    return confidence_breakdown(
+        must_coverage=must_coverage,
+        findings=findings,
+        sim_pass_rate=sim_pass_rate,
+        blocking_cards=blocking_cards,
+    )["confidence"]
+
+
+def confidence_breakdown(
+    *,
+    must_coverage: float | None,
+    findings: list[Finding],
+    sim_pass_rate: float | None,
+    blocking_cards: int = 0,
+) -> dict:
+    """`compute_flow_confidence`의 산식을 **항별로** 펼친 것. 산식은 여기 한 벌만 있다.
+
+    왜 함수로 두는가: 관측 이벤트가 항별 값을 실어야 한다("0.15를 올리려면 무엇을 고치나"에
+    답하려면 결과값만으로는 안 된다). 그런데 호출부가 계수를 **베껴 쓰면** 산식을 고칠 때
+    한쪽만 고쳐져 관측이 조용히 거짓말을 한다 — 실제로 카드 항을 산식에서 뺐을 때 이벤트
+    쪽 `factors.cards`가 남아 있었다(Qodo). 그래서 결과값과 분해를 같은 함수가 낸다.
+
+    `at_floor`/`at_ceiling`은 마지막 clamp가 걸렸는지다. 이게 없으면 사후에 항들을 곱해도
+    저장된 값이 안 나와 "산수가 안 맞는다"로 읽힌다 — 0.05 바닥에 눌린 흐름도가 그렇다.
+    """
+    cov = must_coverage if must_coverage is not None else 1.0
     blockers = sum(1 for f in findings if f.severity == "blocker")
     majors = sum(1 for f in findings if f.severity == "major")
-    base *= 0.8 ** blockers
-    base *= 0.95 ** majors
-    if sim_pass_rate is not None:
-        base *= max(0.3, sim_pass_rate)  # 경로 일부 실패가 0으로 폭락시키지 않게 하한
-    return round(min(1.0, max(0.05, base)), 2)
+    defects = 0.8 ** blockers * 0.95 ** majors
+    sim = max(0.3, sim_pass_rate) if sim_pass_rate is not None else 1.0  # 일부 실패가 0으로 폭락하지 않게
+    raw = cov * defects * sim
+    return {
+        "confidence": round(min(1.0, max(0.05, raw)), 2),
+        "factors": {
+            "coverage": round(cov, 3),
+            "defects": round(defects, 3),
+            "simulation": round(sim, 3),
+        },
+        "blockers": blockers,
+        "majors": majors,
+        "blocking_cards": blocking_cards,  # 감점하지 않는다 — 개수만 관측에 남긴다
+        "raw_product": round(raw, 4),
+        "at_floor": raw < 0.05,
+        "at_ceiling": raw > 1.0,
+        # 시뮬레이션 항이 하한에 붙었는지 — 붙었으면 실제 통과율은 이 값보다 낮다
+        "sim_at_floor": sim_pass_rate is not None and sim_pass_rate < 0.3,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

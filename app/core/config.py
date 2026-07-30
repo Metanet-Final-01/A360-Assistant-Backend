@@ -22,6 +22,7 @@
 """
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -131,7 +132,9 @@ REGISTRY: dict[str, EnvSpec] = {
         doc="**재는** 경로에 거는 temperature — 분석·요구사항 정형화·L2 커버리지·L3 시뮬레이션. "
             "빈 값=인자 미전송(공급자 기본 ≈1.0). 같은 입력에 같은 답이 나와야 비교가 성립한다. "
             "생성 경로(구조·값·수리)엔 걸지 않는다. ⚠ 비전 파싱에는 걸지 않는다 — 실측에서 "
-            "효과가 없었다(RPA-351)",
+            "효과가 없었다(RPA-351). "
+            "⚠ 읽기는 `config.measure_temperature()`로만 한다 — `get()`·`config.MEASURE_TEMPERATURE`는 "
+            "빈 값을 미설정으로 보고 기본값 '0'으로 갈아치워 '인자 미전송'을 표현할 수 없다",
     ),
     # 검색은 LLM 상한과 다른 자원에 부딪힌다 — rag/store/db.py 동기 풀 max_size=20과
     # Voyage 임베딩·리랭커 레이트 리밋이다(검색 1건 = 임베딩 1 + 리랭크 1, 실측 1.4초).
@@ -264,19 +267,39 @@ def get(key: str):
 
 
 def measure_temperature() -> float | None:
-    """읽고 재는 경로에 걸 temperature. 빈 값·비수치면 None(= 인자를 안 보낸다).
+    """읽고 재는 경로에 걸 temperature. 빈 값·비수치·비유한이면 None(= 인자를 안 보낸다).
 
     `MEASURE_TEMPERATURE`는 str로 선언돼 있다(빈 값으로 "인자 미전송"을 표현해야 하는데
     cast=float면 빈 값이 None이 되어 0과 구분되지 않는 경계가 생긴다). 그 해석을 여기
     한 곳에 둔다 — 파서(app/services)와 에이전트(app/agent) 양쪽이 이 함수를 쓴다.
     호출 시점에 읽으므로 테스트가 monkeypatch로 갈아끼울 수 있다.
+
+    ⚠ **`config.get()`으로는 이 값을 읽을 수 없다.** `get()`은 빈 값을 "미설정"으로 보고
+    선언된 기본값("0")으로 갈아치우므로 `MEASURE_TEMPERATURE=`가 0과 구분되지 않는다 —
+    즉 **되돌릴 통로가 사라진다.** 이 키만 그 정책의 예외이고, 그래서 전용 접근자를 둔다
+    (Qodo). 그 정책 자체는 옳다: 산재한 조용한 폴백이 RPA-160을 냈다.
+
+    `os.getenv`는 "미설정"(None)과 "설정했지만 빈 값"("")을 구분해 주는데, `or`로 묶으면
+    그 구분이 사라진다 — 빈 값이 falsy라 기본값 "0"으로 떨어져 `MEASURE_TEMPERATURE=`가
+    문서와 반대로 동작했다(공백 한 칸은 truthy라 None이 됐고, 진짜 빈 값은 0.0이 됐다).
     """
-    raw = (os.getenv("MEASURE_TEMPERATURE") or REGISTRY["MEASURE_TEMPERATURE"].default or "").strip()
+    raw = os.getenv("MEASURE_TEMPERATURE")
+    if raw is None:  # 미설정만 기본값으로 — 설정된 빈 값은 그 자체가 "인자 미전송" 지시다
+        raw = REGISTRY["MEASURE_TEMPERATURE"].default or ""
+    raw = raw.strip()
+    if not raw:
+        return None
     try:
-        return float(raw) if raw else None
+        temp = float(raw)
     except ValueError:
         logger.warning("MEASURE_TEMPERATURE가 숫자가 아님(%r) — 인자를 보내지 않는다", raw)
         return None
+    # nan·inf는 float()를 통과한다. 그대로 넘기면 요청 직렬화나 공급자 검증에서 터지는데,
+    # 하필 **재현성을 위해 값을 건 경로**만 죽는다 — 설정 오타 하나가 계측 전체를 멈춘다.
+    if not math.isfinite(temp):
+        logger.warning("MEASURE_TEMPERATURE가 유한한 수가 아님(%r) — 인자를 보내지 않는다", raw)
+        return None
+    return temp
 
 
 def __getattr__(name: str):

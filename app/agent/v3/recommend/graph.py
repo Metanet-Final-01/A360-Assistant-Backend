@@ -949,6 +949,29 @@ _count_actions = _edit_ops.count_actions
 _repair_regression = _edit_ops.shrink_reason
 
 
+def _vocab_regression(before: dict, after: dict, catalog) -> str | None:
+    """`after`가 `before`보다 **메뉴에 없는 액션을 더** 달고 있으면 그 이유를 한 줄로.
+
+    `_repair_regression`과 같은 자리에 서는 판정이다 — 저건 "구조가 줄었나", 이건 "어휘가
+    오염됐나"를 본다. 둘 다 **다시 만든 구조를 받아도 되나**에 답한다.
+
+    왜 필요한가: `_fix_vocab`은 교정이 반려되면 **입력을 그대로 돌려준다**(코드가 이름을
+    바꾸면 '비슷한 이름'으로 엉뚱한 액션이 들어가므로, 고치는 건 모델에게 맡긴 설계다).
+    그래서 통과 여부를 호출부가 다시 재야 한다 — 안 재면 교정 못 한 오염이 그대로 흘러
+    R1 blocker로 게이트에 들어간다(Qodo).
+
+    0건을 요구하지 않고 **늘지 않았는가**로 본다: 초안 자체가 교정 실패로 1건을 달고 있을
+    수 있고(실측 2026-07-30 턴 16fdafff: 표기 교정이 1건 → 1건으로 반려됐다), 그때 0건을
+    요구하면 커버리지가 오르는 회차까지 같이 버린다. `_fix_vocab`의 자체 반려 기준과 같은
+    방향이다.
+    """
+    n_before = len(_unknown_actions(before, catalog))
+    n_after = len(_unknown_actions(after, catalog))
+    if n_after > n_before:
+        return f"메뉴에 없는 액션 {n_before}건 → {n_after}건"
+    return None
+
+
 def _action_spec_block(flow: dict, catalog) -> str:
     """확정 흐름도에 쓰인 (package, action)의 파라미터 스펙만 모아 준다 — 채우기 단계 입력.
 
@@ -1224,11 +1247,19 @@ async def _compose_candidate(
                 retry.pop("plan", None)
                 # 재생성본도 닫힌 어휘를 통과해야 한다 — 안 거치면 오염이 R1 blocker로
                 # 게이트에 들어간다(실측 2026-07-30: 가중 910, 수리 4라운드를 태우고 300).
-                outline = await _fix_vocab(retry)
-                # 다시 잰다 — 안 재고 옛 findings로 수리를 부르면 이미 넣은 것을 또 넣으라고 시킨다.
-                issues, coverage_findings = await asyncio.to_thread(
-                    _gate_issues, outline, spec, ctx)
-                _emit_gate(cid, issues, outline)
+                candidate = await _fix_vocab(retry)
+                # 교정이 반려됐을 수 있다 — `_fix_vocab`은 그때 입력을 그대로 돌려준다.
+                # 이 회차는 **선택적 개선**이라 오염이 늘었으면 직전 구조가 낫다.
+                dirty = await asyncio.to_thread(
+                    _vocab_regression, outline, candidate, getattr(ctx, "catalog", None))
+                if dirty:
+                    logger.warning("후보 %s 커버리지 보완 반려 — %s. 직전 구조로 진행", cid, dirty)
+                else:
+                    outline = candidate
+                    # 다시 잰다 — 안 재고 옛 findings로 수리를 부르면 이미 넣은 것을 또 넣으라고 시킨다.
+                    issues, coverage_findings = await asyncio.to_thread(
+                        _gate_issues, outline, spec, ctx)
+                    _emit_gate(cid, issues, outline)
             else:
                 logger.warning("후보 %s 커버리지 보완 반려 — %s. 직전 구조로 진행", cid, lost)
 
@@ -1415,7 +1446,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     from ..orchestrator import cards as cards_mod
     from ..orchestrator.harness import (
         attach_confidence,
-        compute_flow_confidence,
+        confidence_breakdown,
         from_violations_dicts,
         refine_flow,
     )
@@ -1510,15 +1541,18 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     blocking_cards = sum(1 for c in cards if c.get("blocking") and not c.get("resolved"))
     flow["needs_input"] = cards
     flow["spec"] = spec
-    flow["flow_confidence"] = compute_flow_confidence(
+    # 결과값과 항별 분해를 **한 함수에서** 받는다 — 관측용으로 산식을 베껴 쓰면 산식을
+    # 고칠 때 한쪽만 고쳐져 이벤트가 조용히 거짓말을 한다(Qodo).
+    breakdown = confidence_breakdown(
         must_coverage=must_cov,
         findings=findings_final,
         sim_pass_rate=sim_rate,
         blocking_cards=blocking_cards,
     )
+    flow["flow_confidence"] = breakdown["confidence"]
 
-    n_blockers = sum(1 for f in findings_final if f.severity == "blocker")
-    n_majors = sum(1 for f in findings_final if f.severity == "major")
+    n_blockers = breakdown["blockers"]
+    n_majors = breakdown["majors"]
     n_warnings = sum(1 for f in findings_final if f.severity == "warning")
 
     emit_scorecard_frame({
@@ -1534,30 +1568,20 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     # turn_events에 저장되지 않는다 — 그래서 사후에는 결과값(flow_confidence) 하나만 남는다.
     #
     # 실측(2026-07-30): 검수 위반 0건짜리 흐름도가 0.15를 받았는데 **어느 항이 눌렀는지
-    # 알 수 없었다.** 산식의 항이 넷(커버리지·결함·시뮬레이션·카드)인데 결과만 보이니
-    # 신뢰도를 개선 지표로 쓸 수가 없다 — "0.15를 올리려면 무엇을 고치나"에 답이 안 나온다.
-    # 그래서 입력뿐 아니라 **각 항이 곱한 값**까지 남긴다(사후에 산수를 다시 하지 않게).
-    f_cov = must_cov if must_cov is not None else 1.0
-    f_sim = max(0.3, sim_rate) if sim_rate is not None else 1.0
+    # 알 수 없었다.** 결과만 보이니 신뢰도를 개선 지표로 쓸 수가 없다 — "0.15를 올리려면
+    # 무엇을 고치나"에 답이 안 나온다. 그래서 각 항이 곱한 값까지 남긴다(`factors` — 작은
+    # 값이 병목이다). 카드는 감점하지 않으므로 항이 없고 개수만 싣는다(입력 대기 ≠ 결함).
     emit({
         "event": "stage", "stage": "verifying",
         "message": f"신뢰도 {flow['flow_confidence']}",
         "data": {
             "candidate": winner.candidate_id,
-            "flow_confidence": flow["flow_confidence"],
             # 원시 입력
             "must_coverage": must_cov, "sim_pass_rate": sim_rate,
-            "blockers": n_blockers, "majors": n_majors, "warnings": n_warnings,
-            "blocking_cards": blocking_cards, "cards": len(cards),
-            # 각 항의 곱 — 작은 값이 병목이다. 카드는 **감점하지 않으므로 항이 없다**
-            # (입력 대기 ≠ 결함 — compute_flow_confidence 주석 참고). 개수만 위에 남긴다.
-            "factors": {
-                "coverage": round(f_cov, 3),
-                "defects": round(0.8 ** n_blockers * 0.95 ** n_majors, 3),
-                "simulation": round(f_sim, 3),
-            },
-            # 시뮬레이션 항이 하한에 붙었는지 — 붙었으면 실제 통과율은 더 낮다
-            "sim_at_floor": sim_rate is not None and sim_rate < 0.3,
+            "warnings": n_warnings, "cards": len(cards),
+            # 결과값 · 항별 분해 · clamp 여부 — 산식 소유자가 낸 것을 그대로 싣는다
+            "flow_confidence": breakdown["confidence"],
+            **{k: v for k, v in breakdown.items() if k != "confidence"},
         },
     })
 

@@ -469,13 +469,22 @@ def shrink_reason(before: dict, after: dict) -> str | None:
 
     수리는 **개선일 때만** 받는다 — 아니면 원본이 낫다. 게이트 수리와 refine 루프가 같은
     판정을 써야 한다(한쪽만 막으면 다른 쪽으로 같은 일이 성립한다).
+
+    ## 단계 수는 세지 않는다 (Qodo)
+
+    앞서 액션 수와 함께 **단계 수 감소**도 shrink로 봤다. 그게 `merge_step`을 **도달 불가**로
+    만들었다: R13(warning)은 "Try와 Catch가 다른 단계에 있다 → 이 단계를 앞 단계와
+    합치세요(merge_step)"라고 지시하고 surgeon 프롬프트도 그 수리를 시키는데, 성공하면
+    단계가 반드시 하나 줄어 refine 루프가 그 라운드를 통째로 반려했다. 검증기가 권고하는
+    수리를 가드가 막고 서 있던 셈이다.
+
+    잘림(긴 재출력에서 뒤쪽이 빠짐)은 **액션 수**로 잡힌다 — 단계가 사라지면 그 안의 액션도
+    같이 사라지므로 위 검사에 걸린다. 단계만 줄고 액션이 그대로인 경우는 정의상 **병합**이고,
+    그건 우리가 시킨 일이다.
     """
     before_n, after_n = count_actions(before), count_actions(after)
     if after_n < before_n:
         return f"액션 {before_n}개 → {after_n}개 ({before_n - after_n}개 소실)"
-    before_steps, after_steps = _dicts(before.get("steps")), _dicts(after.get("steps"))
-    if len(after_steps) < len(before_steps):
-        return f"단계 {len(before_steps)}개 → {len(after_steps)}개"
     return None
 
 
