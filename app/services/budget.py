@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 
 from app.core import localtime
+from app.services import config_bus
 from app import models
 
 logger = logging.getLogger(__name__)
@@ -210,15 +211,30 @@ def _store_if_current(gen_at_read: int, now: float, limits: dict[str, float | No
             logger.debug("예산 상한 캐시 저장 생략 — 조회 중 무효화됨")
 
 
-def bust_cache() -> None:
-    """캐시 무효화 — admin PUT 직후 호출해 다음 검사가 DB를 다시 읽게 한다(무중단 반영).
+def bust_cache_local() -> None:
+    """이 프로세스의 캐시만 비운다 — **전파하지 않는다**.
 
     세대를 올려, **지금 조회 중인 스레드가 옛 값을 캐시에 되돌려놓는 것**도 함께 막는다.
+
+    ⚠️ 전파 메시지를 **수신**했을 때 부르는 것이 이 함수다. 거기서 `bust_cache()`를 부르면
+    수신할 때마다 다시 발행해 무한 루프가 된다 (RPA-275).
     """
     global _cache, _generation
     with _lock:
         _cache = None
         _generation += 1
+
+
+def bust_cache() -> None:
+    """캐시 무효화 — admin PUT 직후 호출해 다음 검사가 DB를 다시 읽게 한다(무중단 반영).
+
+    로컬을 먼저 비우고, 다른 인스턴스에도 알린다 (RPA-275). 전파가 없으면 PUT을 받지 않은
+    인스턴스가 TTL(30초)까지 **옛 상한으로 요청을 통과시킨다** — 상한을 내린 직후가 특히 위험하다.
+
+    전파는 최적화이고 TTL이 최종 방어다 — publish가 실패해도 이 함수는 조용히 성공한다.
+    """
+    bust_cache_local()
+    config_bus.publish("budget")
 
 
 def _period_start(period: str, now: datetime) -> datetime:
