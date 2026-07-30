@@ -114,3 +114,16 @@ COMPOSE_REASONING = os.getenv("COMPOSE_REASONING", "low").strip().lower()
 #
 # 크게 두면(예: 999) 청크가 하나가 되어 분할 전 동작으로 돌아간다 — 탈출구다.
 COMPOSE_FILL_CHUNK = int(os.getenv("COMPOSE_FILL_CHUNK", "8"))
+
+# 구조 게이트가 "필수 요구가 빠졌다"고 판정했을 때 그 요구 문구로 카탈로그를 다시 조사해
+# 구조를 한 번 더 만들지 여부 (0이면 끈다).
+#
+# 왜 켜는가: 커버리지 미달은 **수리로 풀리지 않는다.** 수리(surgeon)에게는 카탈로그를
+# 검색할 수단이 없어서 아는 것 중에 고르게 되고, 그게 매번 빈 `Step`이다(실측 2026-07-29:
+# `insert Step/Step`으로 답한 라운드들이 가중치를 0→20·0→30으로 올렸다). 조사를 가진
+# 경로로 돌리면 실제로 액션을 찾아 넣는다 — 같은 세션에서 `Format cell`이 그렇게 들어왔다.
+#
+# ⚠ **켜면 턴당 LLM 2회가 늘어난다** (구조 재생성 1 + 커버리지 재측정 1, 실측 ~$0.03).
+# 대신 `must_coverage`는 신뢰도에 **곱해지는** 축이라 여기가 오르면 전체가 오른다.
+# 값을 하는지는 같은 문서로 켜고/끄고 한 턴씩 돌려 `flow_confidence`와 턴 비용을 비교한다.
+COMPOSE_COVERAGE_RETRY = int(os.getenv("COMPOSE_COVERAGE_RETRY", "1"))

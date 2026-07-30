@@ -121,6 +121,11 @@ REGISTRY: dict[str, EnvSpec] = {
         "8", cast=int, group="llm",
         doc="값 채우기 한 호출이 맡는 액션 수 상한. 크게 두면 한 호출로 합쳐진다(분할 해제)",
     ),
+    "COMPOSE_COVERAGE_RETRY": EnvSpec(
+        "1", cast=int, group="llm",
+        doc="게이트가 빠뜨린 필수 요구를 조사로 보완하고 구조를 재생성할지 (0=끔). "
+            "켜면 턴당 LLM 2회 증가(~$0.03), 대신 must_coverage가 오른다",
+    ),
     # 검색은 LLM 상한과 다른 자원에 부딪힌다 — rag/store/db.py 동기 풀 max_size=20과
     # Voyage 임베딩·리랭커 레이트 리밋이다(검색 1건 = 임베딩 1 + 리랭크 1, 실측 1.4초).
     # 단계별 검색 채널(RPA-298)이 팬아웃을 곱하므로 별도 상한을 둔다. 기본 8 = 커넥션
