@@ -1700,6 +1700,49 @@ def test_안_채워진_노드는_필드가_아니라_패치로_센다():
     assert (total, patched, total - patched) == (3, 2, 1)   # 남은 하나가 진짜 누락(n3)
 
 
+def test_신뢰도는_분해해서_관측에_남는다():
+    """실측(2026-07-30): 검수 위반 0건짜리 흐름도가 0.15를 받았는데 어느 항이 눌렀는지
+    알 수 없었다 — scorecard는 partial 이벤트라 turn_events에 저장되지 않고, 남는 것은
+    결과값 하나뿐이었다. 항이 넷인데 결과만 보이면 개선 지표로 쓸 수 없다.
+
+    각 항이 곱한 값을 남겨야 "무엇을 고치면 오르나"에 답이 나온다.
+    """
+    import inspect
+
+    from app.agent.v3.recommend import graph as g
+
+    body = inspect.getsource(g)
+    # partial(scorecard)이 아니라 stage 이벤트로도 남아야 저장된다
+    assert '"message": f"신뢰도 {flow[\'flow_confidence\']}"' in body
+    for key in ("must_coverage", "sim_pass_rate", "blockers", "majors",
+                "blocking_cards", "factors", "sim_at_floor"):
+        assert f'"{key}"' in body, f"{key}가 관측에 안 남는다"
+
+    # 산식의 네 항이 모두 factors에 있어야 병목을 가릴 수 있다
+    factors_block = body[body.index('"factors": {'):]
+    for term in ("coverage", "defects", "simulation", "cards"):
+        assert f'"{term}"' in factors_block[:400], f"factors에 {term} 항이 없다"
+
+
+def test_신뢰도_분해가_산식과_같은_계수를_쓴다():
+    """관측이 산식과 다른 계수를 쓰면 사후 분석이 조용히 틀린다 — 같은 값인지 잰다."""
+    from app.agent.v3.orchestrator.harness import compute_flow_confidence
+    from app.agent.v3.verify.findings import Finding
+
+    f = [Finding(layer="L0", severity="blocker", rule="R1", message="x"),
+         Finding(layer="L0", severity="major", rule="R7", message="y")]
+    got = compute_flow_confidence(must_coverage=0.6, findings=f,
+                                  sim_pass_rate=0.1, blocking_cards=3)
+    # factors가 곱한 값과 같아야 한다: 0.6 × (0.8^1 × 0.95^1) × max(0.3,0.1) × max(0.7,0.85)
+    expect = round(min(1.0, max(0.05, 0.6 * (0.8 * 0.95) * 0.3 * 0.85)), 2)
+    assert got == expect, f"{got} != {expect}"
+    # 시뮬레이션 하한이 실제로 걸린다 — sim_at_floor가 그걸 알려주는 이유
+    assert compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=0.1,
+                                   blocking_cards=0) == \
+           compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=0.3,
+                                   blocking_cards=0)
+
+
 def test_구조를_새로_만드는_자리는_모두_어휘_검증을_지난다():
     """실측(2026-07-30): 커버리지 보완 회차를 게이트 안에 넣었더니 그 재생성본이 2.5단
     어휘 검증을 건너뛰어, `package="Recorder/Click"` · `action="범용 레코더로 캡처한
