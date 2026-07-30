@@ -36,7 +36,7 @@ from .. import config
 from ..orchestrator import edit_ops as _edit_ops
 # 메뉴 렌더는 조사 단계와 **같은 함수**를 써야 한다 — 능력 요청으로 덧붙이는 액션이
 # 본 메뉴와 다른 모양이면 모델이 두 목록을 다른 것으로 읽는다.
-from .research import _menu_block
+from .research import _menu_block, menu_quote
 from .stream import (
     emit,
     emit_candidates_frame,
@@ -888,9 +888,10 @@ def _vocab_retry_user(outline: dict, unknown: list[tuple[str, str, str]], catalo
     # (RPA-354).
     lines = []
     for _loc, pkg, act in unknown[:12]:
-        lines.append(f'  package="{pkg}" action="{act}"')
+        lines.append(f"  package={menu_quote(pkg)} action={menu_quote(act)}")
         if hint := _notation_hint(pkg, act, catalog):
-            lines.append(f'      → 메뉴에 있는 표기: package="{pkg}" action="{hint}"')
+            lines.append(
+                f"      → 메뉴에 있는 표기: package={menu_quote(pkg)} action={menu_quote(hint)}")
     return (
         "아래 표기가 [액션 후보 메뉴]에 없다 — 이대로면 검수 R1(카탈로그에 없는 액션)로 "
         "전부 걸려 흐름도가 무너진다.\n"
@@ -1009,7 +1010,7 @@ def _action_spec_block(flow: dict, catalog) -> str:
             _menu_block(pkg, act, spec_dict) if spec_dict is not None
             # 형식을 메뉴와 같게 맞춘다 — 한 프롬프트 안에서 두 형식이 섞이면 어느 쪽이
             # 칸 이름인지 다시 모호해진다 (RPA-354).
-            else f'- package="{pkg}" action="{act}" '
+            else f"- package={menu_quote(pkg)} action={menu_quote(act)} "
                  "(스펙 없음 — 카탈로그에 없는 액션이다. 값을 지어내지 마라)"
         )
     return "\n".join(blocks) or "(액션 없음)"

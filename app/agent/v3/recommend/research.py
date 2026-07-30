@@ -12,6 +12,7 @@ v2는 compose ReAct가 후보 1개를 만들며 순차 도구 왕복(≤6)을 �
 """
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -312,6 +313,24 @@ def _discouraged_note(catalog, packages: set[str]) -> str:
     )
 
 
+def menu_quote(value) -> str:
+    """메뉴·재요청 문구에 실을 값 하나를 **따옴표째** 만든다 (RPA-354, Qodo 보안 반영).
+
+    `package="{pkg}"`처럼 f-string으로 직접 끼우면 값 안의 `"`·개행이 형식을 깨고, 깨진
+    자리로 임의 텍스트가 프롬프트에 들어간다. 인용부호로 경계를 확정한 것이 이번 변경의
+    핵심이라 그 경계가 값에 의해 뚫리면 안 된다.
+
+    ⚠ **가짜 위험이 아니다.** 타 솔루션 경로(RPA-285)는 사용자가 대화로 붙여넣은 카탈로그
+    표기를 **그대로 보존해서** `_whole_catalog_dossier` → 여기로 흘린다. 즉 이 값은 외부
+    입력이다. 붙여넣은 액션 이름에 `" (메뉴명: 무엇이든)`을 심으면 메뉴 한 줄이 두 줄이 된다.
+
+    `json.dumps`를 쓴다 — 따옴표·역슬래시·개행·제어문자를 한 번에 처리하는 표준 이스케이프이고,
+    `ensure_ascii=False`라 한글 라벨이 `\\uXXXX`로 뭉개지지 않는다. 반환값에 **따옴표가 이미
+    포함**되므로 호출부에서 다시 감싸지 않는다.
+    """
+    return json.dumps("" if value is None else str(value), ensure_ascii=False)
+
+
 def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
     """액션 후보 메뉴 한 줄 — **출력 계약의 칸 이름을 그대로 말한다** (RPA-354).
 
@@ -341,7 +360,8 @@ def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
     unknown = spec_dict.get("parameters") is None
     label = spec_dict.get("label") or act
     return (
-        f'- package="{pkg}" action="{act}" (메뉴명: {label})'
+        f"- package={menu_quote(pkg)} action={menu_quote(act)} "
+        f"(메뉴명: {menu_quote(label)})"
         + (f" → 리턴 {rt}" if rt else "")
         + f"\n    파라미터: {params or ('미상 — get_action_schema로 확인' if unknown else '없음')}"
     )
