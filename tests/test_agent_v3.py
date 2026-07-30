@@ -453,10 +453,27 @@ def test_flow_confidence_composition():
                                           "message": "", "severity": "error"}])
     full = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
     dinged = compute_flow_confidence(must_coverage=1.0, findings=findings, sim_pass_rate=1.0)
-    carded = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0, blocking_cards=2)
     assert full == 1.0
     assert dinged == pytest.approx(0.8)  # blocker 1건 → ×0.8
-    assert carded == pytest.approx(0.9)  # 카드 2장 → ×0.9
+
+
+def test_입력_대기는_감점하지_않는다():
+    """액션 수준은 처음부터 그랬다 — "카드가 붙은 R3는 결함이 아니라 입력 대기"(설계 관찰 3).
+    그런데 흐름도 수준에서는 같은 R3가 카드로 승격된 뒤 **다시** 감점했다.
+
+    실측(2026-07-30): 커버리지 1.0 · blocker 0 · major 0인 흐름도가 0.47을 받았고 감점의
+    절반이 blocking 카드 11건이었다. 카드 11건은 업무정의서에 값이 없다는 뜻이라, 흐름도
+    품질을 재는 숫자가 입력의 미확정 정보량에 좌우됐다. 게다가 6건 이상은 하한 0.7에
+    박혀 11건과 20건이 구분되지도 않았다.
+    """
+    clean = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
+    for n in (0, 1, 2, 6, 11, 40):
+        got = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0,
+                                      blocking_cards=n)
+        assert got == clean, f"카드 {n}장이 감점했다: {got} != {clean}"
+    # 카드가 있어도 결함·커버리지·시뮬레이션은 그대로 반영된다
+    assert compute_flow_confidence(must_coverage=0.5, findings=[], sim_pass_rate=1.0,
+                                   blocking_cards=11) == pytest.approx(0.5)
 
 
 def test_major도_신뢰도를_깎는다():
@@ -802,6 +819,161 @@ def test_게이트는_partial도_지적한다(monkeypatch):
     # 시나리오 공백은 요구가 아니라 조언 — 수리 입력에 넣으면 과생성을 부른다
     assert all(f.req_id for f in cov_findings)
     assert not any("시나리오" in f.message for f in cov_findings)
+
+
+def test_refine_루프도_줄어든_라운드를_반려한다(monkeypatch):
+    """게이트 수리에만 크기 가드가 있어 refine 루프는 뚫려 있었다 — 같은 판정을 써야 한다.
+
+    지우면 가중합이 **떨어진다**(정적 검수는 없는 것을 지적하지 못한다). 즉 이 루프에서
+    액션을 지우는 라운드는 회귀 가드를 오히려 쉽게 통과한다.
+    """
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.orchestrator.edit_ops import EditOp, EditOps
+
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Browser", "Open"), _act("Recorder", "Click"), _act("Excel_MS", "SetCell"),
+    ]}]}
+    monkeypatch.setattr(harness, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "emit_flow_frame", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "chat_json",
+                        lambda *a, **k: EditOps(operations=[EditOp(op="remove", target="n3")]))
+    # 지우면 위반이 사라지는 상황을 만든다 — 가중합만 보면 '개선'이다
+    calls = [0]
+
+    def _violations(f, _cat):
+        calls[0] += 1
+        n = harness_count(f)
+        return [] if n < 3 else [{"rule": "R7", "location": "actions[2]",
+                                  "step_id": "s1", "message": ""}]
+
+    def harness_count(f):
+        from app.agent.v3.orchestrator.edit_ops import count_actions
+        return count_actions(f)
+
+    monkeypatch.setattr(harness, "collect_violations", _violations)
+    out = harness.refine_flow(flow, FakeCatalog(), max_rounds=1)
+
+    assert not out["repaired"], "액션을 지워 위반을 없앤 라운드가 채택됐다"
+    assert len(out["flow"]["steps"][0]["actions"]) == 3
+
+
+def test_크기_판정은_한_함수를_공유한다():
+    """게이트 수리와 refine이 다른 함수를 쓰면 한쪽만 고쳐질 때 다른 쪽으로 같은 일이 성립한다."""
+    from app.agent.v3.orchestrator import edit_ops, harness
+    from app.agent.v3.recommend import graph as g
+
+    assert g._repair_regression is edit_ops.shrink_reason
+    assert harness.shrink_reason is edit_ops.shrink_reason
+    assert g._count_actions is edit_ops.count_actions
+
+
+def test_단계만_합친_수리는_반려되지_않는다():
+    """R13(warning)은 "Try와 Catch가 다른 단계에 있다 → 앞 단계와 합치세요(merge_step)"라고
+    지시하고 surgeon 프롬프트도 그 수리를 시킨다. 그런데 크기 가드가 **단계 수 감소**까지
+    shrink로 세는 동안, 그 수리는 성공하면 반드시 단계가 하나 줄어 라운드가 통째로
+    반려됐다 — 검증기가 권고하는 수리를 가드가 막고 서 있었다(Qodo).
+
+    잘림은 액션 수로 잡힌다. 단계만 줄고 액션이 그대로인 것은 정의상 병합이다.
+    """
+    from app.agent.v3.orchestrator import edit_ops
+
+    before = {"steps": [
+        {"step_id": "s1", "actions": [_act("Error handler", "Try")]},
+        {"step_id": "s2", "actions": [_act("Error handler", "Catch")]},
+    ]}
+    merged = {"steps": [{"step_id": "s1", "actions": [
+        _act("Error handler", "Try"), _act("Error handler", "Catch"),
+    ]}]}
+
+    assert edit_ops.count_actions(before) == edit_ops.count_actions(merged) == 2
+    assert edit_ops.shrink_reason(before, merged) is None, "권고받은 병합이 반려됐다"
+
+    # 액션이 사라지는 것은 여전히 반려다 — 가드의 원래 목적
+    lost = {"steps": [{"step_id": "s1", "actions": [_act("Error handler", "Try")]}]}
+    assert "액션" in (edit_ops.shrink_reason(before, lost) or "")
+
+
+def test_커버리지_보완이_오염을_들이면_직전_구조로_돌아간다():
+    """`_fix_vocab`은 교정이 반려되면 **입력을 그대로 돌려준다** — 코드가 이름을 바꾸면
+    '비슷한 이름'으로 엉뚱한 액션이 들어가므로 고치는 건 모델에게 맡긴 설계다. 그래서
+    통과 여부를 호출부가 다시 재야 한다(Qodo). 커버리지 보완은 **선택적 개선**이라
+    오염이 늘었으면 직전 구조가 낫다.
+
+    0건을 요구하지는 않는다 — 초안 자체가 교정 실패로 1건을 달고 있을 수 있고(실측
+    2026-07-30 턴 16fdafff: 표기 교정이 1건 → 1건으로 반려됐다), 0건을 요구하면 커버리지가
+    오르는 회차까지 같이 버린다.
+    """
+    from app.agent.v3.recommend import graph as g
+
+    catalog = FakeCatalog()
+    clean = {"steps": [{"actions": [_act("WebAutomation", "openpage")]}]}
+    dirty = {"steps": [{"actions": [
+        _act("WebAutomation", "openpage"),
+        _act("Recorder/Click", "범용 레코더로 캡처한 객체에"),   # 필드가 밀려 쓰인 꼴
+    ]}]}
+    assert catalog.get_action_schema("WebAutomation", "openpage"), "픽스처 전제 확인"
+
+    assert g._vocab_regression(clean, dirty, catalog), "오염이 늘었는데 채택됐다"
+    assert g._vocab_regression(clean, clean, catalog) is None
+    # 직전이 이미 1건이면, 같은 1건짜리 재생성본은 받는다 — 커버리지 개선을 잃지 않는다
+    assert g._vocab_regression(dirty, dirty, catalog) is None
+    assert g._vocab_regression(dirty, clean, catalog) is None, "깨끗해진 것을 반려했다"
+    assert g._vocab_regression(clean, dirty, None) is None, "카탈로그가 없으면 판정하지 않는다"
+
+
+def test_커버리지_미달은_수리가_아니라_조사로_간다():
+    """수리에게는 카탈로그가 없어 '액션이 없다'는 지적에 매번 빈 Step으로 답한다.
+    그 지적은 요구 문구를 검색어로 삼아 조사로 돌린다 (실측 2026-07-29).
+    """
+    from app.agent.v3.recommend import graph as g
+    from app.agent.v3.verify.findings import Finding
+
+    spec = {"requirements": [
+        {"req_id": "req-1", "text": "엑셀 표에 테두리 서식을 적용한다"},
+        {"req_id": "req-2", "text": "완성된 표를 메일로 발송한다"},
+        {"req_id": "req-3", "text": "이건 커버됐다"},
+    ]}
+    findings = [
+        Finding(layer="L2", severity="major", req_id="req-1", message="req-1 missing"),
+        Finding(layer="L2", severity="major", req_id="req-2", message="req-2 partial"),
+        Finding(layer="L2", severity="major", req_id="req-1", message="중복은 한 번만"),
+        Finding(layer="L2", severity="major", req_id=None, message="req_id 없는 조언은 제외"),
+    ]
+
+    gaps = g._coverage_gaps(findings, spec)
+
+    assert [x["req_id"] for x in gaps] == ["req-1", "req-2"]
+    # 검색어는 요구 문구 그대로 — 조사 단계도 한국어 질의를 보낸다
+    assert gaps[0]["query"] == "엑셀 표에 테두리 서식을 적용한다"
+    assert len(gaps) <= g._MAX_NEEDS
+
+    user = g._coverage_retry_user("기본 지시", gaps)
+    assert "엑셀 표에 테두리 서식을 적용한다" in user
+    assert "빈 `Step`으로 자리를 잡지 마라" in user, "때우는 길을 막아야 한다"
+    assert "R17" in user
+
+
+def test_커버리지_보완은_끌_수_있다():
+    """턴당 LLM 2회가 늘어나는 변경이라 같은 문서로 켜고/끄고 재야 한다."""
+    from app.agent.v3 import config as v3config
+    from app.core.config import REGISTRY
+
+    assert v3config.COMPOSE_COVERAGE_RETRY in (0, 1)
+    assert REGISTRY["COMPOSE_COVERAGE_RETRY"].cast is int
+
+
+def test_스펙_지문으로_턴_간_입력_동일성을_가른다():
+    """같은 문서인데 스펙이 턴마다 달랐다(실측 총요구 8→9→10→11, 오류정책 변경).
+    compose 설정을 비교하려면 **입력이 같았는지** 먼저 갈려야 한다.
+    """
+    from app.agent.v3.orchestrator.spec import _spec_digest
+
+    a = ["웹에서 표를 추출한다", "엑셀에 쓴다"]
+    assert _spec_digest(a) == _spec_digest(["웹에서  표를 추출한다 ", "엑셀에 쓴다"]), "공백은 무시"
+    assert _spec_digest(a) != _spec_digest(["엑셀에 쓴다", "웹에서 표를 추출한다"]), "순서도 스펙이다"
+    assert _spec_digest(a) != _spec_digest(a + ["메일로 보낸다"])
+    assert _spec_digest([]) == "-"
+    assert len(_spec_digest(a)) == 12
 
 
 def test_수리가_흐름을_줄이면_반려한다():
@@ -1597,6 +1769,375 @@ def test_안_채워진_노드는_필드가_아니라_패치로_센다():
     ], allowed={"n1", "n2"})
 
     assert (total, patched, total - patched) == (3, 2, 1)   # 남은 하나가 진짜 누락(n3)
+
+
+def test_계측_경로는_temperature를_고정한다():
+    """실측(2026-07-30): 같은 업무정의서를 세션마다 새로 올려(=대화 이력 없음) 세 턴 돌렸는데
+    요구사항이 6·8·10건으로 갈렸고 오류 정책은 있다가 없어졌다. 입력이 같고 이력도 없으니
+    남는 변수는 샘플링뿐이었다 — temperature가 어디에도 설정돼 있지 않았다(공급자 기본 ≈1.0).
+
+    재는 도구(분석·정형화·L2·L3)는 같은 입력에 같은 답을 내야 한다. 생성 경로는 건드리지
+    않는다. 비전 파싱도 걸지 않는다 — 효과가 없다는 실측이 있다(RPA-351, 아래 전용 테스트).
+    """
+    import inspect
+
+    from app.agent.v3 import config as v3config
+    from app.agent.v3.orchestrator import spec as spec_mod
+    from app.agent.v3.verify import semantic, simulate
+
+    assert v3config.measure_temperature() == 0.0
+    for mod, name in ((spec_mod, "spec_builder"), (semantic, "L2"), (simulate, "L3")):
+        src = inspect.getsource(mod)
+        assert "temperature=config.measure_temperature()" in src, f"{name}에 안 걸렸다"
+
+
+def test_temperature_되돌릴_통로는_실제로_열려_있다(monkeypatch):
+    """`MEASURE_TEMPERATURE=`는 "인자를 안 보낸다"는 지시다 — .env.example이 그렇게 적어 뒀고,
+    설정을 되돌릴 유일한 통로다.
+
+    그런데 `or`로 기본값을 묶으면 그 통로가 조용히 막힌다: 빈 문자열이 falsy라 기본값 "0"으로
+    떨어져 **문서와 반대로** 0이 걸렸다. 공백 한 칸은 truthy라 None이 됐으니, 같은 "빈 값"이
+    한 칸 차이로 갈렸다(Qodo). 미설정과 설정된 빈 값은 다른 사실이다.
+
+    비수치·비유한도 None으로 떨어져야 한다 — 오타 하나가 계측 경로 전체를 죽이면 안 된다.
+    `nan`/`inf`는 `float()`를 통과하므로 따로 막지 않으면 요청까지 실려 나간다.
+    """
+    from app.agent.v3 import config as v3config
+
+    monkeypatch.delenv("MEASURE_TEMPERATURE", raising=False)
+    assert v3config.measure_temperature() == 0.0, "미설정은 선언된 기본값(0)"
+
+    for blank in ("", " ", "\t\n"):
+        monkeypatch.setenv("MEASURE_TEMPERATURE", blank)
+        assert v3config.measure_temperature() is None, f"빈 값({blank!r})은 인자 미전송"
+
+    for junk in ("이건 숫자가 아니다", "nan", "inf", "-inf", "Infinity"):
+        monkeypatch.setenv("MEASURE_TEMPERATURE", junk)
+        assert v3config.measure_temperature() is None, f"{junk!r}가 인자로 나갔다"
+
+    monkeypatch.setenv("MEASURE_TEMPERATURE", "0.7")
+    assert v3config.measure_temperature() == 0.7, "정상값은 그대로 통한다"
+
+
+def test_v3_설정은_빈_값에_기동이_죽지_않는다(monkeypatch):
+    """`int(os.getenv(k, "8"))`은 키가 **있으면서 빈 값**일 때 `int("")`로 터진다. 이 모듈은
+    임포트 시점에 읽으므로 그 예외가 곧 기동 실패다 — 템플릿 배포에서 `KEY=`로 남는 흔한
+    모양 하나가 프로세스를 못 뜨게 한다(Qodo). `app.core.config.get()`과 같은 정책으로 맞춘다.
+    """
+    import importlib
+
+    from app.agent.v3 import config as v3config
+
+    keys = ("MAX_LLM_CONCURRENCY", "COMPOSE_MAX_TOKENS", "COMPOSE_JSON_MODE",
+            "SPEC_USE_ANALYSIS", "COMPOSE_FILL_CHUNK", "COMPOSE_COVERAGE_RETRY")
+    for k in keys:
+        monkeypatch.setenv(k, "   ")
+
+    reloaded = importlib.reload(v3config)
+    try:
+        for k in keys:  # 전부 선언된 기본값으로 떨어져야 한다
+            assert isinstance(getattr(reloaded, k), int), k
+        assert reloaded.COMPOSE_FILL_CHUNK == 8
+        assert reloaded.COMPOSE_COVERAGE_RETRY == 0
+    finally:
+        for k in keys:
+            monkeypatch.delenv(k, raising=False)
+        importlib.reload(v3config)  # 다른 테스트가 보는 모듈 상태를 원복한다
+
+
+def test_chat이_temperature를_거부당하면_떼고_살린다(monkeypatch):
+    """모델이 이 인자를 안 받으면 호출 자체가 죽는다 — 재현성은 잃어도 턴은 살려야 한다."""
+    from app.core import llm
+
+    calls = []
+
+    class _Resp:
+        choices = [type("C", (), {"message": type("M", (), {"content": "{}"})(),
+                                  "finish_reason": "stop"})()]
+        usage = None
+
+    class _Client:
+        class chat:  # noqa: N801
+            class completions:  # noqa: N801
+                @staticmethod
+                def create(**kw):
+                    calls.append(dict(kw))
+                    if "temperature" in kw:
+                        raise ValueError("Unsupported parameter: 'temperature'")
+                    return _Resp()
+
+    monkeypatch.setattr(llm, "_get_client", lambda: _Client())
+    monkeypatch.setattr(llm, "_record_usage", lambda *a, **k: None, raising=False)
+
+    out = llm.chat([{"role": "user", "content": "x"}], purpose="t", temperature=0)
+
+    assert out == "{}"
+    assert len(calls) == 2, "한 번 거부당하고 한 번 더 시도해야 한다"
+    assert "temperature" in calls[0] and "temperature" not in calls[1]
+
+
+def test_temperature_재시도는_그_인자를_지목한_실패에만(monkeypatch):
+    """처음에는 `except Exception`으로 넓게 잡았다. 그러면 스키마 오류·콘텐츠 필터 같은
+    무관한 실패까지 호출을 한 번 더 태우고(비용·지연 2배) 로그에는 "모델이 temperature를
+    거부"로 남는다 — 원인을 엉뚱한 곳에서 찾게 된다(Qodo).
+
+    판정 기준은 (a) 5xx가 아니고 (b) 메시지가 그 인자를 지목했는가다.
+    """
+    from app.core import llm
+
+    calls = []
+
+    class _Client:
+        class chat:  # noqa: N801
+            class completions:  # noqa: N801
+                @staticmethod
+                def create(**kw):
+                    calls.append(dict(kw))
+                    raise ValueError("Invalid schema for response_format")
+
+    monkeypatch.setattr(llm, "_get_client", lambda: _Client())
+    monkeypatch.setattr(llm, "_record_usage", lambda *a, **k: None, raising=False)
+
+    with pytest.raises(ValueError, match="Invalid schema"):
+        llm.chat([{"role": "user", "content": "x"}], purpose="t", temperature=0)
+    assert len(calls) == 1, "temperature와 무관한 실패로 호출을 두 번 태웠다"
+
+
+def test_temperature_거부_판정은_5xx를_배제한다():
+    """서버 쪽 실패(5xx)는 인자를 떼도 안 낫는다 — 떼고 또 태우면 부하만 보탠다.
+    공급자가 오류 형태를 바꿀 수 있으니 타입 이름만 믿지 않고 메시지도 함께 본다.
+    """
+    import httpx
+    from openai import BadRequestError, InternalServerError
+
+    from app.core import llm
+
+    kw = {"temperature": 0}
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+
+    def _err(cls, status, msg):
+        return cls(msg, response=httpx.Response(status, request=req), body=None)
+
+    assert llm._rejects_temperature(
+        _err(BadRequestError, 400, "Unsupported parameter: 'temperature'"), kw)
+    assert not llm._rejects_temperature(
+        _err(BadRequestError, 400, "Invalid schema for response_format"), kw)
+    assert not llm._rejects_temperature(
+        _err(InternalServerError, 500, "temperature service unavailable"), kw), "5xx를 인자 탓으로"
+    # 인자를 안 보낸 호출은 애초에 후보가 아니다 — 뗄 것이 없다
+    assert not llm._rejects_temperature(
+        _err(BadRequestError, 400, "Unsupported parameter: 'temperature'"), {})
+    # SDK 층에서 kwarg를 거부하는 경우(구버전·스텁)도 살려야 한다
+    assert llm._rejects_temperature(
+        TypeError("create() got an unexpected keyword argument 'temperature'"), kw)
+
+
+def test_error_경로는_산출물_미생성으로_감점되지_않는다():
+    """실측(2026-07-30): 커버리지 1.0 · 검수 위반 0건인 흐름도가 신뢰도 0.67에 머물렀고,
+    병목이 시뮬레이션 0.667이었다. 실패 판정이 이것이었다:
+
+        "Try 초반 Browser/Open 이후 오류로 중단되어 … 전혀 수행되지 않음 — 기대 산출물 미생성"
+
+    `error` 경로는 **정의상** Try 중간에 멈춘 경로라 산출물이 나올 수 없다. 그걸 결함으로
+    세면 (a) Error handler를 갖춘 흐름도만 error 경로가 생기므로 **오류 처리를 한 쪽이
+    벌점을 받고**, (b) 경로 3개짜리 흐름도의 통과율 상한이 2/3에 고정돼 신뢰도 천장이
+    0.67이 된다. 판정 기준에서 그 적용을 명시적으로 막아야 한다.
+    """
+    from pathlib import Path
+
+    from app.agent.v3.verify import simulate
+
+    text = (Path(simulate.__file__).resolve().parent.parent
+            / "prompts" / "simulate_judge.md").read_text(encoding="utf-8")
+
+    assert "이 기준을 적용하지 마세요" in text, "목표달성 기준의 error 예외가 없다"
+    assert "정의상 산출물이 만들어지지 않습니다" in text
+    # 무엇을 물어야 하는지도 함께 적어야 한다 — 빼기만 하면 판정관이 기준을 잃는다
+    assert "안전하게 실패했나" in text
+    # 오류 처리를 갖춘 쪽이 벌점을 받는 역설을 명시한다(예시가 규칙을 이기는 전례가 많았다)
+    assert "낮은 점수를 받습니다" in text
+
+
+def test_error_트레이스는_Error_handler가_있을_때만_생긴다():
+    """error 경로가 감점이면 Error handler를 넣는 것 자체가 손해가 된다 — 그 구조를 확인한다."""
+    from app.agent.v3.verify.simulate import build_traces
+
+    plain = {"steps": [{"step_id": "s1", "actions": [_act("Browser", "Open")]}]}
+    assert set(build_traces(plain)) == {"happy", "alt"}
+
+    guarded = {"steps": [{"step_id": "s1", "actions": [
+        _act("Error handler", "Try", children=[_act("Browser", "Open")]),
+        _act("Error handler", "Catch", children=[_act("Error handler", "Throw")]),
+    ]}]}
+    assert set(build_traces(guarded)) == {"happy", "alt", "error"}
+
+
+def test_분석도_temperature를_고정한다():
+    """분석은 정형화의 **입력**이다 — 여기가 흔들리면 아래 전부가 흔들린다."""
+    import inspect
+
+    from app.agent.v3 import analysis
+
+    assert inspect.getsource(analysis).count("temperature=config.measure_temperature()") == 2, \
+        "analyze는 첫 호출과 교정 회차 둘 다 고정해야 한다"
+
+
+def test_비전_파싱에는_temperature를_걸지_않는다():
+    """처음에는 걸었다 — 스펙 편차의 근원이 문서 파싱이었고(같은 PDF의 parsed_content 해시가
+    매번 달랐다) 샘플링을 고정하면 잡힐 것이라 봤다.
+
+    그런데 RPA-351에서 재보니 **0을 걸고도 출력이 550 대 1,388로 갈렸다** — 가설이 반증됐다.
+    실제로 편차를 줄인 것은 프롬프트 쪽이었다. 효과가 없는 조치를 근거처럼 남겨 두면
+    다음 사람이 그걸 믿고 "파싱은 이미 고정됐다"고 읽는다. 그래서 뺐고, 다시 들어오지
+    않도록 잰다.
+    """
+    import inspect
+
+    from app.services.parser import vision
+
+    src = inspect.getsource(vision)
+    assert "measure_temperature" not in src, \
+        "비전 파싱에 temperature가 되돌아왔다 — 효과가 없다는 실측이 있다(RPA-351)"
+
+
+def test_measure_temperature는_한_곳에서만_해석된다():
+    """파서(app/services)와 에이전트(app/agent)가 각자 읽으면 두 기본값이 갈린다."""
+    from app.agent.v3 import config as v3config
+    from app.core import config as core_config
+
+    assert v3config.measure_temperature() == core_config.measure_temperature() == 0.0
+    assert "MEASURE_TEMPERATURE" in core_config.REGISTRY
+
+
+def test_L3_판정이_관측에_남는다():
+    """실측(2026-07-30): 시뮬레이션(0.667)이 신뢰도의 병목이었는데 **어느 경로가 왜 실패했는지**
+    볼 방법이 없었다. 통과율은 신뢰도에 곱해지는 축인데 근거가 저장되지 않았다.
+
+    특히 「판정관이 판정하지 않음(누락)」과 진짜 결함은 처방이 정반대라 갈려야 한다.
+    """
+    import inspect
+
+    from app.agent.v3.verify import simulate
+
+    src = inspect.getsource(simulate)
+    assert "def _emit_verdicts" in src
+    assert "_emit_verdicts(report" in src, "run_simulation이 호출해야 한다"
+    for key in ("pass_rate", "failed", "unjudged", "judged", "traces"):
+        assert f'"{key}"' in src, f"{key}가 안 남는다"
+
+
+def test_신뢰도는_분해해서_관측에_남는다():
+    """실측(2026-07-30): 검수 위반 0건짜리 흐름도가 0.15를 받았는데 어느 항이 눌렀는지
+    알 수 없었다 — scorecard는 partial 이벤트라 turn_events에 저장되지 않고, 남는 것은
+    결과값 하나뿐이었다. 결과만 보이면 개선 지표로 쓸 수 없다.
+
+    관측 이벤트는 이 함수가 낸 것을 **그대로** 싣는다(`**breakdown`). 그래서 여기서 키를
+    재는 것이 곧 "무엇이 저장되는가"를 재는 것이다 — 앞서 이 테스트는 이벤트 딕트의 소스
+    문자열을 뒤졌는데, 산식을 한 함수로 모으자 그 문자열이 사라져 같이 깨졌다(Qodo).
+    """
+    from app.agent.v3.orchestrator.harness import confidence_breakdown
+    from app.agent.v3.verify.findings import Finding
+
+    f = [Finding(layer="L0", severity="blocker", rule="R1", message="x"),
+         Finding(layer="L0", severity="major", rule="R7", message="y")]
+    b = confidence_breakdown(must_coverage=0.6, findings=f, sim_pass_rate=0.1,
+                             blocking_cards=3)
+
+    for key in ("confidence", "factors", "blockers", "majors", "blocking_cards",
+                "raw_product", "at_floor", "at_ceiling", "sim_at_floor"):
+        assert key in b, f"{key}가 관측에 안 남는다"
+
+    # 산식의 세 항이 모두 있어야 병목을 가릴 수 있다. 카드는 감점 항이 아니라 개수만 남는다.
+    assert set(b["factors"]) == {"coverage", "defects", "simulation"}
+    assert (b["blockers"], b["majors"], b["blocking_cards"]) == (1, 1, 3)
+    # 하한에 붙었는지 — 붙었으면 실제 통과율은 이 값보다 낮다(0.1인데 0.3이 곱해졌다)
+    assert b["factors"]["simulation"] == 0.3 and b["sim_at_floor"] is True
+
+
+def test_신뢰도_분해가_산식과_같은_계수를_쓴다():
+    """관측이 산식과 다른 계수를 쓰면 사후 분석이 조용히 틀린다.
+
+    실제로 그 일이 있었다 — 카드 항을 산식에서 뺐는데 이벤트 쪽 `factors.cards`가 남아
+    있었다(Qodo). 그래서 결과값과 분해를 **한 함수**가 내게 했고, 여기서 그 일치를 잰다.
+    """
+    from app.agent.v3.orchestrator.harness import (
+        compute_flow_confidence,
+        confidence_breakdown,
+    )
+    from app.agent.v3.verify.findings import Finding
+
+    f = [Finding(layer="L0", severity="blocker", rule="R1", message="x"),
+         Finding(layer="L0", severity="major", rule="R7", message="y")]
+    got = compute_flow_confidence(must_coverage=0.6, findings=f,
+                                  sim_pass_rate=0.1, blocking_cards=3)
+    # 0.6 × (0.8^1 × 0.95^1) × max(0.3, 0.1). 카드 항은 없다.
+    expect = round(min(1.0, max(0.05, 0.6 * (0.8 * 0.95) * 0.3)), 2)
+    assert got == expect, f"{got} != {expect}"
+
+    # 결과값은 분해와 같은 함수에서 나온다 — 극단(바닥·천장·신호 없음)까지 함께 잰다
+    grid = [
+        (0.6, f, 0.1, 3),
+        (1.0, [], 1.0, 0),
+        (None, [], None, 0),                                  # 신호 없는 축은 중립
+        (0.1, [Finding(layer="L0", severity="blocker", rule="R1", message="x")] * 8, 0.0, 0),
+    ]
+    for cov, findings, sim, ncards in grid:
+        b = confidence_breakdown(must_coverage=cov, findings=findings,
+                                 sim_pass_rate=sim, blocking_cards=ncards)
+        assert b["confidence"] == compute_flow_confidence(
+            must_coverage=cov, findings=findings, sim_pass_rate=sim,
+            blocking_cards=ncards), "관측과 결과값이 갈렸다"
+        product = b["factors"]["coverage"] * b["factors"]["defects"] * b["factors"]["simulation"]
+        assert abs(product - b["raw_product"]) < 0.01, "항들의 곱이 raw_product와 다르다"
+        # clamp가 걸렸는지 알려야 사후에 "산수가 안 맞는다"로 읽히지 않는다
+        if b["at_floor"]:
+            assert b["confidence"] == 0.05, "바닥이라 했는데 값이 다르다"
+        if b["at_ceiling"]:
+            assert b["confidence"] == 1.0, "천장이라 했는데 값이 다르다"
+        assert not (b["at_floor"] and b["at_ceiling"])
+
+    # 시뮬레이션 하한이 실제로 걸린다 — sim_at_floor가 그걸 알려주는 이유
+    assert compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=0.1) == \
+           compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=0.3)
+
+
+def test_구조를_새로_만드는_자리는_모두_어휘_검증을_지난다():
+    """실측(2026-07-30): 커버리지 보완 회차를 게이트 안에 넣었더니 그 재생성본이 2.5단
+    어휘 검증을 건너뛰어, `package="Recorder/Click"` · `action="범용 레코더로 캡처한
+    객체에 대해 수행한"` 꼴의 오염이 R1 blocker 6건으로 게이트에 들어갔다(가중 910).
+
+    구조를 새로 만드는 자리가 늘 때마다 이 검증을 다시 걸어야 한다 — 그래서 한 함수로
+    빼 두 자리가 같은 것을 쓴다. 그 배선이 유지되는지 잰다.
+
+    소스 문자열이 아니라 **AST**로 센다 — 앞서 `"outline = await _fix_vocab(retry)" in body`
+    처럼 대입문 모양까지 문자열로 박아 두니, 반려 시 직전 구조로 되돌리려고 변수명을
+    `candidate`로 바꾸는 무해한 수정에 테스트가 깨졌다(Qodo). 재는 것은 **어떤 값이 이
+    검증을 통과하는가**이고, 그건 호출 인자의 이름으로 드러난다.
+    """
+    import ast
+    import inspect
+
+    from app.agent.v3.recommend import graph as g
+
+    tree = ast.parse(inspect.getsource(g._compose_candidate))  # 모듈 최상위라 들여쓰기 없음
+    defined = {
+        n.name for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_fix_vocab"
+    }
+    assert defined, "어휘 검증이 함수로 빠져 있어야 두 자리가 같은 것을 쓴다"
+
+    awaited_args = {
+        node.value.args[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_fix_vocab"
+        and node.value.args
+        and isinstance(node.value.args[0], ast.Name)
+    }
+    # 초안(outline)과 커버리지 재생성본(retry) 둘 다 — 새 구조를 만드는 자리가 곧 이 목록이다
+    assert awaited_args == {"outline", "retry"}, awaited_args
 
 
 def test_전이_id는_흐름도에_남지_않는다():

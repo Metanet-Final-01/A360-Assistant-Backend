@@ -26,7 +26,15 @@ from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
 from ..verify.checker import derive_session_registry, run_flow_checks
 from ..verify.findings import Finding, from_violations, weight
-from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
+from .edit_ops import (
+    EditOps,
+    annotate_ids,
+    apply_edit_ops,
+    render_outline,
+    renumber,
+    shrink_reason,
+    strip_ids,
+)
 from .jsonio import chat_json
 
 logger = logging.getLogger(__name__)
@@ -130,8 +138,25 @@ def compute_flow_confidence(
 ) -> float:
     """흐름도 수준 신뢰도 — "이 봇이 업무를 하는가" (액션 수준과 다른 질문, 설계 §6).
 
-    must 커버리지 × 결함 감쇠 × 시뮬레이션 통과율 × 카드 완만 감쇠. 카드는 해소 시
-    재산정으로 자동 회복된다. 신호가 없는 축은 중립(1.0)으로 둔다.
+    must 커버리지 × 결함 감쇠 × 시뮬레이션 통과율. 신호가 없는 축은 중립(1.0)으로 둔다.
+
+    ## 질문 카드는 감점하지 않는다 (2026-07-30)
+
+    액션 수준에서는 처음부터 그랬다 — "R3는 감점하지 않는다. 질문 카드가 붙은 R3는 결함이
+    아니라 **입력 대기**다"(attach_confidence 주석). 그런데 흐름도 수준에서는 같은 R3가
+    카드로 승격된 뒤 `max(0.7, 1−0.05·n)`으로 **다시** 감점했다. 한 사실을 두 층에서 다르게
+    취급한 셈이다.
+
+    실측(2026-07-30): 커버리지 1.0 · blocker 0 · major 0인 흐름도가 0.47을 받았고, 그 감점의
+    절반이 blocking 카드 11건이었다. 카드 11건은 **업무정의서에 값이 없다**는 뜻이다 —
+    파일 경로도 수신자도 문서에 안 적혀 있으면 흐름도가 완벽해도 0.7이 곱해졌다. 흐름도
+    품질을 재는 숫자가 입력의 미확정 정보량에 좌우된 것이다.
+
+    게다가 그 항은 **6건 이상에서 하한 0.7에 박혀** 11건과 20건이 구분되지 않았다. 정보를
+    잃으면서 감점만 하는 항이었다.
+
+    `blocking_cards`는 인자로 남긴다 — 호출부가 이미 세고 있고, 관측 이벤트가 그 값을
+    싣는다. 여기서 곱하지만 않는다.
 
     ## 결함 감쇠에 major를 넣는 이유
 
@@ -147,15 +172,53 @@ def compute_flow_confidence(
     계수는 blocker(0.8)보다 확연히 완만하게 둔다 — major는 '실행 불가 확정'이 아니라
     '실행이 의심스럽다'이고, 유도 기반 규칙(R19 경쟁 패키지 등)은 오탐 여지도 있다.
     """
-    base = must_coverage if must_coverage is not None else 1.0
+    return confidence_breakdown(
+        must_coverage=must_coverage,
+        findings=findings,
+        sim_pass_rate=sim_pass_rate,
+        blocking_cards=blocking_cards,
+    )["confidence"]
+
+
+def confidence_breakdown(
+    *,
+    must_coverage: float | None,
+    findings: list[Finding],
+    sim_pass_rate: float | None,
+    blocking_cards: int = 0,
+) -> dict:
+    """`compute_flow_confidence`의 산식을 **항별로** 펼친 것. 산식은 여기 한 벌만 있다.
+
+    왜 함수로 두는가: 관측 이벤트가 항별 값을 실어야 한다("0.15를 올리려면 무엇을 고치나"에
+    답하려면 결과값만으로는 안 된다). 그런데 호출부가 계수를 **베껴 쓰면** 산식을 고칠 때
+    한쪽만 고쳐져 관측이 조용히 거짓말을 한다 — 실제로 카드 항을 산식에서 뺐을 때 이벤트
+    쪽 `factors.cards`가 남아 있었다(Qodo). 그래서 결과값과 분해를 같은 함수가 낸다.
+
+    `at_floor`/`at_ceiling`은 마지막 clamp가 걸렸는지다. 이게 없으면 사후에 항들을 곱해도
+    저장된 값이 안 나와 "산수가 안 맞는다"로 읽힌다 — 0.05 바닥에 눌린 흐름도가 그렇다.
+    """
+    cov = must_coverage if must_coverage is not None else 1.0
     blockers = sum(1 for f in findings if f.severity == "blocker")
     majors = sum(1 for f in findings if f.severity == "major")
-    base *= 0.8 ** blockers
-    base *= 0.95 ** majors
-    if sim_pass_rate is not None:
-        base *= max(0.3, sim_pass_rate)  # 경로 일부 실패가 0으로 폭락시키지 않게 하한
-    base *= max(0.7, 1.0 - 0.05 * blocking_cards)
-    return round(min(1.0, max(0.05, base)), 2)
+    defects = 0.8 ** blockers * 0.95 ** majors
+    sim = max(0.3, sim_pass_rate) if sim_pass_rate is not None else 1.0  # 일부 실패가 0으로 폭락하지 않게
+    raw = cov * defects * sim
+    return {
+        "confidence": round(min(1.0, max(0.05, raw)), 2),
+        "factors": {
+            "coverage": round(cov, 3),
+            "defects": round(defects, 3),
+            "simulation": round(sim, 3),
+        },
+        "blockers": blockers,
+        "majors": majors,
+        "blocking_cards": blocking_cards,  # 감점하지 않는다 — 개수만 관측에 남긴다
+        "raw_product": round(raw, 4),
+        "at_floor": raw < 0.05,
+        "at_ceiling": raw > 1.0,
+        # 시뮬레이션 항이 하한에 붙었는지 — 붙었으면 실제 통과율은 이 값보다 낮다
+        "sim_at_floor": sim_pass_rate is not None and sim_pass_rate < 0.3,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,8 +444,23 @@ def refine_flow(
         # 그래서 관용은 **덧붙이기만 하는 라운드**에만 준다. 기존 액션을 옮기거나 지우는 연산이
         # 섞였으면 정적 가중합이 **실제로 줄어야** 받는다 — 순서·구성을 건드리는 변경은
         # 증거를 요구한다. 정당한 재배치(변수 정의 전 사용 해소 등)는 어차피 가중합을 줄인다.
+        #
+        # 그리고 **줄어든 라운드는 가중합과 무관하게 반려한다.** 액션이 사라지면 그 요구를
+        # 담당하던 자리가 통째로 없어지는데, 정적 검수는 '없는 것'을 지적하지 못하므로
+        # 가중합이 오히려 **떨어진다** — 지우면 점수가 오르는 구조다. 실측(2026-07-29):
+        # 게이트 수리가 20액션을 4액션으로 줄이고 notes에 "자동화 불가"로 적어 낸 적이 있어
+        # 그쪽에는 `_repair_regression` 가드를 뒀는데, 여기에는 없어 비대칭이었다. 커버리지
+        # 지적을 받은 라운드가 remove로 답하면 같은 일이 이 루프에서도 성립한다.
         disruptive = any(o.op in ("move", "remove") for o in ops.operations)
         lenient = extras_pending and not disruptive
+        shrank = shrink_reason(current, work)
+        if shrank:
+            _emit_round(round_no, ops.operations, applied, errors,
+                        f"흐름이 줄어 반려 ({shrank})", current_weight, new_weight)
+            no_improve += 1
+            if no_improve >= _STOP_AFTER_NO_IMPROVE:
+                break
+            continue
         if new_weight < current_weight or (lenient and new_weight <= current_weight):
             _emit_round(round_no, ops.operations, applied, errors, "채택",
                         current_weight, new_weight)

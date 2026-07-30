@@ -570,6 +570,53 @@ def _gate_issues(outline: dict, spec: dict, ctx) -> tuple[list[str], list]:
     return issues, coverage_findings
 
 
+def _coverage_gaps(coverage_findings: list, spec: dict) -> list[dict]:
+    """커버리지 미달 요구를 **능력 요청(needs) 꼴**로 바꾼다. 검색어는 요구 문구 그대로.
+
+    수리(surgeon)에게는 카탈로그를 검색할 수단이 없다 — `repair_spec_excerpts`는 **이미
+    흐름도에 있는** 액션의 파라미터 스펙만 준다. 그래서 "이 요구를 수행할 액션이 없다"는
+    지적을 받으면 아는 것 중에서 고르게 되고, 그게 매번 `Step`이다: 실측(2026-07-29)에서
+    게이트 수리가 `wrap n9..n12 Step/Step`(채택되고도 같은 라벨 Step이 중첩만 됨),
+    `insert Step/Step` ×2·×3(빈 Step은 R17이라 가중치 0→20·0→30)으로 답했다.
+    누적 53라운드 중 채택 7의 상당 부분이 이 유형이다.
+
+    액션이 없다는 지적은 **찾아서 넣어야** 풀린다. 그래서 검색을 가진 경로(능력 요청)로
+    돌린다 — 그쪽은 이 세션에서 `Format cell` 같은 걸 실제로 찾아 넣었다.
+
+    검색어로 요구 문구를 그대로 쓴다. 조사 단계도 한국어 질의를 보내고 있고(하이브리드
+    검색 + 리랭커), 요구 문구가 그 요구를 가장 정확히 서술한 문장이다. 여기서 모델을 한 번
+    더 불러 검색어를 만들게 하면 비용만 늘고 원문에서 멀어진다.
+    """
+    texts = {
+        r.get("req_id"): (r.get("text") or "").strip()
+        for r in (spec.get("requirements") or []) if isinstance(r, dict)
+    }
+    out: list[dict] = []
+    seen: set = set()
+    for f in coverage_findings:
+        rid = getattr(f, "req_id", None)
+        text = texts.get(rid)
+        if not text or rid in seen:
+            continue
+        seen.add(rid)
+        out.append({"what": text, "query": text, "req_id": rid})
+    return out[:_MAX_NEEDS]
+
+
+def _coverage_retry_user(base_user: str, gaps: list[dict]) -> str:
+    """커버리지 보완 회차의 지시 — 무엇을 빠뜨렸는지 말해 주고, 때우는 길을 막는다."""
+    return (
+        f"{base_user}\n\n"
+        "[직전 초안이 빠뜨린 필수 요구]\n"
+        + "\n".join(f"- {g['what']}" for g in gaps)
+        + "\n\n이 요구를 수행하는 액션을 [추가 조사 결과]에서 찾아 흐름도에 넣어라. "
+        "나머지 구조는 그대로 유지한다 — 이미 담긴 요구를 빼면서 이걸 넣는 것이 아니다.\n"
+        "⚠ **빈 `Step`으로 자리를 잡지 마라.** 라벨만 붙은 구획은 아무것도 실행하지 않아 "
+        "요구를 이행한 시늉일 뿐이고 검수 R17이 잡는다. 정말 대응 액션이 없으면 `notes`에 "
+        "자동화 불가로 정직하게 남겨라."
+    )
+
+
 _VALUE_FIELDS = ("parameters", "produces", "consumes")
 # 값 단계가 노드를 가리키는 열쇠. surgeon이 이미 쓰는 것과 **같은 id**여야 한다 —
 # 두 곳이 다른 이름표를 붙이면 같은 흐름도를 두고 서로 다른 좌표계로 말하게 된다.
@@ -896,32 +943,32 @@ def _gate_repair(outline: dict, coverage_findings: list, cid: str, ctx) -> dict:
     return repaired
 
 
-def _count_actions(flow: dict) -> int:
-    """중첩까지 포함한 액션 총수 — 값 단계를 나눌지 판단하는 기준."""
-    def walk(actions: list[dict]) -> int:
-        return sum(1 + walk(a.get("children") or []) for a in actions if isinstance(a, dict))
-    return sum(walk(s.get("actions") or []) for s in flow.get("steps") or [] if isinstance(s, dict))
+# 흐름 크기 판정은 **게이트 수리와 refine 루프가 같은 함수를 써야 한다** — 한쪽만 막으면
+# 다른 쪽으로 같은 일이 성립한다(실측: 게이트에만 가드가 있어 refine이 뚫려 있었다).
+_count_actions = _edit_ops.count_actions
+_repair_regression = _edit_ops.shrink_reason
 
 
-def _repair_regression(before: dict, after: dict) -> str | None:
-    """수리본이 원본보다 **작아졌으면** 그 이유를 한 줄로, 멀쩡하면 None.
+def _vocab_regression(before: dict, after: dict, catalog) -> str | None:
+    """`after`가 `before`보다 **메뉴에 없는 액션을 더** 달고 있으면 그 이유를 한 줄로.
 
-    수리 호출은 구조 전체를 다시 뱉는 일이라, 3단 분리로 없앤 "긴 재출력에서 뒤쪽이
-    빠진다"는 실패 모드를 그대로 다시 들인다. 게다가 게이트 지적에는 커버리지 항목
-    (「필수 요구 req-4가 missing」)이 섞여 있는데, 모델이 이걸 **없앨 근거**로 읽으면
-    지적된 요구를 담당하던 액션을 지우고 notes에 자동화 불가로 적는 쪽이 더 쉬운 답이 된다.
+    `_repair_regression`과 같은 자리에 서는 판정이다 — 저건 "구조가 줄었나", 이건 "어휘가
+    오염됐나"를 본다. 둘 다 **다시 만든 구조를 받아도 되나**에 답한다.
 
-    실측(2026-07-29 01:49 턴): 구조 1,566토큰(액션 ~20개) → 수리 566토큰(액션 4개).
-    엑셀·메일 단계가 통째로 사라지고 브라우저 열기·클릭·클릭·닫기만 남았다.
-    수리는 **개선일 때만** 받는다 — 아니면 원본이 낫다(전체 검수와 refine이 이어받는다).
+    왜 필요한가: `_fix_vocab`은 교정이 반려되면 **입력을 그대로 돌려준다**(코드가 이름을
+    바꾸면 '비슷한 이름'으로 엉뚱한 액션이 들어가므로, 고치는 건 모델에게 맡긴 설계다).
+    그래서 통과 여부를 호출부가 다시 재야 한다 — 안 재면 교정 못 한 오염이 그대로 흘러
+    R1 blocker로 게이트에 들어간다(Qodo).
+
+    0건을 요구하지 않고 **늘지 않았는가**로 본다: 초안 자체가 교정 실패로 1건을 달고 있을
+    수 있고(실측 2026-07-30 턴 16fdafff: 표기 교정이 1건 → 1건으로 반려됐다), 그때 0건을
+    요구하면 커버리지가 오르는 회차까지 같이 버린다. `_fix_vocab`의 자체 반려 기준과 같은
+    방향이다.
     """
-    lost_a = _count_actions(before) - _count_actions(after)
-    if lost_a > 0:
-        return f"액션 {_count_actions(before)}개 → {_count_actions(after)}개 ({lost_a}개 소실)"
-    before_steps = [s for s in (before.get("steps") or []) if isinstance(s, dict)]
-    after_steps = [s for s in (after.get("steps") or []) if isinstance(s, dict)]
-    if len(after_steps) < len(before_steps):
-        return f"단계 {len(before_steps)}개 → {len(after_steps)}개"
+    n_before = len(_unknown_actions(before, catalog))
+    n_after = len(_unknown_actions(after, catalog))
+    if n_after > n_before:
+        return f"메뉴에 없는 액션 {n_before}건 → {n_after}건"
     return None
 
 
@@ -1146,30 +1193,76 @@ async def _compose_candidate(
     #
     # **코드는 탐지만 하고 고치는 건 모델이다.** 이름을 코드가 바꾸기 시작하면 '비슷한 이름'
     # 으로 엉뚱한 액션이 조용히 들어가는 길이 열린다 — 지금 R1이 잡아주는 것을 잃는 셈이다.
-    unknown = await asyncio.to_thread(_unknown_actions, outline, getattr(ctx, "catalog", None))
-    if unknown:
+    # ⚠ **구조를 새로 만드는 자리가 생기면 반드시 이 검증을 다시 통과시켜라.** 실측
+    # (2026-07-30): 커버리지 보완 회차를 게이트 안에 넣었더니 그 재생성본이 이 단계를
+    # 건너뛰어, `package="Recorder/Click"` · `action="범용 레코더로 캡처한 객체에 대해
+    # 수행한"` 꼴의 오염이 R1 blocker 6건으로 게이트에 그대로 들어갔다(가중 910). 그래서
+    # 함수로 빼 두 자리가 같은 것을 쓴다.
+    async def _fix_vocab(flow: dict) -> dict:
+        unknown = await asyncio.to_thread(_unknown_actions, flow, getattr(ctx, "catalog", None))
+        if not unknown:
+            return flow
         emit({"event": "stage", "stage": "verifying",
               "message": f"메뉴에 없는 액션 표기 {len(unknown)}건 — 표기 교정 요청",
               "data": {"candidate": cid,
                        "unknown": [f"{p}/{a}" for _l, p, a in unknown[:8]]}})
         fixed = await _ask(
             compose_system_prompt(persona, analysis, spec, dossier),
-            _vocab_retry_user(outline, unknown, ctx.catalog) + doc_block,
+            _vocab_retry_user(flow, unknown, ctx.catalog) + doc_block,
             "구조(표기)")
         left = await asyncio.to_thread(_unknown_actions, fixed or {}, getattr(ctx, "catalog", None))
-        if fixed is None or len(left) >= len(unknown) or _repair_regression(outline, fixed):
+        if fixed is None or len(left) >= len(unknown) or _repair_regression(flow, fixed):
             logger.warning("후보 %s 표기 교정 반려 — %d건 → %d건. 원래 구조로 진행",
                            cid, len(unknown), len(left))
-        else:
-            fixed.pop("needs", None)
-            outline = fixed
-            emit({"event": "stage", "stage": "verifying",
-                  "message": f"액션 표기를 교정했습니다 ({len(unknown)}건 → {len(left)}건)",
-                  "data": {"candidate": cid, "before": len(unknown), "after": len(left)}})
+            return flow
+        fixed.pop("needs", None)
+        fixed.pop("plan", None)
+        emit({"event": "stage", "stage": "verifying",
+              "message": f"액션 표기를 교정했습니다 ({len(unknown)}건 → {len(left)}건)",
+              "data": {"candidate": cid, "before": len(unknown), "after": len(left)}})
+        return fixed
+
+    outline = await _fix_vocab(outline)
 
     # ── 3단: 구조 게이트 — 값을 채우기 전에 한 번 거른다 ───────────────────
     issues, coverage_findings = await asyncio.to_thread(_gate_issues, outline, spec, ctx)
     _emit_gate(cid, issues, outline)
+
+    # 커버리지 미달은 **수리가 아니라 조사로** 푼다 (_coverage_gaps 주석의 근거 참고).
+    # 한 번만 돈다 — 못 찾았으면 두 번째도 못 찾고, 찾았는데 모델이 안 넣었으면 세 번째도 안 넣는다.
+    gaps = _coverage_gaps(coverage_findings, spec) if config.COMPOSE_COVERAGE_RETRY else []
+    if gaps:
+        extra = await asyncio.to_thread(_capability_menu, gaps, sink, ctx)
+        emit({"event": "stage", "stage": "searching",
+              "message": f"빠뜨린 필수 요구 {len(gaps)}건을 조사로 보완",
+              "data": {"candidate": cid, "req_ids": [g["req_id"] for g in gaps],
+                       "found": bool(extra)}})
+        if extra:
+            retry = await _ask(
+                compose_system_prompt(persona, analysis, spec, dossier, extra_menu=extra),
+                _coverage_retry_user(outline_user, gaps), "구조(커버리지)", reasoning=reasoning)
+            lost = _repair_regression(outline, retry) if retry is not None else "출력 실패"
+            if retry is not None and not lost:
+                retry.pop("needs", None)
+                retry.pop("plan", None)
+                # 재생성본도 닫힌 어휘를 통과해야 한다 — 안 거치면 오염이 R1 blocker로
+                # 게이트에 들어간다(실측 2026-07-30: 가중 910, 수리 4라운드를 태우고 300).
+                candidate = await _fix_vocab(retry)
+                # 교정이 반려됐을 수 있다 — `_fix_vocab`은 그때 입력을 그대로 돌려준다.
+                # 이 회차는 **선택적 개선**이라 오염이 늘었으면 직전 구조가 낫다.
+                dirty = await asyncio.to_thread(
+                    _vocab_regression, outline, candidate, getattr(ctx, "catalog", None))
+                if dirty:
+                    logger.warning("후보 %s 커버리지 보완 반려 — %s. 직전 구조로 진행", cid, dirty)
+                else:
+                    outline = candidate
+                    # 다시 잰다 — 안 재고 옛 findings로 수리를 부르면 이미 넣은 것을 또 넣으라고 시킨다.
+                    issues, coverage_findings = await asyncio.to_thread(
+                        _gate_issues, outline, spec, ctx)
+                    _emit_gate(cid, issues, outline)
+            else:
+                logger.warning("후보 %s 커버리지 보완 반려 — %s. 직전 구조로 진행", cid, lost)
+
     if issues:
         outline = await asyncio.to_thread(_gate_repair, outline, coverage_findings, cid, ctx)
 
@@ -1198,13 +1291,23 @@ async def _compose_candidate(
                            "chunks": [len(c) for c in chunks],
                            "cap": config.COMPOSE_FILL_CHUNK}})
         context_block = _fill_context(outline)
-        parts = await asyncio.gather(*(
-            _ask(fill_system,
-                 _fill_user(context_block, ids, doc_block),
-                 f"값({i + 1}/{len(chunks)})",
-                 parse=_parse_patch, truncated_retry=_FILL_TRUNCATED_RETRY)
-            for i, ids in enumerate(chunks)
-        ))
+
+        def _fill_call(i: int, ids: list[str]):
+            return _ask(fill_system,
+                        _fill_user(context_block, ids, doc_block),
+                        f"값({i + 1}/{len(chunks)})",
+                        parse=_parse_patch, truncated_retry=_FILL_TRUNCATED_RETRY)
+
+        # 첫 조각을 **먼저 혼자** 보낸다 — 조각들이 시스템 프롬프트를 공유하는데 동시에 쏘면
+        # 그 접두가 아직 캐시에 없어 전부 정가로 낸다. 실측(2026-07-29): 3조각 중 2·3번이
+        # 5,850토큰 중 2,816만 캐시를 탔고(앞선 단계와 겹치는 부분뿐), 값 단계 비용이 단일
+        # 호출 $0.0151 대비 $0.0208로 올랐다. 하나를 선행시키면 나머지가 접두를 1/10 가격으로
+        # 받는다. 대가는 첫 조각의 지연(실측 2~3초)이고, 조각이 하나면 아무 차이가 없다.
+        first = await _fill_call(0, chunks[0])
+        rest = await asyncio.gather(*(
+            _fill_call(i, ids) for i, ids in enumerate(chunks) if i
+        )) if len(chunks) > 1 else []
+        parts = [first, *rest]
 
         patched = unknown = failed = added = strayed = 0
         notes: list[str] = []
@@ -1343,7 +1446,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     from ..orchestrator import cards as cards_mod
     from ..orchestrator.harness import (
         attach_confidence,
-        compute_flow_confidence,
+        confidence_breakdown,
         from_violations_dicts,
         refine_flow,
     )
@@ -1438,21 +1541,49 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     blocking_cards = sum(1 for c in cards if c.get("blocking") and not c.get("resolved"))
     flow["needs_input"] = cards
     flow["spec"] = spec
-    flow["flow_confidence"] = compute_flow_confidence(
+    # 결과값과 항별 분해를 **한 함수에서** 받는다 — 관측용으로 산식을 베껴 쓰면 산식을
+    # 고칠 때 한쪽만 고쳐져 이벤트가 조용히 거짓말을 한다(Qodo).
+    breakdown = confidence_breakdown(
         must_coverage=must_cov,
         findings=findings_final,
         sim_pass_rate=sim_rate,
         blocking_cards=blocking_cards,
     )
+    flow["flow_confidence"] = breakdown["confidence"]
+
+    n_blockers = breakdown["blockers"]
+    n_majors = breakdown["majors"]
+    n_warnings = sum(1 for f in findings_final if f.severity == "warning")
 
     emit_scorecard_frame({
         "must_coverage": must_cov,
-        "blockers": sum(1 for f in findings_final if f.severity == "blocker"),
-        "warnings": sum(1 for f in findings_final if f.severity == "warning"),
+        "blockers": n_blockers,
+        "warnings": n_warnings,
         "sim_pass_rate": sim_rate,
         "cards": len(cards),
         "flow_confidence": flow["flow_confidence"],
     }, "최종 검증 요약")
+
+    # 신뢰도를 **분해해서** 관측에 남긴다. 위 scorecard는 partial 이벤트라 프론트로만 가고
+    # turn_events에 저장되지 않는다 — 그래서 사후에는 결과값(flow_confidence) 하나만 남는다.
+    #
+    # 실측(2026-07-30): 검수 위반 0건짜리 흐름도가 0.15를 받았는데 **어느 항이 눌렀는지
+    # 알 수 없었다.** 결과만 보이니 신뢰도를 개선 지표로 쓸 수가 없다 — "0.15를 올리려면
+    # 무엇을 고치나"에 답이 안 나온다. 그래서 각 항이 곱한 값까지 남긴다(`factors` — 작은
+    # 값이 병목이다). 카드는 감점하지 않으므로 항이 없고 개수만 싣는다(입력 대기 ≠ 결함).
+    emit({
+        "event": "stage", "stage": "verifying",
+        "message": f"신뢰도 {flow['flow_confidence']}",
+        "data": {
+            "candidate": winner.candidate_id,
+            # 원시 입력
+            "must_coverage": must_cov, "sim_pass_rate": sim_rate,
+            "warnings": n_warnings, "cards": len(cards),
+            # 결과값 · 항별 분해 · clamp 여부 — 산식 소유자가 낸 것을 그대로 싣는다
+            "flow_confidence": breakdown["confidence"],
+            **{k: v for k, v in breakdown.items() if k != "confidence"},
+        },
+    })
 
     flow = _coerce_flow(flow)
     try:

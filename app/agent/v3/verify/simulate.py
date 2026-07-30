@@ -16,7 +16,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from .. import config
 from ..orchestrator.jsonio import chat_json
+from ..recommend.stream import emit
 from .checker import _eh_role, _if_role, _split_units
 
 _PROMPT = (Path(__file__).resolve().parent.parent / "prompts" / "simulate_judge.md").read_text(encoding="utf-8")
@@ -168,6 +170,8 @@ def run_simulation(spec: dict, flow: dict, *, purpose: str = "verify_simulate") 
         ],
         purpose=purpose,
         model_cls=SimulationReport,
+        # 판정관이 흔들리면 pass_rate가 흔들리고, 그건 신뢰도에 **곱해지는** 축이다.
+        temperature=config.measure_temperature(),
     )
     # 판정 무결성: 트레이서가 만들지 않은 경로 판정은 버리고, 판정이 누락된 경로는
     # 보수적으로 실패 처리한다 — 누락을 빼고 나누면 pass_rate가 부푼다(전량 누락 시 1.0).
@@ -179,4 +183,36 @@ def run_simulation(spec: dict, flow: dict, *, purpose: str = "verify_simulate") 
                 trace_id=tid, ok=False,
                 issues=["판정관이 이 경로를 판정하지 않음(누락) — 보수적으로 실패 처리"],
             ))
+    _emit_verdicts(report, len(traces))
     return report
+
+
+def _emit_verdicts(report: SimulationReport, n_traces: int) -> None:
+    """L3 판정을 turn_events에 남긴다 — 지금까지는 `pass_rate` 숫자만 남았다.
+
+    실측(2026-07-30): 커버리지 1.0 · 검수 위반 0건인 흐름도가 신뢰도 0.47을 받았고 병목이
+    시뮬레이션(0.667)이었다. 그런데 **어느 경로가 왜 실패했는지 볼 방법이 없었다** —
+    통과율은 신뢰도에 곱해지는 축인데 그 근거가 어디에도 저장되지 않았다. 실패 이유가
+    「판정관이 판정하지 않음(누락)」인지 진짜 결함인지도 갈리지 않는다: 앞은 판정관 문제고
+    뒤는 흐름도 문제인데, 처방이 정반대다.
+
+    실패한 경로만 이유와 함께 남긴다(통과 경로는 개수로 충분하다).
+    """
+    failed = [v for v in report.verdicts if not v.ok]
+    emit({
+        "event": "stage", "stage": "verifying",
+        "message": f"시뮬레이션 통과 {len(report.verdicts) - len(failed)}/{len(report.verdicts)} 경로",
+        "data": {
+            "traces": n_traces,
+            "judged": len(report.verdicts),
+            "pass_rate": round(report.pass_rate, 3),
+            "failed": [
+                {"trace_id": v.trace_id, "issues": v.issues[:3]} for v in failed[:6]
+            ],
+            # 판정관이 경로를 빠뜨려 실패로 센 건수 — 흐름도 결함과 구분해야 한다
+            "unjudged": sum(
+                1 for v in failed
+                if any("판정하지 않음" in (i or "") for i in v.issues)
+            ),
+        },
+    })

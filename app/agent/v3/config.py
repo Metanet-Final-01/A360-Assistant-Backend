@@ -10,6 +10,24 @@ try:
 except ImportError:
     pass
 
+
+def _int(raw: str | None, default: str) -> int:
+    """숫자 설정 하나 — **빈 값·공백만인 값도 미설정으로 본다.**
+
+    `int(os.getenv(k, "8"))`은 키가 **있으면서 빈 값**일 때 `int("")`로 터진다. 이 모듈은
+    임포트 시점에 읽으므로 그 예외는 기동 실패가 된다 — 템플릿 배포에서 `KEY=`로 남는 흔한
+    모양 하나가 프로세스를 못 뜨게 하는 셈이다(Qodo). `app.core.config.get()`이 이미 같은
+    정책(빈 값·공백만 = 미설정)을 쓰고 있어 거기에 맞춘다. 여기서 그 함수를 부르지 않는
+    이유는 v3 설정이 중앙 레지스트리에 아직 다 옮겨지지 않았고, 옮기는 일은 별건이기 때문이다.
+
+    키가 아니라 **읽은 값**을 받는다. `_int("KEY", ...)`로 두면 `os.getenv`가 변수 키로
+    불려 레지스트리 래칫(test_config_registry)이 이 파일을 '정적으로 못 보는 파일'로 분류하고,
+    그러면 이 파일의 키 9개가 REGISTRY에 선언됐는지 아무도 확인하지 않게 된다.
+    """
+    raw = (raw or "").strip()
+    return int(raw) if raw else int(default)
+
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # 기본은 가벼운 모델. 교체는 코드 수정 없이 .env의 OPENAI_MODEL로 한다.
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
@@ -17,7 +35,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 # 그래프 전체 동시 LLM 호출 상한 (rate limit 방어). orchestrator와 recommend 서브그래프가
 # 공유한다 — 값이 갈리면 중첩 실행(orchestrator→recommend)의 동시성 예산이 어긋나므로
 # 한 곳에서 관리한다. 배포 환경별 rate limit에 맞춰 .env로 조정 가능(다른 설정과 일관).
-MAX_LLM_CONCURRENCY = int(os.getenv("MAX_LLM_CONCURRENCY", "3"))
+MAX_LLM_CONCURRENCY = _int(os.getenv("MAX_LLM_CONCURRENCY"), "3")
 
 # compose 한 호출의 출력 토큰 상한. 흐름도 JSON은 액션·파라미터·rationale이 쌓여 길어지는데
 # 미지정이면 provider 기본 천장(실측 정황상 4096)에 걸려 JSON이 중간에서 잘린다 —
@@ -30,7 +48,7 @@ MAX_LLM_CONCURRENCY = int(os.getenv("MAX_LLM_CONCURRENCY", "3"))
 # 전부 먹고 본문을 한 글자도 못 냈다 — 절단을 막으려고 올려 둔 값이 절단을 일으켰다.
 # 추론을 켤 때는 **추론 몫 + 본문 몫**을 함께 담을 수 있게 올려야 한다(본문은 실측 2~2.6k).
 # 추론을 끄면 16,000으로 되돌려도 충분하다 — 남는 상한은 비용이 아니라 여유일 뿐이다.
-COMPOSE_MAX_TOKENS = int(os.getenv("COMPOSE_MAX_TOKENS", "32000"))
+COMPOSE_MAX_TOKENS = _int(os.getenv("COMPOSE_MAX_TOKENS"), "32000")
 
 # compose 출력에 JSON mode를 걸지 여부(0이면 끈다).
 #
@@ -44,7 +62,7 @@ COMPOSE_MAX_TOKENS = int(os.getenv("COMPOSE_MAX_TOKENS", "32000"))
 # ⚠ JSON mode는 메시지에 'json' 문자열이 있어야 한다(OpenAI 제약) — compose_agent.md의
 # 출력 지시가 "JSON 객체 하나만"이라 충족한다. 툴 바인딩과 함께 쓸 때 공급자가 거부하면
 # 이 값을 0으로 두고 되돌린다.
-COMPOSE_JSON_MODE = int(os.getenv("COMPOSE_JSON_MODE", "1"))
+COMPOSE_JSON_MODE = _int(os.getenv("COMPOSE_JSON_MODE"), "1")
 
 # spec_builder가 analyze의 분해 결과를 입력으로 받을지 (0이면 원문만 본다) — A/B 측정용.
 #
@@ -65,7 +83,7 @@ COMPOSE_JSON_MODE = int(os.getenv("COMPOSE_JSON_MODE", "1"))
 # 비율이 같은 품질을 뜻하지 않는다 — 요구를 굵게 잡으면 커버하기도 쉬워진다. 같은 턴에 surgeon
 # 프롬프트 수정과 게이트 partial 지적이 함께 들어가 변수가 셋이라, 분석 유무만 갈린 비교가
 # 아니었다. 다른 코드를 고정한 채 1로 한 턴 더 돌려 짝을 맞춘다.
-SPEC_USE_ANALYSIS = int(os.getenv("SPEC_USE_ANALYSIS", "1"))
+SPEC_USE_ANALYSIS = _int(os.getenv("SPEC_USE_ANALYSIS"), "1")
 
 # 구조 단계(흐름도 초안)에만 거는 추론 강도. "" 또는 인정 목록 밖의 값이면 인자를 안 보낸다
 # (= 공급자 기본값). 값: none · low · medium · high · xhigh.
@@ -113,4 +131,51 @@ COMPOSE_REASONING = os.getenv("COMPOSE_REASONING", "low").strip().lower()
 # 그 컨테이너를 떼고 자식들을 다시 잰다.
 #
 # 크게 두면(예: 999) 청크가 하나가 되어 분할 전 동작으로 돌아간다 — 탈출구다.
-COMPOSE_FILL_CHUNK = int(os.getenv("COMPOSE_FILL_CHUNK", "8"))
+COMPOSE_FILL_CHUNK = _int(os.getenv("COMPOSE_FILL_CHUNK"), "8")
+
+# 구조 게이트가 "필수 요구가 빠졌다"고 판정했을 때 그 요구 문구로 카탈로그를 다시 조사해
+# 구조를 한 번 더 만들지 여부 (0이면 끈다).
+#
+# 왜 켜는가: 커버리지 미달은 **수리로 풀리지 않는다.** 수리(surgeon)에게는 카탈로그를
+# 검색할 수단이 없어서 아는 것 중에 고르게 되고, 그게 매번 빈 `Step`이다(실측 2026-07-29:
+# `insert Step/Step`으로 답한 라운드들이 가중치를 0→20·0→30으로 올렸다). 조사를 가진
+# 경로로 돌리면 실제로 액션을 찾아 넣는다 — 같은 세션에서 `Format cell`이 그렇게 들어왔다.
+#
+# ⚠ **켜면 턴당 LLM 2회가 늘어난다** (구조 재생성 1 + 커버리지 재측정 1, 실측 ~$0.03).
+#
+# ⚠⚠ **실측(2026-07-30) 첫 턴은 순손실이었다 — 그래서 기본을 0으로 둔다.** 조사는 제대로
+# 돌아 요구 4건에 대한 액션을 찾았고(found=true) 액션이 14→17로 늘었는데, **재생성본이
+# 닫힌 어휘 검증(2.5단)을 건너뛰어** `package="Recorder/Click"` ·
+# `action="범용 레코더로 캡처한 객체에 대해 수행한"` 꼴의 오염이 R1 blocker 6건으로
+# 게이트에 들어갔다: 게이트 7건 → 13건, 가중 910, 수리 4라운드를 태우고도 300.
+# 최종 위반 3건 → 10건, 신뢰도 0.30 → 0.16, 턴 $0.0895 → $0.1274.
+#
+# 그 배선 결함은 고쳤다(재생성본도 `_fix_vocab`을 통과한다). 하지만 **고친 효과를 아직 안
+# 쟀다.** 재기 전까지는 꺼 둔다 — 켜서 손해가 확인된 것을 기본으로 둘 수는 없다.
+# 재측정 절차: 같은 문서로 0/1 한 턴씩, 스펙 지문(req_digest)이 같은지 먼저 확인하고
+# `flow_confidence` · 게이트 커버리지 미달 건수 · R1 건수 · 턴 비용을 비교한다.
+COMPOSE_COVERAGE_RETRY = _int(os.getenv("COMPOSE_COVERAGE_RETRY"), "0")
+
+# 계측 경로(분석 · 요구사항 정형화 · L2 커버리지 · L3 시뮬레이션)에 거는 temperature.
+# 빈 값이면 인자를 안 보낸다(공급자 기본값 ≈ 1.0 — 기존 동작).
+#
+# 왜 0인가: 이 넷은 **재는 도구**다. 같은 입력에 다른 답을 내면 그 아래 모든 비교가 무효가 된다.
+# 실측(2026-07-30): 같은 업무정의서를 세션마다 새로 올려(=대화 이력 없음) 세 턴 돌렸는데
+# 요구사항이 6·8·10건으로 갈렸고 오류 정책은 있다가 없어졌다. 그 편차가 조사 질의 수·구조
+# 크기·커버리지 분모를 모두 흔들어 추론 강도 A/B도, 커버리지 보완 토글 A/B도 성립하지
+# 않았다 — 한동안 그 차이를 설정 탓으로 읽었다.
+#
+# ⚠ **비전 파싱에는 걸지 않는다.** 처음에는 걸었다 — 스펙 편차의 근원이 문서 파싱이었고
+# (같은 PDF의 parsed_content 해시가 매번 달랐다) 샘플링을 고정하면 잡힐 것이라 봤다.
+# 그런데 RPA-351에서 재보니 **0을 걸고도 출력이 550 대 1,388로 갈렸다** — 가설이 반증됐다.
+# 실제로 편차를 줄인 것은 프롬프트 쪽이었다(기계 추출 텍스트 동봉 · 영역별 규칙 분리 ·
+# 이미지 없는 페이지 고지). 효과가 없는 조치를 근거처럼 남겨 두면 다음 사람이 그걸 믿는다.
+#
+# ⚠ 생성 경로(구조·값·수리)에도 걸지 않는다. 거기서 다양성은 자산이고, 구조 단계는 이미
+# 추론 강도로 다룬다. 재현성이 필요한 것은 **재는 쪽**이다.
+# 모델이 이 인자를 거부하면 `core.llm.chat`이 떼고 재시도한다(재현성은 잃고 호출은 산다).
+# 해석은 `app.core.config` 한 곳이다 — 두 곳에서 읽으면 기본값이 갈린다.
+def measure_temperature() -> float | None:
+    from app.core.config import measure_temperature as _core
+
+    return _core()
