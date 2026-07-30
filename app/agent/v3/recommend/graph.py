@@ -1170,26 +1170,36 @@ async def _compose_candidate(
     #
     # **코드는 탐지만 하고 고치는 건 모델이다.** 이름을 코드가 바꾸기 시작하면 '비슷한 이름'
     # 으로 엉뚱한 액션이 조용히 들어가는 길이 열린다 — 지금 R1이 잡아주는 것을 잃는 셈이다.
-    unknown = await asyncio.to_thread(_unknown_actions, outline, getattr(ctx, "catalog", None))
-    if unknown:
+    # ⚠ **구조를 새로 만드는 자리가 생기면 반드시 이 검증을 다시 통과시켜라.** 실측
+    # (2026-07-30): 커버리지 보완 회차를 게이트 안에 넣었더니 그 재생성본이 이 단계를
+    # 건너뛰어, `package="Recorder/Click"` · `action="범용 레코더로 캡처한 객체에 대해
+    # 수행한"` 꼴의 오염이 R1 blocker 6건으로 게이트에 그대로 들어갔다(가중 910). 그래서
+    # 함수로 빼 두 자리가 같은 것을 쓴다.
+    async def _fix_vocab(flow: dict) -> dict:
+        unknown = await asyncio.to_thread(_unknown_actions, flow, getattr(ctx, "catalog", None))
+        if not unknown:
+            return flow
         emit({"event": "stage", "stage": "verifying",
               "message": f"메뉴에 없는 액션 표기 {len(unknown)}건 — 표기 교정 요청",
               "data": {"candidate": cid,
                        "unknown": [f"{p}/{a}" for _l, p, a in unknown[:8]]}})
         fixed = await _ask(
             compose_system_prompt(persona, analysis, spec, dossier),
-            _vocab_retry_user(outline, unknown, ctx.catalog) + doc_block,
+            _vocab_retry_user(flow, unknown, ctx.catalog) + doc_block,
             "구조(표기)")
         left = await asyncio.to_thread(_unknown_actions, fixed or {}, getattr(ctx, "catalog", None))
-        if fixed is None or len(left) >= len(unknown) or _repair_regression(outline, fixed):
+        if fixed is None or len(left) >= len(unknown) or _repair_regression(flow, fixed):
             logger.warning("후보 %s 표기 교정 반려 — %d건 → %d건. 원래 구조로 진행",
                            cid, len(unknown), len(left))
-        else:
-            fixed.pop("needs", None)
-            outline = fixed
-            emit({"event": "stage", "stage": "verifying",
-                  "message": f"액션 표기를 교정했습니다 ({len(unknown)}건 → {len(left)}건)",
-                  "data": {"candidate": cid, "before": len(unknown), "after": len(left)}})
+            return flow
+        fixed.pop("needs", None)
+        fixed.pop("plan", None)
+        emit({"event": "stage", "stage": "verifying",
+              "message": f"액션 표기를 교정했습니다 ({len(unknown)}건 → {len(left)}건)",
+              "data": {"candidate": cid, "before": len(unknown), "after": len(left)}})
+        return fixed
+
+    outline = await _fix_vocab(outline)
 
     # ── 3단: 구조 게이트 — 값을 채우기 전에 한 번 거른다 ───────────────────
     issues, coverage_findings = await asyncio.to_thread(_gate_issues, outline, spec, ctx)
@@ -1212,7 +1222,9 @@ async def _compose_candidate(
             if retry is not None and not lost:
                 retry.pop("needs", None)
                 retry.pop("plan", None)
-                outline = retry
+                # 재생성본도 닫힌 어휘를 통과해야 한다 — 안 거치면 오염이 R1 blocker로
+                # 게이트에 들어간다(실측 2026-07-30: 가중 910, 수리 4라운드를 태우고 300).
+                outline = await _fix_vocab(retry)
                 # 다시 잰다 — 안 재고 옛 findings로 수리를 부르면 이미 넣은 것을 또 넣으라고 시킨다.
                 issues, coverage_findings = await asyncio.to_thread(
                     _gate_issues, outline, spec, ctx)

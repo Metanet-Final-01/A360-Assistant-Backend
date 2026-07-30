@@ -1700,6 +1700,26 @@ def test_안_채워진_노드는_필드가_아니라_패치로_센다():
     assert (total, patched, total - patched) == (3, 2, 1)   # 남은 하나가 진짜 누락(n3)
 
 
+def test_구조를_새로_만드는_자리는_모두_어휘_검증을_지난다():
+    """실측(2026-07-30): 커버리지 보완 회차를 게이트 안에 넣었더니 그 재생성본이 2.5단
+    어휘 검증을 건너뛰어, `package="Recorder/Click"` · `action="범용 레코더로 캡처한
+    객체에 대해 수행한"` 꼴의 오염이 R1 blocker 6건으로 게이트에 들어갔다(가중 910).
+
+    구조를 새로 만드는 자리가 늘 때마다 이 검증을 다시 걸어야 한다 — 그래서 한 함수로
+    빼 두 자리가 같은 것을 쓴다. 그 배선이 유지되는지 소스에서 잰다.
+    """
+    import inspect
+
+    from app.agent.v3.recommend import graph as g
+
+    body = inspect.getsource(g)
+    assert "async def _fix_vocab" in body, "어휘 검증이 함수로 빠져 있어야 재사용된다"
+    # 초안 경로와 커버리지 재생성 경로 둘 다 통과해야 한다
+    assert body.count("_fix_vocab(") >= 3, "정의 1 + 호출 2(초안·커버리지 재생성)"
+    assert "outline = await _fix_vocab(outline)" in body
+    assert "outline = await _fix_vocab(retry)" in body
+
+
 def test_전이_id는_흐름도에_남지_않는다():
     """id는 값 단계가 노드를 가리키는 임시 좌표다 — 스키마로 새 나가면 안 된다."""
     from app.agent.v3.recommend import graph as g

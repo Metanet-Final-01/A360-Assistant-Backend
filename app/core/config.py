@@ -122,7 +122,7 @@ REGISTRY: dict[str, EnvSpec] = {
         doc="값 채우기 한 호출이 맡는 액션 수 상한. 크게 두면 한 호출로 합쳐진다(분할 해제)",
     ),
     "COMPOSE_COVERAGE_RETRY": EnvSpec(
-        "1", cast=int, group="llm",
+        "0", cast=int, group="llm",
         doc="게이트가 빠뜨린 필수 요구를 조사로 보완하고 구조를 재생성할지 (0=끔). "
             "켜면 턴당 LLM 2회 증가(~$0.03), 대신 must_coverage가 오른다",
     ),
