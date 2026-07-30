@@ -313,6 +313,24 @@ def _discouraged_note(catalog, packages: set[str]) -> str:
 
 
 def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
+    """액션 후보 메뉴 한 줄 — **출력 계약의 칸 이름을 그대로 말한다** (RPA-354).
+
+    앞서는 `- 패키지/액션 «라벨»`이었다. 출력 계약은 `package`·`action`·`label` 세 칸을
+    요구하므로, 모델은 이 한 줄을 **역파싱**해서 세 칸을 채워야 했다. 그 분해가 확정되지
+    않는다 — 카탈로그에 `/`가 든 이름이 실재하기 때문이다(패키지 `CSV/TXT`·`FTP/SFTP`,
+    액션 `Insert/Delete rows/columns`·`For each row in CSV/TXT iterator` 등). 그런 액션은
+    옛 형식에서 이렇게 렌더된다:
+
+        - CSV/TXT/For each row in CSV/TXT iterator «CSV/TXT 반복자의 각 행에 대해»
+
+    슬래시가 넷이고 패키지 경계를 **사람도 못 찍는다.** 실제로 밀려 쓴 흐름도가 나왔다
+    (`package`에 `패키지/액션`이 통째로, `action`에 한국어 라벨이). 모델에게 더 잘하라고
+    할 문제가 아니라 우리 형식이 답을 확정해 주지 못한 것이다.
+
+    그래서 칸 이름을 붙이고 값을 인용부호로 닫는다 — 복사만 하면 맞는다. 라벨은 A360 화면에
+    보이는 이름이라 액션을 고를 때 근거가 되므로 남기되, `메뉴명:`으로 역할을 밝혀 액션
+    이름과 섞이지 않게 한다.
+    """
     params = ", ".join(
         f"{p['name']}({p.get('type')}{', 필수' if p.get('required') else ''})"
         for p in spec_dict.get("parameters", [])
@@ -321,8 +339,9 @@ def _menu_block(pkg: str, act: str, spec_dict: dict) -> str:
     # 스펙 미상(params_unknown 행)을 '없음'으로 표기하면 파라미터가 정말 없는 액션과
     # 구분이 안 돼 composer가 스펙 확인을 건너뛴다 — '미상'으로 구분 표기한다.
     unknown = spec_dict.get("parameters") is None
+    label = spec_dict.get("label") or act
     return (
-        f"- {pkg}/{act} «{spec_dict.get('label') or act}»"
+        f'- package="{pkg}" action="{act}" (메뉴명: {label})'
         + (f" → 리턴 {rt}" if rt else "")
         + f"\n    파라미터: {params or ('미상 — get_action_schema로 확인' if unknown else '없음')}"
     )
