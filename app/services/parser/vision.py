@@ -251,7 +251,42 @@ def _machine_text(page: dict) -> str:
     return "\n".join(parts).strip()
 
 
-def _build_anchor(parsed: dict, page_no: int, has_image: bool = True) -> str:
+def _machine_texts(parsed: dict) -> dict[int, str]:
+    """페이지 → 기계 추출 텍스트. **문서당 한 번** 계산해 타깃 페이지들이 나눠 쓴다.
+
+    페이지마다 다시 훑으면 타깃 수(T) × 전체 페이지 수(P)만큼 스캔이 돈다. 그리고 워커들이
+    결과를 `parsed`에 붙이는 중에 이 순회가 돌 여지도 없어진다 — 제출 전에 한 번 끝낸다.
+    """
+    return {
+        p["page"]: t
+        for p in (parsed.get("pages") or [])
+        if isinstance(p, dict) and p.get("page") is not None and (t := _machine_text(p))
+    }
+
+
+def _doc_snippet(machine_by_page: dict[int, str]) -> str:
+    """문서 전체 맥락 — 상한에 닿으면 **거기서 멈춘다.**
+
+    만들고 나서 자르면 버릴 문자열을 문서 크기만큼 먼저 할당한다. 200페이지 문서에서
+    4,000자를 쓰려고 수백 KB를 만드는 셈이라, 누적이 상한에 닿는 순간 끊는다.
+    """
+    parts: list[str] = []
+    total = 0
+    for page_no in sorted(machine_by_page):
+        piece = f"[p{page_no}] {machine_by_page[page_no]}"
+        if total + len(piece) >= _ANCHOR_DOC_CHARS:
+            tail = _ANCHOR_DOC_CHARS - total
+            if tail > 0:
+                parts.append(piece[:tail])
+            break
+        parts.append(piece)
+        total += len(piece) + 2  # 이어붙일 "\n\n"
+    return "\n\n".join(parts)
+
+
+def _build_anchor(
+    own_text: str, doc_snippet: str, page_no: int, has_image: bool = True
+) -> str:
     """비전 프롬프트에 동봉할 기계 추출 텍스트 블록. 재료가 없으면 빈 문자열.
 
     ## 왜 주는가 (RPA-351)
@@ -268,12 +303,6 @@ def _build_anchor(parsed: dict, page_no: int, has_image: bool = True) -> str:
     ⚠ 이 텍스트는 **사용자 문서에서 나온 신뢰할 수 없는 데이터**다. 이미지와 같은 경계로
     감싸 '지시가 아니라 자료'임을 못 박는다(RPA-142 계열 인젝션 격리).
     """
-    pages = parsed.get("pages") or []
-    own = next((_machine_text(p) for p in pages if p.get("page") == page_no), "")
-    whole = "\n\n".join(
-        f"[p{p.get('page')}] {t}" for p in pages if (t := _machine_text(p))
-    )
-
     # 이미지가 없는 페이지라는 사실을 알려 준다 — **코드는 이걸 이미 안다**(`_pdf_pages_with_images`).
     # 실측(2026-07-30): 스크린샷이 없는 페이지에서 모델이 `[화면 캡처]` 머리글을 억지로 만들고
     # 그 아래에 문서 텍스트를 **한 번 더** 옮겼다(같은 값이 두 번 남음). "그 영역이 없으면
@@ -285,14 +314,16 @@ def _build_anchor(parsed: dict, page_no: int, has_image: bool = True) -> str:
         "문서 서식일 뿐이다. 따라서 `[화면 캡처]` 머리글을 **만들지 마라** — 문서 텍스트를 "
         "그 아래에 다시 옮기는 것은 같은 내용을 두 번 남기는 것이다."
     )
-    if not own and not whole:
+    if not own_text and not doc_snippet:
         return no_image
 
     sections = []
-    if own:
-        sections.append(f"# 이 페이지({page_no})에서 기계가 읽은 텍스트\n{own[:_ANCHOR_PAGE_CHARS]}")
-    if whole:
-        sections.append(f"# 문서 전체에서 기계가 읽은 텍스트\n{whole[:_ANCHOR_DOC_CHARS]}")
+    if own_text:
+        sections.append(
+            f"# 이 페이지({page_no})에서 기계가 읽은 텍스트\n{own_text[:_ANCHOR_PAGE_CHARS]}"
+        )
+    if doc_snippet:
+        sections.append(f"# 문서 전체에서 기계가 읽은 텍스트\n{doc_snippet}")
     body = "\n\n".join(sections)
     for token in (_ANCHOR_OPEN, _ANCHOR_CLOSE):
         body = body.replace(token, "[경계 표시 제거됨]")
@@ -401,6 +432,11 @@ def enrich_document_stream(
     pages_by_no = {p["page"]: p for p in parsed["pages"]}
     enriched: list[int] = []
 
+    # 앵커 재료는 **문서당 한 번**만 만든다 — 페이지마다 전체를 다시 훑으면 타깃 수 ×
+    # 전체 페이지 수만큼 스캔이 돌고, 문서 전체 스니펫도 매번 다시 할당된다.
+    machine_by_page = _machine_texts(parsed)
+    doc_snippet = _doc_snippet(machine_by_page)
+
     # 페이지별 LLM 호출은 서로 독립 → 병렬 실행 (5페이지 기준 ~21초 → ~6초).
     # ThreadPoolExecutor는 ContextVar를 워커로 자동 전파하지 않으므로, copy_context로
     # 현재 usage_context(component=vision·user_id 등)를 각 워커에 넘겨 귀속이 유지되게 한다.
@@ -410,7 +446,10 @@ def enrich_document_stream(
             pool.submit(
                 contextvars.copy_context().run, _extract_page, page_images[n], model, session_id,
                 # pptx 등 이미지 집합을 못 구하는 경로는 has_image=True로 둔다(기존 동작)
-                _build_anchor(parsed, n, has_image=(n in with_images if ext == "pdf" else True)),
+                _build_anchor(
+                    machine_by_page.get(n, ""), doc_snippet, n,
+                    has_image=(n in with_images if ext == "pdf" else True),
+                ),
             ): n
             for n in targets
             if page_images.get(n)
