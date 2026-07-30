@@ -40,7 +40,22 @@ _SEARCH_LIMIT = 5
 # 우선순위는 코드로 강제한다(_expand_queries: must 먼저, should는 남는 자리).
 # 검색은 병렬 I/O라 단위 증가 비용이 작고, 메뉴 증가만 프롬프트 토큰에 비례한다.
 _MAX_UNITS = 10          # 기능 단위 상한 — 질의 폭주 방지
-_MAX_MENU_ACTIONS = 18   # Dossier 액션 메뉴 상한 (스펙 포함이라 토큰 비용이 큼)
+# 검색 유래 액션에는 상한을 두지 않는다 (RPA-355).
+#
+# 앞서 18이었다. 그 값에 **근거가 없었다** — v3 최초 커밋의 14를 `_MAX_UNITS` 8→10에
+# 맞춰 비례로 올린 것이고, 토큰 예산에서 역산한 값이 아니다. 산수도 안 맞았다: 단위가 10개면
+# 깊이 1까지만 완주해도 20칸이 필요해 **최대 단위 수에서는 깊이 1조차 못 채웠다.**
+#
+# 그 상한이 실제로 업무를 망쳤다. 실측(2026-07-30 턴 861f64deebd9) 「증권 버튼 클릭」 단위에서
+# 요소 클릭(`Recorder/Click`, 0.4062)이 좌표 클릭(`Mouse/Click`, 0.4902)에 0.084점 차로
+# 밀려 6위가 됐고, 단위당 2칸이라 잘렸다. 모델은 요소 클릭이 필요함을 알고 있었지만
+# (notes에 그렇게 적었다) 메뉴에 없어 자리표시자를 남겼다. 같은 문서를 두 번 돌렸을 때
+# 한 턴은 받고 한 턴은 못 받았다 — 잡음이 결과를 갈랐다.
+#
+# 무제한이 아니다. 구조적 상한이 `_MAX_UNITS × 2 × _SEARCH_LIMIT = 100`이고, 중복을 걷어낸
+# 실측은 48개였다. 토큰은 구조 보완 과잉 공급을 걷어낸 것으로 상계된다
+# (`structural_complement` 주석 참고).
+_MAX_MENU_ACTIONS = None  # None = 상한 없음
 # 사용자 제공 카탈로그의 메뉴 상한 — 검색으로 좁힐 수 없어 전량을 싣지만, 프롬프트가
 # 무한정 커지는 것은 막는다. 검색 경로보다 훨씬 넉넉하다(실제 카탈로그는 보통 수십 개라
 # 이 값에 닿지 않고, 닿으면 잘린 사실을 프롬프트·로그·진행 메시지 셋 다에 남긴다).
@@ -104,6 +119,30 @@ _STRUCTURAL_CANDIDATES: list[tuple[str, str]] = [
 ]
 
 
+# 구조 보완에서 제외하는 컨테이너 패키지 (RPA-355).
+#
+# 트리거는 **흐름도 steps에 들어가지 않는다** — 별도 노드(`recommend_trigger`)가 추천하고
+# 스키마의 `trigger` 칸에 담긴다. 그런데 이 패키지가 구조 보완으로 무조건 실려 액션 15개 ·
+# 3,150자(메뉴의 26%)를 먹고 있었고, **저장된 흐름도 80건 중 0건에 쓰였다.** 게다가 그 액션들은
+# 호스트·인증정보·폴링 주기를 받는 설정이라 제어 흐름 어휘도 아니다.
+#
+# 트리거 구동 업무라면 요구사항 질의가 검색으로 찾는다 — `action_schema` 행이므로 검색 대상이다.
+# `CONTAINER_PACKAGES`는 그대로 둔다: 검수의 컨테이너 판정(빈 껍데기·children 규칙)이 쓰는
+# 목록이라 여기 사정으로 건드리면 안 된다.
+_COMPLEMENT_EXCLUDED_PACKAGES: frozenset[str] = frozenset({"Trigger loop"})
+
+# 파라미터 타입이 이 값이면 그 액션은 **세션을 받아야** 동작한다 (derive.py와 같은 판정).
+_SESSION_PARAM_TYPE = "SESSION"
+
+
+def _needs_session(spec: dict | None) -> bool:
+    """이 액션이 SESSION 파라미터를 요구하는가 — 특정 시스템에 묶였다는 신호."""
+    for p in (spec or {}).get("parameters") or []:
+        if isinstance(p, dict) and (p.get("type") or "").upper() == _SESSION_PARAM_TYPE:
+            return True
+    return False
+
+
 def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, str]]:
     """메뉴를 결정론으로 보완할 (package, action) 목록 — 검색 없이 카탈로그 직조회 (비용 0).
 
@@ -114,6 +153,28 @@ def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, s
        (`derive_structural_actions`) — 수기 병기 목록은 표기 세대가 바뀔 때마다 깨졌고
        실측에서 실재 39개 중 29개를 놓치고 있었다. 유도가 비면 그 목록으로 폴백한다.
     카탈로그에 실재하는 것만 반환한다(폐쇄어휘 유지).
+
+    ## 왜 ②에 예산 규율을 붙였나 (RPA-355)
+
+    ①에는 관련성 필터가 있는데(`key[0] in menu_packages`) ②에는 없었다. 그래서 '전량 유도'가
+    그대로 메뉴가 되어, 실측 메뉴 12,304자 중 **루프 변형 31개가 6,434자(52%)** 를 먹고 정작
+    업무 액션은 18개 3,456자(28%)였다. 그 31개는 저장된 흐름도 80건에서 **한 번도 쓰이지
+    않았다.**
+
+    두 가지를 뺀다. 판별 기준은 **카탈로그 데이터에서** 나온다:
+
+    - `Trigger loop` 패키지 전체 (`_COMPLEMENT_EXCLUDED_PACKAGES` 주석 참고)
+    - **`SESSION`을 요구하는 이터레이터** — `For each mail in mail box` ·
+      `For each channel in a team` 등 10개가 `Session name:SESSION`을 받는다. 그 세션을 열
+      패키지가 메뉴에 없으면 **애초에 쓸 수 없다.** 이건 범용 제어 흐름이 아니라 특정 시스템에
+      묶인 업무 액션이므로 검색 경로가 맡는다(그쪽은 이제 상한이 없다).
+
+    남는 범용 제어 흐름: `Loop action for data iteration` · `For each row in table` ·
+    `For each work item in queue` · `Break` · `Continue` · If 3종 · Error handler 4종 · Step.
+
+    ⚠ 이터레이터 이름에서 담당 패키지를 추론해 "그 패키지가 메뉴에 있을 때만 싣는" 방식도
+    검토했는데 매핑이 성립하지 않는다(`For each mail in mail box` ↔ `Microsoft 365 Outlook`은
+    이름에 공통 토큰이 없다). 추측으로 필터를 만들면 조용히 틀리므로 안 한다.
     """
     openers, closers = derive_session_registry(catalog)
     candidates: list[tuple[str, str]] = [
@@ -123,12 +184,25 @@ def structural_complement(catalog, menu_packages: set[str]) -> list[tuple[str, s
     candidates += list(derived) if derived else _STRUCTURAL_CANDIDATES
     out: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    dropped: list[str] = []
     for pkg, act in candidates:
         if (pkg, act) in seen:
             continue
         seen.add((pkg, act))
-        if catalog.get_action_schema(pkg, act) is not None:
-            out.append((pkg, act))
+        spec = catalog.get_action_schema(pkg, act)
+        if spec is None:
+            continue
+        # 세션 여닫기(①)는 그대로 싣는다 — 세션 인자를 받는 것이 당연하고, 이미 메뉴 패키지로
+        # 좁혀져 있다. 예산 규율은 '전량 유도'로 들어온 것(②)에만 적용한다.
+        if (pkg, act) not in openers and (pkg, act) not in closers:
+            if pkg in _COMPLEMENT_EXCLUDED_PACKAGES or _needs_session(spec):
+                dropped.append(f"{pkg}/{act}")
+                continue
+        out.append((pkg, act))
+    if dropped:
+        # 조용히 자르지 않는다 — 무엇이 메뉴에서 빠졌는지 남긴다(RPA-355 실측 절차가 이걸 본다).
+        logger.info("구조 보완에서 제외 %d개 (트리거·세션 전용 이터레이터): %s",
+                    len(dropped), ", ".join(dropped[:12]))
     return out
 
 
@@ -229,27 +303,44 @@ def _expand_queries(spec: dict, package_list: str = "") -> list[_ResearchUnit]:
 
 
 def _interleave(
-    unit_ranked: list[list[tuple[tuple[str, str], float]]], limit: int
+    unit_ranked: list[list[tuple[tuple[str, str], float]]], limit: int | None = None
 ) -> list[tuple[tuple[str, str], float]]:
     """단위별 상위부터 라운드로빈으로 뽑는다 — 단위 사이에서는 점수를 비교하지 않는다.
 
     모든 단위가 1위를 먼저 내고, 그다음 2위를 낸다. 임계값도 배분 비율도 없어서 단위 수가
-    몇이든 자연히 공평해지고, 후보가 적은 단위는 알아서 빠진다.
+    몇이든 자연히 공평해지고, 후보가 적은 단위는 알아서 빠진다. `limit=None`이면 상한 없음.
+
+    ## 중복은 그 단위의 차례를 소모하지 않는다 (RPA-355)
+
+    앞서는 단위의 그 깊이 후보가 이미 뽑힌 것이면 `continue`로 넘어갔다 — **다음 순위로
+    내려가지 않고 그 차례를 통째로 잃었다.** 그래서 상위 후보가 다른 단위와 겹치는 단위가
+    굶었다: 실측(2026-07-30) 「국내 금 클릭」 단위는 후보 9개를 갖고도 1개만 올렸다(1위
+    `Browser/Open`은 「웹 열기」가, 2위 `Mouse/Click`은 「증권 버튼 클릭」이 먼저 가져가
+    깊이 0·1을 둘 다 잃었다). 클릭 단위 둘이 합쳐 3개만 올린 원인이 이것이다.
+
+    이제 단위마다 커서를 들고, 이미 뽑힌 것은 **건너뛰며 자기 차례에 하나를 채운다.**
     """
     out: list[tuple[tuple[str, str], float]] = []
     seen: set[tuple[str, str]] = set()
-    depth_max = max((len(r) for r in unit_ranked), default=0)
-    for depth in range(depth_max):
-        for ranked in unit_ranked:
-            if depth >= len(ranked):
-                continue
-            key, score = ranked[depth]
-            if key in seen:
-                continue
+    cursor = [0] * len(unit_ranked)          # 단위별로 어디까지 봤나
+    while limit is None or len(out) < limit:
+        progressed = False
+        for ui, ranked in enumerate(unit_ranked):
+            i = cursor[ui]
+            while i < len(ranked) and ranked[i][0] in seen:
+                i += 1                        # 중복은 넘기고 계속 본다 — 차례를 잃지 않는다
+            cursor[ui] = i
+            if i >= len(ranked):
+                continue                      # 이 단위는 후보를 다 썼다
+            key, score = ranked[i]
+            cursor[ui] = i + 1
             seen.add(key)
             out.append((key, score))
-            if len(out) >= limit:
+            progressed = True
+            if limit is not None and len(out) >= limit:
                 return out
+        if not progressed:                    # 모든 단위가 소진 — 더 뽑을 것이 없다
+            break
     return out
 
 
@@ -332,8 +423,7 @@ def _whole_catalog_dossier(ctx) -> dict:
     """검색기가 없는 경로(사용자 제공 카탈로그)의 Dossier — 전량이 곧 메뉴다 (RPA-285).
 
     어휘가 수십 개 규모라 검색으로 좁힐 이유가 없고, 좁히면 오히려 사용자가 준 액션이
-    메뉴에서 누락돼 composer가 "카탈로그에 없다"고 오판한다. 그래서 검색 경로의 상한
-    (_MAX_MENU_ACTIONS=14)은 여기 적용하지 않는다.
+    메뉴에서 누락돼 composer가 "카탈로그에 없다"고 오판한다.
 
     다만 무제한은 아니다 — 사용자가 수천 개짜리 카탈로그를 붙여넣으면 시스템 프롬프트가
     통째로 부풀어 지연·비용이 폭증하고 컨텍스트 한도에 걸린다(Qodo 리뷰). 안전 상한을 두되
