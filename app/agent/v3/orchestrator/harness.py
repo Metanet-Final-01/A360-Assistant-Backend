@@ -26,7 +26,15 @@ from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
 from ..verify.checker import derive_session_registry, run_flow_checks
 from ..verify.findings import Finding, from_violations, weight
-from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
+from .edit_ops import (
+    EditOps,
+    annotate_ids,
+    apply_edit_ops,
+    render_outline,
+    renumber,
+    shrink_reason,
+    strip_ids,
+)
 from .jsonio import chat_json
 
 logger = logging.getLogger(__name__)
@@ -381,8 +389,23 @@ def refine_flow(
         # 그래서 관용은 **덧붙이기만 하는 라운드**에만 준다. 기존 액션을 옮기거나 지우는 연산이
         # 섞였으면 정적 가중합이 **실제로 줄어야** 받는다 — 순서·구성을 건드리는 변경은
         # 증거를 요구한다. 정당한 재배치(변수 정의 전 사용 해소 등)는 어차피 가중합을 줄인다.
+        #
+        # 그리고 **줄어든 라운드는 가중합과 무관하게 반려한다.** 액션이 사라지면 그 요구를
+        # 담당하던 자리가 통째로 없어지는데, 정적 검수는 '없는 것'을 지적하지 못하므로
+        # 가중합이 오히려 **떨어진다** — 지우면 점수가 오르는 구조다. 실측(2026-07-29):
+        # 게이트 수리가 20액션을 4액션으로 줄이고 notes에 "자동화 불가"로 적어 낸 적이 있어
+        # 그쪽에는 `_repair_regression` 가드를 뒀는데, 여기에는 없어 비대칭이었다. 커버리지
+        # 지적을 받은 라운드가 remove로 답하면 같은 일이 이 루프에서도 성립한다.
         disruptive = any(o.op in ("move", "remove") for o in ops.operations)
         lenient = extras_pending and not disruptive
+        shrank = shrink_reason(current, work)
+        if shrank:
+            _emit_round(round_no, ops.operations, applied, errors,
+                        f"흐름이 줄어 반려 ({shrank})", current_weight, new_weight)
+            no_improve += 1
+            if no_improve >= _STOP_AFTER_NO_IMPROVE:
+                break
+            continue
         if new_weight < current_weight or (lenient and new_weight <= current_weight):
             _emit_round(round_no, ops.operations, applied, errors, "채택",
                         current_weight, new_weight)

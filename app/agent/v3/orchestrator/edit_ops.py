@@ -448,6 +448,37 @@ _APPLIERS = {
 }
 
 
+def count_actions(flow: dict) -> int:
+    """중첩까지 포함한 액션 총수."""
+    def walk(actions) -> int:
+        return sum(1 + walk(a.get("children")) for a in _dicts(actions))
+    return sum(walk(s.get("actions")) for s in _dicts(flow.get("steps")))
+
+
+def shrink_reason(before: dict, after: dict) -> str | None:
+    """`after`가 `before`보다 **작아졌으면** 그 이유를 한 줄로, 멀쩡하면 None.
+
+    수리·교정은 구조 전체를 다시 뱉는 일이라 "긴 재출력에서 뒤쪽이 빠진다"는 실패 모드를
+    들인다. 더 나쁜 건 **지우면 점수가 오르는** 구조라는 점이다: 정적 검수는 '없는 것'을
+    지적하지 못하므로 액션을 지우면 가중합이 오히려 떨어진다. 게다가 커버리지 지적
+    (「필수 요구 req-4가 missing」)을 모델이 **없앨 근거**로 읽으면, 지적된 요구를 담당하던
+    액션을 지우고 notes에 "자동화 불가"로 적는 쪽이 더 쉬운 답이 된다.
+
+    실측(2026-07-29 01:49 턴): 구조 1,566토큰(액션 ~20개) → 수리 566토큰(액션 4개).
+    엑셀·메일 단계가 통째로 사라지고 브라우저 열기·클릭·클릭·닫기만 남았다.
+
+    수리는 **개선일 때만** 받는다 — 아니면 원본이 낫다. 게이트 수리와 refine 루프가 같은
+    판정을 써야 한다(한쪽만 막으면 다른 쪽으로 같은 일이 성립한다).
+    """
+    before_n, after_n = count_actions(before), count_actions(after)
+    if after_n < before_n:
+        return f"액션 {before_n}개 → {after_n}개 ({before_n - after_n}개 소실)"
+    before_steps, after_steps = _dicts(before.get("steps")), _dicts(after.get("steps"))
+    if len(after_steps) < len(before_steps):
+        return f"단계 {len(before_steps)}개 → {len(after_steps)}개"
+    return None
+
+
 def _pair(spec: dict | None) -> tuple[str | None, str | None]:
     spec = spec or {}
     return spec.get("package"), spec.get("action")
