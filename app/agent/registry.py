@@ -132,15 +132,29 @@ def _import_version(name: str):
     return importlib.import_module(f"{__package__}.{name}")
 
 
-def resolve_version(version: str | None):
-    """버전 문자열 → 구현 모듈(지연 import). None이면 기본 버전.
+def resolve_version_name(version: str | None) -> str:
+    """요청 버전 → **실제로 실행될 버전 id**. None이면 서버 기본 (RPA-184).
+
+    모듈이 아니라 이름을 돌려주는 갈래를 따로 둔 이유: 디스패처가 done 이벤트에 실제 실행
+    버전을 새기려면 "무엇을 골랐는지"를 알아야 하는데, 모듈만 받으면 그걸 역으로 알아낼
+    방법이 없다(`__name__` 파싱은 계약이 아니라 우연이다).
 
     미지 버전(명시 요청)은 ValueError — 엔드포인트가 available_versions()로 사전 검증하지만
-    계약을 코드에서도 강제한다. env 기본의 미지값은 default_version()이 이미 폴백 처리한다.
+    계약을 코드에서도 강제한다. **다른 버전으로 조용히 대체하지 않는다**(RPA-184 D-24).
+
+    env 기본(`AGENT_VERSION`)의 미지값만은 default_version()이 경고 로그와 함께 폴백한다 —
+    운영자 오설정으로 부팅을 죽이지 않겠다는 기존 결정이다(test_default_version_falls_back_
+    for_unknown_env). 그 경우에도 **실행된 버전이 그대로 resolved로 공개**되므로 대체 사실이
+    호출자 기록에 남는다 — 조용하지 않다는 계약은 여기서 지켜진다.
     """
     name = version or default_version()
     if name not in _discover():
         raise ValueError(
             f"알 수 없는 에이전트 버전: {name!r} (사용 가능: {list(_discover())})"
         )
-    return _import_version(name)
+    return name
+
+
+def resolve_version(version: str | None):
+    """버전 문자열 → 구현 모듈(지연 import). None이면 기본 버전."""
+    return _import_version(resolve_version_name(version))
