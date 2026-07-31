@@ -20,7 +20,6 @@ from app.agent.v3.orchestrator.harness import (
     repair_spec_excerpts,
 )
 from app.agent.v3.orchestrator.intake import _guard_plan
-from app.agent.v3.orchestrator.judge import CandidateReport, judge_candidates
 from app.agent.v3.verify import checker
 from tests.agent_stubs import FakeCatalog
 
@@ -2979,26 +2978,34 @@ def test_simulation_missing_verdicts_counted_as_fail(monkeypatch):
     assert report.pass_rate == 1 / len(traces)
 
 
-def test_judge_hard_gate_and_llm_failure_fallback(monkeypatch):
-    """LLM 심판이 죽어도 결정론 신호로 승자를 내고, 게이트 실패 후보는 승자 자격이 없다."""
-    import app.agent.v3.orchestrator.judge as judge_mod
+def test_심판은_사라졌다():
+    """후보가 하나면 고를 것이 없다 (RPA-357).
 
-    def _boom(*a, **k):
-        raise ValueError("llm down")
+    지우기 전에도 보고가 하나면 LLM을 안 부르고 통과시켰고 이식 지시는 항상 빈 목록이라,
+    삭제 전후 산출이 같다. 배선만 남겨 두면 다음 사람이 "심판이 돌고 있다"고 읽는다.
+    """
+    import importlib
+    from pathlib import Path
 
-    monkeypatch.setattr(judge_mod, "chat_json", _boom)
+    from app.agent.v3.recommend import graph as g
+    from app.agent.v3.recommend import stream
 
-    strong_but_gated = CandidateReport(
-        candidate_id="A", persona="모범", flow={"steps": []},
-        must_coverage=0.9, gate_failures=["req-2"], sim_pass_rate=1.0,
-    )
-    weaker_but_clean = CandidateReport(
-        candidate_id="B", persona="운영", flow={"steps": []},
-        must_coverage=0.7, gate_failures=[], sim_pass_rate=0.8,
-    )
-    out = judge_candidates({"requirements": []}, [strong_but_gated, weaker_but_clean])
-    assert out["winner"].candidate_id == "B"
-    assert any(r["gate_failed"] for r in out["verdict"]["scores"])
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("app.agent.v3.orchestrator.judge")
+    prompts = Path(g.__file__).resolve().parent.parent / "prompts"
+    assert not (prompts / "judge.md").exists(), "심판 프롬프트가 남아 있다"
+    assert not hasattr(stream, "emit_verdict_frame"), "verdict 프레임이 남아 있다"
+
+    # 검증 결과를 나르는 그릇은 남되, 심판만 읽던 필드는 함께 사라졌다
+    fields = set(g.VerifyReport.model_fields)
+    assert {"flow", "findings", "violations", "must_coverage", "sim_pass_rate"} <= fields
+    assert not ({"gate_failures", "persona"} & fields)
+    assert not hasattr(g.VerifyReport, "deterministic_score")
+
+    # must 미충족 판정 자체는 L2에 그대로 있다 — 그릇이 그 값을 들고 다니지 않을 뿐이다
+    from app.agent.v3.verify.semantic import CoverageReport
+
+    assert hasattr(CoverageReport, "hard_gate_failures")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

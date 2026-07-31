@@ -66,16 +66,6 @@ def emit_candidates_frame(candidates: list[dict], caption: str) -> None:
     })
 
 
-def emit_verdict_frame(verdict: dict, caption: str) -> None:
-    """심판 결과(루브릭 점수판+선정 이유)를 partial(kind="verdict")로 흘린다 (v3)."""
-    emit({
-        "event": "partial",
-        "stage": "verifying",
-        "message": caption,
-        "data": {"kind": "verdict", "caption": caption, "verdict": verdict},
-    })
-
-
 def emit_scorecard_frame(scorecard: dict, caption: str) -> None:
     """검증 현황(must 커버리지·위반·시뮬레이션)을 partial(kind="scorecard")로 흘린다 (v3).
 

@@ -4,7 +4,6 @@
       → research (이중 질의 Dossier)         … 동작 단위 검색 → 액션 후보 메뉴
       → compose (4단)                        … 구조 → 능력 요청 → 구조 게이트 → 값
       → verify 스택                          … L0/L1 정적 → L2 커버리지 → L3 시뮬레이션
-      → judge (루브릭·하드 게이트)            … 채점과 refine 지시
       → refine (surgeon EditOps 패치 루프)    … 회귀 가드, ≤3라운드
       → finalize                             … sources·confidence 합성·질문 카드·flow_confidence
 
@@ -27,13 +26,14 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.llm import UsageCallbackHandler
 from app.schemas import ProgressEvent, Recommendation
 
 from .. import config
 from ..orchestrator import edit_ops as _edit_ops
+from ..verify.findings import Finding
 # 메뉴 렌더는 조사 단계와 **같은 함수**를 써야 한다 — 능력 요청으로 덧붙이는 액션이
 # 본 메뉴와 다른 모양이면 모델이 두 목록을 다른 것으로 읽는다.
 from .research import _menu_block
@@ -42,7 +42,6 @@ from .stream import (
     emit_candidates_frame,
     emit_flow_frame,
     emit_scorecard_frame,
-    emit_verdict_frame,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,11 +62,12 @@ _FILL_PROMPT = (_PROMPT_DIR / "compose_fill.md").read_text(encoding="utf-8")
 # (partial 이벤트라 미저장), (b) 심판 루브릭이 2축뿐이며, (c) 세 후보가 설계 관점보다
 # 잡음으로 갈리는 경우가 많았다. 후보를 줄여 아낀 예산을 구조 게이트·값 분할에 쓴다.
 #
-# judge/CandidateReport 배선은 남긴다 — 흐름도 하나를 채점해 verdict·refine 지시를 만드는
-# 경로가 그대로 필요하고, `judge_candidates`는 보고가 하나면 LLM 없이 통과시킨다.
+# **심판(judge)은 삭제했다** (RPA-357). 후보가 하나면 고를 것이 없다. 코드도 이미 그걸
+# 인정해 보고가 하나면 LLM을 안 부르고 통과시키고 있었고, 이식 지시는 항상 빈 목록이었다 —
+# 지우기 전과 산출이 같다. 다후보를 되살릴 때는 git 이력에서 꺼낸다.
 _STANCE_FILE = "design_stance.md"
 _CANDIDATE_ID = "A"
-_CANDIDATE_LABEL = "표준 설계"
+_CANDIDATE_LABEL = "표준 설계"   # 진행 카드 표시용 — 검증 보고는 이 이름을 들고 다니지 않는다
 
 # 초안 흐름도를 단계별로 '드러내는' 프레임 사이 지연(초) — v2와 동일한 인지적 페이싱.
 _REVEAL_DELAY = 0.18
@@ -1379,13 +1379,35 @@ def _fill_user(context_block: str, ids: list[str], doc_block: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# verify 스택 — 후보별 L0/L1 → L2 → L3
+# verify 스택 — L0/L1 → L2 → L3
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict, sem: asyncio.Semaphore, ctx):
-    """후보 하나에 검증 스택을 돌려 CandidateReport를 만든다. L2/L3 실패는 신호 결측일 뿐."""
+class VerifyReport(BaseModel):
+    """검증 스택 한 번의 결과 묶음 — 흐름도와 그 흐름도에 대한 모든 신호.
+
+    (RPA-357) 앞서는 `orchestrator/judge.py`의 `CandidateReport`였다. 심판이 후보 여럿을
+    비교하던 시절의 이름·자리인데, 후보가 하나가 된 뒤로는 **검증 결과를 다음 단계로
+    나르는 그릇**일 뿐이라 생산자(`_verify_candidate`)와 소비자(`generate_flow`)가 있는
+    이 파일로 옮겼다.
+
+    심판이 읽던 필드는 함께 걷어냈다: `deterministic_score()`(후보 간 순위용),
+    `gate_failures`(승자 자격 박탈용), `persona`(점수판 표기용). must 미충족 판정 자체는
+    `coverage.hard_gate_failures()`에 그대로 있다 — 이 그릇이 그 값을 들고 다니지 않을 뿐이다.
+    """
+
+    candidate_id: str
+    flow: dict = Field(default_factory=dict)
+    violations: list[dict] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
+    must_coverage: float | None = None
+    sim_pass_rate: float | None = None
+    coverage_by_step: dict[str, str] = Field(default_factory=dict)
+    coverage_by_req: dict[str, str] = Field(default_factory=dict)
+
+
+async def _verify_candidate(cid: str, flow: dict, spec: dict, sem: asyncio.Semaphore, ctx):
+    """흐름도에 검증 스택을 돌려 VerifyReport를 만든다. L2/L3 실패는 신호 결측일 뿐."""
     from ..orchestrator.harness import collect_violations, from_violations_dicts
-    from ..orchestrator.judge import CandidateReport
     from ..verify import findings as F
     from ..verify.semantic import run_semantic_check
     from ..verify.simulate import run_simulation
@@ -1419,14 +1441,12 @@ async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict,
         # 기반 정밀화가 후속 — confidence의 semantic 축은 req 상태의 흐름도 전역 요약을 쓴다.
         cov_by_req = {e.req_id: e.status for e in coverage.entries}
 
-    return CandidateReport(
+    return VerifyReport(
         candidate_id=cid,
-        persona=persona_name,
         flow=flow,
         violations=violations,
         findings=fnd,
         must_coverage=coverage.must_coverage if coverage is not None else None,
-        gate_failures=[e.req_id for e in coverage.hard_gate_failures()] if coverage is not None else [],
         sim_pass_rate=sim.pass_rate if sim is not None else None,
         coverage_by_step=cov_by_step,
         coverage_by_req=cov_by_req,
@@ -1438,7 +1458,7 @@ async def _verify_candidate(cid: str, persona_name: str, flow: dict, spec: dict,
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=None) -> dict:
-    """spec → research → compose → verify → judge → refine → finalize.
+    """spec → research → compose → verify → refine → finalize.
 
     반환: {"recommendation": Recommendation dict, "violations": list[dict]}.
     구조 단계 실패 시 RuntimeError (호출부가 error 이벤트로 처리).
@@ -1451,7 +1471,6 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
         refine_flow,
     )
     from ..catalog_context import a360_context
-    from ..orchestrator.judge import judge_candidates
     from ..verify import findings as F
     from ..verify.semantic import run_semantic_check
     from .research import build_dossier
@@ -1480,27 +1499,26 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     emit_candidates_frame(cand_status, "흐름도 초안 완성 — 검증 스택 통과 중")
 
     # [4] verify 스택 — L0/L1 정적 → L2 커버리지 → L3 시뮬레이션
-    report = await _verify_candidate(_CANDIDATE_ID, _CANDIDATE_LABEL, flow, spec, sem, ctx)
+    report = await _verify_candidate(_CANDIDATE_ID, flow, spec, sem, ctx)
     cand_status[0]["status"] = "done"
-    emit_candidates_frame(cand_status, "검증 완료 — 채점 중")
+    emit_candidates_frame(cand_status, "검증 완료")
 
-    # [5] judge — 채점 결과와 refine 지시
-    verdict = await asyncio.to_thread(judge_candidates, spec, [report])
-    winner = verdict["winner"]
-    emit_verdict_frame(verdict["verdict"], "설계 채점 완료")
-
-    # 승자 트리 점진 노출 — '자라나는 흐름도' 경험은 승자 확정 이후부터 (v2 계승).
-    steps = winner.flow.get("steps") or []
+    # 초안 점진 노출 — '자라나는 흐름도' 경험.
+    steps = report.flow.get("steps") or []
     for i in range(len(steps)):
-        emit_flow_frame({**winner.flow, "steps": steps[: i + 1]}, None,
-                        f"선택된 설계 구성 {i + 1}/{len(steps)}")
+        emit_flow_frame({**report.flow, "steps": steps[: i + 1]}, None,
+                        f"흐름도 구성 {i + 1}/{len(steps)}")
         await asyncio.sleep(_REVEAL_DELAY)
-    emit_flow_frame(winner.flow, winner.violations, "선택된 초안 · 다듬기 시작")
+    emit_flow_frame(report.flow, report.violations, "초안 완성 · 다듬기 시작")
 
-    # [6] refine — 정적 위반 + L2/L3 발견 + 이식 지시를 surgeon 패치로
-    extra = [f for f in winner.findings if f.layer in ("L2", "L3")] + verdict["transplant_findings"]
+    # [5] refine — 정적 위반 + L2/L3 발견을 surgeon 패치로
+    #
+    # (RPA-357) 앞서는 여기에 심판의 '이식 지시'가 더해졌다. 후보 여럿을 비교해 패자의
+    # 장점을 옮기던 항인데, 후보가 하나가 된 뒤로 **항상 빈 목록**이었다 — 지우기 전과
+    # 산출이 같다.
+    extra = [f for f in report.findings if f.layer in ("L2", "L3")]
     refined = await asyncio.to_thread(
-        refine_flow, winner.flow, ctx.catalog, extra_findings=extra, purpose="turn_generate"
+        refine_flow, report.flow, ctx.catalog, extra_findings=extra, purpose="turn_generate"
     )
     flow, violations = refined["flow"], refined["violations"]
 
@@ -1508,7 +1526,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     flow = _attach_sources(flow, sink)
 
     coverage = None
-    sim_rate = winner.sim_pass_rate
+    sim_rate = report.sim_pass_rate
     if refined["repaired"]:  # 흐름이 바뀌었을 때만 L2/L3 재채점 (설계: 심판 시점+최종 시점 2회)
         try:
             async with sem:
@@ -1522,7 +1540,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
                 sim_rate = (await asyncio.to_thread(run_simulation, spec, flow)).pass_rate
         except Exception as e:  # noqa: BLE001
             logger.warning("최종 L3 재실행 실패 — 승자 통과율 재사용: %s", e)
-    must_cov = coverage.must_coverage if coverage is not None else winner.must_coverage
+    must_cov = coverage.must_coverage if coverage is not None else report.must_coverage
 
     findings_final, r3_cards = from_violations_dicts(violations)
     if coverage is not None:
@@ -1575,7 +1593,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
         "event": "stage", "stage": "verifying",
         "message": f"신뢰도 {flow['flow_confidence']}",
         "data": {
-            "candidate": winner.candidate_id,
+            "candidate": report.candidate_id,
             # 원시 입력
             "must_coverage": must_cov, "sim_pass_rate": sim_rate,
             "warnings": n_warnings, "cards": len(cards),
@@ -1592,7 +1610,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
         # 마지막 관문에서 전부 버리지 않는다 — 교정 전 승자 초안(직전 유효 후보)으로 강등 시도.
         logger.warning("최종 흐름도 정규화 실패 — 승자 초안으로 강등 시도: %s", e)
         try:
-            rec = Recommendation.model_validate(_coerce_flow(copy.deepcopy(winner.flow)))
+            rec = Recommendation.model_validate(_coerce_flow(copy.deepcopy(report.flow)))
         except ValidationError as e2:
             logger.warning("승자 초안도 정규화 실패, 빈 추천안: %s", e2)
             rec = Recommendation(steps=[])
