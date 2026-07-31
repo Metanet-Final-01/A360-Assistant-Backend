@@ -109,7 +109,8 @@ def test_dossier_uses_whole_catalog_when_not_searchable():
         ("UiPath.Excel.Activities", "ReadRange"),
         ("UiPath.Mail.Activities", "SendOutlookMail"),
     }
-    assert "UiPath.Excel.Activities/ReadRange" in dossier["menu"]
+    # 메뉴 한 줄은 칸 이름을 직접 말한다 — 모델이 슬래시를 쪼개 추측하지 않게 (RPA-354)
+    assert 'package="UiPath.Excel.Activities" action="ReadRange"' in dossier["menu"]
     assert "SheetName" in dossier["menu"]  # 파라미터 스펙까지 실린다
 
 

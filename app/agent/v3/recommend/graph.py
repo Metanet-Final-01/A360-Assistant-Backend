@@ -36,7 +36,7 @@ from ..orchestrator import edit_ops as _edit_ops
 from ..verify.findings import Finding
 # 메뉴 렌더는 조사 단계와 **같은 함수**를 써야 한다 — 능력 요청으로 덧붙이는 액션이
 # 본 메뉴와 다른 모양이면 모델이 두 목록을 다른 것으로 읽는다.
-from .research import _menu_block
+from .research import _menu_block, menu_quote
 from .stream import (
     emit,
     emit_candidates_frame,
@@ -858,9 +858,16 @@ def _unknown_actions(flow: dict, catalog) -> list[tuple[str, str, str]]:
 def _notation_hint(pkg: str, act: str, catalog) -> str | None:
     """오염된 액션 표기에서 **카탈로그에 실재하는 이름**을 찾아 준다. 못 찾으면 None.
 
-    메뉴 한 줄이 `- 패키지/액션 «라벨»`이라 슬래시가 두 역할을 겸한다. 실측(2026-07-29)에서
-    모델이 이걸 액션 이름의 일부로 읽고 라벨까지 붙여 썼다 —
-    `Structured data extraction/구조화된 데이터 추출`, `Send/보내기`.
+    옛 메뉴 형식(`- 패키지/액션 «라벨»`)은 슬래시가 두 역할을 겸해, 모델이 액션 이름에 라벨을
+    이어 붙이곤 했다 — `Structured data extraction/구조화된 데이터 추출`, `Send/보내기`.
+    형식 자체는 칸 이름을 말하도록 고쳤지만(RPA-354, `_menu_block`) 이 힌트는 남긴다:
+    옛 대화 이력이 섞인 턴과, 형식과 무관하게 이름을 이어 붙이는 경우가 남는다.
+
+    ⚠ **`package` 칸으로 밀려 들어간 경우는 못 잡는다** — 여기서 쪼개는 것은 `act`뿐이다.
+    실측된 오염(`package="Recorder/Structured data extraction"` · `action="구조화된 데이터 추출"`)
+    이 그 모양이었고, 힌트가 비어 재요청이 같은 답을 받아 반려됐다. 그쪽은 별건으로 다룬다 —
+    `CSV/TXT`·`Insert/Delete rows/columns`처럼 슬래시가 정당한 이름이 있어 분할점을 모두
+    시도해 **정확 일치 하나**일 때만 후보로 낼 수 있고, 그 판정은 이 함수와 모양이 다르다.
 
     **고치지 않는다. 알려만 준다.** 같은 패키지에서 슬래시 앞부분이 실재할 때만 후보로 내고,
     실제 교체는 모델이 다시 출력하며 한다 — 코드가 이름을 바꾸기 시작하면 '비슷한 이름'으로
@@ -876,17 +883,22 @@ def _notation_hint(pkg: str, act: str, catalog) -> str | None:
 
 def _vocab_retry_user(outline: dict, unknown: list[tuple[str, str, str]], catalog) -> str:
     """닫힌 어휘 재요청 문구 — 어긋난 표기를 지목하고, 메뉴 표기 규칙을 다시 못 박는다."""
+    # 지적도 메뉴와 **같은 형식**으로 쓴다. 앞서는 `패키지 / "액션"`으로 적었는데, 그건
+    # 지금 문제가 되는 그 모호한 모양이다 — 고치라는 문구가 틀린 모양을 다시 보여 준 셈이다
+    # (RPA-354).
     lines = []
     for _loc, pkg, act in unknown[:12]:
-        lines.append(f'  {pkg} / "{act}"')
+        lines.append(f"  package={menu_quote(pkg)} action={menu_quote(act)}")
         if hint := _notation_hint(pkg, act, catalog):
-            lines.append(f'      → 메뉴에 있는 표기: {pkg} / "{hint}"')
+            lines.append(
+                f"      → 메뉴에 있는 표기: package={menu_quote(pkg)} action={menu_quote(hint)}")
     return (
         "아래 표기가 [액션 후보 메뉴]에 없다 — 이대로면 검수 R1(카탈로그에 없는 액션)로 "
         "전부 걸려 흐름도가 무너진다.\n"
         + "\n".join(lines)
-        + "\n\n⚠ 메뉴 한 줄은 `- 패키지/액션 «라벨»` 형식이다. **«» 안은 라벨이지 액션 이름이 "
-        "아니다** — 액션 이름에 라벨을 이어 붙이거나 슬래시를 더 넣지 마라.\n"
+        + '\n\n⚠ 메뉴 한 줄은 `- package="..." action="..." (메뉴명: ...)` 형식이다. '
+        "**`메뉴명:` 뒤는 화면에 보이는 이름이지 `action` 값이 아니다** — 두 칸은 메뉴에 적힌 "
+        "인용부호 안의 값을 그대로 옮긴다. 두 칸을 하나로 합치거나 메뉴명을 섞지 마라.\n"
         "표기만 고쳐 다시 출력하라. **액션을 지우거나 구조를 바꾸지 마라** — 메뉴에 정말 "
         "대응이 없는 것만 남겨 두고 notes에 사유를 적는다.\n\n"
         f"[현재 구조]\n{json.dumps(outline, ensure_ascii=False)}"
@@ -996,7 +1008,10 @@ def _action_spec_block(flow: dict, catalog) -> str:
         spec_dict = catalog.get_action_schema(pkg, act)
         blocks.append(
             _menu_block(pkg, act, spec_dict) if spec_dict is not None
-            else f"- {pkg}/{act} «스펙 없음 — 카탈로그에 없는 액션이다. 값을 지어내지 마라»"
+            # 형식을 메뉴와 같게 맞춘다 — 한 프롬프트 안에서 두 형식이 섞이면 어느 쪽이
+            # 칸 이름인지 다시 모호해진다 (RPA-354).
+            else f"- package={menu_quote(pkg)} action={menu_quote(act)} "
+                 "(스펙 없음 — 카탈로그에 없는 액션이다. 값을 지어내지 마라)"
         )
     return "\n".join(blocks) or "(액션 없음)"
 
