@@ -267,12 +267,13 @@ def test_v3_프롬프트가_복합_요청을_명시한다():
     [
         # 합성: 흐름도 산출이 들어 있어야 한다. 앞에 analyze가 붙는지는 버전 계약 차이지
         # (v3는 복수 task, v1/v2는 단일 route) 분류의 성패가 아니다.
-        (COMPOSITE, ROUTE_GENERATE, (ROUTE_EDIT,)),
+        # qa 금지: 질문이 섞이지 않은 요청에 답변 task를 덤으로 붙이면 그만큼 비용이 샌다.
+        (COMPOSITE, ROUTE_GENERATE, (ROUTE_EDIT, ROUTE_QA)),
         # 분석만: generate가 **끼어들면 안 된다** — 프롬프트가 "분석해줘에 generate를 덤으로
         # 붙이지 마라"고 못 박은 계약이다. 여기를 느슨하게 두면 과잉 산출 회귀를 못 잡는다.
-        (SPLIT_ANALYZE, ROUTE_ANALYZE, (ROUTE_GENERATE, ROUTE_EDIT)),
-        # 흐름도만: 흐름도가 없는 상태라 edit이 나오면 안 된다(가드가 아니라 분류에서 걸러야 한다).
-        (SPLIT_GENERATE, ROUTE_GENERATE, (ROUTE_EDIT,)),
+        (SPLIT_ANALYZE, ROUTE_ANALYZE, (ROUTE_GENERATE, ROUTE_EDIT, ROUTE_QA)),
+        # 흐름도만: 흐름도가 없는 상태라 edit이 나오면 안 된다.
+        (SPLIT_GENERATE, ROUTE_GENERATE, (ROUTE_EDIT, ROUTE_QA)),
         # 일반 질문: 산출이 하나라도 붙으면 회귀다.
         (PLAIN_QUESTION, ROUTE_QA, (ROUTE_ANALYZE, ROUTE_GENERATE, ROUTE_EDIT)),
     ],
@@ -284,8 +285,13 @@ def test_실제_분류(monkeypatch, version, message, required, forbidden):
     끄는 방식을 addopts가 아니라 **테스트 자신의 skip**으로 둔 이유: CI가 `-m "not integration"`
     같은 필터를 주면 addopts의 `-m`이 통째로 덮어써져 요금 나가는 테스트가 조용히 켜진다.
 
-    "있어야 할 것"과 "있으면 안 될 것"을 **둘 다** 본다. `required in plan`만 보면 v3가 분석
-    요청에 generate를 덤으로 붙여도 통과해, 과잉 산출 회귀가 그대로 새어 나간다 (Qodo #476).
+    ⚠️ **`intake_node()`가 아니라 분류기 출력을 직접 본다** (Qodo #476). `intake_node`는 결정론
+    가드를 이미 통과시킨 결과를 주는데, 그 가드가 "흐름도 없는 edit → generate 강등"을 한다.
+    즉 LLM이 `edit`으로 오분류해도 가드가 `generate`로 바꿔 놓아 **금지 항목 검사가 영영 발화하지
+    않는다.** 가드는 이 파일의 결정론 테스트가 따로 덮으므로, 여기서는 가드 이전의 날 분류를 본다.
+
+    "있어야 할 것"과 "있으면 안 될 것"을 둘 다 본다. `required in plan`만 보면 분석 요청에
+    generate가 덤으로 붙어도 통과해, 과잉 산출 회귀가 그대로 새어 나간다.
     """
     import importlib
 
@@ -303,8 +309,10 @@ def test_실제_분류(monkeypatch, version, message, required, forbidden):
         "parsed_doc": {"page_count": 1, "full_text": "매일 오전 9시에 포털에 로그인해 "
                                                      "매출 엑셀을 내려받고 보고서를 메일로 보낸다."},
     }
-    out = mod.intake_node(state)
-    plan = out.get("plan") or [out["route"]]
-    assert required in plan, f"{version}: {message!r} → {plan} (기대: {required} 포함)"
-    overreach = sorted(set(plan) & set(forbidden))
-    assert not overreach, f"{version}: {message!r} → {plan} (과잉 task: {overreach})"
+    # 가드 이전의 날 분류 (LLM 1회). v3는 tasks 목록, v1/v2는 단일 route.
+    out = mod.chat_json(mod._build_messages(state), purpose="intake", model_cls=mod.IntakeOutput)
+    raw = list(getattr(out, "tasks", None) or []) or ([out.route] if out.route else [])
+
+    assert required in raw, f"{version}: {message!r} → {raw} (기대: {required} 포함)"
+    overreach = sorted(set(raw) & set(forbidden))
+    assert not overreach, f"{version}: {message!r} → {raw} (과잉 task: {overreach})"
