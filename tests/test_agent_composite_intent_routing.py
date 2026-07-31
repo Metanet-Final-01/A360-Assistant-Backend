@@ -309,10 +309,15 @@ def test_실제_분류(monkeypatch, version, message, required, forbidden):
         "parsed_doc": {"page_count": 1, "full_text": "매일 오전 9시에 포털에 로그인해 "
                                                      "매출 엑셀을 내려받고 보고서를 메일로 보낸다."},
     }
-    # 가드 이전의 날 분류 (LLM 1회). v3는 tasks 목록, v1/v2는 단일 route.
+    # 가드 이전의 날 분류. LLM 1회 — 단, 출력이 스키마를 어기면 chat_json이 교정 호출을
+    # 1회 더 하므로 최악 2회다(요금·지연 상한을 오해하지 않도록 적어 둔다).
     out = mod.chat_json(mod._build_messages(state), purpose="intake", model_cls=mod.IntakeOutput)
     raw = list(getattr(out, "tasks", None) or []) or ([out.route] if out.route else [])
 
+    # 가드를 우회했으므로 미지 task를 걸러 줄 사람이 없다 — 여기서 직접 본다. 오타·환각
+    # task("generte")가 섞여도 required/forbidden 검사만으로는 통과한다.
+    unknown = sorted(set(raw) - set(ROUTES))
+    assert not unknown, f"{version}: {message!r} → {raw} (미지 task: {unknown})"
     assert required in raw, f"{version}: {message!r} → {raw} (기대: {required} 포함)"
     overreach = sorted(set(raw) & set(forbidden))
     assert not overreach, f"{version}: {message!r} → {raw} (과잉 task: {overreach})"
