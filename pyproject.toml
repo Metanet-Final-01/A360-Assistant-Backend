@@ -6,6 +6,10 @@ markers = [
     # 실 Postgres에 실제로 쓰는 테스트 (RPA-168). DB가 없으면 스스로 skip하므로 기본 실행에
     # 그냥 둬도 안전하다. DB 없이 유닛만 돌리려면: pytest -m "not integration"
     "integration: 실 Postgres 필요 (docker compose up -d db). 앱 DB만 사용 — 공유 DB 미접촉",
+    # 실 LLM을 호출하는 테스트 (RPA-218). 요금이 들고 결과가 비결정적이라 기본 실행에서는
+    # **테스트 자신이 skip한다**(env RUN_LLM_TESTS=1로만 켜짐 — addopts로 거르지 않는 이유는
+    # CI가 `-m "not integration"`을 주면 그 필터가 통째로 덮어써지기 때문이다).
+    "llm: 실 OPENAI_API_KEY로 LLM 호출 (요금 발생·비결정적). RUN_LLM_TESTS=1 일 때만 실행",
 ]
 
 [tool.coverage.run]
