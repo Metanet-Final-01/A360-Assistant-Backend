@@ -29,6 +29,7 @@ class FakeImpl:
     def __init__(self, *events: ProgressEvent):
         self.events = list(events)
         self.calls: list[tuple[str, dict]] = []
+        self.imported: list[str] = []  # 디스패처가 어느 이름으로 import했나
 
     async def stream_agent_turn(self, message: str, context: dict):
         self.calls.append((message, context))
@@ -45,13 +46,28 @@ def _run(monkeypatch, impl: FakeImpl, context: dict) -> list[ProgressEvent]:
 
     이름 해석(기본값 결정·미지 버전 거부)이 계약의 절반이라, 거기까지 스텁하면 남는 게 없다.
     갈아끼우는 건 import 쪽뿐이다 — 실제 vN 스택을 안 띄우려는 것이지 해석을 우회하려는 게 아니다.
+
+    ⚠️ **import에 넘어간 이름을 버리지 않고 기록한다** (Qodo #475). 스텁이 `lambda name: impl`로
+    이름을 무시하면, 디스패처가 A를 import하고 B를 새겨도 테스트가 통과한다 — 이 계약의 핵심이
+    "돌아간 버전 = 보고된 버전"인데 그 등식이 검증에서 빠지는 것이다. 그래서 done을 낸 모든
+    실행에 대해 **import한 이름과 새긴 이름이 같은지**를 여기서 못 박는다.
     """
-    monkeypatch.setattr(agent_pkg, "import_version", lambda name: impl)
+    monkeypatch.setattr(
+        agent_pkg, "import_version", lambda name: (impl.imported.append(name), impl)[1]
+    )
 
     async def collect() -> list[ProgressEvent]:
         return [e async for e in agent_pkg.stream_agent_turn("안녕", context)]
 
-    return asyncio.run(collect())
+    events = asyncio.run(collect())
+
+    stamped = [e.data[RESOLVED_VERSION_FIELD] for e in events
+               if e.event == "done" and RESOLVED_VERSION_FIELD in (e.data or {})]
+    for name in stamped:
+        assert impl.imported == [name], (
+            f"import한 버전({impl.imported})과 done에 새긴 버전({name})이 다르다"
+        )
+    return events
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,9 +80,14 @@ def test_명시_버전은_그대로_보고된다(monkeypatch, version):
     """요청이 버전을 명시하면 resolved가 그 값이다 — 발견된 **모든** 버전에 대해.
 
     v1·v2를 하드코딩하면 새 버전이 계약 밖에 남는다(registry 자동탐색과 같은 이유).
+
+    **실제로 그 버전을 import했는지**까지 본다 — 새긴 이름만 맞고 다른 버전이 돌면 기록이
+    거짓말을 하는 것이고, 그게 이 계약이 막으려는 바로 그 실패다.
     """
-    events = _run(monkeypatch, FakeImpl(_done()), {"agent_version": version})
+    impl = FakeImpl(_done())
+    events = _run(monkeypatch, impl, {"agent_version": version})
     assert events[-1].data[RESOLVED_VERSION_FIELD] == version
+    assert impl.imported == [version]
 
 
 def test_요청값이_없어도_비어_있지_않다(monkeypatch):
@@ -96,8 +117,9 @@ def test_지원하지_않는_버전은_대체되지_않고_거부된다(monkeypa
     '조용한 대체'가 가장 나쁜 실패다: 사용자는 v99를 받은 줄 알고 기록에는 기본 버전이 남는다.
     """
     impl = FakeImpl(_done())
-    imported: list[str] = []
-    monkeypatch.setattr(agent_pkg, "import_version", lambda name: (imported.append(name), impl)[1])
+    monkeypatch.setattr(
+        agent_pkg, "import_version", lambda name: (impl.imported.append(name), impl)[1]
+    )
 
     async def drain() -> None:
         async for _ in agent_pkg.stream_agent_turn("안녕", {"agent_version": "v99"}):
@@ -107,7 +129,7 @@ def test_지원하지_않는_버전은_대체되지_않고_거부된다(monkeypa
         asyncio.run(drain())
     assert impl.calls == []  # 어떤 버전도 실행되지 않았다
     # import까지 가지 않는다 — import_version은 검증하지 않으므로 여기서 막혀야 한다.
-    assert imported == []
+    assert impl.imported == []
 
 
 def test_env_미지값_폴백은_이름_해석에서_드러난다(monkeypatch):
