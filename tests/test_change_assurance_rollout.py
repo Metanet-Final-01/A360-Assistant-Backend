@@ -86,6 +86,14 @@ def test_waiver_is_sha_bound_two_person_and_expiring() -> None:
         validate_waiver(expired, now=NOW)
 
 
+@pytest.mark.parametrize("repository", ["", "not-a-repository", "owner/repo/extra"])
+def test_waiver_rejects_an_invalid_repository(repository: str) -> None:
+    waiver = _waiver()
+    waiver["repository"] = repository
+    with pytest.raises(GovernanceError, match="repository is invalid"):
+        validate_waiver(waiver, now=NOW)
+
+
 def _break_glass() -> dict:
     return {
         "schema_version": "1.0",
@@ -113,3 +121,10 @@ def test_break_glass_requires_recent_successful_rollback_proof() -> None:
     failed["rollback"]["successful"] = False
     with pytest.raises(GovernanceError, match="did not succeed"):
         validate_break_glass(failed, now=NOW)
+
+
+def test_break_glass_rejects_an_invalid_repository() -> None:
+    break_glass = _break_glass()
+    break_glass["repository"] = "owner/repo/extra"
+    with pytest.raises(GovernanceError, match="repository is invalid"):
+        validate_break_glass(break_glass, now=NOW)

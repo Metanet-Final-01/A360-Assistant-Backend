@@ -13,12 +13,19 @@ from typing import Any
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 JIRA_KEY = re.compile(r"^RPA-[1-9][0-9]*$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 HERE = Path(__file__).resolve().parent
 DEFAULT_POLICY = HERE / "rollout-policy.json"
 
 
 class GovernanceError(ValueError):
     """A governance artifact is invalid or cannot prove the requested action."""
+
+
+def _validate_repository(value: Any, artifact_name: str) -> str:
+    if not isinstance(value, str) or REPOSITORY.fullmatch(value) is None:
+        raise GovernanceError(f"{artifact_name} repository is invalid")
+    return value
 
 
 def _canonical(value: Any) -> bytes:
@@ -84,6 +91,7 @@ def validate_waiver(
     }
     if set(artifact) != required or artifact.get("schema_version") != "1.0":
         raise GovernanceError("waiver fields do not match the v1.0 contract")
+    _validate_repository(artifact.get("repository"), "waiver")
     if not GIT_SHA.fullmatch(str(artifact.get("head_sha", ""))):
         raise GovernanceError("waiver must bind a full PR head SHA")
     if not JIRA_KEY.fullmatch(str(artifact.get("jira", ""))):
@@ -132,6 +140,7 @@ def validate_break_glass(
     }
     if set(artifact) != required or artifact.get("schema_version") != "1.0":
         raise GovernanceError("break-glass fields do not match the v1.0 contract")
+    _validate_repository(artifact.get("repository"), "break-glass")
     if artifact.get("branch") not in {"dev", "main"}:
         raise GovernanceError("break-glass scope must bind dev or main")
     if not JIRA_KEY.fullmatch(str(artifact.get("jira", ""))):

@@ -790,8 +790,10 @@ def test_publisher_workflow_keeps_writer_secret_out_of_pr_workflow():
     assert "types: [submitted, dismissed]" in warn
     assert "python -m assurance.change.review_evidence" in warn
     assert "--review-evidence" in warn
-    assert warn.startswith("name: Change Assurance\n")
-    assert "--mode warn" in warn
+    assert warn.startswith("name: Change Assurance (Warn)\n")
+    assert "mode_args=()" in warn
+    assert "mode_args=(--mode warn)" in warn
+    assert '"${mode_args[@]}"' in warn
     assert "First rollout: execute only the checker already trusted" in warn
     assert "grep -q -- '--review-evidence' assurance/change/cli.py" in warn
     assert "actions: read" in workflow_header
