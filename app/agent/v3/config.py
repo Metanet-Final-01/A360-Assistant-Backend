@@ -53,7 +53,7 @@ COMPOSE_MAX_TOKENS = _int(os.getenv("COMPOSE_MAX_TOKENS"), "32000")
 # compose 출력에 JSON mode를 걸지 여부(0이면 끈다).
 #
 # v3의 다른 구조화 출력은 전부 `jsonio.chat_json` → `response_format={"type":"json_object"}`을
-# 거치는데(spec_builder·semantic·judge·surgeon·cards) **compose만 raw ChatOpenAI라 문법
+# 거치는데(spec_builder·semantic·surgeon·cards) **compose만 raw ChatOpenAI라 문법
 # 보장을 못 받고 있었다.** 가장 길고 중첩이 깊은 출력이 하필 무보장이었던 셈이다.
 # 실측(2026-07-28): 후보 파싱 실패 9건이 전부 '텍스트는 }로 끝나는데 중간 문법이 깨짐'
 # 유형이었다(절단 아님 — 출력 2.5k~4k 토큰으로 상한 16k의 1/4). JSON mode는 이 유형을

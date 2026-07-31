@@ -2,7 +2,7 @@
 
 v3는 원래 `solution` 값으로 **파이프라인 자체를 갈랐다**:
 
-    if solution == "a360":  <spec→research→3후보→judge→verify→simulate→cards>
+    if solution == "a360":  <spec→research→compose→verify→refine→cards>
     else:                   <LLM 단발 호출 + R1~R6>
 
 그 결과 평행 파이프라인 둘이 생겼고 한쪽만 발전했다 — 품질 루프 전체가 a360 가지에만

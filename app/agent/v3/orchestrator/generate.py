@@ -9,7 +9,7 @@ generate_node는 solution(세션 확정 키)으로 **카탈로그만** 가르고
 (RPA-285). 어휘 출처를 CatalogContext로 주입한다:
 - "a360": DB 적재 카탈로그 + 하이브리드 검색기 — 어휘가 수천 개라 검색으로 좁힌다.
 - 그 외: 대화에서 추출한 사용자 카탈로그(UserCatalog), 검색기 없음 — 전량이 곧 메뉴다.
-어느 쪽이든 같은 v3 품질 루프(spec→research→후보 N→judge→verify→refine→cards)를 탄다.
+어느 쪽이든 같은 v3 품질 루프(spec→research→compose→verify→refine→cards)를 탄다.
 예전엔 타 솔루션이 LLM 단발 호출로 갈라져 품질 루프가 a360에만 쌓였다.
 """
 
@@ -128,7 +128,7 @@ def _flow_answer(flow: dict, violations: list[dict]) -> str:
 async def _generate_with(state: TurnState, ctx) -> dict:
     """v3 품질 루프 실행: spec 정형화 → recommend 파이프라인(generate_flow).
 
-    진행 이벤트(spec/candidates/verdict/flow/scorecard)는 파이프라인이 직접 부모 그래프
+    진행 이벤트(spec/candidates/flow/scorecard)는 파이프라인이 직접 부모 그래프
     스트림으로 emit한다. 업무정의서 원문(RPA-142)은 spec과 compose 양쪽에 실린다 —
     분석은 힌트, 원문이 근거.
 

@@ -1,6 +1,6 @@
 """검증 계층 공통 산출 포맷 Finding — L0/L1(정적)·L2(시맨틱)·L3(시뮬레이션)의 정규화.
 
-심판(judge)과 refine 루프가 계층 구분 없이 소비하는 단일 어휘다. severity 순서가
+refine 루프가 계층 구분 없이 소비하는 단일 어휘다. severity 순서가
 refine의 처리 우선순위이자 수렴 판정(가중합 단조 감소)의 축이 된다.
 """
 
@@ -13,7 +13,7 @@ SEVERITY_WEIGHT = {"blocker": 100, "major": 10, "minor": 3, "warning": 1}
 class Finding(BaseModel):
     """검증 계층 공통 발견 사항 한 건."""
 
-    layer: str = Field(description="L0|L1|L2|L3|judge")
+    layer: str = Field(description="L0|L1|L2|L3")
     severity: str = Field("major", description="blocker|major|minor|warning")
     rule: str | None = Field(None, description="R1~R18 (정적 계층일 때)")
     req_id: str | None = Field(None, description="FlowSpec 요구 id (시맨틱 계층일 때)")
