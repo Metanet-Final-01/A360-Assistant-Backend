@@ -1496,10 +1496,10 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     sink: list[dict] = []
     sem = asyncio.Semaphore(config.MAX_LLM_CONCURRENCY)
 
-    # [2] research — 조사 선행·공유
+    # [1] research — 조사 선행·공유 (spec은 호출부 orchestrator/spec.py가 이미 만들어 넘긴다)
     dossier = await build_dossier(spec, sink, ctx)
 
-    # [3] compose — 구조 → (능력 요청) → 구조 게이트 → 값
+    # [2] compose — 구조 → (능력 요청) → 구조 게이트 → 값
     cand_status = [{"id": _CANDIDATE_ID, "persona": _CANDIDATE_LABEL,
                     "status": "composing", "steps": 0, "actions": 0}]
     emit_candidates_frame(cand_status, "흐름도 설계 중")
@@ -1513,7 +1513,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     cand_status[0]["steps"], cand_status[0]["actions"] = _flow_counts(flow)
     emit_candidates_frame(cand_status, "흐름도 초안 완성 — 검증 스택 통과 중")
 
-    # [4] verify 스택 — L0/L1 정적 → L2 커버리지 → L3 시뮬레이션
+    # [3] verify 스택 — L0/L1 정적 → L2 커버리지 → L3 시뮬레이션
     report = await _verify_candidate(_CANDIDATE_ID, flow, spec, sem, ctx)
     cand_status[0]["status"] = "done"
     emit_candidates_frame(cand_status, "검증 완료")
@@ -1526,7 +1526,7 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
         await asyncio.sleep(_REVEAL_DELAY)
     emit_flow_frame(report.flow, report.violations, "초안 완성 · 다듬기 시작")
 
-    # [5] refine — 정적 위반 + L2/L3 발견을 surgeon 패치로
+    # [4] refine — 정적 위반 + L2/L3 발견을 surgeon 패치로
     #
     # (RPA-357) 앞서는 여기에 심판의 '이식 지시'가 더해졌다. 후보 여럿을 비교해 패자의
     # 장점을 옮기던 항인데, 후보가 하나가 된 뒤로 **항상 빈 목록**이었다 — 지우기 전과
@@ -1537,12 +1537,14 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     )
     flow, violations = refined["flow"], refined["violations"]
 
-    # [7] finalize — 근거·confidence·질문 카드·flow_confidence
+    # [5] finalize — 근거·confidence·질문 카드·flow_confidence
     flow = _attach_sources(flow, sink)
 
     coverage = None
     sim_rate = report.sim_pass_rate
-    if refined["repaired"]:  # 흐름이 바뀌었을 때만 L2/L3 재채점 (설계: 심판 시점+최종 시점 2회)
+    # 흐름이 바뀌었을 때만 L2/L3 재채점 — 검증 시점과 최종 시점 2회가 설계다. 안 바뀌었으면
+    # 방금 잰 값이 그대로 유효하므로 LLM 2회를 아낀다.
+    if refined["repaired"]:
         try:
             async with sem:
                 coverage = await asyncio.to_thread(run_semantic_check, spec, flow)
