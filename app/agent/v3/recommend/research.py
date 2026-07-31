@@ -414,6 +414,20 @@ def _discouraged_note(catalog, packages: set[str]) -> str:
     )
 
 
+def _record(ctx, pairs, source: str) -> None:
+    """확보한 액션을 턴 어휘에 기록한다 (RPA-359). 어휘가 없는 컨텍스트면 조용히 지나간다.
+
+    ctx는 여러 진입점에서 오고(테스트 스텁 포함) `vocabulary`가 없을 수 있어 방어한다 —
+    기록은 관측·후속 단계용 보강이지 이 단계의 산출 조건이 아니다.
+    """
+    vocab = getattr(ctx, "vocabulary", None)
+    if vocab is None:
+        return
+    added = vocab.extend(pairs, source)
+    if added:
+        logger.info("턴 어휘 +%d개 (%s) — 누적 %d개", added, source, len(vocab))
+
+
 def menu_quote(value) -> str:
     """메뉴·재요청 문구에 실을 값 하나를 **따옴표째** 만든다 (RPA-354, Qodo 보안 반영).
 
@@ -504,10 +518,12 @@ def _whole_catalog_dossier(ctx) -> dict:
             f"\n[주의] 제공된 카탈로그가 커서 앞의 {len(actions)}개만 실었다. "
             f"{dropped}개는 이번 설계에 쓸 수 없으니, 필요한 액션이 빠졌다면 answer에서 알려라."
         )
+    _record(ctx, actions, "user_catalog")
     message = f"제공된 카탈로그 {len(actions)}개 액션을 후보로 사용"
     if dropped:
         message += f" (상한 초과로 {dropped}개 제외)"
-    emit({"event": "stage", "stage": "searching", "message": message})
+    emit({"event": "stage", "stage": "searching", "message": message,
+          "data": {"vocabulary": len(ctx.vocabulary)}})
     return {
         "menu": "\n".join(blocks) or "(제공된 액션 없음)",
         "actions": actions,
@@ -626,8 +642,11 @@ async def build_dossier(spec: dict, sink: list[dict], ctx) -> dict:
     if bg_hits:
         sink.extend(bg_hits)
 
+    # 메뉴에 실은 것을 턴 어휘에 기록한다 — 이후 단계(특히 수리)가 같은 목록을 본다 (RPA-359).
+    _record(ctx, menu_actions, "research")
     emit({"event": "stage", "stage": "searching",
-          "message": f"조사 완료 — 액션 후보 {len(menu_actions)}개 확보 (구조·세션 보완 {len(extra_blocks)}개 포함)"})
+          "message": f"조사 완료 — 액션 후보 {len(menu_actions)}개 확보 (구조·세션 보완 {len(extra_blocks)}개 포함)",
+          "data": {"vocabulary": len(ctx.vocabulary), "vocab_digest": ctx.vocabulary.digest()}})
     return {
         "menu": "\n".join(blocks) or "(조사된 액션 없음 — 도구로 직접 검색 필요)",
         "actions": menu_actions,

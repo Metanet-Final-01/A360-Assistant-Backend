@@ -3107,6 +3107,114 @@ def test_repair_spec_excerpts_supplies_insertion_vocabulary():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 턴 어휘 (RPA-359) — 단계 전체가 같은 목록을 본다
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_어휘는_줄지_않고_순서를_지킨다():
+    """캐시는 공통 접두에 걸린다 — 새 어휘를 뒤에 붙여야 접두가 유지된다. 정렬하면 그 턴의
+    나머지 호출이 전부 캐시를 잃는다(실측: 입력 25만 토큰의 절반이 재전송, 적중률 34%).
+    """
+    from app.agent.v3.catalog_context import ActionVocabulary
+
+    v = ActionVocabulary()
+    assert v.extend([("B", "x"), ("A", "y")], "research") == 2
+    assert v.add("B", "x") is False          # 중복은 안 늘어난다
+    assert v.add("A", "z", "needs") is True
+    assert list(v) == [("B", "x"), ("A", "y"), ("A", "z")], "삽입 순서 그대로여야 한다"
+    assert len(v) == 3
+    assert ("B", "x") in v and ("C", "w") not in v
+    assert v.packages() == {"A", "B"}
+    assert v.of_package("A") == [("A", "y"), ("A", "z")]
+    assert v.add("", "x") is False and v.add("A", "") is False
+
+    # 지문은 정렬 기반 — 프롬프트에 안 실리므로 캐시와 무관하고, 순서가 달라도 같은 집합이면
+    # 같은 지문이어야 턴 사이 비교가 성립한다
+    other = ActionVocabulary()
+    other.extend([("A", "z"), ("A", "y"), ("B", "x")])
+    assert v.digest() == other.digest()
+    assert v.digest() != ActionVocabulary().digest()
+
+    # 같은 조회를 두 번 하지 않는다
+    assert v.mark_fetched("pkg:A") is True
+    assert v.mark_fetched("pkg:A") is False
+
+
+def test_수리_메뉴가_턴_어휘의_업무_액션을_받는다():
+    """실측(2026-07-30): 초안이 84종을 봤는데 수리는 23종만 봤고, 그 23종에 **업무 액션이
+    0종**이었다(제어 흐름 11 + 세션 여닫기 4). 그래서 「이 액션은 카탈로그에 없다」는 지적에
+    수리가 답할 수단이 '지우기'뿐이었다.
+    """
+    from app.agent.v3.catalog_context import ActionVocabulary
+
+    flow = {"steps": [{"step_id": "step-1", "actions": [
+        _act("Excel_MS", "OpenSpreadsheet"),
+    ]}]}
+
+    # 구조 보완만으로는 세션 여닫기·제어 흐름뿐 — 업무 액션(셀 쓰기·매크로)이 안 실린다
+    before = repair_spec_excerpts(flow, FakeCatalog(), exclude=set())
+    assert "Excel_MS/SetCell" not in before
+    assert "Excel_MS/RunMacro" not in before
+
+    vocab = ActionVocabulary()
+    vocab.extend([
+        ("Excel_MS", "SetCell"),      # 흐름도가 쓰는 패키지 → 실린다
+        ("Excel_MS", "RunMacro"),
+        ("Email", "sendMail"),        # 흐름도에 없는 패키지 → 안 실린다
+    ], "research")
+    after = repair_spec_excerpts(flow, FakeCatalog(), exclude=set(), vocabulary=vocab)
+
+    assert "Excel_MS/SetCell" in after and "Excel_MS/RunMacro" in after
+    assert "Email/sendMail" not in after, "흐름도가 안 쓰는 패키지까지 실으면 프롬프트가 부푼다"
+    # 삽입 순서가 유지된다 — 정렬하면 라운드마다 순서가 흔들려 캐시를 잃는다
+    assert after.index("Excel_MS/SetCell") < after.index("Excel_MS/RunMacro")
+    # 구조 보완은 그대로 남는다 (덧붙이기지 대체가 아니다)
+    assert "Error handler/errorHandlerTry" in after
+
+
+def test_R1_위반에_그_패키지의_실제_액션_이름을_준다():
+    """실측(2026-07-30): `Microsoft 365 Excel/Read cell`이 두 번 나왔는데 카탈로그에 없다.
+    비슷한 것이 셋(`Get cell`·`Read cell format`·`Read cell formula`)이라 **문자열이 가까운
+    쪽을 코드가 고르면 서식을 읽는 엉뚱한 액션이 들어간다.** 코드는 후보만 좁히고 고르는 건
+    모델이다.
+    """
+    from app.agent.v3.catalog_context import ActionVocabulary
+    from app.agent.v3.orchestrator.harness import r1_package_hints
+
+    vocab = ActionVocabulary()
+    hints = r1_package_hints(
+        [{"rule": "R1", "package": "Excel advanced", "action": "readCell"}],
+        FakeCatalog(), vocab,
+    )
+    assert "표기가 틀린 패키지의 실제 액션 이름" in hints
+    assert 'package="Excel advanced"' in hints
+    assert "cloudExcelOpen" in hints                   # 그 패키지의 실재 액션이 나열된다
+    assert "이름이 비슷하다고 고르지 말고" in hints      # 문자열 근접으로 고르지 말라고 못 박는다
+    assert len(vocab) > 0, "조회한 것은 턴 어휘에도 남는다"
+
+    # 패키지 자체가 카탈로그에 없으면 나열할 것이 없다 (실측 `package="needs"` 3건)
+    assert r1_package_hints(
+        [{"rule": "R1", "package": "needs", "action": "click element on screen"}],
+        FakeCatalog(), vocab,
+    ) == ""
+    # R1이 아닌 위반은 대상이 아니다
+    assert r1_package_hints(
+        [{"rule": "R3", "package": "Excel advanced", "action": "cloudExcelOpen"}],
+        FakeCatalog(), vocab,
+    ) == ""
+
+
+def test_어휘가_없어도_수리는_돈다():
+    """v1/v2가 같은 refine 루프를 부르고 그쪽엔 턴 어휘가 없다 — 선택 인자여야 한다."""
+    flow = {"steps": [{"step_id": "step-1", "actions": [
+        _act("Excel advanced", "excelAdvancedPackageSaveWorkbookAction"),
+    ]}]}
+    assert repair_spec_excerpts(flow, FakeCatalog(), exclude=set(), vocabulary=None)
+    from app.agent.v3.orchestrator.harness import r1_package_hints
+
+    assert r1_package_hints([{"rule": "R1", "package": "Excel advanced"}], FakeCatalog(), None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 코드리뷰(PR #249) 반영 회귀 잠금
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3367,3 +3475,25 @@ def test_premise_only_edit_requires_notes_and_variables_unchanged():
     with_vars = _flow_with_spec(_MAC_ASSUME)
     with_vars["variables"] = [{"name": "nCount", "type": "NUMBER"}]
     assert not _is_premise_only_edit(with_vars, before)
+
+
+def test_수리_메뉴의_어휘_덧붙임에는_상한이_있다():
+    """실측(2026-07-30): 흐름도가 쓰는 패키지의 어휘를 전부 실었더니 삽입 재료가
+    15종 1,490자 → 139종 16,314자가 됐다. 수리는 한 턴 최대 5라운드이고 이 블록은
+    user 메시지라 라운드 간 캐시도 안 탄다.
+    """
+    from app.agent.v3.catalog_context import ActionVocabulary
+    from app.agent.v3.orchestrator.harness import _REPAIR_VOCAB_CAP
+
+    flow = {"steps": [{"step_id": "step-1", "actions": [_act("Excel_MS", "OpenSpreadsheet")]}]}
+    base = repair_spec_excerpts(flow, FakeCatalog(), exclude=set())
+
+    # 스텁 카탈로그는 작으니 상한을 확실히 넘기게 같은 패키지 액션을 반복 생성해 채운다
+    vocab = ActionVocabulary()
+    vocab.extend(
+        [(s["package"], s["action"]) for s in FakeCatalog().iter_action_schemas()], "research",
+    )
+    capped = repair_spec_excerpts(flow, FakeCatalog(), exclude=set(), vocabulary=vocab)
+
+    added = len(capped.splitlines()) - len(base.splitlines())
+    assert added <= _REPAIR_VOCAB_CAP, "어휘 덧붙임이 상한을 넘었다"

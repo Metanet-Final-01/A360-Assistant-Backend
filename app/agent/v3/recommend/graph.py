@@ -36,7 +36,7 @@ from ..orchestrator import edit_ops as _edit_ops
 from ..verify.findings import Finding
 # 메뉴 렌더는 조사 단계와 **같은 함수**를 써야 한다 — 능력 요청으로 덧붙이는 액션이
 # 본 메뉴와 다른 모양이면 모델이 두 목록을 다른 것으로 읽는다.
-from .research import _menu_block, menu_quote
+from .research import _menu_block, _record, menu_quote
 from .stream import (
     emit,
     emit_candidates_frame,
@@ -493,10 +493,15 @@ def _capability_menu(needs: list[dict], sink: list[dict], ctx) -> str:
                 found[key] = max(found.get(key, 0.0), h.get("score") or 0.0)
 
     blocks: list[str] = []
+    picked: list[tuple[str, str]] = []
     for (pkg, act), _ in sorted(found.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_NEED_ACTIONS]:
         spec_dict = ctx.catalog.get_action_schema(pkg, act)
         if spec_dict is not None:  # 폐쇄 어휘 — 카탈로그에 실재하는 것만
             blocks.append(_menu_block(pkg, act, spec_dict))
+            picked.append((pkg, act))
+    # 능력 요청으로 찾은 것도 턴 어휘다 — 앞서는 이 문자열이 compose 프롬프트에만 실리고
+    # 사라져, 수리 단계는 여기서 찾은 액션의 존재를 몰랐다 (RPA-359).
+    _record(ctx, picked, "needs")
     if not blocks:
         return ""
     asked = " · ".join(f"{n.get('what') or n.get('query')}" for n in needs[:_MAX_NEEDS])
@@ -928,6 +933,7 @@ def _gate_repair(outline: dict, coverage_findings: list, cid: str, ctx) -> dict:
     try:
         out = refine_flow(
             outline, catalog,
+            vocabulary=getattr(ctx, "vocabulary", None),
             extra_findings=coverage_findings,
             max_rounds=_GATE_REPAIR_ROUNDS,
             purpose="turn_generate",
@@ -1533,7 +1539,9 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     # 산출이 같다.
     extra = [f for f in report.findings if f.layer in ("L2", "L3")]
     refined = await asyncio.to_thread(
-        refine_flow, report.flow, ctx.catalog, extra_findings=extra, purpose="turn_generate"
+        refine_flow, report.flow, ctx.catalog,
+        vocabulary=getattr(ctx, "vocabulary", None),
+        extra_findings=extra, purpose="turn_generate",
     )
     flow, violations = refined["flow"], refined["violations"]
 
