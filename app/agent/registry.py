@@ -128,7 +128,16 @@ def available_versions() -> list[dict]:
 
 
 @lru_cache(maxsize=None)
-def _import_version(name: str):
+def import_version(name: str):
+    """**이미 검증된** 버전 id → 구현 모듈(지연 import, 캐시).
+
+    이름 해석과 import를 가른 이유: 디스패처는 두 결과가 **다 필요하다**(이름은 done에 새기고,
+    모듈은 실행한다). 합쳐진 `resolve_version()`만 있으면 이름을 얻으려 해석을 한 번, 모듈을
+    얻으려 또 한 번 — 같은 검증을 두 번 타게 된다 (Qodo #475).
+
+    ⚠️ 검증하지 않는다 — `resolve_version_name()`이 돌려준 값만 넘긴다. 미검증 문자열을 직접
+    넘기면 `importlib`가 임의 모듈 경로를 타므로, 외부 입력은 반드시 그쪽을 먼저 통과시킨다.
+    """
     return importlib.import_module(f"{__package__}.{name}")
 
 
@@ -156,5 +165,9 @@ def resolve_version_name(version: str | None) -> str:
 
 
 def resolve_version(version: str | None):
-    """버전 문자열 → 구현 모듈(지연 import). None이면 기본 버전."""
-    return _import_version(resolve_version_name(version))
+    """요청 버전 문자열 → 구현 모듈. None이면 기본 버전 — 해석+import 한 번에 하는 편의 갈래.
+
+    이름이 필요 없는 호출부(`analyze`/`recommend`)용이다. 이름도 함께 필요하면
+    `resolve_version_name()` → `import_version()` 두 단계로 나눠 쓴다(중복 검증 방지).
+    """
+    return import_version(resolve_version_name(version))

@@ -44,8 +44,9 @@ def _run(monkeypatch, impl: FakeImpl, context: dict) -> list[ProgressEvent]:
     """디스패처를 태우고 이벤트를 모은다. `resolve_version_name`은 **진짜**를 쓴다.
 
     이름 해석(기본값 결정·미지 버전 거부)이 계약의 절반이라, 거기까지 스텁하면 남는 게 없다.
+    갈아끼우는 건 import 쪽뿐이다 — 실제 vN 스택을 안 띄우려는 것이지 해석을 우회하려는 게 아니다.
     """
-    monkeypatch.setattr(agent_pkg, "resolve_version", lambda name: impl)
+    monkeypatch.setattr(agent_pkg, "import_version", lambda name: impl)
 
     async def collect() -> list[ProgressEvent]:
         return [e async for e in agent_pkg.stream_agent_turn("안녕", context)]
@@ -95,7 +96,8 @@ def test_지원하지_않는_버전은_대체되지_않고_거부된다(monkeypa
     '조용한 대체'가 가장 나쁜 실패다: 사용자는 v99를 받은 줄 알고 기록에는 기본 버전이 남는다.
     """
     impl = FakeImpl(_done())
-    monkeypatch.setattr(agent_pkg, "resolve_version", lambda name: impl)
+    imported: list[str] = []
+    monkeypatch.setattr(agent_pkg, "import_version", lambda name: (imported.append(name), impl)[1])
 
     async def drain() -> None:
         async for _ in agent_pkg.stream_agent_turn("안녕", {"agent_version": "v99"}):
@@ -104,6 +106,8 @@ def test_지원하지_않는_버전은_대체되지_않고_거부된다(monkeypa
     with pytest.raises(ValueError, match="v99"):
         asyncio.run(drain())
     assert impl.calls == []  # 어떤 버전도 실행되지 않았다
+    # import까지 가지 않는다 — import_version은 검증하지 않으므로 여기서 막혀야 한다.
+    assert imported == []
 
 
 def test_env_미지값_폴백은_이름_해석에서_드러난다(monkeypatch):

@@ -23,6 +23,7 @@ from app.schemas import ProgressEvent
 from .registry import (
     available_versions,
     default_version,
+    import_version,
     resolve_version,
     resolve_version_name,
 )
@@ -62,8 +63,10 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
     보증 기록을 미완성으로 남길 수밖에 없었다 — 이 필드가 그 공백을 메운다. `operation`과
     무관하게(chat·compact·fill_cards 모두) 같은 자리에서 새기므로 자동 compact 턴에도 남는다.
     """
+    # 해석과 import를 나눠 부른다 — 둘 다 필요하기 때문이다(이름은 done에 새기고, 모듈은
+    # 실행한다). 합쳐진 resolve_version()을 쓰면 같은 검증을 두 번 탄다 (Qodo #475).
     resolved = resolve_version_name((context or {}).get("agent_version"))
-    impl = resolve_version(resolved)
+    impl = import_version(resolved)
     async for event in impl.stream_agent_turn(message, context):
         yield _stamp_resolved_version(event, resolved) if event.event == "done" else event
 
