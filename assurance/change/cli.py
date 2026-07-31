@@ -1,4 +1,4 @@
-"""CLI for the Change Assurance Warn harness."""
+"""CLI for the Change Assurance rollout harness."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,7 @@ EVIDENCE_LOCATION = re.compile(
 
 
 def parser() -> argparse.ArgumentParser:
-    value = argparse.ArgumentParser(description="Run A360 Change Assurance in Warn mode")
+    value = argparse.ArgumentParser(description="Run A360 Change Assurance")
     value.add_argument("--repo", type=Path, default=Path.cwd())
     value.add_argument("--base-sha", required=True)
     value.add_argument("--head-sha", required=True)
@@ -27,6 +27,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     value.add_argument("--output", type=Path, default=Path(".artifacts/change-assurance"))
     value.add_argument("--review-evidence", type=Path)
+    value.add_argument(
+        "--mode",
+        choices=("warn", "enforce"),
+        default="warn",
+        help="Trusted workflow mode. Must match the protected policy.",
+    )
     return value
 
 
@@ -92,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             output=args.output,
             policy_path=args.policy,
             review_evidence_path=args.review_evidence,
+            expected_mode=args.mode,
         )
     except Exception as exc:
         try:
@@ -101,10 +108,11 @@ def main(argv: list[str] | None = None) -> int:
                 base_sha=args.base_sha,
                 head_sha=args.head_sha,
                 error=exc,
+                enforcement_mode=args.mode,
             )
         except Exception as receipt_error:
             print(
-                f"Change Assurance could not write a Warn receipt: {type(receipt_error).__name__}",
+                f"Change Assurance could not write a receipt: {type(receipt_error).__name__}",
                 file=sys.stderr,
             )
             return 2
@@ -112,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     print(summary, end="")
     append_job_summary(summary)
     emit_warning_annotations(report)
-    # Warn deliberately reports non-passing controls without failing the required check.
+    if args.mode == "enforce" and report["assurance_decision"] != "allow_candidate":
+        return 1
     return 0
 
 

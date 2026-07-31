@@ -1,0 +1,9 @@
+# Default ownership. The repository ruleset supplies the independent second approval.
+* @star8041 @JungJunHwan @tmdals1207 @KDH2929
+
+# Assurance policy, checker, workflow, fixtures, and ownership changes are protected oracles.
+/.github/CODEOWNERS @star8041 @JungJunHwan @tmdals1207 @KDH2929
+/.github/workflows/ @star8041 @JungJunHwan @tmdals1207 @KDH2929
+/assurance/ @star8041 @JungJunHwan @tmdals1207 @KDH2929
+/tests/fixtures/change_assurance/ @star8041 @JungJunHwan @tmdals1207 @KDH2929
+/tests/test_change_assurance.py @star8041 @JungJunHwan @tmdals1207 @KDH2929

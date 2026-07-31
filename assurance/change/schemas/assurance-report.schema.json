@@ -240,15 +240,40 @@
       ],
       "properties": {
         "mode": {
-          "enum": ["observe", "warn"]
+          "enum": ["observe", "warn", "enforce"]
         },
         "blocks_merge": {
-          "const": false
+          "type": "boolean"
         }
       }
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "enforcement": {
+            "properties": {"mode": {"const": "enforce"}},
+            "required": ["mode"]
+          }
+        },
+        "required": ["enforcement"]
+      },
+      "then": {
+        "properties": {
+          "enforcement": {
+            "properties": {"blocks_merge": {"const": true}}
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "enforcement": {
+            "properties": {"blocks_merge": {"const": false}}
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": {

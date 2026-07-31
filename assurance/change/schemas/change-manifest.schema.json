@@ -129,7 +129,7 @@
           "$ref": "#/$defs/digest"
         },
         "rollout_mode": {
-          "enum": ["observe", "warn"]
+          "enum": ["observe", "warn", "enforce"]
         },
         "decision_state": {
           "enum": [

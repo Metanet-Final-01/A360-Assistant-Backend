@@ -1,4 +1,4 @@
-# Change Assurance Warn
+# Change Assurance Warn / Enforce 준비
 
 > Jira: `RPA-180`
 >
@@ -41,6 +41,28 @@ allow_candidate | deny | unassured
 
 Warn에서는 비통과 판정을 GitHub 경고로 표시하지만 기존 병합 결과를 바꾸지 않음
 ```
+
+보호된 정책과 workflow를 함께 `enforce`로 승격하면 CLI는 `allow_candidate`만 성공(0)으로
+종료하고 `deny`, `unassured`, detector error, 증거 누락은 실패(1)로 종료한다. 현재 운영 정책과
+workflow는 의도적으로 `warn`에 고정되어 있다.
+
+## 승격 준비 게이트
+
+[`rollout.py`](rollout.py)는 Warn receipt와 사람이 판정한
+[`dispositions.json`](dispositions.json)을 함께 읽어 다음 조건을 모두 만족할 때만 `ready=true`를 낸다.
+
+- 중복 제거된 Warn 표본과 정상 통과 표본의 최소 수
+- 사람에게 판정된 비통과 표본 수와 false-positive 비율
+- detector error 비율
+- report digest에 결합된 disposition과 Jira 근거
+
+기준값은 [`rollout-policy.json`](rollout-policy.json)에 있다. 오탐 판정은
+`reviewer_type=human`만 인정하므로 자동화가 임의로 오탐률을 0으로 만들 수 없다.
+
+waiver는 정확한 PR head SHA와 단일 control, Jira, 보완 통제, 서로 다른 2명 승인자,
+최대 14일 만료에 결합된다. break-glass는 `dev`/`main` 한 브랜치, 최대 2시간,
+2명 승인과 최근 30일 내 성공한 rollback 증거가 없으면 거부된다. 운영 절차는
+[`docs/runbooks/change-assurance-rollback.md`](../../docs/runbooks/change-assurance-rollback.md)에 있다.
 
 ## 판정 의미
 
@@ -131,8 +153,9 @@ python -m assurance.change.cli `
 | `foundation.py` | 공통 계약, Git object 읽기, 격리된 설치환경 검사 |
 | `dependency_checks.py` | 요구사항·import·취약점·license·보호 경로 판정 |
 | `evidence.py` | manifest/report 계약 검증과 증거 파일 무결성 작성 |
-| `checker.py` | control 결과 조합, 최종 판정, Warn 오류·상세 사유 기록 |
-| `cli.py` | GitHub Actions와 로컬 실행 진입점 |
+| `checker.py` | control 결과 조합, 최종 판정, Warn/Enforce 오류·상세 사유 기록 |
+| `cli.py` | GitHub Actions와 로컬 실행 진입점 및 Enforce 종료 코드 |
+| `rollout.py` | 운영 표본·오탐·detector error·waiver·break-glass 승격 검증 |
 
 ## 검증
 
@@ -149,14 +172,15 @@ python -m pytest -q tests/test_change_assurance.py
 - base에 검사기가 없는 최초 도입 PR은 `bootstrap-unassured`이며 완전한 assurance report를 만들지 않는다.
 - `deny`와 정상적으로 기록된 `unassured`는 CLI 성공으로 끝나지만, 오류 기록조차 만들지 못한 실행기 고장은 CI 실패로
   드러난다. required check가 아니므로 현재 단계에서 자동 병합 차단으로 승격되지는 않는다.
-- `CODEOWNERS`와 정책 2인 승인은 아직 연결되지 않았다.
+- `CODEOWNERS`는 추가됐지만 실제 ruleset의 2인 승인·code-owner review는 운영 설정 변경 전까지 적용되지 않는다.
 - `RPA-207`은 기본 브랜치 `workflow_run` publisher와 전용 writer API를 연결하지만, GitHub Environment의
   승인자·secret·배포 URL이 실제로 보호됐는지는 운영 설정에서 별도 검증해야 한다.
 - 취약점 snapshot의 운영 갱신 주기와 승인자는 아직 확정되지 않았다.
 - 외부 패키지를 실행하는 완전 격리·네트워크 차단 runner는 아직 없다.
 
-Warn 운영 결과와 오탐률은 후속 운영 검증에서 확인한다. 이 구현과 `RPA-207` 전송 코드만으로 보안 인증이나
-`Enforce` 승격을 주장하면 안 된다.
+Warn 운영 receipt는 승격 도구로 측정하지만, 사람 disposition이 없으면 false-positive 비율을
+`unknown`으로 두고 승격을 거부한다. required check와 ruleset을 실제 변경하기 전에는 `Enforce`
+승격을 주장하면 안 된다.
 
 ## 사람 리뷰 후속 판정
 

@@ -1,4 +1,4 @@
-name: Change Assurance (Warn)
+name: Change Assurance
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   observe:
-    name: Derive assurance evidence
+    name: Evaluate trusted evidence
     if: >-
       ${{ github.event_name != 'pull_request_review' ||
           github.event.action == 'dismissed' ||
@@ -83,6 +83,7 @@ jobs:
               --head-sha "$ASSURANCE_HEAD_SHA" \
               --repository "$ASSURANCE_REPOSITORY" \
               --review-evidence "$ASSURANCE_REVIEW_EVIDENCE" \
+              --mode warn \
               --output "$ASSURANCE_OUTPUT"
           else
             # First rollout: execute only the checker already trusted on the base branch.
@@ -91,6 +92,7 @@ jobs:
               --base-sha "$ASSURANCE_BASE_SHA" \
               --head-sha "$ASSURANCE_HEAD_SHA" \
               --repository "$ASSURANCE_REPOSITORY" \
+              --mode warn \
               --output "$ASSURANCE_OUTPUT"
           fi
 

@@ -1,4 +1,4 @@
-"""Orchestrate Change Assurance decisions and non-blocking Warn receipts."""
+"""Orchestrate Change Assurance decisions and rollout-aware receipts."""
 from __future__ import annotations
 
 import hashlib
@@ -96,6 +96,7 @@ class _AssuranceRunner:
         policy_digest: str,
         environment: DependencyEnvironment,
         review_evidence_path: Path | None = None,
+        expected_mode: str | None = None,
         now: datetime | None = None,
     ):
         self.repo = GitRepository(repo_root)
@@ -108,14 +109,19 @@ class _AssuranceRunner:
         self.policy_digest = policy_digest
         self.environment = environment
         self.review_evidence_path = review_evidence_path
+        self.expected_mode = expected_mode
         self.now = now or utc_now()
 
     def run(self) -> dict[str, Any]:
         if self.policy.get("schema_version") != SCHEMA_VERSION:
             raise AssuranceError("dependency policy schema version mismatch")
         rollout_mode = self.policy.get("rollout_mode")
-        if rollout_mode != "warn":
-            raise AssuranceError("Change Assurance is configured for Warn rollout only")
+        if rollout_mode not in {"warn", "enforce"}:
+            raise AssuranceError("Change Assurance has an unsupported rollout mode")
+        if self.expected_mode is not None and rollout_mode != self.expected_mode:
+            raise AssuranceError(
+                "trusted workflow mode does not match the protected policy rollout mode"
+            )
         base = self.repo.commit(self.base_sha)
         head = self.repo.commit(self.head_sha)
         merge_base = self.repo.merge_base(base, head)
@@ -343,7 +349,10 @@ class _AssuranceRunner:
             "evidence_complete": evidence_complete,
             "assurance_decision": decision,
             "business_outcome": {"decision": "not_evaluated", "changed_by_assurance": False},
-            "enforcement": {"mode": rollout_mode, "blocks_merge": False},
+            "enforcement": {
+                "mode": rollout_mode,
+                "blocks_merge": rollout_mode == "enforce",
+            },
         }
         validate_report(report)
         writer.write_json("assurance-report.json", report)
@@ -377,6 +386,7 @@ def run_assurance(
     policy_path: Path,
     environment: DependencyEnvironment | None = None,
     review_evidence_path: Path | None = None,
+    expected_mode: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     policy, policy_digest = load_policy(policy_path)
@@ -395,6 +405,7 @@ def run_assurance(
         policy_digest=policy_digest,
         environment=environment or InstalledDependencyEnvironment(),
         review_evidence_path=review_evidence_path,
+        expected_mode=expected_mode,
         now=now,
     )
     return runner.run()
@@ -407,9 +418,12 @@ def write_error_report(
     base_sha: str,
     head_sha: str,
     error: BaseException,
+    enforcement_mode: str = "warn",
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Best-effort Warn receipt for detector failure; never claims PASS."""
+    """Best-effort rollout-aware receipt for detector failure; never claims PASS."""
+    if enforcement_mode not in {"warn", "enforce"}:
+        raise AssuranceError("unsupported error receipt enforcement mode")
     generated_at = isoformat(now or utc_now())
     subject_head = head_sha if GIT_SHA.fullmatch(head_sha) else "unknown"
     subject_base = base_sha if GIT_SHA.fullmatch(base_sha) else "unknown"
@@ -457,7 +471,10 @@ def write_error_report(
         "evidence_complete": False,
         "assurance_decision": "unassured",
         "business_outcome": {"decision": "not_evaluated", "changed_by_assurance": False},
-        "enforcement": {"mode": "warn", "blocks_merge": False},
+        "enforcement": {
+            "mode": enforcement_mode,
+            "blocks_merge": enforcement_mode == "enforce",
+        },
     }
     validate_report(report)
     writer.write_json("assurance-report.json", report)
@@ -466,11 +483,13 @@ def write_error_report(
 
 
 def markdown_summary(report: dict[str, Any]) -> str:
+    mode = report["enforcement"]["mode"]
+    blocks_merge = report["enforcement"]["blocks_merge"]
     rows = [
-        "### Change Assurance (Warn)",
+        f"### Change Assurance ({mode.title()})",
         "",
         f"- 보증 판정: `{report['assurance_decision']}`",
-        "- 병합 차단: `false`",
+        f"- 병합 차단: `{str(blocks_merge).lower()}`",
         f"- 판정 대상 커밋: `{report['subject']['head_sha']}`",
         f"- 증거 완전성: `{str(report['evidence_complete']).lower()}`",
         "",
@@ -481,12 +500,11 @@ def markdown_summary(report: dict[str, Any]) -> str:
         rows.append(
             f"| {control['control_id']} | `{control['status']}` | {control['reason_code']} |"
         )
-    rows.extend(
-        [
-            "",
-            "> Warn은 비통과 판정을 경고하지만 PR 병합을 차단하지 않습니다.",
-        ]
-    )
+    rows.append("")
+    if mode == "warn":
+        rows.append("> Warn은 비통과 판정을 경고하지만 PR 병합을 차단하지 않습니다.")
+    else:
+        rows.append("> Enforce는 `allow_candidate`가 아닌 판정의 PR 병합을 차단합니다.")
     non_passing = [
         control
         for control in report["controls"]

@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "promotion": {
+    "min_warn_samples": 30,
+    "min_allow_candidates": 10,
+    "min_reviewed_nonpassing": 10,
+    "max_false_positive_rate": 0.05,
+    "max_detector_error_rate": 0.01
+  },
+  "waiver": {
+    "max_duration_hours": 336,
+    "min_approvers": 2
+  },
+  "break_glass": {
+    "max_duration_hours": 2,
+    "min_approvers": 2,
+    "rollback_test_max_age_days": 30
+  }
+}
