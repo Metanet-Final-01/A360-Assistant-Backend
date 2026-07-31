@@ -132,9 +132,13 @@ def _drive(plan: list[str], nodes: dict, *, analysis: dict | None = None) -> dic
 
     LangGraph를 띄우지 않는 이유: 여기서 보려는 건 배선(누가 다음에 뛰는가)이지 런타임이
     아니고, 실제 그래프를 태우면 analyze/generate가 LLM·RAG를 끌고 온다.
+
+    상한은 **입력에서 유도한다** — 상수로 박으면 디스패치 규칙이 늘 때 정상 수렴도 "수렴 실패"로
+    오탐한다 (Qodo #476). task 하나가 소비되기까지 최대 2스텝(경유 1 + 본 실행 1)이고, 마지막에
+    respond 1스텝이 붙는다. 여유 1을 더해 규칙이 하나 늘어도 버티게 둔다.
     """
     state: dict = {"plan": list(plan), "analysis": analysis, "artifacts": [], "current_task": ""}
-    for _ in range(len(ROUTES) * 4):  # 무한 루프 방어 — plan 상한(3)의 넉넉한 배수
+    for _ in range(2 * len(plan) + 2):
         state.update(supervisor_node(state))
         nxt = state["next_node"]
         if nxt == "respond":
@@ -259,24 +263,29 @@ def test_v3_프롬프트가_복합_요청을_명시한다():
 @pytest.mark.llm
 @pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 @pytest.mark.parametrize(
-    ("message", "expected"),
+    ("message", "required", "forbidden"),
     [
-        (COMPOSITE, ROUTE_GENERATE),
-        (SPLIT_ANALYZE, ROUTE_ANALYZE),
-        (SPLIT_GENERATE, ROUTE_GENERATE),
-        (PLAIN_QUESTION, ROUTE_QA),
+        # 합성: 흐름도 산출이 들어 있어야 한다. 앞에 analyze가 붙는지는 버전 계약 차이지
+        # (v3는 복수 task, v1/v2는 단일 route) 분류의 성패가 아니다.
+        (COMPOSITE, ROUTE_GENERATE, (ROUTE_EDIT,)),
+        # 분석만: generate가 **끼어들면 안 된다** — 프롬프트가 "분석해줘에 generate를 덤으로
+        # 붙이지 마라"고 못 박은 계약이다. 여기를 느슨하게 두면 과잉 산출 회귀를 못 잡는다.
+        (SPLIT_ANALYZE, ROUTE_ANALYZE, (ROUTE_GENERATE, ROUTE_EDIT)),
+        # 흐름도만: 흐름도가 없는 상태라 edit이 나오면 안 된다(가드가 아니라 분류에서 걸러야 한다).
+        (SPLIT_GENERATE, ROUTE_GENERATE, (ROUTE_EDIT,)),
+        # 일반 질문: 산출이 하나라도 붙으면 회귀다.
+        (PLAIN_QUESTION, ROUTE_QA, (ROUTE_ANALYZE, ROUTE_GENERATE, ROUTE_EDIT)),
     ],
     ids=["합성", "분석만", "흐름도만", "일반질문"],
 )
-def test_실제_분류(monkeypatch, version, message, expected):
+def test_실제_분류(monkeypatch, version, message, required, forbidden):
     """실 LLM 분류 — `RUN_LLM_TESTS=1 pytest -m llm`일 때만 돈다.
 
     끄는 방식을 addopts가 아니라 **테스트 자신의 skip**으로 둔 이유: CI가 `-m "not integration"`
     같은 필터를 주면 addopts의 `-m`이 통째로 덮어써져 요금 나가는 테스트가 조용히 켜진다.
 
-    합성 문구는 v3에서 `[analyze, generate]`, v1/v2에서 `generate`로 나온다. 어느 쪽이든
-    **흐름도 산출이 계획에 들어 있는가**를 본다 — 앞에 analyze가 붙는지는 버전 계약 차이지
-    분류의 성패가 아니다.
+    "있어야 할 것"과 "있으면 안 될 것"을 **둘 다** 본다. `required in plan`만 보면 v3가 분석
+    요청에 generate를 덤으로 붙여도 통과해, 과잉 산출 회귀가 그대로 새어 나간다 (Qodo #476).
     """
     import importlib
 
@@ -296,4 +305,6 @@ def test_실제_분류(monkeypatch, version, message, expected):
     }
     out = mod.intake_node(state)
     plan = out.get("plan") or [out["route"]]
-    assert expected in plan, f"{version}: {message!r} → {plan}"
+    assert required in plan, f"{version}: {message!r} → {plan} (기대: {required} 포함)"
+    overreach = sorted(set(plan) & set(forbidden))
+    assert not overreach, f"{version}: {message!r} → {plan} (과잉 task: {overreach})"
