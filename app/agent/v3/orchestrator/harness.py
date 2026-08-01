@@ -21,7 +21,7 @@ import copy
 import logging
 from pathlib import Path
 
-from ..recommend.research import structural_complement
+from ..recommend.research import menu_quote, structural_complement
 from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
 from ..verify.checker import derive_session_registry, run_flow_checks
@@ -264,23 +264,151 @@ def _flow_packages(flow: dict) -> set[str]:
     return pkgs
 
 
-def repair_spec_excerpts(flow: dict, catalog: CatalogLookup, exclude: set[tuple[str, str]]) -> str:
+def repair_spec_excerpts(
+    flow: dict, catalog: CatalogLookup, exclude: set[tuple[str, str]], vocabulary=None,
+) -> str:
     """'삽입' 수리에 필요한 액션 스펙 — 위반 목록에는 없는 어휘를 동봉한다 (처방 3).
 
     surgeon은 스펙에 없는 표기를 못 쓴다(환각 방지 규칙). 그런데 세션 누수(R8)·가짜
     반복(R14)의 수리는 흐름도에 **아직 없는** opener/closer·Loop 이터레이터·Try/Catch를
     삽입해야 한다 — 위반 액션 발췌만으로는 재료가 없어 정직한 무연산으로 끝난다(0374
     JIRA 봇 실측). research.structural_complement를 재사용해 카탈로그 직조회로 공급한다.
+
+    ## 턴 어휘를 덧붙인다 (RPA-359)
+
+    구조 보완만으로는 **제어 흐름과 세션 여닫기뿐이고 업무 액션이 0종**이었다(실측 15종).
+    그래서 조사가 찾아 둔 업무 액션을 이 흐름도가 쓰는 패키지에 한해 덧붙인다 — 같은 턴에
+    이미 확보한 어휘이므로 추가 조회가 없고, 패키지로 좁히므로 프롬프트가 부풀지 않는다.
+
+    ⚠ **어휘 전량을 싣지 않는다.** 84종에 스펙까지 실으면 약 12,000자이고 수리는 한 턴에
+    최대 5라운드다. 저장소는 단일 진실이고 여기 실리는 것은 그 view다.
     """
+    seen = set(exclude)
     blocks: list[str] = []
-    for pkg, act in structural_complement(catalog, _flow_packages(flow)):
-        if (pkg, act) in exclude:
-            continue
+
+    def _put(pkg: str, act: str) -> bool:
+        if (pkg, act) in seen:
+            return False
         spec = catalog.get_action_schema(pkg, act)
         if spec is None:
-            continue
+            return False
+        seen.add((pkg, act))
         blocks.append(_spec_block(pkg, act, spec))
+        return True
+
+    flow_pkgs = _flow_packages(flow)
+    for pkg, act in structural_complement(catalog, flow_pkgs):
+        _put(pkg, act)
+    if vocabulary is not None:
+        # 삽입 순서 그대로 — 정렬하면 라운드마다 순서가 흔들려 캐시를 잃는다. 그리고 그
+        # 순서가 곧 조사 관련도순이라(단위별 상위부터 라운드로빈) 앞에서 자르는 것이 맞다.
+        added = 0
+        for pkg, act in vocabulary:
+            if added >= _REPAIR_VOCAB_CAP:
+                break
+            if pkg in flow_pkgs and _put(pkg, act):
+                added += 1
     return "\n".join(blocks)
+
+
+# R1 되묻기에 실을 패키지당 액션 이름 수 상한. 이름만이라 한 줄 ~25자 — 60개면 약 1.5KB로,
+# 스펙까지 싣는 것(액션당 ~190자)보다 한 자릿수 싸다.
+_R1_PACKAGE_NAME_CAP = 60
+
+# 수리 메뉴에 덧붙일 턴 어휘 개수 상한 (RPA-359).
+#
+# 상한 없이 붙이면 부푼다 — 실측(2026-07-30) 흐름도가 쓰는 7개 패키지의 어휘를 전부 실었더니
+# 삽입 재료가 15종 1,490자에서 **139종 16,314자**가 됐다. 수리는 한 턴 최대 5라운드이고
+# 이 블록은 user 메시지라 라운드 간 캐시도 안 탄다.
+#
+# 24종이면 약 4.5KB — 구조 보완(1.5KB) 위에 3배쯤 얹는 수준이다. 어휘의 삽입 순서가 곧
+# 조사 관련도순(단위별 상위부터 라운드로빈)이라 앞에서 자르는 것이 관련도순으로 자르는 것과
+# 같다. ⚠ 이 값은 시작점이고 실측으로 조정한다 — 수리 채택률과 턴 비용을 함께 본다.
+_REPAIR_VOCAB_CAP = 24
+
+
+def r1_package_hints(violations: list[dict], catalog: CatalogLookup, vocabulary=None) -> str:
+    """R1 위반이 난 **패키지의 실제 액션 이름 목록** (RPA-359).
+
+    실측(2026-07-30 턴 fcd58640): `Microsoft 365 Excel/Read cell`이 두 번 나왔는데
+    카탈로그에 그 이름이 없다. 비슷한 것은 셋이다 — `Get cell`(의미 일치),
+    `Read cell format`·`Read cell formula`(접두 일치). **문자열이 가까운 쪽을 코드가 고르면
+    서식을 읽는 엉뚱한 액션이 조용히 들어간다.** 그래서 코드는 후보를 좁혀 주기만 하고
+    고르는 것은 모델이다 — `_fix_vocab` 주석의 원칙과 같다.
+
+    앞서는 되묻기가 "메뉴에 없다"까지만 말하고 무엇이 있는지는 말하지 않았다. 그 회차는
+    44턴 중 4회 발동해 **1회 성공**했다.
+
+    ⚠ **패키지가 카탈로그에 실재할 때만** 낸다. `package="needs"`처럼 패키지 자체가 없는
+    오염(실측 3건)은 나열할 것이 없고, 그 경우는 다른 처방이 필요하다.
+    """
+    packages = {v.get("package") for v in violations if v.get("rule") == "R1" and v.get("package")}
+    if not packages:
+        return ""
+    by_pkg = _package_action_names(catalog, packages, _R1_PACKAGE_NAME_CAP)
+    blocks: list[str] = []
+    for pkg in sorted(packages):
+        shown, total = by_pkg[pkg]
+        if not shown:
+            continue  # 패키지 자체가 카탈로그에 없다 — 나열할 것이 없다
+        if vocabulary is not None:
+            # **실제로 프롬프트에 실은 것만** 어휘에 넣는다 (Qodo #473). 전량을 넣으면 대형
+            # 카탈로그에서 어휘가 표시 상한과 무관하게 부풀고, 모델이 본 적 없는 이름이
+            # 나중에 수리 메뉴(repair_spec_excerpts)에 올라간다.
+            vocabulary.extend(((pkg, a) for a in shown), "r1_hint")
+        more = f" … 외 {total - len(shown)}개" if total > len(shown) else ""
+        # 값은 menu_quote로 경계를 고정한다 (Qodo #473). 메뉴 렌더링과 같은 규칙이다 —
+        # 따옴표·개행이 든 이름이 블록 형식을 깨거나 프롬프트 주입이 되지 않게 한다.
+        blocks.append(
+            f"- package={menu_quote(pkg)} 의 실제 액션: "
+            + ", ".join(menu_quote(a) for a in shown)
+            + more
+        )
+    if not blocks:
+        return ""
+    return (
+        "\n\n[표기가 틀린 패키지의 실제 액션 이름]\n"
+        "아래 이름 중에서 **의도에 맞는 것을 골라** update 하라. 이름이 비슷하다고 고르지 말고 "
+        "무엇을 하는 액션인지로 고른다(예: 셀 '값'을 읽는 것과 '서식'을 읽는 것은 다른 액션이다).\n"
+        "정말 대응이 없으면 그 액션을 지우지 말고 notes에 남긴다.\n" + "\n".join(blocks)
+    )
+
+
+def _package_action_names(
+    catalog: CatalogLookup, packages: set[str], cap: int
+) -> dict[str, tuple[list[str], int]]:
+    """대상 패키지들의 액션 이름을 **카탈로그 1회 순회**로 모은다 → {패키지: (이름 상한개, 총 개수)}.
+
+    패키지마다 `_iter_catalog`를 다시 부르면 전량 스캔이 패키지 수만큼 반복된다. 이 함수는
+    수리 라운드마다 불리므로(한 턴 최대 5라운드) 그 곱이 그대로 쌓인다 (Qodo #473).
+
+    이름은 **상한까지만** 들고 나머지는 세기만 한다 — 뒤쪽은 "… 외 N개" 한 조각으로만 쓰이니
+    전량을 리스트로 만들 이유가 없다. 카탈로그가 1,375종인 지금도, 더 커져도 상한이 재료비를
+    묶는다.
+    """
+    kept: dict[str, list[str]] = {p: [] for p in packages}
+    total: dict[str, int] = dict.fromkeys(packages, 0)
+    for pkg, act in _iter_catalog(catalog):
+        if pkg not in kept:
+            continue
+        total[pkg] += 1
+        if len(kept[pkg]) < cap:
+            kept[pkg].append(act)
+    return {p: (kept[p], total[p]) for p in packages}
+
+
+def _iter_catalog(catalog: CatalogLookup):
+    """카탈로그 전량을 (package, action)으로 훑는다. 순회를 지원하지 않으면 빈 결과."""
+    it = getattr(catalog, "iter_action_schemas", None)
+    if it is None:
+        return
+    try:
+        for spec in it():
+            pkg, act = spec.get("package"), spec.get("action")
+            if pkg and act:
+                yield pkg, act
+    except Exception as e:  # noqa: BLE001 — 힌트 실패가 수리를 막지 않게
+        logger.warning("카탈로그 순회 실패 — R1 힌트 생략: %s", e)
 
 
 def _findings_lines(findings: list[Finding]) -> str:
@@ -342,6 +470,7 @@ def refine_flow(
     flow: dict,
     catalog: CatalogLookup,
     *,
+    vocabulary=None,
     extra_findings: list[Finding] | None = None,
     max_rounds: int = MAX_REFINE_ROUNDS,
     purpose: str = "verify",
@@ -376,10 +505,14 @@ def refine_flow(
     emit({"event": "stage", "stage": "verifying",
           "message": caption or
           f"검수 위반 {len(violations)}건 · 개선 지시 {len(extra_findings or [])}건 교정 중",
-          "data": {"violations": [
-              {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
-              for v in violations
-          ]}})
+          "data": {
+              # 수리가 **무엇을 재료로 쥐고 있었는지** — 이게 없으면 "고칠 방법이 없었다"와
+              # "방법이 있었는데 못 골랐다"를 사후에 못 가른다 (RPA-359).
+              "vocabulary": len(vocabulary) if vocabulary is not None else 0,
+              "violations": [
+                  {k: v.get(k) for k in ("rule", "location", "message", "step_id", "package", "action", "param")}
+                  for v in violations
+              ]}})
 
     current = flow
     current_violations = violations
@@ -395,13 +528,16 @@ def refine_flow(
         work = annotate_ids(copy.deepcopy(current))
         outline = render_outline(work)
         excerpts, excerpt_keys = _spec_excerpts(current_violations, catalog)
-        repair_menu = repair_spec_excerpts(current, catalog, excerpt_keys)
+        repair_menu = repair_spec_excerpts(current, catalog, excerpt_keys, vocabulary)
+        # R1 위반 패키지의 실제 액션 이름 — 라운드마다 새로 잰다(위반이 바뀌면 대상도 바뀐다).
+        r1_hints = r1_package_hints(current_violations, catalog, vocabulary)
         user_content = (
             f"[흐름도 아웃라인]\n{outline}\n\n"
             f"[고칠 문제들 (심각도순)]\n{_findings_lines(round_findings)}\n\n"
             f"[스펙 발췌]\n{excerpts}"
             + (f"\n\n[수리용 액션 스펙 — 세션 여닫기·반복·분기·예외 처리를 삽입(insert/wrap)할 때 이 표기 사용]\n{repair_menu}"
                if repair_menu else "")
+            + r1_hints
             + (f"\n\n{note}" if note else "")
         )
         try:
@@ -497,11 +633,12 @@ def from_violations_dicts(violations: list[dict]) -> tuple[list[Finding], list[d
     return fs, [c.as_dict() for c in cards]
 
 
-def verify_and_repair(flow: dict, catalog: CatalogLookup) -> dict:
+def verify_and_repair(flow: dict, catalog: CatalogLookup, vocabulary=None) -> dict:
     """흐름도를 검수하고 위반이 있으면 surgeon refine 루프로 교정한다 (v2 시그니처 유지).
 
     edit 경로·타 솔루션(generate_other) 경로가 이 관문을 그대로 쓴다.
+    `vocabulary`는 선택이다 — v1/v2가 같은 함수를 부르고 그쪽엔 턴 어휘가 없다.
     반환: {"flow": dict, "violations": list[dict], "repaired": bool}.
     """
     emit({"event": "stage", "stage": "verifying", "message": "흐름도 최종 검수 중"})
-    return refine_flow(flow, catalog)
+    return refine_flow(flow, catalog, vocabulary=vocabulary)

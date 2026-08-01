@@ -404,7 +404,7 @@ async def edit_node(state: TurnState) -> dict:
     # 라이브 렌더: 적용된 수정안을 즉시 프레임으로 흘려보낸다(추천 흐름도 상세 패널이 트리로 표시).
     emit_flow_frame(flow, None, "수정안 구성")
     if ctx is not None:
-        result = verify_and_repair(flow, ctx.catalog)
+        result = verify_and_repair(flow, ctx.catalog, getattr(ctx, "vocabulary", None))
     else:
         # 타 솔루션 세션인데 대화에서 카탈로그를 못 찾았다 — 검수 기준이 없어 생략한다
         # (A360 카탈로그로 검수하면 사용자가 준 액션이 전부 R1 위반으로 찍힌다).
