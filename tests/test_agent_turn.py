@@ -143,6 +143,27 @@ def _compact_payload() -> dict:
     }
 
 
+def test_turn_rejects_likely_encoding_loss_before_agent_call():
+    session = SimpleNamespace(id=SID, user_id=None, solution="a360")
+    _override(FakeDB(session=session))
+
+    with TestClient(app) as c:
+        r = c.post(f"/api/sessions/{SID}/turn", json={"message": "? ?????? ???? ??? ????? ????"})
+
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "TEXT_ENCODING_SUSPECTED"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["보험금 지급 자동화를 분석해줘", "What is the status?"],
+)
+def test_encoding_loss_guard_keeps_normal_or_short_text(text):
+    from app.core.text_integrity import is_likely_encoding_loss
+
+    assert is_likely_encoding_loss(text) is False
+
+
 # --- type=answer: 대화만 저장 ---
 
 def test_answer_streams_and_persists_chat(monkeypatch):

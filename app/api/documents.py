@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.api.auth import assert_session_owner, get_optional_user
 from app.core.llm import usage_context
+from app.core.text_integrity import encoding_loss_detail, is_likely_encoding_loss
 from app.db import get_db
 from app.schemas import ProgressEvent
 from app.services import storage
@@ -203,6 +204,9 @@ def create_document_from_text(
 
     파싱이 필요 없으므로 status="parsed"로 즉시 반환 → 곧바로 analyze 가능.
     """
+    if is_likely_encoding_loss(payload.text):
+        raise HTTPException(status_code=400, detail=encoding_loss_detail())
+
     title = payload.text.strip().splitlines()[0][:80] if payload.text.strip() else "자연어 요청"
     session = _resolve_session(payload.session_id, title, db, user)
 
