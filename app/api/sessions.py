@@ -6,13 +6,11 @@
 
 import asyncio
 import contextlib
-import importlib
 import json
 import logging
 import math
 import os
 import re
-import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -720,11 +718,8 @@ async def export_recommendation_docx(
 #
 # 지금은 비어 있다 — 이 장치는 v4의 2상(초안 확정 → 백그라운드 정밀화) 전용이었고 v4는
 # 폐기됐다. v3는 단상이라 턴이 끝날 때 산출물이 확정되므로 잠글 구간 자체가 없다.
-# `_refine_lock_module()`이 빈 목록에서 None을 돌려주고, 호출부는 "살아 있는 잠금 없음"으로
-# 읽는다(정확한 판정이지 근사가 아니다 — 아래 독스트링 참조).
-_REFINE_LOCK_MODULES: tuple[str, ...] = ()
-
-
+# 현재 잠금 레지스트리는 제공하지 않는다. 호출부는 이를 "살아 있는 잠금 없음"으로
+# 읽으며, 비리터럴 동적 import를 사용하지 않아 의존성 보증도 가능하다.
 def _refine_lock_module():
     """잠금 레지스트리 모듈을 돌려준다 — **이미 로드된 경우에만**.
 
@@ -737,10 +732,6 @@ def _refine_lock_module():
     (잠금이 없는 것과 같다). 지금 Dockerfile은 워커 1의 단일 uvicorn이라 실효가 있다.
     스케일아웃하면 잠금 상태를 DB(세션 행)나 Redis로 옮겨야 한다.
     """
-    for name in _REFINE_LOCK_MODULES:
-        mod = sys.modules.get(name)
-        if mod is not None and hasattr(mod, "refine_lock_status"):
-            return mod
     return None
 
 
@@ -752,13 +743,6 @@ def _load_refine_lock_module():
     에이전트를 통째로 돌릴 턴 경로에서만 불린다 — 리프 모듈(langchain·프롬프트 의존 없음)
     하나를 미리 import하는 비용은 사실상 0이고, 그래야 턴 데드라인을 심을 수 있다.
     """
-    for name in _REFINE_LOCK_MODULES:
-        try:
-            mod = importlib.import_module(name)
-        except Exception:  # noqa: BLE001 — 없는 버전은 건너뛴다(잠금 장치 없는 에이전트)
-            continue
-        if hasattr(mod, "turn_deadline_scope"):
-            return mod
     return None
 
 
