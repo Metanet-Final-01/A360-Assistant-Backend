@@ -3214,6 +3214,60 @@ def test_어휘가_없어도_수리는_돈다():
     assert r1_package_hints([{"rule": "R1", "package": "Excel advanced"}], FakeCatalog(), None)
 
 
+def test_R1_힌트가_값_경계를_지키고_카탈로그를_한_번만_훑는다():
+    """PR #473 코드리뷰(Qodo) 반영 회귀 잠금 — 두 건이 같은 함수에 있었다.
+
+    1) **경계** — 메뉴 렌더링은 `menu_quote`(json.dumps)로 값 경계를 고정하는데 R1 힌트만
+       f-string이었다. 사용자 제공 카탈로그의 이름에 따옴표·개행이 들어오면 블록 형식이
+       깨지고(모델 파싱 혼선) 프롬프트 주입 벡터가 된다 — RPA-354와 같은 결함이다.
+    2) **전량 스캔** — 패키지마다 카탈로그를 다시 훑고, 표시 상한과 무관하게 전량을 어휘에
+       넣었다. 이 함수는 수리 라운드마다(한 턴 최대 5회) 불린다.
+    """
+    from app.agent.v3.catalog_context import ActionVocabulary
+    from app.agent.v3.orchestrator.harness import _R1_PACKAGE_NAME_CAP, r1_package_hints
+
+    class _CountingCatalog:
+        """순회 횟수를 세는 카탈로그 — '한 번만 훑는다'는 관측 가능한 성질이다."""
+
+        def __init__(self, specs):
+            self.specs, self.scans = specs, 0
+
+        def get_action_schema(self, package, action):
+            return None
+
+        def iter_action_schemas(self):
+            self.scans += 1
+            yield from self.specs
+
+    dirty = '따옴표"와\n개행이 든 이름'
+    specs = [{"package": "PkgA", "action": dirty}]
+    specs += [{"package": "PkgA", "action": f"a{i}"} for i in range(_R1_PACKAGE_NAME_CAP + 4)]
+    specs += [{"package": "PkgB", "action": "b1"}]
+    catalog = _CountingCatalog(specs)
+
+    vocab = ActionVocabulary()
+    hints = r1_package_hints(
+        [{"rule": "R1", "package": "PkgA"}, {"rule": "R1", "package": "PkgB"}], catalog, vocab,
+    )
+
+    # (1) 값 경계 — 지저분한 이름이 JSON 문자열로 실리고, 줄을 쪼개지 않는다
+    assert json.dumps(dirty, ensure_ascii=False) in hints, "이름이 이스케이프되지 않았다"
+    assert '따옴표"와' not in hints, "따옴표가 경계를 뚫고 그대로 실렸다"
+    pkg_lines = [ln for ln in hints.splitlines() if ln.startswith("- package=")]
+    assert len(pkg_lines) == 2, f"개행이 든 이름이 줄을 쪼갰다 (패키지 2개인데 {len(pkg_lines)}줄)"
+
+    # (2) 순회는 패키지 수와 무관하게 1회
+    assert catalog.scans == 1, f"패키지 수만큼 전량 스캔했다 ({catalog.scans}회)"
+
+    # (3) 어휘에는 **프롬프트에 실제로 실은 것만** — 표시 상한을 넘지 않는다
+    assert len(vocab) == _R1_PACKAGE_NAME_CAP + 1, (
+        f"표시({_R1_PACKAGE_NAME_CAP}) + PkgB(1)만 남아야 하는데 {len(vocab)}종이다 "
+        "— 표시 상한과 어긋나면 모델이 본 적 없는 이름이 수리 메뉴에 올라간다"
+    )
+    # 총 개수는 세기만 해서 "외 N개"로 남는다 (PkgA 65종 중 60종 표시)
+    assert f"외 {len(specs) - 1 - _R1_PACKAGE_NAME_CAP}개" in hints
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 코드리뷰(PR #249) 반영 회귀 잠금
 # ─────────────────────────────────────────────────────────────────────────────

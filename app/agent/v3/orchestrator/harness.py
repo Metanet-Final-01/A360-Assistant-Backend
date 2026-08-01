@@ -21,7 +21,7 @@ import copy
 import logging
 from pathlib import Path
 
-from ..recommend.research import structural_complement
+from ..recommend.research import menu_quote, structural_complement
 from ..recommend.stream import emit, emit_flow_frame
 from ..verify.catalog import CatalogLookup
 from ..verify.checker import derive_session_registry, run_flow_checks
@@ -345,16 +345,25 @@ def r1_package_hints(violations: list[dict], catalog: CatalogLookup, vocabulary=
     packages = {v.get("package") for v in violations if v.get("rule") == "R1" and v.get("package")}
     if not packages:
         return ""
+    by_pkg = _package_action_names(catalog, packages, _R1_PACKAGE_NAME_CAP)
     blocks: list[str] = []
     for pkg in sorted(packages):
-        names = [a for p, a in _iter_catalog(catalog) if p == pkg]
-        if not names:
+        shown, total = by_pkg[pkg]
+        if not shown:
             continue  # 패키지 자체가 카탈로그에 없다 — 나열할 것이 없다
         if vocabulary is not None:
-            vocabulary.extend(((pkg, a) for a in names), "r1_hint")
-        shown = names[:_R1_PACKAGE_NAME_CAP]
-        more = f" … 외 {len(names) - len(shown)}개" if len(names) > len(shown) else ""
-        blocks.append(f'- package="{pkg}" 의 실제 액션: ' + ", ".join(shown) + more)
+            # **실제로 프롬프트에 실은 것만** 어휘에 넣는다 (Qodo #473). 전량을 넣으면 대형
+            # 카탈로그에서 어휘가 표시 상한과 무관하게 부풀고, 모델이 본 적 없는 이름이
+            # 나중에 수리 메뉴(repair_spec_excerpts)에 올라간다.
+            vocabulary.extend(((pkg, a) for a in shown), "r1_hint")
+        more = f" … 외 {total - len(shown)}개" if total > len(shown) else ""
+        # 값은 menu_quote로 경계를 고정한다 (Qodo #473). 메뉴 렌더링과 같은 규칙이다 —
+        # 따옴표·개행이 든 이름이 블록 형식을 깨거나 프롬프트 주입이 되지 않게 한다.
+        blocks.append(
+            f"- package={menu_quote(pkg)} 의 실제 액션: "
+            + ", ".join(menu_quote(a) for a in shown)
+            + more
+        )
     if not blocks:
         return ""
     return (
@@ -363,6 +372,29 @@ def r1_package_hints(violations: list[dict], catalog: CatalogLookup, vocabulary=
         "무엇을 하는 액션인지로 고른다(예: 셀 '값'을 읽는 것과 '서식'을 읽는 것은 다른 액션이다).\n"
         "정말 대응이 없으면 그 액션을 지우지 말고 notes에 남긴다.\n" + "\n".join(blocks)
     )
+
+
+def _package_action_names(
+    catalog: CatalogLookup, packages: set[str], cap: int
+) -> dict[str, tuple[list[str], int]]:
+    """대상 패키지들의 액션 이름을 **카탈로그 1회 순회**로 모은다 → {패키지: (이름 상한개, 총 개수)}.
+
+    패키지마다 `_iter_catalog`를 다시 부르면 전량 스캔이 패키지 수만큼 반복된다. 이 함수는
+    수리 라운드마다 불리므로(한 턴 최대 5라운드) 그 곱이 그대로 쌓인다 (Qodo #473).
+
+    이름은 **상한까지만** 들고 나머지는 세기만 한다 — 뒤쪽은 "… 외 N개" 한 조각으로만 쓰이니
+    전량을 리스트로 만들 이유가 없다. 카탈로그가 1,375종인 지금도, 더 커져도 상한이 재료비를
+    묶는다.
+    """
+    kept: dict[str, list[str]] = {p: [] for p in packages}
+    total: dict[str, int] = dict.fromkeys(packages, 0)
+    for pkg, act in _iter_catalog(catalog):
+        if pkg not in kept:
+            continue
+        total[pkg] += 1
+        if len(kept[pkg]) < cap:
+            kept[pkg].append(act)
+    return {p: (kept[p], total[p]) for p in packages}
 
 
 def _iter_catalog(catalog: CatalogLookup):
