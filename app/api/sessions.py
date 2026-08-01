@@ -34,7 +34,7 @@ from app.db import get_db
 from app.schemas import AnalysisResult, ProgressEvent, Recommendation
 from app.schemas.analysis import normalize_constraints
 from app.services import alerts, budget, turn_stream
-from app.services.assurance_evidence import persist_output_receipt
+from app.services.assurance_evidence import build_output_receipt
 from app.services.output_assurance import (
     OutputBoundaryContext,
     build_unassured_observation,
@@ -393,7 +393,14 @@ def _save_recommendation(
                     payload=payload,
                     change_summary=change_summary,
                 )
+                finalized = finalize_persistence_observation(observation, persisted=True)
+                receipt_row, receipt = build_output_receipt(
+                    finalized,
+                    recommendation_id=row.id,
+                    recommendation_version=row.version,
+                )
                 s.add(row)
+                s.add(receipt_row)
                 s.commit()
         except IntegrityError as exc:
             if attempt == 2:  # 마지막 시도까지 충돌하면 상위에서 처리
@@ -410,17 +417,15 @@ def _save_recommendation(
             _log_output_observation(failed)
             raise
         else:
-            finalized = finalize_persistence_observation(observation, persisted=True)
             _log_output_observation(finalized)
-            receipt = persist_output_receipt(
-                finalized,
-                recommendation_id=row.id,
-                recommendation_version=row.version,
-            )
             return {
                 **_recommendation_out(row),
                 "output_assurance": finalized,
-                "assurance_receipt": receipt,
+                "assurance_receipt": {
+                    **receipt,
+                    "status": "persisted",
+                    "idempotent": False,
+                },
             }
 
 

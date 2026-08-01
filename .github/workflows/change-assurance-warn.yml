@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   observe:
-    name: Derive assurance evidence
+    name: Evaluate trusted evidence
     if: >-
       ${{ github.event_name != 'pull_request_review' ||
           github.event.action == 'dismissed' ||
@@ -69,6 +69,12 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check \
             -r requirements.txt -r requirements-dev.txt
+          mode_args=()
+          # The runner is checked out from the base SHA. Older trusted runners
+          # deliberately run without the newly introduced optional flag.
+          if grep -q -- '--mode' assurance/change/cli.py; then
+            mode_args=(--mode warn)
+          fi
           if [[ -f assurance/change/review_evidence.py ]] && \
              grep -q -- '--review-evidence' assurance/change/cli.py; then
             python -m assurance.change.review_evidence \
@@ -83,6 +89,7 @@ jobs:
               --head-sha "$ASSURANCE_HEAD_SHA" \
               --repository "$ASSURANCE_REPOSITORY" \
               --review-evidence "$ASSURANCE_REVIEW_EVIDENCE" \
+              "${mode_args[@]}" \
               --output "$ASSURANCE_OUTPUT"
           else
             # First rollout: execute only the checker already trusted on the base branch.
@@ -91,6 +98,7 @@ jobs:
               --base-sha "$ASSURANCE_BASE_SHA" \
               --head-sha "$ASSURANCE_HEAD_SHA" \
               --repository "$ASSURANCE_REPOSITORY" \
+              "${mode_args[@]}" \
               --output "$ASSURANCE_OUTPUT"
           fi
 

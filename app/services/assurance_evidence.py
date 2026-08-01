@@ -357,11 +357,12 @@ def build_change_receipt(
     completeness_status = "complete" if evidence_complete and not missing else "incomplete"
     subject = report["subject"]
     enforcement = report["enforcement"]
-    enforcement_effect = (
-        "warned"
-        if enforcement["mode"] == "warn" and decision != "allow_candidate"
-        else "none"
-    )
+    if enforcement["mode"] == "enforce" and decision != "allow_candidate":
+        enforcement_effect = "blocked"
+    elif enforcement["mode"] == "warn" and decision != "allow_candidate":
+        enforcement_effect = "warned"
+    else:
+        enforcement_effect = "none"
     protected_evidence = envelope["artifacts"].get("protected-change-evidence.json", {})
     human_review = _sanitize_human_review(protected_evidence.get("human_review"))
     receipt_payload = {

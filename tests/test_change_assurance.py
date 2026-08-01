@@ -1242,6 +1242,51 @@ def test_cli_error_warns_but_stays_nonblocking(tmp_path: Path, capsys) -> None:
     assert "확인/조치:" in output
 
 
+def test_cli_detector_error_fails_closed_in_enforce_mode(tmp_path: Path) -> None:
+    exit_code = cli_main(
+        [
+            "--repo",
+            str(tmp_path),
+            "--base-sha",
+            "invalid",
+            "--head-sha",
+            "invalid",
+            "--repository",
+            "Metanet-Final-01/fixture",
+            "--mode",
+            "enforce",
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
+    report = json.loads((tmp_path / "out" / "assurance-report.json").read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert report["assurance_decision"] == "unassured"
+    assert report["enforcement"] == {"mode": "enforce", "blocks_merge": True}
+
+
+def test_enforce_fixture_blocks_a_fixed_dependency_defect(tmp_path: Path) -> None:
+    scenario = _load_scenarios()["fake_dependency"]
+    repo, base, head = _fixture_repo(tmp_path, scenario)
+    policy = _policy(scenario)
+    policy["rollout_mode"] = "enforce"
+    report = _AssuranceRunner(
+        repo_root=repo,
+        base_sha=base,
+        head_sha=head,
+        repository="Metanet-Final-01/fixture",
+        output=tmp_path / "out",
+        policy=policy,
+        policy_uri="fixture-policy.json",
+        policy_digest=canonical_digest(policy),
+        environment=FixtureDependencyEnvironment(scenario["environment"]),
+        expected_mode="enforce",
+        now=FIXED_NOW,
+    ).run()
+    assert report["assurance_decision"] == "deny"
+    assert report["enforcement"] == {"mode": "enforce", "blocks_merge": True}
+
+
 def test_nonpassing_control_contains_evidence_based_operator_guidance(
     tmp_path: Path,
 ) -> None:

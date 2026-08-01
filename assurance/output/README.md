@@ -30,8 +30,9 @@ checker, prompt, graph, repair 구현을 import하거나 복제하지 않는다.
 | Enforce | `deny`·`unassured` 활성 저장 차단 | 검증된 활성 버전만 노출 | 검증된 버전만 허용 |
 
 RPA-182의 첫 Backend 슬라이스는 저장이 성공한 추천 버전마다 내용 주소형 receipt를 제품 DB의
-`assurance_receipts`에 append-only로 남긴다. receipt 저장이 실패하면 기존 추천 저장은 유지하되
-API 응답에 `assurance_receipt.status=refused`를 명시한다. Observe 단계이므로 이 receipt는 통과
+`assurance_receipts`에 append-only로 남긴다. 추천 버전과 receipt는 같은 DB 세션에 추가하고
+한 번의 commit으로 확정한다. 둘 중 하나라도 실패하면 트랜잭션 전체가 실패하므로 업무 데이터만
+남거나 receipt만 남은 상태를 성공으로 반환하지 않는다. Observe 단계이므로 이 receipt는 통과
 증명이나 배포 승인이 아니며 latest/history/export의 노출 정책도 아직 바꾸지 않는다.
 
 상세 계약과 관리자 조회 방법은 [Evidence & Governance](../evidence/README.md)를 참고한다.
