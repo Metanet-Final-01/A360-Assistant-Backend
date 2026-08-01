@@ -128,19 +128,46 @@ def available_versions() -> list[dict]:
 
 
 @lru_cache(maxsize=None)
-def _import_version(name: str):
+def import_version(name: str):
+    """**이미 검증된** 버전 id → 구현 모듈(지연 import, 캐시).
+
+    이름 해석과 import를 가른 이유: 디스패처는 두 결과가 **다 필요하다**(이름은 done에 새기고,
+    모듈은 실행한다). 합쳐진 `resolve_version()`만 있으면 이름을 얻으려 해석을 한 번, 모듈을
+    얻으려 또 한 번 — 같은 검증을 두 번 타게 된다 (Qodo #475).
+
+    ⚠️ 검증하지 않는다 — `resolve_version_name()`이 돌려준 값만 넘긴다. 미검증 문자열을 직접
+    넘기면 `importlib`가 임의 모듈 경로를 타므로, 외부 입력은 반드시 그쪽을 먼저 통과시킨다.
+    """
     return importlib.import_module(f"{__package__}.{name}")
 
 
-def resolve_version(version: str | None):
-    """버전 문자열 → 구현 모듈(지연 import). None이면 기본 버전.
+def resolve_version_name(version: str | None) -> str:
+    """요청 버전 → **실제로 실행될 버전 id**. None이면 서버 기본 (RPA-184).
+
+    모듈이 아니라 이름을 돌려주는 갈래를 따로 둔 이유: 디스패처가 done 이벤트에 실제 실행
+    버전을 새기려면 "무엇을 골랐는지"를 알아야 하는데, 모듈만 받으면 그걸 역으로 알아낼
+    방법이 없다(`__name__` 파싱은 계약이 아니라 우연이다).
 
     미지 버전(명시 요청)은 ValueError — 엔드포인트가 available_versions()로 사전 검증하지만
-    계약을 코드에서도 강제한다. env 기본의 미지값은 default_version()이 이미 폴백 처리한다.
+    계약을 코드에서도 강제한다. **다른 버전으로 조용히 대체하지 않는다**(RPA-184 D-24).
+
+    env 기본(`AGENT_VERSION`)의 미지값만은 default_version()이 경고 로그와 함께 폴백한다 —
+    운영자 오설정으로 부팅을 죽이지 않겠다는 기존 결정이다(test_default_version_falls_back_
+    for_unknown_env). 그 경우에도 **실행된 버전이 그대로 resolved로 공개**되므로 대체 사실이
+    호출자 기록에 남는다 — 조용하지 않다는 계약은 여기서 지켜진다.
     """
     name = version or default_version()
     if name not in _discover():
         raise ValueError(
             f"알 수 없는 에이전트 버전: {name!r} (사용 가능: {list(_discover())})"
         )
-    return _import_version(name)
+    return name
+
+
+def resolve_version(version: str | None):
+    """요청 버전 문자열 → 구현 모듈. None이면 기본 버전 — 해석+import 한 번에 하는 편의 갈래.
+
+    이름이 필요 없는 호출부(`analyze`/`recommend`)용이다. 이름도 함께 필요하면
+    `resolve_version_name()` → `import_version()` 두 단계로 나눠 쓴다(중복 검증 방지).
+    """
+    return import_version(resolve_version_name(version))

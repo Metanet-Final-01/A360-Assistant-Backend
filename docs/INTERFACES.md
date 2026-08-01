@@ -171,6 +171,29 @@ async def stream_agent_turn(message: str, context: dict) -> AsyncIterator[Progre
   백엔드가 **세션이 아직 `a360`일 때만** 이 값으로 `session.solution`을 확정한다 — 사용자가 명시적으로
   정한 값이 감지보다 우선한다. 오탐 되돌리기는 `PATCH /api/sessions/{id}` `{"solution": "a360"}`.
 
+#### `resolved_agent_version` — 실제 실행된 버전 (RPA-184)
+
+```python
+{ "type": ..., ..., "resolved_agent_version": "v1" | "v2" | "v3" | ... }   # 모든 type에 공통
+```
+
+**모든 done 이벤트에 무조건 실린다** — `type`·`operation`과 무관하고, 값은 절대 `null`이 아니다.
+요청이 `agent_version`을 안 보내 서버 기본으로 돌았을 때도 실제로 돈 버전이 들어간다.
+
+| 요청 `agent_version` | done `resolved_agent_version` |
+|---|---|
+| 없음(`null`) | 서버 기본 — env `AGENT_VERSION`, 미설정·미지값이면 폴백(`v2`) |
+| 명시 버전(`"v3"`) | 그 버전 그대로 (`"v3"`) |
+| 지원하지 않는 버전 | **done 없음** — 진입점이 `ValueError`. 다른 버전으로 조용히 대체하지 않는다 |
+
+- 새기는 주체는 **디스패처**(`app/agent/__init__.py`)다 — 버전을 고른 자리에서 새기므로 `vN/` 폴더를
+  추가하는 것만으로 계약이 따라온다. 각 버전 구현이 자기 이름을 자기신고하지 않는다.
+- `operation="compact"`(자동 compact 포함)와 본 처리가 **각각** 자기 실행 버전을 보고한다.
+  백엔드는 같은 turn의 requested 버전을 양쪽에 전달하므로, 두 기록의 resolved를 비교하면
+  자동 compact가 다른 버전으로 샜는지 확인할 수 있다.
+- 백엔드는 이 값을 그대로 믿되 **요청값은 자기가 관측한 것으로 덮어쓴다** — 에이전트 payload가
+  provenance를 자기신고하지 못하게 하는 기존 경계(`_backend_requested_agent_version`)는 그대로다.
+
 #### 질문 카드 (v3) — `updated_recommendation` 안의 필드
 
 ⚠️ **별도 done `type`이 아니다.** 추천 payload 안에 실려 온다:

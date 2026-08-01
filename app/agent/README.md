@@ -38,6 +38,31 @@ async for event in stream_agent_turn(message, context):  # context["agent_versio
 - `agent_version` 없음 → env `AGENT_VERSION`(없으면 `v2`) 기본으로 동작.
 - 미지 버전을 명시 요청하면 `ValueError`(백엔드 엔드포인트가 `available_versions()`로 사전 검증).
 
+### 실제 실행 버전 되돌려주기 — `resolved_agent_version` (RPA-184)
+
+**done 이벤트에는 실제로 돈 버전을 무조건 싣는다.** 백엔드는 요청값이나 서버 기본값만으로는
+무엇이 돌았는지 확정할 수 없어(둘 다 "무엇을 원했나"이지 "무엇이 돌았나"가 아니다) 보증 기록을
+미완성으로 남길 수밖에 없었다.
+
+```python
+done.data["resolved_agent_version"]  # "v1" | "v2" | "v3" | …  — 절대 null이 아니다
+```
+
+| 요청 | resolved |
+|---|---|
+| 없음 | 서버 기본(env `AGENT_VERSION`, 미설정·미지값이면 `v2`) |
+| 명시 버전 | 그 버전 그대로 |
+| 지원하지 않는 버전 | **done이 없다** — `ValueError`. 다른 버전으로 조용히 대체하지 않는다 |
+
+새기는 자리는 **디스패처 하나**다(`_stamp_resolved_version`). 각 `vN`이 자기 이름을 자기신고하면
+벤더링 사본마다 코드가 복제되고, 사본이 틀린 이름을 적어도 아무도 못 잡는다. 디스패처가 새기면
+`v4/` 폴더를 드롭하는 것만으로 계약이 따라온다 — 아래 "버전 추가"의 무변경 원칙과 한 쌍이다.
+`operation`(chat·compact·fill_cards)과 무관하므로 자동 compact 턴에도 그대로 남는다.
+
+> ⚠️ **env `AGENT_VERSION`이 미지값일 때만** `default_version()`이 경고 로그와 함께 폴백한다
+> (운영자 오설정으로 부팅을 죽이지 않겠다는 기존 결정). 이때도 resolved에는 **실제로 돈 버전**이
+> 실리므로 대체 사실이 호출자 기록에 남는다 — "조용히 대체"는 아니다.
+
 > **HTTP 표면은 백엔드가 제공한다(이 PR 범위 밖).** `AgentTurnRequest.agent_version` 필드와
 > `GET /api/agent/versions` 엔드포인트는 백엔드 담당이 구현한다(작업요청서). 이 패키지는
 > `context["agent_version"]` 소비와 `available_versions()`/`default_version()` 헬퍼만 제공한다.
