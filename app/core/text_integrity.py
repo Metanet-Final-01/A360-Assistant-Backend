@@ -5,14 +5,19 @@ from __future__ import annotations
 import re
 
 
-_CJK_RE = re.compile(r"[\u1100-\u11FF\u2E80-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF]")
+_CJK_RE = re.compile(r"[\u1100-\u11FF\u2E80-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\uF900-\uFAFF]")
 _ENCODING_LOSS_RATIO = 0.25
+_MIN_ENCODING_LOSS_QUESTION_MARKS = 5
 
 
 def is_likely_encoding_loss(text: str) -> bool:
     """Return whether a likely non-UTF-8 client replaced CJK text with ``?``."""
     normalized = text.strip()
-    if not normalized or _CJK_RE.search(normalized):
+    if (
+        not normalized
+        or _CJK_RE.search(normalized)
+        or normalized.count("?") < _MIN_ENCODING_LOSS_QUESTION_MARKS
+    ):
         return False
     return normalized.count("?") / len(normalized) >= _ENCODING_LOSS_RATIO
 

@@ -143,9 +143,14 @@ def _compact_payload() -> dict:
     }
 
 
-def test_turn_rejects_likely_encoding_loss_before_agent_call():
+def test_turn_rejects_likely_encoding_loss_before_agent_call(monkeypatch):
     session = SimpleNamespace(id=SID, user_id=None, solution="a360")
     _override(FakeDB(session=session))
+
+    def _agent_must_not_run():
+        raise AssertionError("인코딩 손상 요청이 Agent까지 전달됐다")
+
+    monkeypatch.setattr(sessions_api, "_get_agent_turn", _agent_must_not_run)
 
     with TestClient(app) as c:
         r = c.post(f"/api/sessions/{SID}/turn", json={"message": "? ?????? ???? ??? ????? ????"})
@@ -156,7 +161,7 @@ def test_turn_rejects_likely_encoding_loss_before_agent_call():
 
 @pytest.mark.parametrize(
     "text",
-    ["보험금 지급 자동화를 분석해줘", "What is the status?"],
+    ["보험금 지급 자동화를 분석해줘", "こんにちは？？？？？", "?", "??", "What is the status?"],
 )
 def test_encoding_loss_guard_keeps_normal_or_short_text(text):
     from app.core.text_integrity import is_likely_encoding_loss
