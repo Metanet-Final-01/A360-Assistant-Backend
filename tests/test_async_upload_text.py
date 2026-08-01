@@ -156,3 +156,12 @@ def test_text_input_rejects_empty(fake_db):
     with TestClient(app) as c:
         r = c.post("/api/documents/text", json={"text": ""})
     assert r.status_code == 422  # min_length=1
+
+
+def test_text_input_rejects_likely_encoding_loss(fake_db):
+    with TestClient(app) as c:
+        r = c.post("/api/documents/text", json={"text": "? ?????? ???? ??? ????? ????"})
+
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "TEXT_ENCODING_SUSPECTED"
+    assert fake_db.added == []

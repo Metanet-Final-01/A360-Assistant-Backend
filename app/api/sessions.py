@@ -30,6 +30,7 @@ from app.api.auth import assert_session_owner, get_current_user, get_optional_us
 from app.core import config
 from app.core.llm import usage_context
 from app.core.masking import mask_fields, mask_pii
+from app.core.text_integrity import encoding_loss_detail, is_likely_encoding_loss
 from app.db import get_db
 from app.schemas import AnalysisResult, ProgressEvent, Recommendation
 from app.schemas.analysis import normalize_constraints
@@ -1697,6 +1698,8 @@ async def agent_turn(
     막히므로, chat 안의 수정 요청은 에이전트 edit 노드에서 걸러야 한다(그쪽은 아직 미배선).
     """
     session = _owned_session_or_404(session_id, db, user)
+    if is_likely_encoding_loss(payload.message):
+        raise HTTPException(status_code=400, detail=encoding_loss_detail())
     if payload.operation == "fill_cards":
         _assert_not_refining(session.id)
     stream_turn = _get_agent_turn()
