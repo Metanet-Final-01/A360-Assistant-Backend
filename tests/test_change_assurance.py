@@ -733,6 +733,15 @@ def test_live_registry_dynamic_import_matches_the_approved_policy() -> None:
     )
 
 
+def test_live_sessions_refine_loader_has_no_unverifiable_dynamic_import() -> None:
+    _, errors = parse_imports(
+        "app/api/sessions.py",
+        (ROOT / "app" / "api" / "sessions.py").read_bytes(),
+    )
+
+    assert errors == []
+
+
 def test_dynamic_import_approval_does_not_cover_an_external_prefix() -> None:
     _, errors = parse_imports(
         "app/agent/registry.py",
