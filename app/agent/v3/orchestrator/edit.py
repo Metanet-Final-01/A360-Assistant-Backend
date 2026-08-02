@@ -346,6 +346,8 @@ def _existing_packages(catalog, wanted: set[str]) -> set[str] | None:
     `get_action_schema` 하나뿐이라, 순회 불가를 '없음'으로 읽으면 실재하는 패키지를
     "카탈로그에 없다"고 안내하게 된다.
     """
+    if not wanted:
+        return set()  # 확인할 게 없으면 훑지 않는다 — 빈 집합에도 전량 순회가 돌았다(Qodo #485)
     it = getattr(catalog, "iter_action_schemas", None)
     if it is None:
         return None

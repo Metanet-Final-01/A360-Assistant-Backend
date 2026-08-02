@@ -3742,6 +3742,12 @@ def test_사용자_안내의_패키지_존재_확인도_카탈로그를_한_번�
     assert "카탈로그에 없어서" in msg
     assert cat.scans == 1, f"패키지 수만큼 훑었다 ({cat.scans}회)"
 
+    # 확인할 패키지가 없으면 아예 안 훑는다 — package가 None인 쌍만 온 경우가 그렇다
+    # (`_cant_apply_message`가 `if p`로 걸러 wanted가 빈 집합이 된다). Qodo #485 재지적.
+    empty = _CountingCatalog()
+    edit_mod._cant_apply_message([(None, "액션만있음")], empty)
+    assert empty.scans == 0, "확인할 게 없는데 카탈로그를 훑었다"
+
 
 def test_없는_패키지_후보_생성이_카탈로그를_한_번만_훑는다():
     """Qodo #485: 없는 패키지마다 전량 스캔이 반복됐다.
