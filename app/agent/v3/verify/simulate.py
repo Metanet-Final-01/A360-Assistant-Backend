@@ -16,7 +16,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from .. import config
 from ..orchestrator.jsonio import chat_json
 from ..recommend.stream import emit
 from .checker import _eh_role, _if_role, _split_units
@@ -170,8 +169,6 @@ def run_simulation(spec: dict, flow: dict, *, purpose: str = "verify_simulate") 
         ],
         purpose=purpose,
         model_cls=SimulationReport,
-        # 판정관이 흔들리면 pass_rate가 흔들리고, 그건 신뢰도에 **곱해지는** 축이다.
-        temperature=config.measure_temperature(),
     )
     # 판정 무결성: 트레이서가 만들지 않은 경로 판정은 버리고, 판정이 누락된 경로는
     # 보수적으로 실패 처리한다 — 누락을 빼고 나누면 pass_rate가 부푼다(전량 누락 시 1.0).

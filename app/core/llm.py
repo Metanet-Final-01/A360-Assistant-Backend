@@ -216,29 +216,6 @@ def _log_llm_failure(purpose: str, model: str, kind: str, started: float, exc: E
         logger.warning("LLM 실패 관측 기록 실패 (호출 오류는 그대로 전파): %s", kind)
 
 
-def _rejects_temperature(exc: Exception, create_kwargs: dict) -> bool:
-    """이 실패가 "이 모델은 temperature를 안 받는다"인가.
-
-    좁게 잡는다 — **요청 자체가 잘못됐다(4xx)** + 메시지가 `temperature`를 지목했을 때만.
-    넓게 잡으면 무관한 실패까지 호출을 한 번 더 태우면서 로그에는 temperature 탓으로 남는다.
-    공급자가 오류 형태를 바꿀 수 있으니 타입 이름에만 의존하지 않고 메시지도 함께 본다.
-
-    ⚠️ 메시지는 **판정에만** 쓰고 어디에도 남기지 않는다 — 오류 본문에 요청 페이로드 일부가
-    실릴 수 있다(`_log_llm_failure` 주석과 같은 이유).
-    """
-    if "temperature" not in create_kwargs:
-        return False
-    from openai import APIStatusError
-
-    # 5xx는 서버 쪽 문제다 — 인자를 떼도 안 낫고, 떼고 또 태우면 부하만 보탠다.
-    # 4xx(400 Unsupported parameter · 422)와 SDK 층의 TypeError/ValueError만 후보로 둔다.
-    if isinstance(exc, APIStatusError) and not 400 <= exc.status_code < 500:
-        return False
-    # 결정타는 **메시지가 그 인자를 지목했는가**다. 타입만으로 가르면 공급자가 오류 형태를
-    # 바꿀 때 조용히 통로가 막히고, 메시지만으로 가르면 무관한 4xx까지 태운다.
-    return "temperature" in str(exc).lower()
-
-
 def chat(
     messages: list[dict],
     *,
@@ -247,7 +224,6 @@ def chat(
     session_id: uuid.UUID | None = None,
     response_format: dict | None = None,
     meta: dict | None = None,
-    temperature: float | None = None,
 ) -> str:
     """Chat Completions 호출 후 응답 텍스트를 반환하고 사용량을 기록한다.
 
@@ -266,12 +242,11 @@ def chat(
     반환값이 str뿐이라 호출부가 알 방법이 없었다 — 그래서 진단이 "JSON 구문 오류" 한 줄로
     끝나고 원인을 정황으로만 추측하게 됐다. 반환 계약은 그대로 두고 out-param으로만 준다.
 
-    temperature: 미지정이면 create()에 전달하지 않는다(공급자 기본값 — 기존 동작 무변경).
-    **정형화·채점처럼 같은 입력이면 같은 답이 나와야 하는 호출은 0을 준다.** 실측
-    (2026-07-30): 같은 업무정의서를 세션마다 새로 올려(=대화 이력 없음) 세 턴 돌렸는데
-    요구사항이 6·8·10건으로 갈렸다. 표본이 같고 이력도 없으니 남는 변수는 샘플링뿐이었다.
-    그 편차가 아래 모든 단계(조사 질의·구조·커버리지 분모)를 흔들어 설정 A/B가 성립하지 않았다.
-    모델이 이 인자를 거부하면 떼고 한 번 더 시도한다 — 재현성을 잃어도 호출은 살린다.
+    ⚠ **temperature는 보내지 않는다.** 한때 계측 경로(분석·정형화·L2·L3)에 0을 걸어 재현성을
+    확보했는데, 그건 그 인자를 받아 주는 모델에서만 성립하는 장치였다. 추론형 모델은 기본값
+    외의 temperature를 거부하고(400), 그러면 호출마다 실패-재시도로 왕복이 두 배가 되면서
+    재현성은 어차피 없다 — '있는 척'만 남는다. 그래서 인자 자체를 두지 않는다. 재현성이
+    필요하면 샘플링이 아니라 **프롬프트와 후처리**로 좁힌다.
     """
     from openai import AuthenticationError, RateLimitError
 
@@ -281,32 +256,11 @@ def chat(
     create_kwargs: dict = {"model": model, "messages": messages}
     if response_format is not None:
         create_kwargs["response_format"] = response_format
-    if temperature is not None:
-        create_kwargs["temperature"] = temperature
     from openai import APIConnectionError, APITimeoutError
 
     started = time.monotonic()
     try:
-        try:
-            response = _get_client().chat.completions.create(**create_kwargs)
-        except (AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError):
-            raise  # 인프라 실패는 아래 전용 핸들러가 맡는다 — temperature 탓으로 돌리지 않는다
-        except Exception as first:
-            # **temperature 거부만** 다시 시도한다. 처음에는 `except Exception`으로 넓게
-            # 잡았는데, 그러면 스키마 오류·콘텐츠 필터 같은 무관한 실패까지 호출을 한 번 더
-            # 태우고(비용·지연 2배) 로그에는 "모델이 temperature를 거부"로 남는다 — 원인을
-            # 엉뚱한 곳에서 찾게 된다(Qodo). 판정은 `_rejects_temperature`가 한다.
-            if not _rejects_temperature(first, create_kwargs):
-                raise
-            logger.warning("%s: 모델이 temperature를 거부(%s) — 떼고 재시도(재현성 없음)",
-                           purpose, type(first).__name__)
-            create_kwargs.pop("temperature")
-            try:
-                response = _get_client().chat.completions.create(**create_kwargs)
-            except Exception as second:
-                # 두 번째도 죽으면 **첫 실패를 원인으로 매단다.** 안 매달면 진짜 원인이
-                # 'temperature 뗀 뒤의 실패'로 덮여 사라진다.
-                raise second from first
+        response = _get_client().chat.completions.create(**create_kwargs)
     except AuthenticationError as e:
         # 인증 실패도 관측에 남긴다 — 키 만료·교체 사고는 "어느 시점부터 전부 실패했나"를
         # 봐야 원인을 좁힐 수 있는데, 여기가 비어 있으면 그 흔적이 없다(#279 리뷰).
