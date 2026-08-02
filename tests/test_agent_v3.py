@@ -2137,6 +2137,7 @@ def test_temperature는_어디에도_보내지_않는다():
 
     되돌아오면 같은 자리에서 같은 값을 다시 치른다 — 그래서 잰다.
     """
+    import ast
     import inspect
 
     from app.agent.v3 import analysis
@@ -2146,9 +2147,18 @@ def test_temperature는_어디에도_보내지_않는다():
     from app.core import config as core_config
     from app.core import llm
 
+    # ⚠ 원문에 "temperature"라는 **글자**가 있는지 보면 안 된다 (Qodo #486) — 주석·독스트링에
+    # 이 결정을 설명하는 문장이 들어가는 순간 테스트가 깨져서, 문서를 남기는 것을 막는다.
+    # 재야 할 성질은 "**인자로 넘기는가**"다. AST로 호출의 키워드 인자만 본다.
     for mod in (analysis, jsonio, spec_mod, semantic, simulate):
-        assert "temperature" not in inspect.getsource(mod), \
-            f"{mod.__name__}이 temperature를 다시 보낸다"
+        tree = ast.parse(inspect.getsource(mod))
+        passed = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "temperature"
+        ]
+        assert not passed, f"{mod.__name__}이 temperature를 인자로 넘긴다"
     assert "temperature" not in inspect.signature(llm.chat).parameters, \
         "llm.chat이 temperature 인자를 다시 받는다 — 통로가 생기면 정책도 돌아온다"
     assert "MEASURE_TEMPERATURE" not in core_config.REGISTRY, \
