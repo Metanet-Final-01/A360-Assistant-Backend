@@ -319,12 +319,10 @@ def _cant_apply_message(unknown: list, catalog) -> str:
         return _CANT_APPLY
     pkgs = {p for p, _ in unknown if p}
     # ⚠ 순회를 지원하는 카탈로그에서만 '없는 패키지'라고 단정한다 (Qodo #485).
-    # `CatalogLookup` 계약이 보장하는 것은 `get_action_schema` 하나뿐이라, 사용자 카탈로그
-    # 등 순회를 못 하는 경로에서는 **실재하는 패키지를 '없다'고 안내**하게 된다. 모르면
-    # 단정하지 말고 이름 오류 문구로 떨어진다 — 틀린 단정이 침묵보다 나쁘다.
-    listable = getattr(catalog, "iter_action_schemas", None) is not None
-    known = {p for p in pkgs if any(True for _ in _actions_of(catalog, p))} if listable else pkgs
-    missing = sorted(pkgs - known)
+    # 순회 불가는 None으로 돌아오고, 그때는 판정을 보류해 이름 오류 문구로 떨어진다 —
+    # 틀린 단정이 침묵보다 나쁘다.
+    known = _existing_packages(catalog, pkgs)
+    missing = sorted(pkgs - known) if known is not None else []
     if missing:
         return (
             f"요청하신 {', '.join(missing)} 패키지는 카탈로그에 없어서 흐름도에 넣을 수 없어요. "
@@ -337,17 +335,32 @@ def _cant_apply_message(unknown: list, catalog) -> str:
     )
 
 
-def _actions_of(catalog, package: str):
-    """그 패키지의 액션 이름 — 존재 확인용(첫 하나만 있으면 된다)."""
+def _existing_packages(catalog, wanted: set[str]) -> set[str] | None:
+    """`wanted` 중 카탈로그에 **실재하는** 패키지만 — 순회는 **한 번**이다.
+
+    패키지마다 따로 확인하면 실패 경로가 O(패키지 수 × 카탈로그 크기)가 된다 (Qodo #485).
+    같은 지적을 `r1_package_hints`에서 이미 받고 고쳤는데(#473) 형제 함수인 여기가 남아
+    있었다 — 한 곳을 고칠 때 같은 모양을 함께 훑어야 한다는 뜻이다.
+
+    순회를 지원하지 않으면 **None**(판정 보류)이다. `CatalogLookup` 계약이 보장하는 것은
+    `get_action_schema` 하나뿐이라, 순회 불가를 '없음'으로 읽으면 실재하는 패키지를
+    "카탈로그에 없다"고 안내하게 된다.
+    """
     it = getattr(catalog, "iter_action_schemas", None)
     if it is None:
-        return
+        return None
+    found: set[str] = set()
     try:
         for spec in it():
-            if spec.get("package") == package and spec.get("action"):
-                yield spec["action"]
+            pkg = spec.get("package")
+            if pkg in wanted:
+                found.add(pkg)
+                if len(found) == len(wanted):
+                    break  # 다 찾았으면 더 볼 이유가 없다
     except Exception as e:  # noqa: BLE001 — 안내 문구 실패가 턴을 죽이지 않게
         logger.warning("패키지 존재 확인 실패: %s", e)
+        return None
+    return found
 
 
 async def _tool_loop(runnable, llm, tools, messages: list, usage_config: dict):

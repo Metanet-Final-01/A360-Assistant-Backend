@@ -3717,6 +3717,32 @@ def test_순회_못하는_카탈로그를_없는_패키지로_단정하지_않�
     assert "찾지 못해" in msg
 
 
+def test_사용자_안내의_패키지_존재_확인도_카탈로그를_한_번만_훑는다():
+    """Qodo #485(재지적): `r1_package_hints`는 고쳤는데 형제 함수가 남아 있었다.
+
+    `_cant_apply_message`가 패키지마다 따로 확인해 실패 경로가
+    O(패키지 수 × 카탈로그 크기)였다. 한 곳을 고칠 때 같은 모양을 함께 훑어야 한다.
+    """
+    from app.agent.v3.orchestrator import edit as edit_mod
+
+    class _CountingCatalog:
+        def __init__(self):
+            self.scans = 0
+
+        def get_action_schema(self, package, action):
+            return None
+
+        def iter_action_schemas(self):
+            self.scans += 1
+            yield {"package": "Excel advanced", "action": "Open"}
+
+    cat = _CountingCatalog()
+    msg = edit_mod._cant_apply_message(
+        [("없는것1", "a"), ("없는것2", "b"), ("없는것3", "c")], cat)
+    assert "카탈로그에 없어서" in msg
+    assert cat.scans == 1, f"패키지 수만큼 훑었다 ({cat.scans}회)"
+
+
 def test_없는_패키지_후보_생성이_카탈로그를_한_번만_훑는다():
     """Qodo #485: 없는 패키지마다 전량 스캔이 반복됐다.
 
