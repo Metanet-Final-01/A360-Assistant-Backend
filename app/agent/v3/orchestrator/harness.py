@@ -129,96 +129,141 @@ def attach_confidence(
         _walk(step.get("actions") or [], sid, status, "")
 
 
+# RRF 점수의 이론적 상한 — 두 branch에서 모두 1위여도 2/(k+1) = 2/61 ≈ 0.033.
+# 리랭커가 살아 있으면 score는 Voyage relevance(0~1)라 이 대역을 크게 넘는다.
+_RRF_SCORE_CEILING = 0.05
+
+
+def _action_confidences(flow: dict) -> list[float]:
+    """흐름도의 모든 액션 confidence를 중첩(children)까지 훑어 모은다."""
+    out: list[float] = []
+
+    def walk(actions: list[dict] | None) -> None:
+        for a in actions or []:
+            c = a.get("confidence")
+            if isinstance(c, (int, float)) and not isinstance(c, bool):
+                out.append(float(c))
+            walk(a.get("children"))
+
+    for step in flow.get("steps") or []:
+        walk(step.get("actions"))
+    return out
+
+
+def retrieval_scale(sink: list[dict] | None) -> str | None:
+    """sink의 `score`가 **유사도인지 순위 융합값인지** 판정한다. 판단 불가면 None.
+
+    이 검사가 필요한 이유: `hybrid_search.py`가 점수를 고를 때 리랭커를 우선하고 없으면
+    RRF로 떨어진다(`score = item.get("rerank_score") or item.get("rrf_score")`). 그런데 둘은
+    **척도가 완전히 다르다** — Voyage relevance는 0~1이고, RRF는 `Σ w/(k+rank)`라 k=60에서
+    최댓값이 0.033이다. 그리고 그 폴백은 설계상 조용하다(README: "절대 API가 죽지 않는다").
+
+    신뢰도의 본체를 검색 점수로 삼으면 이 폴백이 **VOYAGE_API_KEY 하나로 신뢰도를 20배
+    붕괴**시킨다 — 흐름도는 그대로인데 숫자만 바닥에 눕는다. 그래서 척도를 먼저 확인하고,
+    유사도가 아니면 숫자를 내지 않는다(측정 불가). 억지로 0.05를 내면 '나쁜 흐름도'와
+    '리랭커가 죽은 것'이 구별되지 않는다.
+    """
+    scores = [
+        s.get("score") for s in (sink or [])
+        if isinstance(s.get("score"), (int, float)) and not isinstance(s.get("score"), bool)
+    ]
+    if not scores:
+        return None
+    return "relevance" if max(scores) > _RRF_SCORE_CEILING else "rrf"
+
+
 def compute_flow_confidence(
+    flow: dict,
     *,
-    must_coverage: float | None,
-    findings: list[Finding],
-    sim_pass_rate: float | None,
+    sink: list[dict] | None = None,
+    findings: list[Finding] | tuple = (),
+    must_coverage: float | None = None,
+    sim_pass_rate: float | None = None,
     blocking_cards: int = 0,
-) -> float:
-    """흐름도 수준 신뢰도 — "이 봇이 업무를 하는가" (액션 수준과 다른 질문, 설계 §6).
+) -> float | None:
+    """흐름도 수준 신뢰도 — **액션별 검색 근거의 평균**. 근거가 없으면 None을 낸다.
 
-    must 커버리지 × 결함 감쇠 × 시뮬레이션 통과율. 신호가 없는 축은 중립(1.0)으로 둔다.
+    ## 왜 곱셈 산식을 버렸나
 
-    ## 질문 카드는 감점하지 않는다 (2026-07-30)
+    이전 산식은 `must_coverage × 0.8^blockers × 0.95^majors × max(0.3, sim)`이었다. 계수에
+    출처가 없다는 것보다 심각한 문제가 실측으로 드러났다 — **판별을 못 했다.**
 
-    액션 수준에서는 처음부터 그랬다 — "R3는 감점하지 않는다. 질문 카드가 붙은 R3는 결함이
-    아니라 **입력 대기**다"(attach_confidence 주석). 그런데 흐름도 수준에서는 같은 R3가
-    카드로 승격된 뒤 `max(0.7, 1−0.05·n)`으로 **다시** 감점했다. 한 사실을 두 층에서 다르게
-    취급한 셈이다.
+    실측(v3 런 13케이스 × 3반복 = 39런, `action_core.f1`을 품질 라벨로):
 
-    실측(2026-07-30): 커버리지 1.0 · blocker 0 · major 0인 흐름도가 0.47을 받았고, 그 감점의
-    절반이 blocking 카드 11건이었다. 카드 11건은 **업무정의서에 값이 없다**는 뜻이다 —
-    파일 경로도 수신자도 문서에 안 적혀 있으면 흐름도가 완벽해도 0.7이 곱해졌다. 흐름도
-    품질을 재는 숫자가 입력의 미확정 정보량에 좌우된 것이다.
+    | 지표 | 케이스 내 rho | 케이스 간 rho |
+    |---|---|---|
+    | 이전 곱셈 산식 | **+0.011** | +0.593 |
+    | 액션 confidence 평균 | **+0.303** | +0.264 |
+    | 액션 confidence 최솟값 | −0.038 | +0.567 |
 
-    게다가 그 항은 **6건 이상에서 하한 0.7에 박혀** 11건과 20건이 구분되지 않았다. 정보를
-    잃으면서 감점만 하는 항이었다.
+    **케이스 내**가 제품이 화면에 쓰는 주장이다 — "방금 만든 이 흐름도가 몇 점". 같은
+    업무정의서로 만든 세 판 중 어느 것이 잘 나왔는지를 이전 산식은 13케이스 중 4개만
+    맞혔다(찍으면 절반). 케이스 간 +0.59는 "어려운 문서엔 낮은 점수"인데, 그건 문서를 보면
+    알고 `must_coverage`가 입력이라 부분적으로 동어반복이다.
 
-    `blocking_cards`는 인자로 남긴다 — 호출부가 이미 세고 있고, 관측 이벤트가 그 값을
-    싣는다. 여기서 곱하지만 않는다.
+    검색 근거 평균은 케이스 내에서 이전 산식의 27배다. 다만 n=13케이스라 통계적으로
+    0과 확실히 구별되지는 않는다 — **더 낫다는 방향은 실측이고, 크기는 아직 미확정**이다.
 
-    ## 결함 감쇠에 major를 넣는 이유
+    ## 무엇을 재는가
 
-    오래도록 blocker만 셌다. 그 사이 "실행되지 않는데 실행되는 척"하는 결함들이 major로
-    올라왔는데(빈 Step 스캐폴드, 조건 없는 Throw, 경쟁 패키지 혼용, 갈라진 Try 블록),
-    그것들이 **신뢰도에 0의 영향**이었다. 실측(2026-07-29): 세션을 열지 않고 닫고, 변수를
-    정의 전에 쓰고, Try가 둘로 갈린 흐름도가 major 4건을 달고도 blocker가 없다는 이유로
-    감쇠 1.00을 받았다 — 그 넷을 전부 고쳐도 숫자가 그대로였다.
+    액션별 confidence는 이미 검색 근거가 본체다(`attach_confidence`: `base = RAG best score`,
+    R1 환각이면 0.2). 그것을 흐름도 단위로 평균 낸 값이다 — "이 흐름도의 액션들이 카탈로그에
+    얼마나 단단히 붙어 있나".
 
-    수리 루프가 실제로 고치는 것이 대부분 major라, 이 항이 없으면 **수리 → 재검증 →
-    신뢰도 상승**이라는 되먹임 자체가 성립하지 않는다.
+    **한계(명시)**: 이건 자기 일관성 측정이다. 검색 질의가 모델 자신의 계획에서 나오므로,
+    카탈로그에 그럴듯한 액션이 있는 **확신에 찬 오답은 높게 나온다**. 카탈로그에 아예 없는
+    환각은 R1이 잡지만(0.2), '있지만 이 업무엔 틀린 액션'은 이 지표로 못 잡는다.
 
-    계수는 blocker(0.8)보다 확연히 완만하게 둔다 — major는 '실행 불가 확정'이 아니라
-    '실행이 의심스럽다'이고, 유도 기반 규칙(R19 경쟁 패키지 등)은 오탐 여지도 있다.
+    blocker·major·커버리지·시뮬레이션은 **곱하지 않고 세기만 한다** — 곱해도 판별이 안 되는
+    것이 위 실측이고, 개수 자체는 "무엇을 고치나"에 답하므로 관측에는 그대로 남긴다.
     """
     return confidence_breakdown(
-        must_coverage=must_coverage,
+        flow,
+        sink=sink,
         findings=findings,
+        must_coverage=must_coverage,
         sim_pass_rate=sim_pass_rate,
         blocking_cards=blocking_cards,
     )["confidence"]
 
 
 def confidence_breakdown(
+    flow: dict,
     *,
-    must_coverage: float | None,
-    findings: list[Finding],
-    sim_pass_rate: float | None,
+    sink: list[dict] | None = None,
+    findings: list[Finding] | tuple = (),
+    must_coverage: float | None = None,
+    sim_pass_rate: float | None = None,
     blocking_cards: int = 0,
 ) -> dict:
-    """`compute_flow_confidence`의 산식을 **항별로** 펼친 것. 산식은 여기 한 벌만 있다.
+    """`compute_flow_confidence`의 근거를 펼친 것. 산식은 여기 한 벌만 있다.
 
-    왜 함수로 두는가: 관측 이벤트가 항별 값을 실어야 한다("0.15를 올리려면 무엇을 고치나"에
+    왜 함수로 두는가: 관측 이벤트가 근거를 실어야 한다("0.15를 올리려면 무엇을 고치나"에
     답하려면 결과값만으로는 안 된다). 그런데 호출부가 계수를 **베껴 쓰면** 산식을 고칠 때
-    한쪽만 고쳐져 관측이 조용히 거짓말을 한다 — 실제로 카드 항을 산식에서 뺐을 때 이벤트
-    쪽 `factors.cards`가 남아 있었다(Qodo). 그래서 결과값과 분해를 같은 함수가 낸다.
+    한쪽만 고쳐져 관측이 조용히 거짓말을 한다(Qodo). 그래서 결과값과 분해를 같은 함수가 낸다.
 
-    `at_floor`/`at_ceiling`은 마지막 clamp가 걸렸는지다. 이게 없으면 사후에 항들을 곱해도
-    저장된 값이 안 나와 "산수가 안 맞는다"로 읽힌다 — 0.05 바닥에 눌린 흐름도가 그렇다.
+    `confidence`가 None이면 `unmeasurable`에 사유가 있다 — 숫자를 못 낸 것과 낮게 나온 것은
+    다른 사실이라 섞지 않는다.
     """
-    cov = must_coverage if must_coverage is not None else 1.0
-    blockers = sum(1 for f in findings if f.severity == "blocker")
-    majors = sum(1 for f in findings if f.severity == "major")
-    defects = 0.8 ** blockers * 0.95 ** majors
-    sim = max(0.3, sim_pass_rate) if sim_pass_rate is not None else 1.0  # 일부 실패가 0으로 폭락하지 않게
-    raw = cov * defects * sim
-    return {
-        "confidence": round(min(1.0, max(0.05, raw)), 2),
-        "factors": {
-            "coverage": round(cov, 3),
-            "defects": round(defects, 3),
-            "simulation": round(sim, 3),
-        },
-        "blockers": blockers,
-        "majors": majors,
-        "blocking_cards": blocking_cards,  # 감점하지 않는다 — 개수만 관측에 남긴다
-        "raw_product": round(raw, 4),
-        "at_floor": raw < 0.05,
-        "at_ceiling": raw > 1.0,
-        # 시뮬레이션 항이 하한에 붙었는지 — 붙었으면 실제 통과율은 이 값보다 낮다
-        "sim_at_floor": sim_pass_rate is not None and sim_pass_rate < 0.3,
+    confs = _action_confidences(flow)
+    scale = retrieval_scale(sink)
+    obs = {
+        # 아래는 전부 **관측용** — 신뢰도에 곱하지 않는다
+        "basis": "retrieval",
+        "n_actions": len(confs),
+        "retrieval_scale": scale,
+        "blockers": sum(1 for f in findings if f.severity == "blocker"),
+        "majors": sum(1 for f in findings if f.severity == "major"),
+        "blocking_cards": blocking_cards,
+        "must_coverage": round(must_coverage, 3) if must_coverage is not None else None,
+        "sim_pass_rate": round(sim_pass_rate, 3) if sim_pass_rate is not None else None,
     }
+    if scale == "rrf":
+        # 리랭커 폴백 — score가 순위 융합값이라 유사도로 읽으면 안 된다
+        return {**obs, "confidence": None, "unmeasurable": "리랭커 폴백(검색 점수가 유사도가 아님)"}
+    if not confs:
+        return {**obs, "confidence": None, "unmeasurable": "액션 신뢰도 없음"}
+    return {**obs, "confidence": round(sum(confs) / len(confs), 2), "unmeasurable": None}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

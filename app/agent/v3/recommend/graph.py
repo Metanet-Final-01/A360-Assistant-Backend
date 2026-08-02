@@ -1591,8 +1591,10 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     # 결과값과 항별 분해를 **한 함수에서** 받는다 — 관측용으로 산식을 베껴 쓰면 산식을
     # 고칠 때 한쪽만 고쳐져 이벤트가 조용히 거짓말을 한다(Qodo).
     breakdown = confidence_breakdown(
-        must_coverage=must_cov,
+        flow,
+        sink=sink,
         findings=findings_final,
+        must_coverage=must_cov,
         sim_pass_rate=sim_rate,
         blocking_cards=blocking_cards,
     )
@@ -1616,17 +1618,17 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     #
     # 실측(2026-07-30): 검수 위반 0건짜리 흐름도가 0.15를 받았는데 **어느 항이 눌렀는지
     # 알 수 없었다.** 결과만 보이니 신뢰도를 개선 지표로 쓸 수가 없다 — "0.15를 올리려면
-    # 무엇을 고치나"에 답이 안 나온다. 그래서 각 항이 곱한 값까지 남긴다(`factors` — 작은
-    # 값이 병목이다). 카드는 감점하지 않으므로 항이 없고 개수만 싣는다(입력 대기 ≠ 결함).
+    # 무엇을 고치나"에 답이 안 나온다. 신뢰도가 검색 근거 기반으로 바뀐 뒤에도 이 요구는
+    # 그대로다: blocker·major·커버리지·시뮬은 이제 **곱하지 않지만** 개수는 계속 싣는다 —
+    # 고칠 대상을 가리키는 것은 여전히 그 항들이다.
     emit({
         "event": "stage", "stage": "verifying",
-        "message": f"신뢰도 {flow['flow_confidence']}",
+        "message": f"신뢰도 {flow['flow_confidence'] if flow['flow_confidence'] is not None else '측정 불가'}",
         "data": {
             "candidate": report.candidate_id,
             # 원시 입력
-            "must_coverage": must_cov, "sim_pass_rate": sim_rate,
             "warnings": n_warnings, "cards": len(cards),
-            # 결과값 · 항별 분해 · clamp 여부 — 산식 소유자가 낸 것을 그대로 싣는다
+            # 결과값 · 근거 분해 — 산식 소유자가 낸 것을 그대로 싣는다
             "flow_confidence": breakdown["confidence"],
             **{k: v for k, v in breakdown.items() if k != "confidence"},
         },

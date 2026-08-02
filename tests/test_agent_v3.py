@@ -16,6 +16,7 @@ from app.schemas import Recommendation
 from app.agent.v3.orchestrator.harness import (
     attach_confidence,
     compute_flow_confidence,
+    confidence_breakdown,
     from_violations_dicts,
     repair_spec_excerpts,
 )
@@ -503,65 +504,78 @@ def test_confidence_r1_still_floors():
     assert flow["steps"][0]["actions"][0]["confidence"] == 0.2
 
 
-def test_flow_confidence_composition():
-    findings, _ = from_violations_dicts([{"rule": "R1", "location": "actions[0]", "step_id": "s1",
-                                          "message": "", "severity": "error"}])
-    full = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
-    dinged = compute_flow_confidence(must_coverage=1.0, findings=findings, sim_pass_rate=1.0)
-    assert full == 1.0
-    assert dinged == pytest.approx(0.8)  # blocker 1건 → ×0.8
+def test_흐름도_신뢰도는_액션_검색_근거의_평균이다():
+    """흐름도 수준 신뢰도의 본체 — 중첩(children)까지 훑어 평균 낸다.
 
-
-def test_입력_대기는_감점하지_않는다():
-    """액션 수준은 처음부터 그랬다 — "카드가 붙은 R3는 결함이 아니라 입력 대기"(설계 관찰 3).
-    그런데 흐름도 수준에서는 같은 R3가 카드로 승격된 뒤 **다시** 감점했다.
-
-    실측(2026-07-30): 커버리지 1.0 · blocker 0 · major 0인 흐름도가 0.47을 받았고 감점의
-    절반이 blocking 카드 11건이었다. 카드 11건은 업무정의서에 값이 없다는 뜻이라, 흐름도
-    품질을 재는 숫자가 입력의 미확정 정보량에 좌우됐다. 게다가 6건 이상은 하한 0.7에
-    박혀 11건과 20건이 구분되지도 않았다.
+    이전 곱셈 산식(`must_coverage × 0.8^blockers × 0.95^majors × max(0.3, sim)`)을 버린
+    근거는 실측이다. v3 런 39개(13케이스 × 3반복)에서 `action_core.f1`과의 **케이스 내**
+    순위상관이 곱셈 산식 +0.011, 액션 신뢰도 평균 +0.303이었다. 케이스 내가 제품이 화면에
+    쓰는 주장("방금 만든 이 흐름도가 몇 점")이고, 거기서 이전 산식은 13케이스 중 4개만
+    맞혔다 — 찍는 것보다 나쁘다.
     """
-    clean = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
-    for n in (0, 1, 2, 6, 11, 40):
-        got = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0,
-                                      blocking_cards=n)
-        assert got == clean, f"카드 {n}장이 감점했다: {got} != {clean}"
-    # 카드가 있어도 결함·커버리지·시뮬레이션은 그대로 반영된다
-    assert compute_flow_confidence(must_coverage=0.5, findings=[], sim_pass_rate=1.0,
-                                   blocking_cards=11) == pytest.approx(0.5)
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Email", "sendMail"),
+        _act("Error handler", "errorHandlerTry", children=[_act("String", "assign")]),
+    ]}]}
+    flow["steps"][0]["actions"][0]["confidence"] = 0.9
+    flow["steps"][0]["actions"][1]["confidence"] = 0.6
+    flow["steps"][0]["actions"][1]["children"][0]["confidence"] = 0.3
+
+    got = compute_flow_confidence(flow, sink=_sink())
+    assert got == pytest.approx(0.6)  # (0.9 + 0.6 + 0.3) / 3 — children 포함
 
 
-def test_major도_신뢰도를_깎는다():
-    """수리 루프가 실제로 고치는 것은 대부분 major다 — 식에 없으면 수리가 숫자에 안 보인다.
+def test_리랭커가_죽으면_신뢰도를_내지_않는다():
+    """검색 점수의 척도가 조용히 바뀐다 — 그때 숫자를 내면 인프라 사고가 품질로 읽힌다.
 
-    실측(2026-07-29): 세션을 열지 않고 닫고, 변수를 정의 전에 쓰고, Try가 둘로 갈린 흐름도가
-    major 4건을 달고도 blocker가 없다는 이유로 감쇠 1.00을 받았다 — 넷을 다 고쳐도 0.20 그대로.
-    계수는 blocker(0.8)보다 확연히 완만해야 한다(major는 '실행 불가 확정'이 아니다).
+    `hybrid_search`는 `rerank_score`(Voyage relevance, 0~1)를 쓰고 없으면 `rrf_score`로
+    떨어진다. RRF는 `Σ w/(k+rank)`라 k=60에서 최댓값이 2/61 ≈ 0.033이다. 신뢰도의 본체를
+    검색 점수로 삼은 이상, 이 폴백은 **VOYAGE_API_KEY 하나로 신뢰도를 20배 붕괴**시킨다.
+
+    낮은 신뢰도와 '못 쟀다'는 다른 사실이라 섞지 않는다 — None을 낸다.
     """
-    majors, _ = from_violations_dicts([
-        {"rule": "R7", "location": "actions[0]", "step_id": "s1", "message": ""},
-        {"rule": "R13", "location": "actions[1]", "step_id": "s1", "message": ""},
-    ])
-    assert [f.severity for f in majors] == ["major", "major"]
+    flow = {"steps": [{"step_id": "s1", "actions": [_act("Email", "sendMail")]}]}
+    flow["steps"][0]["actions"][0]["confidence"] = 0.8
 
-    clean = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=1.0)
-    dinged = compute_flow_confidence(must_coverage=1.0, findings=majors, sim_pass_rate=1.0)
-    assert dinged < clean, "major가 신뢰도에 반영되지 않는다"
-    assert dinged == pytest.approx(0.9)          # 0.95^2
+    rrf_sink = [{"package_name": "Email", "action_name": "sendMail", "score": 2 / 61}]
+    b = confidence_breakdown(flow, sink=rrf_sink)
+    assert b["confidence"] is None and b["retrieval_scale"] == "rrf"
+    assert "리랭커" in b["unmeasurable"]
 
-    blocker, _ = from_violations_dicts([
+    # 리랭커가 살아 있으면 정상적으로 낸다
+    ok = confidence_breakdown(flow, sink=_sink())
+    assert ok["confidence"] == 0.8 and ok["retrieval_scale"] == "relevance"
+
+    # 잴 액션이 없어도 0이 아니라 None (빈 흐름도를 '나쁜 흐름도'로 읽으면 안 된다)
+    empty = confidence_breakdown({"steps": []}, sink=_sink())
+    assert empty["confidence"] is None and empty["unmeasurable"] == "액션 신뢰도 없음"
+
+
+def test_결함과_커버리지는_곱하지_않고_세기만_한다():
+    """blocker·major·카드·커버리지·시뮬은 신뢰도를 움직이지 않는다 — 관측에만 남는다.
+
+    곱해도 판별이 안 된다는 것이 위 실측이다. 다만 개수 자체는 "무엇을 고치나"에 답하므로
+    이벤트에는 그대로 싣는다(입력 대기 ≠ 결함이라 카드는 예나 지금이나 감점 축이 아니다).
+    """
+    flow = {"steps": [{"step_id": "s1", "actions": [_act("Email", "sendMail")]}]}
+    flow["steps"][0]["actions"][0]["confidence"] = 0.8
+
+    clean = compute_flow_confidence(flow, sink=_sink())
+    findings, _ = from_violations_dicts([
         {"rule": "R1", "location": "actions[0]", "step_id": "s1", "message": ""},
+        {"rule": "R7", "location": "actions[1]", "step_id": "s1", "message": ""},
     ])
-    one_blocker = compute_flow_confidence(must_coverage=1.0, findings=blocker, sim_pass_rate=1.0)
-    one_major = compute_flow_confidence(must_coverage=1.0, findings=majors[:1], sim_pass_rate=1.0)
-    assert one_blocker < one_major, "major 감쇠가 blocker만큼 세면 안 된다"
+    for cov, sim, ncards in ((1.0, 1.0, 0), (0.1, 0.0, 40), (None, None, 3)):
+        got = compute_flow_confidence(flow, sink=_sink(), findings=findings,
+                                      must_coverage=cov, sim_pass_rate=sim,
+                                      blocking_cards=ncards)
+        assert got == clean, f"관측 축이 신뢰도를 움직였다: {got} != {clean}"
 
-    # warning은 여전히 감점 축이 아니다 (감점·앵커용)
-    warns, _ = from_violations_dicts([
-        {"rule": "R12", "location": "actions[0]", "step_id": "s1", "message": ""},
-    ])
-    assert compute_flow_confidence(
-        must_coverage=1.0, findings=warns, sim_pass_rate=1.0) == pytest.approx(clean)
+    # 세기는 한다 — 고칠 대상을 가리키는 것은 여전히 이 항들이다
+    b = confidence_breakdown(flow, sink=_sink(), findings=findings,
+                             must_coverage=0.6, sim_pass_rate=0.1, blocking_cards=3)
+    assert (b["blockers"], b["majors"], b["blocking_cards"]) == (1, 1, 3)
+    assert (b["must_coverage"], b["sim_pass_rate"]) == (0.6, 0.1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -601,12 +615,16 @@ def test_r13_action_between_try_and_catch():
     assert any(v.severity == "blocker" and "붙어 있지 않습니다" in v.message for v in r13)
 
 
-def test_짝_없는_try는_blocker로_신뢰도를_떨어뜨린다():
+def test_짝_없는_try는_blocker로_잡힌다():
     """A360이 저장·실행을 거부하는 구조는 R1(환각)과 같은 급이어야 출고를 막는다.
 
     실측(2026-07-28): Try 3개 대 Catch 1개인 흐름도가 major로만 잡혀 신뢰도 0.13으로 나갔다.
+
+    ⚠ 신뢰도가 검색 근거 기반으로 바뀐 뒤로 **blocker는 flow_confidence를 움직이지 않는다**
+    (`test_결함과_커버리지는_곱하지_않고_세기만_한다`). 실행 불가 구조를 막는 것은 이제
+    신뢰도가 아니라 blocker 개수 자체이며, 그 개수는 스코어카드로 따로 나간다. 그래서 이
+    테스트는 등급 판정만 잰다 — 신뢰도와의 연결을 여기서 다시 걸면 안 된다.
     """
-    from app.agent.v3.orchestrator.harness import compute_flow_confidence
     from app.agent.v3.verify.findings import from_violations
 
     steps = [{"step_id": "s1", "actions": [
@@ -616,11 +634,6 @@ def test_짝_없는_try는_blocker로_신뢰도를_떨어뜨린다():
     findings, _ = from_violations(checker.run_structure_checks(steps))
     blockers = [f for f in findings if f.severity == "blocker"]
     assert len(blockers) == 2  # 짝 없는 Try 두 개
-
-    # must를 다 덮어도 실행 불가 구조면 신뢰도가 내려간다
-    full = compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=None)
-    broken = compute_flow_confidence(must_coverage=1.0, findings=findings, sim_pass_rate=None)
-    assert broken < full
 
 
 def test_severity_덮어쓰기는_양방향이다():
@@ -2228,27 +2241,30 @@ def test_신뢰도는_분해해서_관측에_남는다():
     from app.agent.v3.orchestrator.harness import confidence_breakdown
     from app.agent.v3.verify.findings import Finding
 
+    flow = {"steps": [{"step_id": "s1", "actions": [_act("Email", "sendMail")]}]}
+    flow["steps"][0]["actions"][0]["confidence"] = 0.8
     f = [Finding(layer="L0", severity="blocker", rule="R1", message="x"),
          Finding(layer="L0", severity="major", rule="R7", message="y")]
-    b = confidence_breakdown(must_coverage=0.6, findings=f, sim_pass_rate=0.1,
-                             blocking_cards=3)
+    b = confidence_breakdown(flow, sink=_sink(), findings=f, must_coverage=0.6,
+                             sim_pass_rate=0.1, blocking_cards=3)
 
-    for key in ("confidence", "factors", "blockers", "majors", "blocking_cards",
-                "raw_product", "at_floor", "at_ceiling", "sim_at_floor"):
+    for key in ("confidence", "basis", "n_actions", "retrieval_scale", "unmeasurable",
+                "blockers", "majors", "blocking_cards", "must_coverage", "sim_pass_rate"):
         assert key in b, f"{key}가 관측에 안 남는다"
 
-    # 산식의 세 항이 모두 있어야 병목을 가릴 수 있다. 카드는 감점 항이 아니라 개수만 남는다.
-    assert set(b["factors"]) == {"coverage", "defects", "simulation"}
+    # 신뢰도는 검색 근거에서만 나온다. 나머지는 곱해지지 않지만 개수는 전부 남아야
+    # "무엇을 고치나"에 답할 수 있다 — 곱하지 않는 것과 안 남기는 것은 다르다.
+    assert (b["basis"], b["n_actions"], b["retrieval_scale"]) == ("retrieval", 1, "relevance")
     assert (b["blockers"], b["majors"], b["blocking_cards"]) == (1, 1, 3)
-    # 하한에 붙었는지 — 붙었으면 실제 통과율은 이 값보다 낮다(0.1인데 0.3이 곱해졌다)
-    assert b["factors"]["simulation"] == 0.3 and b["sim_at_floor"] is True
+    assert (b["must_coverage"], b["sim_pass_rate"]) == (0.6, 0.1)
 
 
-def test_신뢰도_분해가_산식과_같은_계수를_쓴다():
-    """관측이 산식과 다른 계수를 쓰면 사후 분석이 조용히 틀린다.
+def test_신뢰도_분해가_결과값과_갈리지_않는다():
+    """관측이 산식과 다른 값을 쓰면 사후 분석이 조용히 틀린다.
 
     실제로 그 일이 있었다 — 카드 항을 산식에서 뺐는데 이벤트 쪽 `factors.cards`가 남아
     있었다(Qodo). 그래서 결과값과 분해를 **한 함수**가 내게 했고, 여기서 그 일치를 잰다.
+    측정 불가(None)까지 함께 재야 한다 — 거기서 갈리면 '못 쟀다'가 0으로 저장된다.
     """
     from app.agent.v3.orchestrator.harness import (
         compute_flow_confidence,
@@ -2256,39 +2272,32 @@ def test_신뢰도_분해가_산식과_같은_계수를_쓴다():
     )
     from app.agent.v3.verify.findings import Finding
 
-    f = [Finding(layer="L0", severity="blocker", rule="R1", message="x"),
-         Finding(layer="L0", severity="major", rule="R7", message="y")]
-    got = compute_flow_confidence(must_coverage=0.6, findings=f,
-                                  sim_pass_rate=0.1, blocking_cards=3)
-    # 0.6 × (0.8^1 × 0.95^1) × max(0.3, 0.1). 카드 항은 없다.
-    expect = round(min(1.0, max(0.05, 0.6 * (0.8 * 0.95) * 0.3)), 2)
-    assert got == expect, f"{got} != {expect}"
+    def _flow(*confs):
+        acts = []
+        for c in confs:
+            a = _act("Email", "sendMail")
+            a["confidence"] = c
+            acts.append(a)
+        return {"steps": [{"step_id": "s1", "actions": acts}]}
 
-    # 결과값은 분해와 같은 함수에서 나온다 — 극단(바닥·천장·신호 없음)까지 함께 잰다
+    f = [Finding(layer="L0", severity="blocker", rule="R1", message="x")]
+    rrf_sink = [{"package_name": "Email", "action_name": "sendMail", "score": 2 / 61}]
     grid = [
-        (0.6, f, 0.1, 3),
-        (1.0, [], 1.0, 0),
-        (None, [], None, 0),                                  # 신호 없는 축은 중립
-        (0.1, [Finding(layer="L0", severity="blocker", rule="R1", message="x")] * 8, 0.0, 0),
+        (_flow(0.8, 0.4), _sink(), f, 0.6, 0.1, 3),
+        (_flow(1.0), _sink(), [], 1.0, 1.0, 0),
+        (_flow(0.05), _sink(), [], None, None, 0),
+        (_flow(0.8), rrf_sink, [], 1.0, 1.0, 0),    # 리랭커 폴백 — 측정 불가
+        ({"steps": []}, _sink(), [], 1.0, 1.0, 0),  # 잴 액션 없음 — 측정 불가
+        (_flow(0.8), None, [], 1.0, 1.0, 0),        # sink 없음(수정 경로) — 척도 판정 불가
     ]
-    for cov, findings, sim, ncards in grid:
-        b = confidence_breakdown(must_coverage=cov, findings=findings,
+    for flow, sink, findings, cov, sim, ncards in grid:
+        b = confidence_breakdown(flow, sink=sink, findings=findings, must_coverage=cov,
                                  sim_pass_rate=sim, blocking_cards=ncards)
         assert b["confidence"] == compute_flow_confidence(
-            must_coverage=cov, findings=findings, sim_pass_rate=sim,
-            blocking_cards=ncards), "관측과 결과값이 갈렸다"
-        product = b["factors"]["coverage"] * b["factors"]["defects"] * b["factors"]["simulation"]
-        assert abs(product - b["raw_product"]) < 0.01, "항들의 곱이 raw_product와 다르다"
-        # clamp가 걸렸는지 알려야 사후에 "산수가 안 맞는다"로 읽히지 않는다
-        if b["at_floor"]:
-            assert b["confidence"] == 0.05, "바닥이라 했는데 값이 다르다"
-        if b["at_ceiling"]:
-            assert b["confidence"] == 1.0, "천장이라 했는데 값이 다르다"
-        assert not (b["at_floor"] and b["at_ceiling"])
-
-    # 시뮬레이션 하한이 실제로 걸린다 — sim_at_floor가 그걸 알려주는 이유
-    assert compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=0.1) == \
-           compute_flow_confidence(must_coverage=1.0, findings=[], sim_pass_rate=0.3)
+            flow, sink=sink, findings=findings, must_coverage=cov,
+            sim_pass_rate=sim, blocking_cards=ncards), "관측과 결과값이 갈렸다"
+        # 숫자를 못 낸 것과 낮게 나온 것은 다른 사실이다 — 둘을 섞으면 안 된다
+        assert (b["confidence"] is None) == (b["unmeasurable"] is not None)
 
 
 def test_구조를_새로_만드는_자리는_모두_어휘_검증을_지난다():

@@ -271,42 +271,30 @@ def _label_hint_block(message: str, is_a360: bool) -> str:
     )
 
 
-# 구조를 바꾸는 연산 — 이런 수정 뒤에만 L2 시맨틱 재채점을 태운다("라벨 바꿔줘"에
-# 시맨틱 채점 수십 초는 UX 배신 — 검증 심도를 수정 규모에 연동, v3 설계 §5).
-_STRUCTURAL_OPS = frozenset({"wrap", "insert", "remove", "move", "split_step", "merge_step"})
+def _rescore_confidence(flow: dict, sink: list[dict]) -> None:
+    """수정 후 flow_confidence를 다시 센다 — 액션이 바뀌면 그 액션의 검색 근거도 바뀐다.
 
+    ## L2 재채점(run_semantic_check)을 걷어낸 이유
 
-async def _rescore_if_structural(flow: dict, ops: EditOps) -> None:
-    """구조 연산이 있었고 spec이 동봉돼 있으면 L2 재채점으로 flow_confidence를 갱신한다.
+    이전에는 구조 연산(wrap·insert·remove·move·split·merge)일 때만 L2를 다시 돌려
+    `must_coverage`를 구했다. 그런데 그 LLM 1콜의 **유일한 소비처가 이전 곱셈 산식의
+    커버리지 항**이었다. 신뢰도가 검색 근거 기반으로 바뀌면서 그 값은 곱해지지 않으므로,
+    남겨 두면 결과를 버리는 LLM 호출이 된다.
+
+    대신 갱신 조건이 넓어졌다 — `update`로 액션 하나만 갈아끼워도 검색 근거가 달라지므로
+    구조 연산 여부를 묻지 않고 항상 다시 센다. 호출부에서 `attach_confidence` 직후에 부른다.
+
+    조건을 넓히면서도 느려지지 않는다. 구조 연산에만 태우던 이유가 "'라벨 바꿔줘'에 시맨틱
+    채점 수십 초는 UX 배신"(설계 §5)이었는데, 이제 LLM 호출이 아예 없어 항상 돌려도 공짜다.
 
     실패는 조용히 무시(신호 결측일 뿐) — 수정 자체의 성패와 무관하다. 제자리 갱신.
     """
-    import asyncio
-
-    spec = flow.get("spec")
-    if not spec or not any(op.op in _STRUCTURAL_OPS for op in ops.operations):
-        return
     try:
-        from ..verify.semantic import run_semantic_check
-        from .harness import compute_flow_confidence, from_violations_dicts
+        from .harness import compute_flow_confidence
 
-        emit({"event": "stage", "stage": "verifying", "message": "구조 변경 — 요구 커버리지 재채점"})
-        coverage = await asyncio.to_thread(run_semantic_check, spec, flow)
-        findings, _ = from_violations_dicts([])
-        from ..verify import findings as F
-
-        cov_findings = F.from_coverage(coverage)
-        blocking_cards = sum(
-            1 for c in flow.get("needs_input") or [] if c.get("blocking") and not c.get("resolved")
-        )
-        flow["flow_confidence"] = compute_flow_confidence(
-            must_coverage=coverage.must_coverage,
-            findings=findings + cov_findings,
-            sim_pass_rate=None,
-            blocking_cards=blocking_cards,
-        )
+        flow["flow_confidence"] = compute_flow_confidence(flow, sink=sink)
     except Exception as e:  # noqa: BLE001
-        logger.warning("edit 후 L2 재채점 실패 (무시): %s", e)
+        logger.warning("edit 후 신뢰도 재계산 실패 (무시): %s", e)
 
 
 def _cant_apply_message(unknown: list, catalog) -> str:
@@ -537,8 +525,8 @@ async def edit_node(state: TurnState) -> dict:
     _restore_user_values(result["flow"], flow)
     # 액션별 신뢰도(FR-12/RPA-116)를 RAG 소스 점수·위반으로 산정해 채운다 — 수정 경로도 동일.
     attach_confidence(result["flow"], sink, result["violations"])
-    # 구조 연산이었으면 L2 재채점으로 flow_confidence 갱신 (검증 심도 ∝ 수정 규모, v3).
-    await _rescore_if_structural(result["flow"], ops)
+    # 액션 신뢰도가 바뀌었으니 흐름도 신뢰도도 다시 센다 (검색 근거 평균).
+    _rescore_confidence(result["flow"], sink)
     # 라이브 렌더: 검수·교정 반영한 최종본을 "완료" 프레임으로 흘려보낸다(done 직전).
     emit_flow_frame(result["flow"], result["violations"], "완료")
     answer = ops.answer or (ops.change_summary or "요청하신 대로 흐름도를 수정했어요.")

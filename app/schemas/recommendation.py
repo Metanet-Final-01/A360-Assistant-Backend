@@ -238,7 +238,13 @@ class Recommendation(BaseModel):
         default_factory=list, description="사용자 입력 대기 질문 카드 (v3)"
     )
     flow_confidence: float | None = Field(
-        None, ge=0.0, le=1.0, description="흐름도 수준 신뢰도 — must 커버리지×blocker×시뮬레이션 (v3)"
+        None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "흐름도 수준 신뢰도 — 액션별 검색 근거(RAG)의 평균 (v3). "
+            "근거를 못 구하면 None(측정 불가) — 낮은 값과 구별해야 한다"
+        ),
     )
     spec: FlowSpec | None = Field(None, description="이 흐름도의 채점 기준이 된 FlowSpec (v3)")
 
