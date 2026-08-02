@@ -3551,3 +3551,100 @@ def test_수리_메뉴의_어휘_덧붙임에는_상한이_있다():
 
     added = len(capped.splitlines()) - len(base.splitlines())
     assert added <= _REPAIR_VOCAB_CAP, "어휘 덧붙임이 상한을 넘었다"
+
+
+def test_도구를_바인딩하는_노드는_reasoning_effort를_명시한다():
+    """실측(2026-08-02): qa 노드가 400으로 즉사했다.
+
+        Function tools with reasoning_effort are not supported for gpt-5.6-luna
+        in /v1/chat/completions. ... or set reasoning_effort to 'none'.
+
+    chat.completions는 **도구와 추론을 함께 못 쓴다** — gpt-5.4-mini·5.4·5.5·5.6-luna
+    전부 같이 주면 400이다. 그리고 luna는 **인자를 빼는 것만으로는 안 통과한다**(공급자
+    기본이 none이 아니다). 그래서 도구를 바인딩하는 노드는 "none"을 **명시**해야 한다.
+
+    이건 모델을 바꿀 때마다 되돌아오는 종류의 결함이라, 새 도구 노드가 생기면 자동으로
+    걸리게 잰다. (추론이 필요하면 값을 올리지 말고 그 노드를 Responses API로 옮긴다.)
+    """
+    import importlib
+    import inspect
+
+    from app.core import config as core_config
+
+    # 도구를 바인딩하는 모듈 = bind_tools를 호출하는 모듈
+    modules = [
+        "app.agent.v1.orchestrator.qa", "app.agent.v1.orchestrator.edit",
+        "app.agent.v2.orchestrator.qa", "app.agent.v2.orchestrator.edit",
+        "app.agent.v2.recommend.graph",
+        "app.agent.v3.orchestrator.qa", "app.agent.v3.orchestrator.edit",
+    ]
+    for name in modules:
+        src = inspect.getsource(importlib.import_module(name))
+        assert ".bind_tools(" in src, f"{name}이 더는 도구를 안 쓴다 — 이 목록을 갱신하라"
+        assert "tool_llm_kwargs(" in src, (
+            f"{name}이 도구를 바인딩하면서 tool_llm_kwargs를 안 쓴다 — 추론 강도와 전송 방식을 "
+            "따로 정하면 강도를 올린 사람이 400을 만난다"
+        )
+
+    # 강도와 전송은 **함께** 정해져야 한다 — 이 결합이 깨지면 400이 돌아온다
+    assert core_config.tool_llm_kwargs("none") == {"reasoning_effort": "none"}, \
+        "none일 때 인자를 빼면 안 된다 — luna는 공급자 기본이 none이 아니라 400이다"
+    assert core_config.tool_llm_kwargs("medium") == {
+        "reasoning_effort": "medium", "use_responses_api": True}, \
+        "추론을 켜면 Responses API로 가야 한다 — chat.completions는 도구+추론을 못 받는다"
+
+    # 선언된 기본값 — 이건 env와 무관한 사실이다
+    assert core_config.REGISTRY["TOOL_REASONING"].default == "none"
+    assert core_config.REGISTRY["EDIT_REASONING"].default == "medium"
+
+
+def test_추론_강도_읽기는_공백만인_값을_미설정으로_본다(monkeypatch):
+    """Qodo #484: `EDIT_REASONING=" "`(공백 한 칸)이 medium을 조용히 끄고 있었다.
+
+    `os.getenv(k) or 기본값`으로 짜면 공백만인 값이 truthy라 기본값으로 안 가고 "알 수 없는
+    값"이 되어 none으로 강등된다. 배포 템플릿·쉘 설정에 공백이 섞이는 것만으로 edit 추론이
+    꺼지는 셈이다. 이 레포는 `get()`이 공백만인 값을 미설정으로 보기로 이미 정했으므로
+    (그 자체가 Qodo 지적으로 굳은 정책) 여기도 같은 판정을 쓴다.
+
+    ⚠ 이 테스트는 env를 명시적으로 지운 뒤 본다 — 외부 셸에 TOOL_REASONING이 설정돼 있으면
+    기본값 가정이 깨져 CI/로컬에 따라 흔들린다(같은 리뷰의 두 번째 지적).
+    """
+    from app.core import config as core_config
+
+    for k in ("TOOL_REASONING", "EDIT_REASONING"):
+        monkeypatch.delenv(k, raising=False)
+    assert core_config.tool_reasoning() == "none"
+    assert core_config.edit_reasoning() == "medium"
+
+    for blank in ("", " ", "\t\n"):
+        monkeypatch.setenv("EDIT_REASONING", blank)
+        assert core_config.edit_reasoning() == "medium", f"공백({blank!r})이 기본값을 껐다"
+
+    # 오타는 인자를 빼는 게 아니라 none으로 떨어져야 한다(빼면 luna에서 400)
+    monkeypatch.setenv("TOOL_REASONING", "오타")
+    assert core_config.tool_reasoning() == "none"
+    # 정상값은 그대로 통하고, 그때 전송이 Responses API로 바뀐다
+    monkeypatch.setenv("EDIT_REASONING", "HIGH")
+    assert core_config.edit_reasoning() == "high"
+    assert core_config.tool_llm_kwargs(core_config.edit_reasoning())["use_responses_api"] is True
+
+
+def test_edit_노드는_버전과_무관하게_EDIT_REASONING을_쓴다():
+    """Qodo #484: v1/v2 edit이 TOOL_REASONING을 봐서, 노브를 켜도 효과가 없었다.
+
+    AGENT_VERSION 한 줄로 되돌릴 수 있는 구성이라 "설정을 켰는데 왜 안 먹지"가 된다.
+    같은 역할의 노드는 버전이 달라도 같은 노브를 봐야 한다.
+    """
+    import importlib
+    import inspect
+
+    for name in ("app.agent.v1.orchestrator.edit", "app.agent.v2.orchestrator.edit",
+                 "app.agent.v3.orchestrator.edit"):
+        src = inspect.getsource(importlib.import_module(name))
+        assert "edit_reasoning()" in src, f"{name}이 EDIT_REASONING을 안 본다"
+    for name in ("app.agent.v1.orchestrator.qa", "app.agent.v2.orchestrator.qa",
+                 "app.agent.v3.orchestrator.qa"):
+        src = inspect.getsource(importlib.import_module(name))
+        assert "tool_reasoning()" in src, f"{name}은 TOOL_REASONING을 봐야 한다"
+
+
