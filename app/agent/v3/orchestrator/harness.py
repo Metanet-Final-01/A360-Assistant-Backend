@@ -108,7 +108,11 @@ def attach_confidence(
     def _conf(pkg: str | None, act: str | None, rule: str | None, step_status: str | None) -> float:
         if rule == "R1":
             return 0.2
-        base = best.get((pkg, act)) or 0.4
+        # **키 부재일 때만** 0.4다. `or`로 쓰면 점수 0.0(= 검색이 전혀 못 맞힌 액션)이
+        # falsy라 "근거 없음"으로 승격돼 0.4를 받는다 — 가장 나쁜 액션이 중간 점수를
+        # 받는 셈이다. flow_confidence가 이 값들의 평균이 된 뒤로는 그 오류가 흐름도
+        # 신뢰도를 통째로 부풀린다(Qodo #490).
+        base = best.get((pkg, act), 0.4)
         if rule in _PENALTY_RULES:
             base *= 0.75
         if agreement is not None:
@@ -127,11 +131,6 @@ def attach_confidence(
         sid = step.get("step_id")
         status = (coverage_by_step or {}).get(sid)
         _walk(step.get("actions") or [], sid, status, "")
-
-
-# RRF 점수의 이론적 상한 — 두 branch에서 모두 1위여도 2/(k+1) = 2/61 ≈ 0.033.
-# 리랭커가 살아 있으면 score는 Voyage relevance(0~1)라 이 대역을 크게 넘는다.
-_RRF_SCORE_CEILING = 0.05
 
 
 def _action_confidences(flow: dict) -> list[float]:
@@ -162,14 +161,33 @@ def retrieval_scale(sink: list[dict] | None) -> str | None:
     붕괴**시킨다 — 흐름도는 그대로인데 숫자만 바닥에 눕는다. 그래서 척도를 먼저 확인하고,
     유사도가 아니면 숫자를 내지 않는다(측정 불가). 억지로 0.05를 내면 '나쁜 흐름도'와
     '리랭커가 죽은 것'이 구별되지 않는다.
+
+    ## 점수 크기가 아니라 메타데이터로 가른다 (Qodo #490)
+
+    처음엔 `max(score) > 0.05`로 갈랐는데 양쪽으로 틀린다. (1) 약하게 맞은 정상 relevance를
+    폴백으로 오탐해 멀쩡한 흐름도를 측정 불가로 떨군다. (2) `RRF_K`는 env로 조절되므로
+    (`int(os.getenv("RRF_K", "60"))`) 값이 작아지면 RRF 상한이 임계를 넘어 **폴백을 못
+    잡는다** — 가드가 막으려던 바로 그 방향으로 조용히 실패한다.
+
+    `services/rag.py`가 `score`를 채울 때 원본 필드를 지우지 않고 제자리 갱신하므로
+    (`r["score"] = r.get("rerank_score", r.get("rrf_score", ...))`), 판정 근거가 sink에 그대로
+    남아 있다. 단 **`rrf_score` 유무로는 못 가른다** — 리랭커를 거친 항목은 융합 결과를
+    물려받아 둘 다 갖는다. 기준은 `rerank_score`의 유무다.
+
+    섞인 sink(도구를 여러 번 부르는 사이 리랭커가 죽은 경우)는 **오염으로 본다** — 일부만
+    RRF 척도여도 그 액션들의 근거가 바닥으로 눌려 평균이 왜곡된다.
     """
-    scores = [
-        s.get("score") for s in (sink or [])
+    scored = [
+        s for s in (sink or [])
         if isinstance(s.get("score"), (int, float)) and not isinstance(s.get("score"), bool)
     ]
-    if not scores:
+    if not scored:
         return None
-    return "relevance" if max(scores) > _RRF_SCORE_CEILING else "rrf"
+    # rerank를 못 거쳤는데 융합 점수를 들고 있는 항목 = 폴백 산물
+    if any("rerank_score" not in s and "rrf_score" in s for s in scored):
+        return "rrf"
+    # 남는 경우: 전부 rerank됨 / 벡터 단독 검색(`db.search`의 `1 - cosine`) — 둘 다 유사도다
+    return "relevance"
 
 
 def compute_flow_confidence(

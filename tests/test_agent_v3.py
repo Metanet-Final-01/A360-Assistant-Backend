@@ -537,7 +537,8 @@ def test_리랭커가_죽으면_신뢰도를_내지_않는다():
     flow = {"steps": [{"step_id": "s1", "actions": [_act("Email", "sendMail")]}]}
     flow["steps"][0]["actions"][0]["confidence"] = 0.8
 
-    rrf_sink = [{"package_name": "Email", "action_name": "sendMail", "score": 2 / 61}]
+    rrf_sink = [{"package_name": "Email", "action_name": "sendMail",
+                 "rrf_score": 2 / 61, "score": 2 / 61}]
     b = confidence_breakdown(flow, sink=rrf_sink)
     assert b["confidence"] is None and b["retrieval_scale"] == "rrf"
     assert "리랭커" in b["unmeasurable"]
@@ -549,6 +550,56 @@ def test_리랭커가_죽으면_신뢰도를_내지_않는다():
     # 잴 액션이 없어도 0이 아니라 None (빈 흐름도를 '나쁜 흐름도'로 읽으면 안 된다)
     empty = confidence_breakdown({"steps": []}, sink=_sink())
     assert empty["confidence"] is None and empty["unmeasurable"] == "액션 신뢰도 없음"
+
+
+def test_척도_판정은_점수_크기가_아니라_메타데이터로_한다():
+    """점수 크기로 가르면 양쪽으로 틀린다 (Qodo #490).
+
+    (1) 약하게 맞은 정상 relevance를 폴백으로 오탐해 멀쩡한 흐름도를 측정 불가로 떨구고,
+    (2) `RRF_K`가 env로 작아지면 RRF 상한이 임계를 넘어 **폴백을 못 잡는다** — 가드가
+    막으려던 바로 그 방향으로 조용히 실패한다.
+    """
+    from app.agent.v3.orchestrator.harness import retrieval_scale
+
+    # (1) rerank 점수가 아주 낮아도 relevance다 — 크기로 갈랐으면 rrf로 오탐했다
+    assert retrieval_scale([{"rerank_score": 0.01, "rrf_score": 0.03, "score": 0.01}]) == "relevance"
+
+    # (2) RRF_K가 작아 융합 점수가 커도 rrf다 — 크기로 갈랐으면 relevance로 통과시켰다
+    assert retrieval_scale([{"rrf_score": 0.33, "score": 0.33}]) == "rrf"
+
+    # 리랭커를 거친 항목은 rrf_score도 **함께** 갖는다 — 그 유무로 가르면 전부 rrf가 된다
+    assert retrieval_scale([{"rerank_score": 0.9, "rrf_score": 0.03, "score": 0.9}]) == "relevance"
+
+    # 섞인 sink는 오염으로 본다 — 일부만 RRF 척도여도 그 액션들이 평균을 끌어내린다
+    assert retrieval_scale([
+        {"rerank_score": 0.9, "rrf_score": 0.03, "score": 0.9},
+        {"rrf_score": 0.03, "score": 0.03},
+    ]) == "rrf"
+
+    # 벡터 단독 검색(`1 - cosine`)·테스트 스텁은 두 필드가 없다 — 유사도로 본다
+    assert retrieval_scale([{"score": 0.8}]) == "relevance"
+    assert retrieval_scale([]) is None and retrieval_scale(None) is None
+    assert retrieval_scale([{"score": None}]) is None
+
+
+def test_검색_점수_0은_근거_없음이_아니다():
+    """`or`로 기본값을 주면 점수 0.0이 falsy라 '근거 없음'(0.4)으로 승격된다 (Qodo #490).
+
+    **가장 나쁜 액션이 중간 점수를 받는다** — 그리고 flow_confidence가 액션 신뢰도의
+    평균이 된 뒤로는 그 오류가 흐름도 신뢰도를 통째로 부풀린다.
+    """
+    hit = {"package_name": "Email", "action_name": "sendMail", "score": 0.0}
+    flow = {"steps": [{"step_id": "s1", "actions": [_act("Email", "sendMail")]}]}
+    attach_confidence(flow, [hit], [])
+    assert flow["steps"][0]["actions"][0]["confidence"] == 0.05, "0.0이 0.4로 승격됐다"
+
+    # 카탈로그에 아예 없어 검색 결과가 없는 액션은 여전히 0.4(근거 없음)다 — 둘은 다르다
+    missing = {"steps": [{"step_id": "s1", "actions": [_act("Nope", "nope")]}]}
+    attach_confidence(missing, [hit], [])
+    assert missing["steps"][0]["actions"][0]["confidence"] == 0.4
+
+    # 흐름도 신뢰도가 부풀지 않는다 — 0.4가 아니라 0.05가 평균에 들어간다
+    assert compute_flow_confidence(flow, sink=[hit]) == 0.05
 
 
 def test_결함과_커버리지는_곱하지_않고_세기만_한다():
