@@ -347,10 +347,17 @@ def r1_package_hints(violations: list[dict], catalog: CatalogLookup, vocabulary=
         return ""
     by_pkg = _package_action_names(catalog, packages, _R1_PACKAGE_NAME_CAP)
     blocks: list[str] = []
+    missing: list[str] = []
     for pkg in sorted(packages):
         shown, total = by_pkg[pkg]
         if not shown:
-            continue  # 패키지 자체가 카탈로그에 없다 — 나열할 것이 없다
+            # 패키지 자체가 카탈로그에 없다 — 나열할 액션이 없다. 그렇다고 **빈손으로 두면
+            # 안 된다**: 그러면 재요청이 "표기를 바로잡아라"라고만 하고 바로잡을 대상조차
+            # 없는 상태가 된다(실측: 사용자가 "microsoft 패키지로 바꿔줘"라고 했는데
+            # 카탈로그에는 `Microsoft 365 Excel` 등 6종이 있고 `microsoft`는 없다).
+            # 이름이 겹치는 후보를 주고, 없으면 **없다는 사실 자체**를 알린다.
+            missing.append(_missing_package_line(pkg, catalog))
+            continue
         if vocabulary is not None:
             # **실제로 프롬프트에 실은 것만** 어휘에 넣는다 (Qodo #473). 전량을 넣으면 대형
             # 카탈로그에서 어휘가 표시 상한과 무관하게 부풀고, 모델이 본 적 없는 이름이
@@ -364,13 +371,46 @@ def r1_package_hints(violations: list[dict], catalog: CatalogLookup, vocabulary=
             + ", ".join(menu_quote(a) for a in shown)
             + more
         )
-    if not blocks:
-        return ""
+    out = ""
+    if blocks:
+        out += (
+            "\n\n[표기가 틀린 패키지의 실제 액션 이름]\n"
+            "아래 이름 중에서 **의도에 맞는 것을 골라** update 하라. 이름이 비슷하다고 고르지 말고 "
+            "무엇을 하는 액션인지로 고른다(예: 셀 '값'을 읽는 것과 '서식'을 읽는 것은 다른 액션이다).\n"
+            "정말 대응이 없으면 그 액션을 지우지 말고 notes에 남긴다.\n" + "\n".join(blocks)
+        )
+    if missing:
+        out += (
+            "\n\n[카탈로그에 **없는** 패키지]\n"
+            "아래 패키지는 카탈로그에 존재하지 않는다. 표기를 고쳐도 통과하지 않는다 — "
+            "후보가 있으면 그중에서 고르고, **없으면 지어내지 말고** operations를 비운 뒤 "
+            "answer에 '카탈로그에 없다'고 답하라.\n" + "\n".join(missing)
+        )
+    return out
+
+
+# 없는 패키지에 제시할 후보 수 상한. 이름이 겹치는 것만 고르므로 보통 몇 개다
+# (실측: "microsoft" → Microsoft 365 Excel/Outlook/OneDrive/Calendar/Teams 등 6종).
+_MISSING_PACKAGE_CANDIDATES = 8
+
+
+def _missing_package_line(pkg: str, catalog: CatalogLookup) -> str:
+    """카탈로그에 없는 패키지 한 줄 — 이름이 겹치는 실재 패키지를 후보로 붙인다.
+
+    부분 문자열(대소문자 무시) 양방향으로 본다: 사용자가 짧게 말한 경우("microsoft")와
+    길게 말한 경우("Microsoft 365 Excel 고급") 둘 다 걸리게 하기 위해서다. 의미 검색이
+    아니라 **표기 매칭**이라 결정론이고, 아무것도 안 걸리면 후보 없이 사실만 남긴다.
+    """
+    key = (pkg or "").strip().lower()
+    names = sorted({p for p, _ in _iter_catalog(catalog) if p})
+    hits = [p for p in names if key and (key in p.lower() or p.lower() in key)]
+    shown = hits[:_MISSING_PACKAGE_CANDIDATES]
+    if not shown:
+        return f"- package={menu_quote(pkg)} — 카탈로그에 없음 (이름이 겹치는 패키지도 없음)"
+    more = f" … 외 {len(hits) - len(shown)}종" if len(hits) > len(shown) else ""
     return (
-        "\n\n[표기가 틀린 패키지의 실제 액션 이름]\n"
-        "아래 이름 중에서 **의도에 맞는 것을 골라** update 하라. 이름이 비슷하다고 고르지 말고 "
-        "무엇을 하는 액션인지로 고른다(예: 셀 '값'을 읽는 것과 '서식'을 읽는 것은 다른 액션이다).\n"
-        "정말 대응이 없으면 그 액션을 지우지 말고 notes에 남긴다.\n" + "\n".join(blocks)
+        f"- package={menu_quote(pkg)} — 카탈로그에 없음. 이름이 겹치는 패키지: "
+        + ", ".join(menu_quote(p) for p in shown) + more
     )
 
 
