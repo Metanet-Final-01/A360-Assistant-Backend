@@ -3697,6 +3697,72 @@ def test_edit_재요청은_고칠_재료를_함께_준다():
     assert "SAP GUI" in msg and "카탈로그에 없어서" in msg
 
 
+def test_순회_못하는_카탈로그를_없는_패키지로_단정하지_않는다():
+    """Qodo #485: `CatalogLookup` 계약은 `get_action_schema` 하나만 보장한다.
+
+    `_cant_apply_message`가 `iter_action_schemas`로 존재를 판정했는데, 사용자 카탈로그처럼
+    순회를 지원하지 않는 경로에서는 **실재하는 패키지를 '카탈로그에 없다'고 안내**하게 된다.
+    모르면 단정하지 말고 이름 오류 문구로 떨어진다 — 틀린 단정이 침묵보다 나쁘다.
+    """
+    from app.agent.v3.orchestrator import edit as edit_mod
+
+    class _LookupOnly:
+        """계약 최소치만 만족하는 카탈로그 — 순회 없음."""
+
+        def get_action_schema(self, package, action):
+            return None
+
+    msg = edit_mod._cant_apply_message([("Excel advanced", "없는이름")], _LookupOnly())
+    assert "카탈로그에 없어서" not in msg, "순회를 못 하는데 '패키지가 없다'고 단정했다"
+    assert "찾지 못해" in msg
+
+
+def test_없는_패키지_후보_생성이_카탈로그를_한_번만_훑는다():
+    """Qodo #485: 없는 패키지마다 전량 스캔이 반복됐다.
+
+    `_package_action_names`가 같은 이유로 이미 1회 순회로 고쳐졌는데(#473), 새로 만든
+    `_missing_package_line`이 그 실수를 되풀이했다.
+    """
+    from app.agent.v3.orchestrator.harness import r1_package_hints
+
+    class _CountingCatalog:
+        def __init__(self):
+            self.scans = 0
+
+        def get_action_schema(self, package, action):
+            return None
+
+        def iter_action_schemas(self):
+            self.scans += 1
+            yield {"package": "Microsoft 365 Excel", "action": "Close"}
+            yield {"package": "Excel advanced", "action": "Open"}
+
+    cat = _CountingCatalog()
+    hints = r1_package_hints(
+        [{"rule": "R1", "package": p, "action": "x"} for p in ("없는것1", "없는것2", "없는것3")],
+        cat,
+    )
+    assert "카탈로그에 **없는** 패키지" in hints
+    assert cat.scans == 1, f"없는 패키지 수만큼 훑었다 ({cat.scans}회)"
+
+
+def test_재요청_실패사유도_값_경계를_지킨다():
+    """Qodo #485: 이 사유는 `_retry_message`를 타고 **재요청 프롬프트로 다시 들어간다.**
+
+    모델·사용자 카탈로그에서 온 이름에 따옴표·개행이 있으면 안내 블록의 경계가 흐려진다.
+    RPA-354(메뉴)·#473(R1 힌트)에 이미 같은 처방을 했는데 세 번째로 같은 자리가 났다.
+    """
+    import json
+
+    from app.agent.v3.orchestrator.edit_ops import EditOp, _unknown_action_error
+
+    dirty = '따옴표"와\n개행'
+    msg = _unknown_action_error(0, EditOp(op="insert", anchor="n1", position="after"),
+                                [("Pkg", dirty)])
+    assert json.dumps(dirty, ensure_ascii=False) in msg, "이름이 이스케이프되지 않았다"
+    assert '따옴표"와' not in msg, "따옴표가 경계를 뚫고 그대로 실렸다"
+
+
 def test_update가_package만_바꾸면_물려받았다고_말해준다():
     """실측(2026-08-02): "엑셀 패키지를 Microsoft로 바꿔줘"가 두 번 연속 실패했다.
 

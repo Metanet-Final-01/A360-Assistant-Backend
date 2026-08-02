@@ -318,7 +318,12 @@ def _cant_apply_message(unknown: list, catalog) -> str:
     if not unknown:
         return _CANT_APPLY
     pkgs = {p for p, _ in unknown if p}
-    known = {p for p in pkgs if any(True for _ in _actions_of(catalog, p))}
+    # ⚠ 순회를 지원하는 카탈로그에서만 '없는 패키지'라고 단정한다 (Qodo #485).
+    # `CatalogLookup` 계약이 보장하는 것은 `get_action_schema` 하나뿐이라, 사용자 카탈로그
+    # 등 순회를 못 하는 경로에서는 **실재하는 패키지를 '없다'고 안내**하게 된다. 모르면
+    # 단정하지 말고 이름 오류 문구로 떨어진다 — 틀린 단정이 침묵보다 나쁘다.
+    listable = getattr(catalog, "iter_action_schemas", None) is not None
+    known = {p for p in pkgs if any(True for _ in _actions_of(catalog, p))} if listable else pkgs
     missing = sorted(pkgs - known)
     if missing:
         return (
