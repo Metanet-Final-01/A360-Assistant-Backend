@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
+from app.core import config as core_config
 from app.core.llm import UsageCallbackHandler
 from app.schemas import ProgressEvent, Recommendation
 
@@ -86,7 +87,14 @@ def _make_llm():
     """compose_agent용 ChatOpenAI 클라이언트를 만든다(사용량 스트리밍 on)."""
     from langchain_openai import ChatOpenAI
 
-    return ChatOpenAI(model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY, stream_usage=True)
+    return ChatOpenAI(
+        model=config.OPENAI_MODEL,
+        api_key=config.OPENAI_API_KEY,
+        stream_usage=True,
+        # 이 노드는 function tool을 바인딩한다 — chat.completions는 도구+추론을 함께 못 쓴다.
+        # 'none'을 **명시**해야 한다: luna는 인자를 빼면 공급자 기본이 none이 아니라 400이다.
+        **core_config.tool_llm_kwargs(core_config.tool_reasoning()),
+    )
 
 
 def _to_dict(analysis: Any) -> dict:

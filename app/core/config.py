@@ -118,6 +118,22 @@ REGISTRY: dict[str, EnvSpec] = {
         doc="흐름도 구조 단계에만 거는 추론 강도 (none|low|medium|high|xhigh, 빈 값=미지정). "
             "추론 토큰은 출력으로 과금되고 COMPOSE_MAX_TOKENS 상한을 함께 먹는다",
     ),
+    "TOOL_REASONING": EnvSpec(
+        "none", group="llm",
+        doc="**function tool을 바인딩하는 노드**(qa·edit)의 추론 강도. 기본 none. "
+            "⚠ chat.completions는 '도구 + 추론'을 함께 못 쓴다 — 실측(2026-08-02) gpt-5.4-mini·"
+            "gpt-5.4·gpt-5.5·gpt-5.6-luna 전부 tools와 reasoning_effort를 같이 주면 400이다. "
+            "게다가 luna는 **인자를 안 보내면 공급자 기본이 none이 아니라** 그것만으로도 400이라, "
+            "none을 명시해야 통과한다(네 모델 모두 none은 받는다 — 모델을 되돌려도 안전). "
+            "추론이 필요하면 값을 올리지 말고 그 노드를 Responses API로 옮겨야 한다",
+    ),
+    "EDIT_REASONING": EnvSpec(
+        "medium", group="llm",
+        doc="흐름도 수정(edit) 노드의 추론 강도. 이 노드는 '어디를 어떻게 고칠지' 판단이 본업이라 "
+            "추론을 켠다. ⚠ none이 아니면 전송이 **Responses API로 바뀐다** — chat.completions는 "
+            "도구+추론을 함께 못 쓰기 때문이고, 그 전환은 tool_llm_kwargs()가 자동으로 한다. "
+            "추론 토큰은 출력으로 과금된다",
+    ),
     "COMPOSE_FILL_CHUNK": EnvSpec(
         "8", cast=int, group="llm",
         doc="값 채우기 한 호출이 맡는 액션 수 상한. 크게 두면 한 호출로 합쳐진다(분할 해제)",
@@ -320,3 +336,62 @@ def startup_report() -> list[str]:
     for k in missing:
         logger.warning("환경변수 미설정: %s — %s", k, REGISTRY[k].doc)
     return missing
+
+
+# 추론 강도로 인정하는 값. 오타가 그대로 API에 실려 400을 내지 않게 여기서 거른다.
+REASONING_LEVELS = frozenset({"none", "low", "medium", "high", "xhigh"})
+
+
+def tool_reasoning() -> str:
+    """function tool을 바인딩하는 노드(qa·edit)에 걸 추론 강도. 기본 "none".
+
+    ⚠ **이 값은 자유 노브가 아니다.** chat.completions는 '도구 + 추론'을 함께 못 쓴다 —
+    실측(2026-08-02)에서 gpt-5.4-mini·gpt-5.4·gpt-5.5·gpt-5.6-luna 전부, tools와
+    reasoning_effort를 같이 주면 400이었다. 그러니 여기서 "none"이 아닌 값을 주면
+    **그 노드는 도구를 쓰는 순간 죽는다.** 그래도 노브로 둔 이유는 모델 계약이 바뀔 수
+    있어서이고, 바꿀 때는 반드시 도구 경로를 함께 재봐야 한다.
+
+    미지정·오타는 "none"으로 떨어진다 — 인자를 **빼는** 폴백이 아니라는 점이 중요하다.
+    luna는 인자를 안 보내면 공급자 기본이 none이 아니라 그것만으로 400이 난다(그게 이
+    함수가 생긴 이유다). 네 모델 모두 "none"은 받으므로 명시가 항상 더 안전하다.
+    """
+    raw = (os.getenv("TOOL_REASONING") or REGISTRY["TOOL_REASONING"].default or "none").strip().lower()
+    if raw not in REASONING_LEVELS:
+        logger.warning("TOOL_REASONING이 알 수 없는 값(%r) — none으로 처리한다", raw)
+        return "none"
+    return raw
+
+
+def edit_reasoning() -> str:
+    """흐름도 수정(edit) 노드의 추론 강도. 기본 "medium".
+
+    qa와 갈라 둔 이유: qa는 '검색 결과를 읽고 요약'이라 추론 이득이 작고, edit은 '어디를
+    어떻게 고칠지' 판단이 본업이다. 강도를 올리면 전송 방식이 바뀌므로(아래 참고) 노브를
+    함께 두면 한쪽 사정으로 다른 쪽이 끌려다닌다.
+    """
+    raw = (os.getenv("EDIT_REASONING") or REGISTRY["EDIT_REASONING"].default or "none").strip().lower()
+    if raw not in REASONING_LEVELS:
+        logger.warning("EDIT_REASONING이 알 수 없는 값(%r) — none으로 처리한다", raw)
+        return "none"
+    return raw
+
+
+def tool_llm_kwargs(effort: str) -> dict:
+    """도구를 바인딩할 ChatOpenAI의 추론·전송 인자를 **함께** 정한다.
+
+    둘을 따로 두면 안 되는 이유가 실측으로 확인됐다(2026-08-02): chat.completions는
+    function tool과 reasoning_effort를 **함께 못 쓴다** — gpt-5.4-mini·5.4·5.5·5.6-luna
+    전부 400이다. 그래서 강도를 올리는 순간 전송이 Responses API로 가야 하는데, 그 결합을
+    호출부마다 기억하게 두면 노브를 올린 사람이 400을 만난다. 여기서 한 번에 정한다.
+
+    Responses API로 가도 호출부 코드는 그대로다 — langchain이 `.tool_calls`·`.text`·
+    usage_metadata를 같은 모양으로 정규화한다(실측: 도구 1라운드 + 결과 회신 2라운드가
+    두 전송 모두 동일하게 동작, 추론 토큰만 0 → 50으로 늘었다).
+
+    ⚠ 실측은 `ainvoke` 경로다. `astream`(qa)은 Responses API에서 아직 안 재봤으므로,
+    qa 쪽 강도를 올릴 때는 스트리밍부터 확인할 것.
+    """
+    if effort == "none":
+        # 'none'을 **명시**한다 — 인자를 빼면 luna는 공급자 기본이 none이 아니라 400이다.
+        return {"reasoning_effort": "none"}
+    return {"reasoning_effort": effort, "use_responses_api": True}

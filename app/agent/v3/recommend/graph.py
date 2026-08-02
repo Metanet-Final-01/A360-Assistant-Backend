@@ -28,6 +28,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core import config as core_config
 from app.core.llm import UsageCallbackHandler
 from app.schemas import ProgressEvent, Recommendation
 
@@ -86,9 +87,14 @@ _GATE_RULES = frozenset({
 # recommend 검색은 액션 후보 메뉴용 — 문서 페이지·패키지 개요 오염을 막는다.
 SEARCH_SOURCE_TYPES = ["action_schema", "bot_example"]
 
-# 추론 강도로 인정하는 값. 오타가 그대로 API에 실려 400을 내지 않게 여기서 거른다
-# (모르는 값이면 인자를 아예 안 보낸다 = 공급자 기본값 none).
-_REASONING_LEVELS = frozenset({"none", "low", "medium", "high", "xhigh"})
+# 추론 강도로 인정하는 값 (선언은 app.core.config 한 곳 — 두 벌이면 한쪽만 고쳐진다).
+# 오타가 그대로 API에 실려 400을 내지 않게 여기서 거른다.
+#
+# ⚠ 모르는 값이면 인자를 **안 보낸다.** 여기(compose)는 도구를 바인딩하지 않으므로 그래도
+# 되지만, **도구를 쓰는 노드에서는 그 폴백이 틀렸다** — luna는 인자를 빼면 공급자 기본이
+# none이 아니라 400이 난다(실측 2026-08-02). 그쪽은 config.tool_reasoning()이 "none"을
+# 명시하는 폴백을 쓴다.
+_REASONING_LEVELS = core_config.REASONING_LEVELS
 
 # 출력이 길이 한도에서 잘렸을 때의 재출력 지시. 형식 오류용 문구("다시 출력하라")를 그대로
 # 쓰면 같은 길이가 또 나와 **반드시** 재실패한다 — 실측에서 후보 3개가 전부 재시도까지

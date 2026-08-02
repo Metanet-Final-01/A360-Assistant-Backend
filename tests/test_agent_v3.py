@@ -3551,3 +3551,62 @@ def test_수리_메뉴의_어휘_덧붙임에는_상한이_있다():
 
     added = len(capped.splitlines()) - len(base.splitlines())
     assert added <= _REPAIR_VOCAB_CAP, "어휘 덧붙임이 상한을 넘었다"
+
+
+def test_도구를_바인딩하는_노드는_reasoning_effort를_명시한다():
+    """실측(2026-08-02): qa 노드가 400으로 즉사했다.
+
+        Function tools with reasoning_effort are not supported for gpt-5.6-luna
+        in /v1/chat/completions. ... or set reasoning_effort to 'none'.
+
+    chat.completions는 **도구와 추론을 함께 못 쓴다** — gpt-5.4-mini·5.4·5.5·5.6-luna
+    전부 같이 주면 400이다. 그리고 luna는 **인자를 빼는 것만으로는 안 통과한다**(공급자
+    기본이 none이 아니다). 그래서 도구를 바인딩하는 노드는 "none"을 **명시**해야 한다.
+
+    이건 모델을 바꿀 때마다 되돌아오는 종류의 결함이라, 새 도구 노드가 생기면 자동으로
+    걸리게 잰다. (추론이 필요하면 값을 올리지 말고 그 노드를 Responses API로 옮긴다.)
+    """
+    import importlib
+    import inspect
+
+    from app.core import config as core_config
+
+    # 도구를 바인딩하는 모듈 = bind_tools를 호출하는 모듈
+    modules = [
+        "app.agent.v1.orchestrator.qa", "app.agent.v1.orchestrator.edit",
+        "app.agent.v2.orchestrator.qa", "app.agent.v2.orchestrator.edit",
+        "app.agent.v2.recommend.graph",
+        "app.agent.v3.orchestrator.qa", "app.agent.v3.orchestrator.edit",
+    ]
+    for name in modules:
+        src = inspect.getsource(importlib.import_module(name))
+        assert ".bind_tools(" in src, f"{name}이 더는 도구를 안 쓴다 — 이 목록을 갱신하라"
+        assert "tool_llm_kwargs(" in src, (
+            f"{name}이 도구를 바인딩하면서 tool_llm_kwargs를 안 쓴다 — 추론 강도와 전송 방식을 "
+            "따로 정하면 강도를 올린 사람이 400을 만난다"
+        )
+
+    # 강도와 전송은 **함께** 정해져야 한다 — 이 결합이 깨지면 400이 돌아온다
+    assert core_config.tool_llm_kwargs("none") == {"reasoning_effort": "none"}, \
+        "none일 때 인자를 빼면 안 된다 — luna는 공급자 기본이 none이 아니라 400이다"
+    assert core_config.tool_llm_kwargs("medium") == {
+        "reasoning_effort": "medium", "use_responses_api": True}, \
+        "추론을 켜면 Responses API로 가야 한다 — chat.completions는 도구+추론을 못 받는다"
+
+    # qa는 none(도구만), edit은 추론을 켠다 — 노드마다 사정이 다르다
+    assert core_config.tool_reasoning() == "none"
+    assert core_config.REGISTRY["TOOL_REASONING"].default == "none"
+    assert core_config.edit_reasoning() in core_config.REASONING_LEVELS
+    # 오타는 인자를 빼는 게 아니라 none으로 떨어져야 한다(빼면 luna에서 400)
+    import os
+    saved = os.environ.get("TOOL_REASONING")
+    try:
+        os.environ["TOOL_REASONING"] = "오타"
+        assert core_config.tool_reasoning() == "none"
+    finally:
+        if saved is None:
+            os.environ.pop("TOOL_REASONING", None)
+        else:
+            os.environ["TOOL_REASONING"] = saved
+
+

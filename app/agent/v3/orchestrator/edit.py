@@ -26,6 +26,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
+from app.core import config as core_config
 from app.core.llm import UsageCallbackHandler
 
 from .. import config
@@ -66,7 +67,16 @@ def _make_llm() -> ChatOpenAI:
 
     stream_usage=True: UsageCallbackHandler(진입점 config)가 토큰을 집계하게 한다.
     """
-    return ChatOpenAI(model=config.OPENAI_MODEL, api_key=config.OPENAI_API_KEY, stream_usage=True)
+    return ChatOpenAI(
+        model=config.OPENAI_MODEL,
+        api_key=config.OPENAI_API_KEY,
+        stream_usage=True,
+        # 이 노드는 function tool을 바인딩하면서 **추론도 쓴다** — '어디를 어떻게 고칠지'가
+        # 본업이라서다. chat.completions는 그 둘을 함께 못 받으므로 전송을 Responses API로
+        # 옮겨야 하는데, 그 결합은 tool_llm_kwargs()가 강도에서 자동으로 정한다
+        # (EDIT_REASONING=none으로 내리면 다시 chat.completions로 돌아간다).
+        **core_config.tool_llm_kwargs(core_config.edit_reasoning()),
+    )
 
 
 def _parse_ops(text: str) -> EditOps:
