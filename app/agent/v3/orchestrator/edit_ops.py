@@ -516,7 +516,36 @@ def _introduced_actions(flow: dict, op: EditOp) -> list[tuple[str | None, str | 
     return []
 
 
-def apply_edit_ops(flow: dict, ops: list[EditOp], catalog=None) -> tuple[int, list[str]]:
+def _unknown_action_error(i: int, op: EditOp, bad: list[tuple]) -> str:
+    """'카탈로그에 없는 액션' 사유 — **왜 그 조합이 나왔는지**까지 적는다.
+
+    실측(2026-08-02): "엑셀 패키지를 Microsoft로 바꿔줘"에서 모델이 `update`로 package만
+    바꿨고, 코드가 action 이름을 현재값에서 물려받아
+    `Microsoft 365 Excel` + `Close action in Excel advanced package`가 됐다. 두 패키지의
+    같은 기능이 이름만 다른 것이 원인이다(`Excel advanced`는 `Close action in Excel advanced
+    package`, `Microsoft 365 Excel`은 `Close`. Open·Write from data table은 이름이 같아 통과).
+
+    그런데 사유가 "카탈로그 표기 그대로 적으세요"뿐이라, **모델은 그 이름을 적은 적이 없어**
+    자기 출력의 어디를 고치라는 건지 알 수 없었다. 물려받았다는 사실을 말해 준다.
+    """
+    pairs = ", ".join(f"{p}/{a}" for p, a in bad)
+    if op.op == "update" and op.package and not op.action_name:
+        inherited = ", ".join(a for _, a in bad)
+        return (
+            f"op[{i}] update: 카탈로그에 없는 액션 {pairs} — 적용하지 않음. "
+            f"package만 바꿔서 action 이름({inherited})을 **이전 패키지 표기 그대로** "
+            "물려받았다. 같은 기능이라도 패키지마다 액션 이름이 다르므로 "
+            "action_name을 새 패키지의 표기로 함께 지정하라"
+        )
+    return (
+        f"op[{i}] {op.op}: 카탈로그에 없는 액션 {pairs} — 적용하지 않음. "
+        "package와 action을 카탈로그 표기 그대로 나눠 적으세요"
+    )
+
+
+def apply_edit_ops(
+    flow: dict, ops: list[EditOp], catalog=None, unknown_out: list | None = None
+) -> tuple[int, list[str]]:
     """연산들을 순서대로 flow에 제자리 적용한다. (적용_수, 실패_사유들)을 반환한다.
 
     한 연산이 실패해도 나머지는 계속 시도한다 — 실패 사유는 재요청 피드백에 쓴다.
@@ -535,15 +564,17 @@ def apply_edit_ops(flow: dict, ops: list[EditOp], catalog=None) -> tuple[int, li
     errors: list[str] = []
     for i, op in enumerate(ops):
         if catalog is not None:
-            unknown = [
-                f"{p}/{a}" for p, a in _introduced_actions(flow, op)
+            bad = [
+                (p, a) for p, a in _introduced_actions(flow, op)
                 if not (p and a and catalog.get_action_schema(p, a) is not None)
             ]
-            if unknown:
-                errors.append(
-                    f"op[{i}] {op.op}: 카탈로그에 없는 액션 {', '.join(unknown)} — 적용하지 않음. "
-                    "package와 action을 카탈로그 표기 그대로 나눠 적으세요"
-                )
+            if bad:
+                # 실패한 (package, action)을 **구조로도** 넘긴다 (out-param). 재요청이 "그
+                # 패키지의 실제 액션 이름"을 실어 주려면 패키지가 필요한데, 사유 문자열에서
+                # 되파싱하면 문구를 다듬는 순간 조용히 깨진다. (llm.chat의 meta와 같은 관례.)
+                if unknown_out is not None:
+                    unknown_out.extend(bad)
+                errors.append(_unknown_action_error(i, op, bad))
                 continue
         try:
             ok = _APPLIERS[op.op](flow, op)
