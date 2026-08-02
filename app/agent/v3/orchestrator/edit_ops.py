@@ -27,6 +27,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from ..recommend.research import menu_quote
+
 # 임시 노드 id를 다는 전이(transient) 키 — 프롬프트 참조용, 적용 후 제거한다.
 _ID = "_id"
 
@@ -528,9 +530,12 @@ def _unknown_action_error(i: int, op: EditOp, bad: list[tuple]) -> str:
     그런데 사유가 "카탈로그 표기 그대로 적으세요"뿐이라, **모델은 그 이름을 적은 적이 없어**
     자기 출력의 어디를 고치라는 건지 알 수 없었다. 물려받았다는 사실을 말해 준다.
     """
-    pairs = ", ".join(f"{p}/{a}" for p, a in bad)
+    # 값은 따옴표째 싣는다 (Qodo #485). 이 사유는 `_retry_message`를 타고 **재요청
+    # 프롬프트로 다시 들어가므로**, 모델·사용자 카탈로그에서 온 이름에 따옴표·개행이 있으면
+    # 안내 블록의 경계가 흐려진다 — RPA-354·#473에서 메뉴와 R1 힌트에 이미 같은 처방을 했다.
+    pairs = ", ".join(f"{menu_quote(p)}/{menu_quote(a)}" for p, a in bad)
     if op.op == "update" and op.package and not op.action_name:
-        inherited = ", ".join(a for _, a in bad)
+        inherited = ", ".join(menu_quote(a) for _, a in bad)
         return (
             f"op[{i}] update: 카탈로그에 없는 액션 {pairs} — 적용하지 않음. "
             f"package만 바꿔서 action 이름({inherited})을 **이전 패키지 표기 그대로** "
