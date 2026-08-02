@@ -31,6 +31,7 @@ from app.core.llm import UsageCallbackHandler
 
 from .. import config
 from ..recommend.graph import _coerce_flow
+from ..recommend.research import menu_quote
 from ..recommend.stream import emit, emit_flow_frame
 from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
 from .generate import resolve_catalog_context
@@ -314,6 +315,12 @@ def _cant_apply_message(unknown: list, catalog) -> str:
     기존 문구는 원인과 무관하게 "조금 더 구체적으로 알려주세요"였다. 사용자가 이미 구체적으로
     말했고 원인이 표기·미보유일 때 그 문구는 원인을 숨기고 책임을 사용자에게 넘긴다 — 몇 번을
     다시 말해도 카탈로그에 없는 것은 없다.
+
+    ⚠ **이름은 `menu_quote`로 감싼다** (Qodo #487). 사용자에게 나가는 말이라 프롬프트와
+    무관해 보이지만, 이 답변은 대화 이력에 쌓였다가 `render_history()`를 타고 **다음 턴의
+    프롬프트로 되돌아온다.** 모델·사용자 카탈로그에서 온 이름에 따옴표·개행이 있으면 그때
+    프롬프트 경계가 흐려진다. 같은 처방을 메뉴(RPA-354)·R1 힌트(#473)·재요청 사유(#485)에
+    이미 했는데 이 경로만 빠져 네 번째 재발이었다 — 이름을 문장에 끼울 때는 예외 없이 감싼다.
     """
     if not unknown:
         return _CANT_APPLY
@@ -325,10 +332,10 @@ def _cant_apply_message(unknown: list, catalog) -> str:
     missing = sorted(pkgs - known) if known is not None else []
     if missing:
         return (
-            f"요청하신 {', '.join(missing)} 패키지는 카탈로그에 없어서 흐름도에 넣을 수 없어요. "
-            "사용할 수 있는 패키지 이름으로 다시 말씀해 주시면 반영할게요."
+            f"요청하신 {', '.join(menu_quote(p) for p in missing)} 패키지는 카탈로그에 없어서 "
+            "흐름도에 넣을 수 없어요. 사용할 수 있는 패키지 이름으로 다시 말씀해 주시면 반영할게요."
         )
-    names = ", ".join(f"{p}/{a}" for p, a in unknown[:3])
+    names = ", ".join(f"{menu_quote(p)}/{menu_quote(a)}" for p, a in unknown[:3])
     return (
         f"{names} 액션을 카탈로그에서 찾지 못해 수정을 되돌렸어요. "
         "일부만 반영하면 흐름도가 어긋나서 전체를 되돌립니다 — 바꿀 액션을 지정해 주시면 다시 시도할게요."

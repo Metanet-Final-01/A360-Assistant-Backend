@@ -3697,6 +3697,43 @@ def test_edit_재요청은_고칠_재료를_함께_준다():
     assert "SAP GUI" in msg and "카탈로그에 없어서" in msg
 
 
+def test_사용자_답변의_이름도_값_경계를_지킨다():
+    """Qodo #487: 사용자에게 나가는 말이라도 이름은 감싸야 한다 — **네 번째 재발**이다.
+
+    프롬프트와 무관해 보이지만 이 답변은 대화 이력에 쌓였다가 `render_history()`를 타고
+    **다음 턴의 프롬프트로 되돌아온다.** 모델·사용자 카탈로그에서 온 이름에 따옴표·개행이
+    있으면 그때 프롬프트 경계가 흐려진다.
+
+    같은 처방을 메뉴(RPA-354) → R1 힌트(#473) → 재요청 사유(#485) → 여기(#487)까지
+    네 번 했다. 이름을 문장에 끼우는 자리는 예외 없이 감싼다.
+    """
+    import json
+
+    from app.agent.v3.orchestrator import edit as edit_mod
+
+    class _LookupOnly:
+        def get_action_schema(self, package, action):
+            return None
+
+    dirty = '따옴표"와\n개행'
+    # (a) 이름 오류 문구 — 순회를 못 하는 카탈로그라 이 갈래로 떨어진다
+    msg = edit_mod._cant_apply_message([("Pkg", dirty)], _LookupOnly())
+    assert json.dumps(dirty, ensure_ascii=False) in msg
+    assert '따옴표"와' not in msg, "따옴표가 경계를 뚫고 그대로 실렸다"
+
+    # (b) 없는 패키지 문구 — 순회 가능한 카탈로그
+    class _Empty:
+        def get_action_schema(self, package, action):
+            return None
+
+        def iter_action_schemas(self):
+            return iter(())
+
+    msg2 = edit_mod._cant_apply_message([(dirty, "act")], _Empty())
+    assert json.dumps(dirty, ensure_ascii=False) in msg2
+    assert '따옴표"와' not in msg2
+
+
 def test_순회_못하는_카탈로그를_없는_패키지로_단정하지_않는다():
     """Qodo #485: `CatalogLookup` 계약은 `get_action_schema` 하나만 보장한다.
 
