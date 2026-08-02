@@ -136,9 +136,6 @@ def build_flow_spec(state: dict, document: str | None) -> dict:
             [{"role": "system", "content": _PROMPT}, {"role": "user", "content": user_content}],
             purpose="turn_generate",
             model_cls=FlowSpec,
-            # 정형화는 **재는 도구의 기준선**이다 — 같은 문서에 다른 요구를 내면 그 아래
-            # 모든 비교가 무효다(config.MEASURE_TEMPERATURE 주석의 실측 참고).
-            temperature=config.measure_temperature(),
         )
     except (ValueError, RuntimeError) as e:
         logger.warning("spec_builder 실패 — 최소 스펙으로 강등: %s", e)

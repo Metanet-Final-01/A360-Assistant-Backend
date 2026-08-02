@@ -648,8 +648,32 @@ class _SessionWalker:
                         )
                     )
             else:
-                merged_maybe.add(key)
-                if any(present):  # 일부 분기에서만 열림/닫힘 — 상태 불일치
+                # ⚠ Finally 안의 **정리 가드**만 예외로 둔다 — 좁게 잡는다 (Qodo #486).
+                #
+                # 예외의 근거는 "병합 이후 동작이 경로에 따라 달라진다"가 Finally에서는
+                # 성립하지 않는다는 것이다: 정리 구간이라 그 뒤에 세션을 쓰는 액션이 없다.
+                # 그리고 `If <열렸는가> → Close`는 결함이 아니라 정확한 정리다 — Try 앞쪽에서
+                # 실패하면 뒤쪽 세션은 열리지 않았고, 무조건 닫으면 정리하다 또 터진다.
+                # 이 예외가 없으면 세션 정리에 합법 수가 없다(실측): 가드 없이 Finally면 L3가
+                # error 경로를 떨어뜨리고, 가드를 붙이면 여기서 major가 붙고, Finally 밖으로
+                # 빼면 R12+R8이 붙는다. (`Else`를 명시해도 분기 상태는 여전히 갈린다.)
+                #
+                # ⚠⚠ 예외는 **닫기 가드 모양에만** 준다. Finally 안이라도 분기가 세션을
+                # **열어서** 상태가 갈리는 것은 정리가 아니므로 그대로 잡는다(`key in incoming`
+                # 조건이 그 구분이다). 그리고 이 경우는 `maybe`에 넣지 않고 **닫힘으로 확정**
+                # 한다 — maybe는 이후 사용·닫기에서 침묵하게 만드는 집합이라, 넣으면 예외가
+                # 보고를 넘어 상태 추적까지 꺼 버린다. "일부 경로에서 닫혔다"의 보수적 해석은
+                # '닫혔다'이다.
+                #
+                # ⚠ 다만 Finally 안의 이중 닫기는 이 조치로도 안 잡힌다 — Try/Catch fork가
+                # `merge_lenient`로 그 세션을 이미 `maybe`에 올려 두기 때문이다(실측: 가드
+                # 없이 Finally에 close를 두 번 둔 대조군도 똑같이 조용하다). 즉 그 구멍은 이
+                # 예외와 무관한 **기존 동작**이고, 고치려면 catch fork의 maybe 전파를 손봐야
+                # 하는데 그건 전 경로의 오탐 균형을 다시 재야 하는 별개 작업이다.
+                closed_guard = in_finally and key in incoming[0] and not all(present)
+                if not closed_guard:
+                    merged_maybe.add(key)
+                if any(present) and not closed_guard:  # 일부 분기에서만 열림/닫힘 — 상태 불일치
                     pkg, name = key
                     shown = name if name != _ANON else "(이름 미지정)"
                     changed_in_branch = key not in incoming[0] or not all(present)
