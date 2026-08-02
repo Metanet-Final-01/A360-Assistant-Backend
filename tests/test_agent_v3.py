@@ -3191,11 +3191,18 @@ def test_R1_위반에_그_패키지의_실제_액션_이름을_준다():
     assert "이름이 비슷하다고 고르지 말고" in hints      # 문자열 근접으로 고르지 말라고 못 박는다
     assert len(vocab) > 0, "조회한 것은 턴 어휘에도 남는다"
 
-    # 패키지 자체가 카탈로그에 없으면 나열할 것이 없다 (실측 `package="needs"` 3건)
-    assert r1_package_hints(
+    # 패키지 자체가 카탈로그에 없으면 나열할 **액션**이 없다 (실측 `package="needs"` 3건).
+    # 그렇다고 빈손으로 두지는 않는다 — 예전에는 ""를 냈는데, 그러면 재요청이 "표기를
+    # 바로잡아라"라고만 하고 바로잡을 대상조차 없는 상태가 됐다(실측 2026-08-02:
+    # 사용자가 "microsoft 패키지로"라고 했고 카탈로그엔 `Microsoft 365 Excel` 등만 있었다).
+    # 없다는 **사실**과 이름이 겹치는 후보를 주고, 지어내지 말라고 못 박는다.
+    no_pkg = r1_package_hints(
         [{"rule": "R1", "package": "needs", "action": "click element on screen"}],
         FakeCatalog(), vocab,
-    ) == ""
+    )
+    assert "카탈로그에 **없는** 패키지" in no_pkg
+    assert "지어내지 말고" in no_pkg
+    assert "의 실제 액션:" not in no_pkg, "없는 패키지의 액션을 나열하면 안 된다"
     # R1이 아닌 위반은 대상이 아니다
     assert r1_package_hints(
         [{"rule": "R3", "package": "Excel advanced", "action": "cloudExcelOpen"}],
@@ -3646,5 +3653,186 @@ def test_edit_노드는_버전과_무관하게_EDIT_REASONING을_쓴다():
                  "app.agent.v3.orchestrator.qa"):
         src = inspect.getsource(importlib.import_module(name))
         assert "tool_reasoning()" in src, f"{name}은 TOOL_REASONING을 봐야 한다"
+
+
+
+
+def test_edit_재요청은_고칠_재료를_함께_준다():
+    """실측(2026-08-02): "엑셀 패키지를 microsoft로 바꿔줘"가 실패했다.
+
+    모델이 `Microsoft 365 Excel/Close action in Excel advanced package`를 냈다 — 액션 이름
+    자리에 **설명 문장**을 적었다(실제 이름은 `Close`). 6개 중 5개는 적용됐지만 1개 실패로
+    전체가 되돌아갔고, 사용자는 "조금 더 구체적으로 알려주세요"만 봤다.
+
+    복구가 안 된 이유는 재요청이 **맨손**이었기 때문이다:
+      - 도구를 뗀 채(`llm.ainvoke`) 불러 카탈로그를 확인할 수 없었고
+      - "카탈로그 표기 그대로 적으세요"라면서 그 표기를 주지 않았고
+      - 흐름도 아웃라인은 **바꾸기 전** 이름만 보여줬다
+    모델이 답을 알아낼 통로가 없는 상태에서 다시 찍으라는 요구였다.
+    """
+    import inspect
+
+    from app.agent.v3.orchestrator import edit as edit_mod
+    from app.agent.v3.orchestrator.harness import r1_package_hints
+
+    src = inspect.getsource(edit_mod)
+    # (1) 재요청도 도구 루프를 탄다 — 첫 호출과 같은 함수를 쓴다
+    assert src.count("await _tool_loop(") >= 2, \
+        "재요청이 도구 없이 불린다 — '카탈로그에 없는 액션'을 고칠 방법이 사라진다"
+    # (2) 실패한 (package, action)이 구조로 흐른다 — 사유 문자열 되파싱은 문구를 바꾸면 깨진다
+    assert "unknown_out=" in src and "r1_package_hints(" in src
+
+    # (3) 오류 종류에 맞는 안내가 나간다
+    name_err = ["op[0] update: 카탈로그에 없는 액션 X/Y — 적용하지 않음"]
+    assert "표기 문제" in edit_mod._retry_message(name_err, "OUTLINE", [("X", "Y")])
+    assert "표기 문제" not in edit_mod._retry_message(["op[0] update: 대상 노드를 못 찾았거나"], "OUTLINE", [])
+
+    # (4) 패키지가 아예 없으면 '없다'고 알리고 이름이 겹치는 후보를 준다 (빈손 금지)
+    hints = r1_package_hints([{"rule": "R1", "package": "microsoft", "action": "Close"}], FakeCatalog())
+    assert "카탈로그에 **없는** 패키지" in hints
+    assert "지어내지 말고" in hints, "없을 때 물러설 길을 안 주면 또 지어낸다"
+
+    # (5) 사용자에게 나가는 말이 원인을 담는다 — "구체적으로 말하라"로 뭉개지 않는다
+    msg = edit_mod._cant_apply_message([("SAP GUI", "Login")], FakeCatalog())
+    assert "SAP GUI" in msg and "카탈로그에 없어서" in msg
+
+
+def test_순회_못하는_카탈로그를_없는_패키지로_단정하지_않는다():
+    """Qodo #485: `CatalogLookup` 계약은 `get_action_schema` 하나만 보장한다.
+
+    `_cant_apply_message`가 `iter_action_schemas`로 존재를 판정했는데, 사용자 카탈로그처럼
+    순회를 지원하지 않는 경로에서는 **실재하는 패키지를 '카탈로그에 없다'고 안내**하게 된다.
+    모르면 단정하지 말고 이름 오류 문구로 떨어진다 — 틀린 단정이 침묵보다 나쁘다.
+    """
+    from app.agent.v3.orchestrator import edit as edit_mod
+
+    class _LookupOnly:
+        """계약 최소치만 만족하는 카탈로그 — 순회 없음."""
+
+        def get_action_schema(self, package, action):
+            return None
+
+    msg = edit_mod._cant_apply_message([("Excel advanced", "없는이름")], _LookupOnly())
+    assert "카탈로그에 없어서" not in msg, "순회를 못 하는데 '패키지가 없다'고 단정했다"
+    assert "찾지 못해" in msg
+
+
+def test_사용자_안내의_패키지_존재_확인도_카탈로그를_한_번만_훑는다():
+    """Qodo #485(재지적): `r1_package_hints`는 고쳤는데 형제 함수가 남아 있었다.
+
+    `_cant_apply_message`가 패키지마다 따로 확인해 실패 경로가
+    O(패키지 수 × 카탈로그 크기)였다. 한 곳을 고칠 때 같은 모양을 함께 훑어야 한다.
+    """
+    from app.agent.v3.orchestrator import edit as edit_mod
+
+    class _CountingCatalog:
+        def __init__(self):
+            self.scans = 0
+
+        def get_action_schema(self, package, action):
+            return None
+
+        def iter_action_schemas(self):
+            self.scans += 1
+            yield {"package": "Excel advanced", "action": "Open"}
+
+    cat = _CountingCatalog()
+    msg = edit_mod._cant_apply_message(
+        [("없는것1", "a"), ("없는것2", "b"), ("없는것3", "c")], cat)
+    assert "카탈로그에 없어서" in msg
+    assert cat.scans == 1, f"패키지 수만큼 훑었다 ({cat.scans}회)"
+
+    # 확인할 패키지가 없으면 아예 안 훑는다 — package가 None인 쌍만 온 경우가 그렇다
+    # (`_cant_apply_message`가 `if p`로 걸러 wanted가 빈 집합이 된다). Qodo #485 재지적.
+    empty = _CountingCatalog()
+    edit_mod._cant_apply_message([(None, "액션만있음")], empty)
+    assert empty.scans == 0, "확인할 게 없는데 카탈로그를 훑었다"
+
+
+def test_없는_패키지_후보_생성이_카탈로그를_한_번만_훑는다():
+    """Qodo #485: 없는 패키지마다 전량 스캔이 반복됐다.
+
+    `_package_action_names`가 같은 이유로 이미 1회 순회로 고쳐졌는데(#473), 새로 만든
+    `_missing_package_line`이 그 실수를 되풀이했다.
+    """
+    from app.agent.v3.orchestrator.harness import r1_package_hints
+
+    class _CountingCatalog:
+        def __init__(self):
+            self.scans = 0
+
+        def get_action_schema(self, package, action):
+            return None
+
+        def iter_action_schemas(self):
+            self.scans += 1
+            yield {"package": "Microsoft 365 Excel", "action": "Close"}
+            yield {"package": "Excel advanced", "action": "Open"}
+
+    cat = _CountingCatalog()
+    hints = r1_package_hints(
+        [{"rule": "R1", "package": p, "action": "x"} for p in ("없는것1", "없는것2", "없는것3")],
+        cat,
+    )
+    assert "카탈로그에 **없는** 패키지" in hints
+    assert cat.scans == 1, f"없는 패키지 수만큼 훑었다 ({cat.scans}회)"
+
+
+def test_재요청_실패사유도_값_경계를_지킨다():
+    """Qodo #485: 이 사유는 `_retry_message`를 타고 **재요청 프롬프트로 다시 들어간다.**
+
+    모델·사용자 카탈로그에서 온 이름에 따옴표·개행이 있으면 안내 블록의 경계가 흐려진다.
+    RPA-354(메뉴)·#473(R1 힌트)에 이미 같은 처방을 했는데 세 번째로 같은 자리가 났다.
+    """
+    import json
+
+    from app.agent.v3.orchestrator.edit_ops import EditOp, _unknown_action_error
+
+    dirty = '따옴표"와\n개행'
+    msg = _unknown_action_error(0, EditOp(op="insert", anchor="n1", position="after"),
+                                [("Pkg", dirty)])
+    assert json.dumps(dirty, ensure_ascii=False) in msg, "이름이 이스케이프되지 않았다"
+    assert '따옴표"와' not in msg, "따옴표가 경계를 뚫고 그대로 실렸다"
+
+
+def test_update가_package만_바꾸면_물려받았다고_말해준다():
+    """실측(2026-08-02): "엑셀 패키지를 Microsoft로 바꿔줘"가 두 번 연속 실패했다.
+
+    모델은 `update`로 package만 바꿨고(자연스러운 판단), 코드가 action 이름을 현재값에서
+    물려받아 `Microsoft 365 Excel` + `Close action in Excel advanced package`가 됐다.
+    두 패키지의 닫기 액션 이름이 다른 것이 원인이다 — `Open`·`Write from data table`은
+    이름이 같아 통과했고 닫기만 걸렸다(적용 2, 실패 1).
+
+    그런데 사유가 "카탈로그 표기 그대로 적으세요"뿐이라 **모델은 그 이름을 적은 적이 없어**
+    어디를 고치라는 건지 알 수 없었다. 물려받았다는 사실을 사유에 담아야 연결이 된다.
+    """
+    from app.agent.v3.orchestrator.edit_ops import EditOp, _unknown_action_error
+
+    bad = [("Microsoft 365 Excel", "Close action in Excel advanced package")]
+
+    # package만 바꾼 update — 물려받았다고 알려 준다
+    op = EditOp(op="update", target="n3", package="Microsoft 365 Excel")
+    msg = _unknown_action_error(2, op, bad)
+    assert "물려받았다" in msg
+    assert "action_name을 새 패키지의 표기로 함께 지정" in msg
+
+    # 이름을 직접 적은 경우는 기존 문구 그대로 — 물려받은 게 아니다
+    op2 = EditOp(op="update", target="n3", package="Microsoft 365 Excel", action_name="없는이름")
+    assert "물려받았다" not in _unknown_action_error(2, op2, bad)
+    # insert처럼 물려받을 현재값이 없는 연산도 마찬가지
+    op3 = EditOp(op="insert", anchor="n1", position="after",
+                 action={"package": "X", "action": "Y"})
+    assert "물려받았다" not in _unknown_action_error(0, op3, [("X", "Y")])
+
+
+def test_edit_프롬프트가_패키지_교체시_액션명도_바꾸라고_한다():
+    """규칙이 없으면 모델은 package만 바꾼다 — 그게 자연스러운 해석이라서다."""
+    from pathlib import Path
+
+    import app.agent.v3 as v3
+
+    src = (Path(v3.__file__).parent / "prompts" / "edit.md").read_text(encoding="utf-8")
+    assert "package를 바꾸면 action_name도 함께 적는다" in src
+    assert "action_name" in src, "필드 이름이 action이 아님을 알려야 한다"
 
 

@@ -24,6 +24,12 @@
 - set_params: 기존 액션의 파라미터를 name 기준으로 병합/치환한다(나머지 파라미터는 보존).
     { "op":"set_params", "target":"n2", "parameters":[ {"name":"to","value":"a@b.com","value_source":"llm"} ] }
 - update: 액션의 package/action/label을 바꾼다. { "op":"update", "target":"n2", "label":"새 라벨" }
+    액션 이름은 `action`이 아니라 **`action_name`** 필드에 적는다(op 필드와 이름이 겹쳐서다).
+    ⚠ **package를 바꾸면 action_name도 함께 적는다.** 안 적으면 이전 패키지의 액션 이름이
+    그대로 남아 존재하지 않는 조합이 된다. 같은 기능이라도 패키지마다 표기가 다르다 —
+    예: 엑셀 닫기가 `Microsoft 365 Excel`에서는 `Close`, `Excel advanced`에서는
+    `Close action in Excel advanced package`다(`Open`처럼 이름이 같은 것도 있어 더 헷갈린다).
+    패키지를 통째로 바꾸는 요청이면 **바뀌는 액션마다** 새 패키지의 표기를 확인하고 적어라.
 - set_flow: 흐름도 수준 값. 바꿀 필드만 넣는다.
     { "op":"set_flow", "notes":"메모", "variables":[{"name":"nCount","type":"NUMBER"}], "assumptions":["실행 환경: macOS 러너"] }
     assumptions는 [현재 흐름도의 전제] 목록을 **통째로 교체**한다(병합 아님) — 바꿀 항목만

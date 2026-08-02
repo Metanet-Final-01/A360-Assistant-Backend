@@ -34,7 +34,7 @@ from ..recommend.graph import _coerce_flow
 from ..recommend.stream import emit, emit_flow_frame
 from .edit_ops import EditOps, annotate_ids, apply_edit_ops, render_outline, renumber, strip_ids
 from .generate import resolve_catalog_context
-from .harness import attach_confidence, verify_and_repair
+from .harness import attach_confidence, r1_package_hints, verify_and_repair
 from .render import render_compact, render_history
 from .state import TYPE_ANSWER, TYPE_RECOMMENDATION, TurnState
 from .tools import (
@@ -156,7 +156,9 @@ def _is_premise_only_edit(out_flow: dict, in_flow: dict) -> bool:
     )
 
 
-def _apply_to_flow(base: dict, ops: EditOps, catalog=None) -> tuple[dict, int, list[str]]:
+def _apply_to_flow(
+    base: dict, ops: EditOps, catalog=None, unknown_out: list | None = None
+) -> tuple[dict, int, list[str]]:
     """base(원본)의 사본에 id를 붙이고 ops를 적용한 뒤, id 제거·정규화·order 재정렬한 흐름도를
     반환한다. (flow, 적용_수, 실패_사유들). base는 건드리지 않는다 — 재시도 때 같은 id를 다시
     붙일 수 있어야(프롬프트에 보여준 id와 일치) 하기 때문이다.
@@ -165,7 +167,7 @@ def _apply_to_flow(base: dict, ops: EditOps, catalog=None) -> tuple[dict, int, l
     `_retry_message`로 모델에 되돌아간다(사용자 수정 요청은 재요청 기회가 1회 있다)."""
     work = copy.deepcopy(base)
     annotate_ids(work)
-    applied, errors = apply_edit_ops(work, ops.operations, catalog=catalog)
+    applied, errors = apply_edit_ops(work, ops.operations, catalog=catalog, unknown_out=unknown_out)
     strip_ids(work)
     work = _coerce_flow(work)  # 새 액션의 value_source 기본값·리스트 정규화
     renumber(work)             # 형제마다 order 1..N
@@ -306,14 +308,113 @@ async def _rescore_if_structural(flow: dict, ops: EditOps) -> None:
         logger.warning("edit 후 L2 재채점 실패 (무시): %s", e)
 
 
-def _retry_message(errors: list[str], outline: str) -> str:
-    """연산이 무효과였을 때, 유효 id를 다시 보여주며 실제 반영을 강제하는 재요청."""
-    reason = (" — 사유: " + "; ".join(errors[:4])) if errors else ""
+def _cant_apply_message(unknown: list, catalog) -> str:
+    """수정 실패를 사용자에게 알리는 말 — **무엇이 걸렸는지**를 담는다.
+
+    기존 문구는 원인과 무관하게 "조금 더 구체적으로 알려주세요"였다. 사용자가 이미 구체적으로
+    말했고 원인이 표기·미보유일 때 그 문구는 원인을 숨기고 책임을 사용자에게 넘긴다 — 몇 번을
+    다시 말해도 카탈로그에 없는 것은 없다.
+    """
+    if not unknown:
+        return _CANT_APPLY
+    pkgs = {p for p, _ in unknown if p}
+    # ⚠ 순회를 지원하는 카탈로그에서만 '없는 패키지'라고 단정한다 (Qodo #485).
+    # 순회 불가는 None으로 돌아오고, 그때는 판정을 보류해 이름 오류 문구로 떨어진다 —
+    # 틀린 단정이 침묵보다 나쁘다.
+    known = _existing_packages(catalog, pkgs)
+    missing = sorted(pkgs - known) if known is not None else []
+    if missing:
+        return (
+            f"요청하신 {', '.join(missing)} 패키지는 카탈로그에 없어서 흐름도에 넣을 수 없어요. "
+            "사용할 수 있는 패키지 이름으로 다시 말씀해 주시면 반영할게요."
+        )
+    names = ", ".join(f"{p}/{a}" for p, a in unknown[:3])
     return (
-        f"직전 연산이 흐름도를 실제로 바꾸지 못했다{reason}. 아래 구조에 있는 노드 id만 정확히 "
-        "참조해 요청한 변경을 이루는 operations를 다시 출력하라. wrap의 targets는 같은 부모의 "
-        "'연속된 형제'여야 한다. 예: '엑셀 열기를 try로 감싸라'면 그 액션 id를 targets에 넣고 "
-        "container=Error handler/errorHandlerTry, siblings_after에 Catch·Finally를 둔다. "
+        f"{names} 액션을 카탈로그에서 찾지 못해 수정을 되돌렸어요. "
+        "일부만 반영하면 흐름도가 어긋나서 전체를 되돌립니다 — 바꿀 액션을 지정해 주시면 다시 시도할게요."
+    )
+
+
+def _existing_packages(catalog, wanted: set[str]) -> set[str] | None:
+    """`wanted` 중 카탈로그에 **실재하는** 패키지만 — 순회는 **한 번**이다.
+
+    패키지마다 따로 확인하면 실패 경로가 O(패키지 수 × 카탈로그 크기)가 된다 (Qodo #485).
+    같은 지적을 `r1_package_hints`에서 이미 받고 고쳤는데(#473) 형제 함수인 여기가 남아
+    있었다 — 한 곳을 고칠 때 같은 모양을 함께 훑어야 한다는 뜻이다.
+
+    순회를 지원하지 않으면 **None**(판정 보류)이다. `CatalogLookup` 계약이 보장하는 것은
+    `get_action_schema` 하나뿐이라, 순회 불가를 '없음'으로 읽으면 실재하는 패키지를
+    "카탈로그에 없다"고 안내하게 된다.
+    """
+    if not wanted:
+        return set()  # 확인할 게 없으면 훑지 않는다 — 빈 집합에도 전량 순회가 돌았다(Qodo #485)
+    it = getattr(catalog, "iter_action_schemas", None)
+    if it is None:
+        return None
+    found: set[str] = set()
+    try:
+        for spec in it():
+            pkg = spec.get("package")
+            if pkg in wanted:
+                found.add(pkg)
+                if len(found) == len(wanted):
+                    break  # 다 찾았으면 더 볼 이유가 없다
+    except Exception as e:  # noqa: BLE001 — 안내 문구 실패가 턴을 죽이지 않게
+        logger.warning("패키지 존재 확인 실패: %s", e)
+        return None
+    return found
+
+
+async def _tool_loop(runnable, llm, tools, messages: list, usage_config: dict):
+    """도구 호출 왕복을 소진하고 **텍스트 응답**을 돌려준다.
+
+    첫 호출과 재요청이 같은 루프를 쓴다 — 재요청에도 도구를 붙이기 때문이다. 예전에는
+    재요청을 `llm.ainvoke` 한 줄로 처리해 도구가 없었는데, 실패 사유가 하필 "카탈로그에 없는
+    액션"일 때 **고칠 재료가 없는 상태로 다시 찍으라는 요구**가 됐다(실측 2026-08-02:
+    `Microsoft 365 Excel/Close action in Excel advanced package` — 실제 이름은 `Close`).
+
+    마지막 라운드는 도구를 떼어 강제 마무리한다 — 무한 검색을 끊는다.
+    """
+    response = await runnable.ainvoke(messages, config=usage_config)
+    rounds = 0
+    while getattr(response, "tool_calls", None) and rounds < _MAX_TOOL_ROUNDS:
+        rounds += 1
+        emit({"event": "stage", "stage": "searching",
+              "message": describe_tool_calls(response.tool_calls),
+              "data": tool_calls_data(response.tool_calls)})  # data는 관측 전용(RPA-105)
+        messages.append(response)
+        messages.extend(execute_tool_calls(tools, response))
+        target = llm if rounds == _MAX_TOOL_ROUNDS else runnable
+        response = await target.ainvoke(messages, config=usage_config)
+    return response
+
+
+_UNKNOWN_ACTION_HINT = (
+    "실패 사유가 '카탈로그에 없는 액션'이면 **표기 문제다.** 아래 목록에서 고르거나, "
+    "확신이 없으면 search_kb·get_action_schema로 정확한 표기를 확인한 뒤 다시 내라 — "
+    "기억으로 적지 마라. 목록에도 검색에도 대응이 없으면 지어내지 말고 operations를 비운 뒤 "
+    "answer에 그 사실을 적어라."
+)
+_BAD_TARGET_HINT = (
+    "실패 사유가 대상/구조 문제이면 아래 구조의 노드 id만 정확히 참조하라. wrap의 targets는 "
+    "같은 부모의 '연속된 형제'여야 한다. 예: '엑셀 열기를 try로 감싸라'면 그 액션 id를 "
+    "targets에 넣고 container=Error handler/errorHandlerTry, siblings_after에 Catch·Finally를 둔다."
+)
+
+
+def _retry_message(errors: list[str], outline: str, unknown: list | None = None) -> str:
+    """연산이 무효과였을 때의 재요청 — **오류 종류에 맞는 재료**를 함께 준다.
+
+    예전에는 오류가 무엇이든 같은 문구(노드 id·wrap 설명)를 보냈다. 액션 이름이 틀린 오류에
+    id 안내를 하는 셈이라, 모델이 고칠 단서를 못 받았다. 이름 오류면 표기를, 대상 오류면
+    id를 준다(둘 다면 둘 다).
+    """
+    reason = (" — 사유: " + "; ".join(errors[:4])) if errors else ""
+    guide = _UNKNOWN_ACTION_HINT if unknown else _BAD_TARGET_HINT
+    if unknown and any("대상 노드를 못 찾" in e or "조건" in e for e in errors):
+        guide = _UNKNOWN_ACTION_HINT + " " + _BAD_TARGET_HINT
+    return (
+        f"직전 연산이 흐름도를 실제로 바꾸지 못했다{reason}.\n{guide}\n"
         f"설명·코드펜스 없이 JSON 하나만 출력하라.\n\n[현재 흐름도 구조]\n{outline}"
     )
 
@@ -348,18 +449,7 @@ async def edit_node(state: TurnState) -> dict:
     outline = render_outline(annotated)
 
     messages = _build_messages(state, outline, _label_hint_block(state.get("message", ""), is_a360))
-    response = await runnable.ainvoke(messages, config=usage_config)
-    rounds = 0
-    while getattr(response, "tool_calls", None) and rounds < _MAX_TOOL_ROUNDS:
-        rounds += 1
-        emit({"event": "stage", "stage": "searching",
-              "message": describe_tool_calls(response.tool_calls),
-              "data": tool_calls_data(response.tool_calls)})  # data는 관측 전용(RPA-105)
-        messages.append(response)
-        messages.extend(execute_tool_calls(tools, response))
-        # 마지막 라운드는 도구 없이 강제 마무리 — 무한 검색을 끊는다.
-        target = llm if rounds == _MAX_TOOL_ROUNDS else runnable
-        response = await target.ainvoke(messages, config=usage_config)
+    response = await _tool_loop(runnable, llm, tools, messages, usage_config)
 
     try:
         ops = _parse_ops(response.text)
@@ -393,23 +483,39 @@ async def edit_node(state: TurnState) -> dict:
     # 연산 일부만 적용되고 나머지가 실패한(errors 비어있지 않은) 경우도 '미완결'로 본다 —
     # 실패한 연산을 삼키고 applied>0을 성공으로 처리하면 사용자가 요청한 수정 일부가 조용히
     # 누락된다. 유효 id를 재안내해 1회 재요청하고, 재요청도 완결되지 않으면 정직하게 저하한다.
-    flow, applied, errors = _apply_to_flow(base, ops, catalog=ctx.catalog)
+    unknown: list = []
+    flow, applied, errors = _apply_to_flow(base, ops, catalog=ctx.catalog, unknown_out=unknown)
     if applied == 0 or errors or _is_noop_edit(flow, base):
-        logger.info("edit 연산 미완결(적용 %d, 실패 %s) — 유효 id 재안내 후 1회 재요청", applied, errors[:3])
+        logger.info("edit 연산 미완결(적용 %d, 실패 %s) — 재요청", applied, errors[:3])
+        # 실패가 '없는 액션'이면 그 패키지의 **실제 액션 이름**을 함께 준다. 재요청에도 도구가
+        # 붙어 있으니 모델이 직접 확인할 수도 있는데, 목록을 함께 두는 이유는 검색이 의미가
+        # 가까운 오답을 집을 수 있어서다(`Read cell` → `Read cell format`). 코드는 후보를
+        # 좁혀 주고 고르는 것은 모델이다 — RPA-359 `r1_package_hints`의 원칙 그대로다.
+        hints = ""
+        if unknown and ctx is not None:
+            hints = r1_package_hints(
+                [{"rule": "R1", "package": p, "action": a} for p, a in unknown], ctx.catalog
+            )
         messages.append(response)
-        messages.append(HumanMessage(content=_retry_message(errors, outline)))
-        response = await llm.ainvoke(messages, config=usage_config)  # 재요청은 도구 없이
+        messages.append(HumanMessage(content=_retry_message(errors, outline, unknown) + hints))
+        response = await _tool_loop(runnable, llm, tools, messages, usage_config)
         try:
             ops = _parse_ops(response.text)
         except (json.JSONDecodeError, ValidationError) as e:
             logger.warning("edit 재요청 연산 파싱 실패: %s", e)
             return {"turn_type": TYPE_ANSWER, "answer": _CANT_APPLY, "sources": sink_to_sources(sink)}
         if not ops.operations:
+            # 모델이 '대응 액션이 없다'고 정직하게 물러선 경우 — 그 답변을 그대로 전한다.
             return {"turn_type": TYPE_ANSWER, "answer": ops.answer or _CANT_APPLY, "sources": sink_to_sources(sink)}
-        flow, applied, errors = _apply_to_flow(base, ops, catalog=ctx.catalog)
+        unknown2: list = []
+        flow, applied, errors = _apply_to_flow(base, ops, catalog=ctx.catalog, unknown_out=unknown2)
         if applied == 0 or errors or _is_noop_edit(flow, base):
             logger.warning("edit 재요청 후에도 미완결(적용 %d, 실패 %s) — 답변으로 저하", applied, errors[:3])
-            return {"turn_type": TYPE_ANSWER, "answer": _CANT_APPLY, "sources": sink_to_sources(sink)}
+            # 사용자에게 **무엇이 걸렸는지** 말한다. 예전에는 원인과 무관하게 "조금 더
+            # 구체적으로 알려주세요"였는데, 이번처럼 사용자가 이미 구체적으로 말했고 원인이
+            # 우리 쪽 표기 오류일 때 그 문구는 책임을 사용자에게 떠넘긴다.
+            return {"turn_type": TYPE_ANSWER, "answer": _cant_apply_message(unknown2, ctx.catalog),
+                    "sources": sink_to_sources(sink)}
 
     # 라이브 렌더: 적용된 수정안을 즉시 프레임으로 흘려보낸다(추천 흐름도 상세 패널이 트리로 표시).
     emit_flow_frame(flow, None, "수정안 구성")
