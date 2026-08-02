@@ -41,21 +41,13 @@ def _error_digest(err: Exception) -> str:
     return "JSON 구문 오류"  # JSONDecodeError 위치정보도 굳이 노출하지 않는다
 
 
-def chat_json(
-    messages: list[dict], *, purpose: str, model_cls: type[T],
-    temperature: float | None = None,
-) -> T:
+def chat_json(messages: list[dict], *, purpose: str, model_cls: type[T]) -> T:
     """JSON mode로 LLM을 호출해 model_cls로 검증한다. 위반 시 1회 교정, 재실패면 ValueError.
 
     사용량은 core.llm.chat이 purpose로 귀속 기록한다 — 오케스트레이터의 모든 구조화
     호출이 usage 기록 경로를 타야 하는 계약(링 게이지)의 이행 지점이다.
-
-    `temperature`는 그대로 전달한다(미지정=공급자 기본값). **같은 입력이면 같은 답이
-    나와야 하는 호출**(정형화·채점)은 0을 준다 — core.llm.chat의 temperature 주석 참고.
-    교정 회차에도 같은 값을 쓴다: 첫 호출만 고정하면 재현성이 반쪽이다.
     """
-    raw = llm.chat(messages, purpose=purpose, response_format=_RESPONSE_FORMAT,
-                   temperature=temperature)
+    raw = llm.chat(messages, purpose=purpose, response_format=_RESPONSE_FORMAT)
     try:
         return _parse(raw, model_cls)
     except (json.JSONDecodeError, ValidationError) as first_error:
@@ -72,8 +64,7 @@ def chat_json(
                 ),
             },
         ]
-        repaired = llm.chat(repair_messages, purpose=purpose, response_format=_RESPONSE_FORMAT,
-                            temperature=temperature)
+        repaired = llm.chat(repair_messages, purpose=purpose, response_format=_RESPONSE_FORMAT)
         try:
             return _parse(repaired, model_cls)
         except (json.JSONDecodeError, ValidationError) as second_error:

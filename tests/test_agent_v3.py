@@ -102,6 +102,57 @@ def test_r7_both_branches_open_is_consistent():
     assert violations == []
 
 
+def test_r7_finally_안의_정리_가드는_불일치로_보지_않는다():
+    """Finally 안의 `If <열렸는가> → Close`는 결함이 아니라 **정확한 정리**다.
+
+    이 검사의 근거는 "병합 이후 동작이 경로에 따라 달라진다"인데 Finally 뒤에는 그 세션을
+    쓰는 액션이 없다. 그리고 이 예외가 없으면 세션 정리에 **합법 수가 없다**(실측):
+
+        Finally·가드 없음   가중치  0  ← 대신 L3가 error 경로를 떨어뜨린다(미초기화 세션 정리)
+        Finally·If 가드     가중치 10  ← 여기서 R7 major
+        Finally 밖으로      가중치 11  ← R12 경고 + R8 major
+
+    셋 다 벌점이면 모델은 고칠 방법이 없다. Else를 명시해도 분기 상태는 갈리므로 같았다.
+    """
+    open_x = _act("Excel advanced", "cloudExcelOpen", params=[_param("sessionName", "S")])
+    close_x = _act("Excel advanced", "excelAdvancedPackageCloseAction",
+                   params=[_param("sessionName", "S")])
+    steps = [{"step_id": "s1", "actions": [
+        _act("Error handler", "errorHandlerTry", children=[open_x]),
+        _act("Error handler", "errorHandlerCatch", children=[]),
+        _act("Error handler", "errorHandlerFinally", children=[
+            _act("If", "ifPackageIfAction", children=[close_x]),
+        ]),
+    ]}]
+    violations = checker.run_session_checks(steps)
+    assert not [v for v in violations if v.rule == "R7" and "불일치" in v.message], \
+        f"Finally 정리 가드가 R7로 잡혔다: {[v.message for v in violations]}"
+
+    # ⚠ 예외는 **닫기 가드 모양에만** 준다 (Qodo #486). Finally 안이라도 분기가 세션을
+    # **열어서** 상태가 갈리는 것은 정리 가드가 아니므로 그대로 잡아야 한다.
+    opens_in_branch = [{"step_id": "s1", "actions": [
+        _act("Error handler", "errorHandlerTry", children=[_act("Browser", "browserPackageOpenAction")]),
+        _act("Error handler", "errorHandlerCatch", children=[]),
+        _act("Error handler", "errorHandlerFinally", children=[
+            _act("If", "ifPackageIfAction", children=[open_x]),  # 한쪽 분기에서만 연다
+        ]),
+    ]}]
+    assert any(v.rule == "R7" and "불일치" in v.message
+               for v in checker.run_session_checks(opens_in_branch)), \
+        "Finally 예외가 '열기로 갈린 상태'까지 덮었다 — 정리 가드 모양에만 줘야 한다"
+
+    # Finally **밖**에서는 그대로 잡아야 한다 — 예외는 정리 구간에만 준다
+    outside = [{"step_id": "s1", "actions": [
+        open_x,
+        _act("If", "ifPackageIfAction", children=[close_x]),
+        _act("Excel advanced", "excelAdvancedPackageSaveWorkbookAction",
+             params=[_param("sessionName", "S")]),
+    ]}]
+    assert any(v.rule == "R7" and "불일치" in v.message
+               for v in checker.run_session_checks(outside)), \
+        "Finally 밖의 분기 불일치까지 놓치면 진짜 결함이 샌다"
+
+
 def test_r8_loop_leak_warning():
     """Loop 본문에서 열고 본문에서 닫지 않으면 반복 누수 경고 + 미종료 R8."""
     steps = [{"step_id": "s1", "actions": [
@@ -1874,54 +1925,6 @@ def test_안_채워진_노드는_필드가_아니라_패치로_센다():
     assert (total, patched, total - patched) == (3, 2, 1)   # 남은 하나가 진짜 누락(n3)
 
 
-def test_계측_경로는_temperature를_고정한다():
-    """실측(2026-07-30): 같은 업무정의서를 세션마다 새로 올려(=대화 이력 없음) 세 턴 돌렸는데
-    요구사항이 6·8·10건으로 갈렸고 오류 정책은 있다가 없어졌다. 입력이 같고 이력도 없으니
-    남는 변수는 샘플링뿐이었다 — temperature가 어디에도 설정돼 있지 않았다(공급자 기본 ≈1.0).
-
-    재는 도구(분석·정형화·L2·L3)는 같은 입력에 같은 답을 내야 한다. 생성 경로는 건드리지
-    않는다. 비전 파싱도 걸지 않는다 — 효과가 없다는 실측이 있다(RPA-351, 아래 전용 테스트).
-    """
-    import inspect
-
-    from app.agent.v3 import config as v3config
-    from app.agent.v3.orchestrator import spec as spec_mod
-    from app.agent.v3.verify import semantic, simulate
-
-    assert v3config.measure_temperature() == 0.0
-    for mod, name in ((spec_mod, "spec_builder"), (semantic, "L2"), (simulate, "L3")):
-        src = inspect.getsource(mod)
-        assert "temperature=config.measure_temperature()" in src, f"{name}에 안 걸렸다"
-
-
-def test_temperature_되돌릴_통로는_실제로_열려_있다(monkeypatch):
-    """`MEASURE_TEMPERATURE=`는 "인자를 안 보낸다"는 지시다 — .env.example이 그렇게 적어 뒀고,
-    설정을 되돌릴 유일한 통로다.
-
-    그런데 `or`로 기본값을 묶으면 그 통로가 조용히 막힌다: 빈 문자열이 falsy라 기본값 "0"으로
-    떨어져 **문서와 반대로** 0이 걸렸다. 공백 한 칸은 truthy라 None이 됐으니, 같은 "빈 값"이
-    한 칸 차이로 갈렸다(Qodo). 미설정과 설정된 빈 값은 다른 사실이다.
-
-    비수치·비유한도 None으로 떨어져야 한다 — 오타 하나가 계측 경로 전체를 죽이면 안 된다.
-    `nan`/`inf`는 `float()`를 통과하므로 따로 막지 않으면 요청까지 실려 나간다.
-    """
-    from app.agent.v3 import config as v3config
-
-    monkeypatch.delenv("MEASURE_TEMPERATURE", raising=False)
-    assert v3config.measure_temperature() == 0.0, "미설정은 선언된 기본값(0)"
-
-    for blank in ("", " ", "\t\n"):
-        monkeypatch.setenv("MEASURE_TEMPERATURE", blank)
-        assert v3config.measure_temperature() is None, f"빈 값({blank!r})은 인자 미전송"
-
-    for junk in ("이건 숫자가 아니다", "nan", "inf", "-inf", "Infinity"):
-        monkeypatch.setenv("MEASURE_TEMPERATURE", junk)
-        assert v3config.measure_temperature() is None, f"{junk!r}가 인자로 나갔다"
-
-    monkeypatch.setenv("MEASURE_TEMPERATURE", "0.7")
-    assert v3config.measure_temperature() == 0.7, "정상값은 그대로 통한다"
-
-
 def test_v3_설정은_빈_값에_기동이_죽지_않는다(monkeypatch):
     """`int(os.getenv(k, "8"))`은 키가 **있으면서 빈 값**일 때 `int("")`로 터진다. 이 모듈은
     임포트 시점에 읽으므로 그 예외가 곧 기동 실패다 — 템플릿 배포에서 `KEY=`로 남는 흔한
@@ -1948,94 +1951,7 @@ def test_v3_설정은_빈_값에_기동이_죽지_않는다(monkeypatch):
         importlib.reload(v3config)  # 다른 테스트가 보는 모듈 상태를 원복한다
 
 
-def test_chat이_temperature를_거부당하면_떼고_살린다(monkeypatch):
-    """모델이 이 인자를 안 받으면 호출 자체가 죽는다 — 재현성은 잃어도 턴은 살려야 한다."""
-    from app.core import llm
-
-    calls = []
-
-    class _Resp:
-        choices = [type("C", (), {"message": type("M", (), {"content": "{}"})(),
-                                  "finish_reason": "stop"})()]
-        usage = None
-
-    class _Client:
-        class chat:  # noqa: N801
-            class completions:  # noqa: N801
-                @staticmethod
-                def create(**kw):
-                    calls.append(dict(kw))
-                    if "temperature" in kw:
-                        raise ValueError("Unsupported parameter: 'temperature'")
-                    return _Resp()
-
-    monkeypatch.setattr(llm, "_get_client", lambda: _Client())
-    monkeypatch.setattr(llm, "_record_usage", lambda *a, **k: None, raising=False)
-
-    out = llm.chat([{"role": "user", "content": "x"}], purpose="t", temperature=0)
-
-    assert out == "{}"
-    assert len(calls) == 2, "한 번 거부당하고 한 번 더 시도해야 한다"
-    assert "temperature" in calls[0] and "temperature" not in calls[1]
-
-
-def test_temperature_재시도는_그_인자를_지목한_실패에만(monkeypatch):
-    """처음에는 `except Exception`으로 넓게 잡았다. 그러면 스키마 오류·콘텐츠 필터 같은
-    무관한 실패까지 호출을 한 번 더 태우고(비용·지연 2배) 로그에는 "모델이 temperature를
-    거부"로 남는다 — 원인을 엉뚱한 곳에서 찾게 된다(Qodo).
-
-    판정 기준은 (a) 5xx가 아니고 (b) 메시지가 그 인자를 지목했는가다.
-    """
-    from app.core import llm
-
-    calls = []
-
-    class _Client:
-        class chat:  # noqa: N801
-            class completions:  # noqa: N801
-                @staticmethod
-                def create(**kw):
-                    calls.append(dict(kw))
-                    raise ValueError("Invalid schema for response_format")
-
-    monkeypatch.setattr(llm, "_get_client", lambda: _Client())
-    monkeypatch.setattr(llm, "_record_usage", lambda *a, **k: None, raising=False)
-
-    with pytest.raises(ValueError, match="Invalid schema"):
-        llm.chat([{"role": "user", "content": "x"}], purpose="t", temperature=0)
-    assert len(calls) == 1, "temperature와 무관한 실패로 호출을 두 번 태웠다"
-
-
-def test_temperature_거부_판정은_5xx를_배제한다():
-    """서버 쪽 실패(5xx)는 인자를 떼도 안 낫는다 — 떼고 또 태우면 부하만 보탠다.
-    공급자가 오류 형태를 바꿀 수 있으니 타입 이름만 믿지 않고 메시지도 함께 본다.
-    """
-    import httpx
-    from openai import BadRequestError, InternalServerError
-
-    from app.core import llm
-
-    kw = {"temperature": 0}
-    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
-
-    def _err(cls, status, msg):
-        return cls(msg, response=httpx.Response(status, request=req), body=None)
-
-    assert llm._rejects_temperature(
-        _err(BadRequestError, 400, "Unsupported parameter: 'temperature'"), kw)
-    assert not llm._rejects_temperature(
-        _err(BadRequestError, 400, "Invalid schema for response_format"), kw)
-    assert not llm._rejects_temperature(
-        _err(InternalServerError, 500, "temperature service unavailable"), kw), "5xx를 인자 탓으로"
-    # 인자를 안 보낸 호출은 애초에 후보가 아니다 — 뗄 것이 없다
-    assert not llm._rejects_temperature(
-        _err(BadRequestError, 400, "Unsupported parameter: 'temperature'"), {})
-    # SDK 층에서 kwarg를 거부하는 경우(구버전·스텁)도 살려야 한다
-    assert llm._rejects_temperature(
-        TypeError("create() got an unexpected keyword argument 'temperature'"), kw)
-
-
-def test_error_경로는_산출물_미생성으로_감점되지_않는다():
+def test_error와_alt_경로는_산출물_미생성으로_감점되지_않는다():
     """실측(2026-07-30): 커버리지 1.0 · 검수 위반 0건인 흐름도가 신뢰도 0.67에 머물렀고,
     병목이 시뮬레이션 0.667이었다. 실패 판정이 이것이었다:
 
@@ -2044,7 +1960,12 @@ def test_error_경로는_산출물_미생성으로_감점되지_않는다():
     `error` 경로는 **정의상** Try 중간에 멈춘 경로라 산출물이 나올 수 없다. 그걸 결함으로
     세면 (a) Error handler를 갖춘 흐름도만 error 경로가 생기므로 **오류 처리를 한 쪽이
     벌점을 받고**, (b) 경로 3개짜리 흐름도의 통과율 상한이 2/3에 고정돼 신뢰도 천장이
-    0.67이 된다. 판정 기준에서 그 적용을 명시적으로 막아야 한다.
+    0.67이 된다.
+
+    `alt`(반복 0회)도 같은 이유로 같은 예외를 받는다 — 실측(2026-08-01) 세 턴 연속으로
+    "반복 0회라 표가 안 만들어졌다"가 실패 사유였다. 처리할 데이터가 0건이면 산출물이 없는
+    것이 정상이고, 그걸 감점하면 **빈 데이터를 제대로 건너뛴 흐름이 손해를 본다.** 남는
+    기준은 "안전하게 끝나는가"와 "빈 결과를 완성본처럼 남기지 않는가"다.
     """
     from pathlib import Path
 
@@ -2053,10 +1974,17 @@ def test_error_경로는_산출물_미생성으로_감점되지_않는다():
     text = (Path(simulate.__file__).resolve().parent.parent
             / "prompts" / "simulate_judge.md").read_text(encoding="utf-8")
 
-    assert "이 기준을 적용하지 마세요" in text, "목표달성 기준의 error 예외가 없다"
-    assert "정의상 산출물이 만들어지지 않습니다" in text
+    assert "`error` 경로에는 적용하지 마세요" in text, "목표달성 기준의 error 예외가 없다"
+    # 원문이 줄바꿈으로 갈리므로 조각으로 본다 (문구를 다듬어도 뜻이 남으면 통과)
+    assert "정의상 산출물이" in text
+    assert "반복 0회라 표가 안 만들어졌다" in text, "alt의 '처리할 것 없음'이 면제되지 않았다"
+    # ⚠ alt를 통째로 면제하면 안 된다 (Qodo #486) — 트레이서는 Else 분기로도 alt를 만든다.
+    # Else가 실제로 일을 하는 흐름에서 산출물 미생성은 진짜 결함이다.
+    assert "다른 분기가 실제로 일을 하는" in text, "alt를 통째로 면제하면 Else 결함이 샌다"
+    assert "1번을 그대로" in text
     # 무엇을 물어야 하는지도 함께 적어야 한다 — 빼기만 하면 판정관이 기준을 잃는다
     assert "안전하게 실패했나" in text
+    assert "빈 결과를 완성본처럼" in text, "alt에 남는 판정 기준이 없다"
     # 오류 처리를 갖춘 쪽이 벌점을 받는 역설을 명시한다(예시가 규칙을 이기는 전례가 많았다)
     assert "낮은 점수를 받습니다" in text
 
@@ -2075,41 +2003,200 @@ def test_error_트레이스는_Error_handler가_있을_때만_생긴다():
     assert set(build_traces(guarded)) == {"happy", "alt", "error"}
 
 
-def test_분석도_temperature를_고정한다():
-    """분석은 정형화의 **입력**이다 — 여기가 흔들리면 아래 전부가 흔들린다."""
-    import inspect
+def test_edit_재요청은_고칠_재료를_함께_준다():
+    """실측(2026-08-02): "엑셀 패키지를 microsoft로 바꿔줘"가 실패했다.
 
-    from app.agent.v3 import analysis
+    모델이 `Microsoft 365 Excel/Close action in Excel advanced package`를 냈다 — 액션 이름
+    자리에 **설명 문장**을 적었다(실제 이름은 `Close`). 6개 중 5개는 적용됐지만 1개 실패로
+    전체가 되돌아갔고, 사용자는 "조금 더 구체적으로 알려주세요"만 봤다.
 
-    assert inspect.getsource(analysis).count("temperature=config.measure_temperature()") == 2, \
-        "analyze는 첫 호출과 교정 회차 둘 다 고정해야 한다"
-
-
-def test_비전_파싱에는_temperature를_걸지_않는다():
-    """처음에는 걸었다 — 스펙 편차의 근원이 문서 파싱이었고(같은 PDF의 parsed_content 해시가
-    매번 달랐다) 샘플링을 고정하면 잡힐 것이라 봤다.
-
-    그런데 RPA-351에서 재보니 **0을 걸고도 출력이 550 대 1,388로 갈렸다** — 가설이 반증됐다.
-    실제로 편차를 줄인 것은 프롬프트 쪽이었다. 효과가 없는 조치를 근거처럼 남겨 두면
-    다음 사람이 그걸 믿고 "파싱은 이미 고정됐다"고 읽는다. 그래서 뺐고, 다시 들어오지
-    않도록 잰다.
+    복구가 안 된 이유는 재요청이 **맨손**이었기 때문이다:
+      - 도구를 뗀 채(`llm.ainvoke`) 불러 카탈로그를 확인할 수 없었고
+      - "카탈로그 표기 그대로 적으세요"라면서 그 표기를 주지 않았고
+      - 흐름도 아웃라인은 **바꾸기 전** 이름만 보여줬다
+    모델이 답을 알아낼 통로가 없는 상태에서 다시 찍으라는 요구였다.
     """
     import inspect
 
-    from app.services.parser import vision
+    from app.agent.v3.orchestrator import edit as edit_mod
+    from app.agent.v3.orchestrator.harness import r1_package_hints
 
-    src = inspect.getsource(vision)
-    assert "measure_temperature" not in src, \
-        "비전 파싱에 temperature가 되돌아왔다 — 효과가 없다는 실측이 있다(RPA-351)"
+    src = inspect.getsource(edit_mod)
+    # (1) 재요청도 도구 루프를 탄다 — 첫 호출과 같은 함수를 쓴다
+    assert src.count("await _tool_loop(") >= 2, \
+        "재요청이 도구 없이 불린다 — '카탈로그에 없는 액션'을 고칠 방법이 사라진다"
+    # (2) 실패한 (package, action)이 구조로 흐른다 — 사유 문자열 되파싱은 문구를 바꾸면 깨진다
+    assert "unknown_out=" in src and "r1_package_hints(" in src
+
+    # (3) 오류 종류에 맞는 안내가 나간다
+    name_err = ["op[0] update: 카탈로그에 없는 액션 X/Y — 적용하지 않음"]
+    assert "표기 문제" in edit_mod._retry_message(name_err, "OUTLINE", [("X", "Y")])
+    assert "표기 문제" not in edit_mod._retry_message(["op[0] update: 대상 노드를 못 찾았거나"], "OUTLINE", [])
+
+    # (4) 패키지가 아예 없으면 '없다'고 알리고 이름이 겹치는 후보를 준다 (빈손 금지)
+    hints = r1_package_hints([{"rule": "R1", "package": "microsoft", "action": "Close"}], FakeCatalog())
+    assert "카탈로그에 **없는** 패키지" in hints
+    assert "지어내지 말고" in hints, "없을 때 물러설 길을 안 주면 또 지어낸다"
+
+    # (5) 사용자에게 나가는 말이 원인을 담는다 — "구체적으로 말하라"로 뭉개지 않는다
+    msg = edit_mod._cant_apply_message([("SAP GUI", "Login")], FakeCatalog())
+    assert "SAP GUI" in msg and "카탈로그에 없어서" in msg
 
 
-def test_measure_temperature는_한_곳에서만_해석된다():
-    """파서(app/services)와 에이전트(app/agent)가 각자 읽으면 두 기본값이 갈린다."""
-    from app.agent.v3 import config as v3config
+def test_update가_package만_바꾸면_물려받았다고_말해준다():
+    """실측(2026-08-02): "엑셀 패키지를 Microsoft로 바꿔줘"가 두 번 연속 실패했다.
+
+    모델은 `update`로 package만 바꿨고(자연스러운 판단), 코드가 action 이름을 현재값에서
+    물려받아 `Microsoft 365 Excel` + `Close action in Excel advanced package`가 됐다.
+    두 패키지의 닫기 액션 이름이 다른 것이 원인이다 — `Open`·`Write from data table`은
+    이름이 같아 통과했고 닫기만 걸렸다(적용 2, 실패 1).
+
+    그런데 사유가 "카탈로그 표기 그대로 적으세요"뿐이라 **모델은 그 이름을 적은 적이 없어**
+    어디를 고치라는 건지 알 수 없었다. 물려받았다는 사실을 사유에 담아야 연결이 된다.
+    """
+    from app.agent.v3.orchestrator.edit_ops import EditOp, _unknown_action_error
+
+    bad = [("Microsoft 365 Excel", "Close action in Excel advanced package")]
+
+    # package만 바꾼 update — 물려받았다고 알려 준다
+    op = EditOp(op="update", target="n3", package="Microsoft 365 Excel")
+    msg = _unknown_action_error(2, op, bad)
+    assert "물려받았다" in msg
+    assert "action_name을 새 패키지의 표기로 함께 지정" in msg
+
+    # 이름을 직접 적은 경우는 기존 문구 그대로 — 물려받은 게 아니다
+    op2 = EditOp(op="update", target="n3", package="Microsoft 365 Excel", action_name="없는이름")
+    assert "물려받았다" not in _unknown_action_error(2, op2, bad)
+    # insert처럼 물려받을 현재값이 없는 연산도 마찬가지
+    op3 = EditOp(op="insert", anchor="n1", position="after",
+                 action={"package": "X", "action": "Y"})
+    assert "물려받았다" not in _unknown_action_error(0, op3, [("X", "Y")])
+
+
+def test_edit_프롬프트가_패키지_교체시_액션명도_바꾸라고_한다():
+    """규칙이 없으면 모델은 package만 바꾼다 — 그게 자연스러운 해석이라서다."""
+    from pathlib import Path
+
+    import app.agent.v3 as v3
+
+    src = (Path(v3.__file__).parent / "prompts" / "edit.md").read_text(encoding="utf-8")
+    assert "package를 바꾸면 action_name도 함께 적는다" in src
+    assert "action_name" in src, "필드 이름이 action이 아님을 알려야 한다"
+
+
+def test_도구를_바인딩하는_노드는_reasoning_effort를_명시한다():
+    """실측(2026-08-02): qa 노드가 400으로 즉사했다.
+
+        Function tools with reasoning_effort are not supported for gpt-5.6-luna
+        in /v1/chat/completions. ... or set reasoning_effort to 'none'.
+
+    chat.completions는 **도구와 추론을 함께 못 쓴다** — gpt-5.4-mini·5.4·5.5·5.6-luna
+    전부 같이 주면 400이다. 그리고 luna는 **인자를 빼는 것만으로는 안 통과한다**(공급자
+    기본이 none이 아니다). 그래서 도구를 바인딩하는 노드는 "none"을 **명시**해야 한다.
+
+    이건 모델을 바꿀 때마다 되돌아오는 종류의 결함이라, 새 도구 노드가 생기면 자동으로
+    걸리게 잰다. (추론이 필요하면 값을 올리지 말고 그 노드를 Responses API로 옮긴다.)
+    """
+    import importlib
+    import inspect
+
     from app.core import config as core_config
 
-    assert v3config.measure_temperature() == core_config.measure_temperature() == 0.0
-    assert "MEASURE_TEMPERATURE" in core_config.REGISTRY
+    # 도구를 바인딩하는 모듈 = bind_tools를 호출하는 모듈
+    modules = [
+        "app.agent.v1.orchestrator.qa", "app.agent.v1.orchestrator.edit",
+        "app.agent.v2.orchestrator.qa", "app.agent.v2.orchestrator.edit",
+        "app.agent.v2.recommend.graph",
+        "app.agent.v3.orchestrator.qa", "app.agent.v3.orchestrator.edit",
+    ]
+    for name in modules:
+        src = inspect.getsource(importlib.import_module(name))
+        assert ".bind_tools(" in src, f"{name}이 더는 도구를 안 쓴다 — 이 목록을 갱신하라"
+        assert "tool_llm_kwargs(" in src, (
+            f"{name}이 도구를 바인딩하면서 tool_llm_kwargs를 안 쓴다 — 추론 강도와 전송 방식을 "
+            "따로 정하면 강도를 올린 사람이 400을 만난다"
+        )
+
+    # 강도와 전송은 **함께** 정해져야 한다 — 이 결합이 깨지면 400이 돌아온다
+    assert core_config.tool_llm_kwargs("none") == {"reasoning_effort": "none"}, \
+        "none일 때 인자를 빼면 안 된다 — luna는 공급자 기본이 none이 아니라 400이다"
+    assert core_config.tool_llm_kwargs("medium") == {
+        "reasoning_effort": "medium", "use_responses_api": True}, \
+        "추론을 켜면 Responses API로 가야 한다 — chat.completions는 도구+추론을 못 받는다"
+
+    # 선언된 기본값 — 이건 env와 무관한 사실이다
+    assert core_config.REGISTRY["TOOL_REASONING"].default == "none"
+    assert core_config.REGISTRY["EDIT_REASONING"].default == "medium"
+
+
+def test_temperature는_어디에도_보내지_않는다():
+    """한때 계측 경로(분석·정형화·L2·L3)에 temperature=0을 걸어 재현성을 확보했다. 그건 그
+    인자를 받아 주는 모델에서만 성립하는 장치였다 — 추론형 모델은 기본값 외의 값을 400으로
+    거부하고, 그러면 호출마다 실패-재시도로 왕복이 두 배가 되면서 재현성은 어차피 없다.
+    '있는 척'만 남으므로 인자 자체를 뺐다.
+
+    되돌아오면 같은 자리에서 같은 값을 다시 치른다 — 그래서 잰다.
+    """
+    import ast
+    import inspect
+
+    from app.agent.v3 import analysis
+    from app.agent.v3.orchestrator import jsonio
+    from app.agent.v3.orchestrator import spec as spec_mod
+    from app.agent.v3.verify import semantic, simulate
+    from app.core import config as core_config
+    from app.core import llm
+
+    # ⚠ 원문에 "temperature"라는 **글자**가 있는지 보면 안 된다 (Qodo #486) — 주석·독스트링에
+    # 이 결정을 설명하는 문장이 들어가는 순간 테스트가 깨져서, 문서를 남기는 것을 막는다.
+    # 재야 할 성질은 "**인자로 넘기는가**"다. AST로 호출의 키워드 인자만 본다.
+    for mod in (analysis, jsonio, spec_mod, semantic, simulate):
+        tree = ast.parse(inspect.getsource(mod))
+        passed = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "temperature"
+        ]
+        assert not passed, f"{mod.__name__}이 temperature를 인자로 넘긴다"
+    assert "temperature" not in inspect.signature(llm.chat).parameters, \
+        "llm.chat이 temperature 인자를 다시 받는다 — 통로가 생기면 정책도 돌아온다"
+    assert "MEASURE_TEMPERATURE" not in core_config.REGISTRY, \
+        "설정 키가 살아 있으면 .env가 아무 효과 없이 설정을 '건 것처럼' 보인다"
+
+
+def test_세션_정리_규칙이_검수와_모순되지_않는다():
+    """구조 프롬프트가 강제하는 배치를 검수·판정이 벌하면 모델은 고칠 방법이 없다.
+
+    한 번 겪었다: 정리 가드를 지시했더니 R7이 그걸 잡아 위반이 2.3건/턴 → 9.7건, major
+    0 → 2~9건이 됐고 턴 비용은 3.5배가 됐다. 그때는 지시를 뺐고, 지금은 **R7 쪽에
+    Finally 예외**를 넣어(정리 구간은 병합 이후 소비자가 없다) 가드가 합법 수가 됐다.
+
+    세 규칙이 같은 방향을 봐야 한다:
+      - 프롬프트: 정리는 Finally에, 여는 액션이 둘 이상이면 가드
+      - R7:       Finally 안의 분기 불일치는 위반이 아님
+      - R12:      정리가 Finally 밖이면 경고
+    """
+    from pathlib import Path
+
+    import app.agent.v3 as v3
+
+    prompts = Path(v3.__file__).parent / "prompts"
+    compose = (prompts / "compose_agent.md").read_text(encoding="utf-8")
+    judge = (prompts / "simulate_judge.md").read_text(encoding="utf-8")
+
+    # 정리는 Finally에 두되, 미초기화 세션을 닫지 않도록 가드를 **허용**한다
+    assert "Finally는 Try의 어디에서 실패했든 실행된다" in compose
+    assert "여는 액션이 둘 이상이면" in compose
+    assert "없는 가드를 만들지 마라" in compose, "가드를 무조건 만들게 하면 흐름이 부푼다"
+
+    # 성공 플래그는 produces를 함께 선언해야 R9에 안 걸린다
+    assert "produces`에 그 이름을 넣는다" in compose, "플래그 선언 지시가 없으면 R9가 난다"
+
+    # alt(반복 0회)를 '산출물 미생성'으로 감점하면 빈 데이터를 제대로 처리한 흐름이 손해다.
+    # 다만 통째 면제도 안 된다 — Else가 실제로 일을 하는 alt는 1번을 그대로 받는다(Qodo #486).
+    assert "반복 0회라 표가 안 만들어졌다" in judge
+    assert "다른 분기가 실제로 일을 하는" in judge
 
 
 def test_L3_판정이_관측에_남는다():
@@ -3560,51 +3647,6 @@ def test_수리_메뉴의_어휘_덧붙임에는_상한이_있다():
     assert added <= _REPAIR_VOCAB_CAP, "어휘 덧붙임이 상한을 넘었다"
 
 
-def test_도구를_바인딩하는_노드는_reasoning_effort를_명시한다():
-    """실측(2026-08-02): qa 노드가 400으로 즉사했다.
-
-        Function tools with reasoning_effort are not supported for gpt-5.6-luna
-        in /v1/chat/completions. ... or set reasoning_effort to 'none'.
-
-    chat.completions는 **도구와 추론을 함께 못 쓴다** — gpt-5.4-mini·5.4·5.5·5.6-luna
-    전부 같이 주면 400이다. 그리고 luna는 **인자를 빼는 것만으로는 안 통과한다**(공급자
-    기본이 none이 아니다). 그래서 도구를 바인딩하는 노드는 "none"을 **명시**해야 한다.
-
-    이건 모델을 바꿀 때마다 되돌아오는 종류의 결함이라, 새 도구 노드가 생기면 자동으로
-    걸리게 잰다. (추론이 필요하면 값을 올리지 말고 그 노드를 Responses API로 옮긴다.)
-    """
-    import importlib
-    import inspect
-
-    from app.core import config as core_config
-
-    # 도구를 바인딩하는 모듈 = bind_tools를 호출하는 모듈
-    modules = [
-        "app.agent.v1.orchestrator.qa", "app.agent.v1.orchestrator.edit",
-        "app.agent.v2.orchestrator.qa", "app.agent.v2.orchestrator.edit",
-        "app.agent.v2.recommend.graph",
-        "app.agent.v3.orchestrator.qa", "app.agent.v3.orchestrator.edit",
-    ]
-    for name in modules:
-        src = inspect.getsource(importlib.import_module(name))
-        assert ".bind_tools(" in src, f"{name}이 더는 도구를 안 쓴다 — 이 목록을 갱신하라"
-        assert "tool_llm_kwargs(" in src, (
-            f"{name}이 도구를 바인딩하면서 tool_llm_kwargs를 안 쓴다 — 추론 강도와 전송 방식을 "
-            "따로 정하면 강도를 올린 사람이 400을 만난다"
-        )
-
-    # 강도와 전송은 **함께** 정해져야 한다 — 이 결합이 깨지면 400이 돌아온다
-    assert core_config.tool_llm_kwargs("none") == {"reasoning_effort": "none"}, \
-        "none일 때 인자를 빼면 안 된다 — luna는 공급자 기본이 none이 아니라 400이다"
-    assert core_config.tool_llm_kwargs("medium") == {
-        "reasoning_effort": "medium", "use_responses_api": True}, \
-        "추론을 켜면 Responses API로 가야 한다 — chat.completions는 도구+추론을 못 받는다"
-
-    # 선언된 기본값 — 이건 env와 무관한 사실이다
-    assert core_config.REGISTRY["TOOL_REASONING"].default == "none"
-    assert core_config.REGISTRY["EDIT_REASONING"].default == "medium"
-
-
 def test_추론_강도_읽기는_공백만인_값을_미설정으로_본다(monkeypatch):
     """Qodo #484: `EDIT_REASONING=" "`(공백 한 칸)이 medium을 조용히 끄고 있었다.
 
@@ -3654,47 +3696,6 @@ def test_edit_노드는_버전과_무관하게_EDIT_REASONING을_쓴다():
         src = inspect.getsource(importlib.import_module(name))
         assert "tool_reasoning()" in src, f"{name}은 TOOL_REASONING을 봐야 한다"
 
-
-
-
-def test_edit_재요청은_고칠_재료를_함께_준다():
-    """실측(2026-08-02): "엑셀 패키지를 microsoft로 바꿔줘"가 실패했다.
-
-    모델이 `Microsoft 365 Excel/Close action in Excel advanced package`를 냈다 — 액션 이름
-    자리에 **설명 문장**을 적었다(실제 이름은 `Close`). 6개 중 5개는 적용됐지만 1개 실패로
-    전체가 되돌아갔고, 사용자는 "조금 더 구체적으로 알려주세요"만 봤다.
-
-    복구가 안 된 이유는 재요청이 **맨손**이었기 때문이다:
-      - 도구를 뗀 채(`llm.ainvoke`) 불러 카탈로그를 확인할 수 없었고
-      - "카탈로그 표기 그대로 적으세요"라면서 그 표기를 주지 않았고
-      - 흐름도 아웃라인은 **바꾸기 전** 이름만 보여줬다
-    모델이 답을 알아낼 통로가 없는 상태에서 다시 찍으라는 요구였다.
-    """
-    import inspect
-
-    from app.agent.v3.orchestrator import edit as edit_mod
-    from app.agent.v3.orchestrator.harness import r1_package_hints
-
-    src = inspect.getsource(edit_mod)
-    # (1) 재요청도 도구 루프를 탄다 — 첫 호출과 같은 함수를 쓴다
-    assert src.count("await _tool_loop(") >= 2, \
-        "재요청이 도구 없이 불린다 — '카탈로그에 없는 액션'을 고칠 방법이 사라진다"
-    # (2) 실패한 (package, action)이 구조로 흐른다 — 사유 문자열 되파싱은 문구를 바꾸면 깨진다
-    assert "unknown_out=" in src and "r1_package_hints(" in src
-
-    # (3) 오류 종류에 맞는 안내가 나간다
-    name_err = ["op[0] update: 카탈로그에 없는 액션 X/Y — 적용하지 않음"]
-    assert "표기 문제" in edit_mod._retry_message(name_err, "OUTLINE", [("X", "Y")])
-    assert "표기 문제" not in edit_mod._retry_message(["op[0] update: 대상 노드를 못 찾았거나"], "OUTLINE", [])
-
-    # (4) 패키지가 아예 없으면 '없다'고 알리고 이름이 겹치는 후보를 준다 (빈손 금지)
-    hints = r1_package_hints([{"rule": "R1", "package": "microsoft", "action": "Close"}], FakeCatalog())
-    assert "카탈로그에 **없는** 패키지" in hints
-    assert "지어내지 말고" in hints, "없을 때 물러설 길을 안 주면 또 지어낸다"
-
-    # (5) 사용자에게 나가는 말이 원인을 담는다 — "구체적으로 말하라"로 뭉개지 않는다
-    msg = edit_mod._cant_apply_message([("SAP GUI", "Login")], FakeCatalog())
-    assert "SAP GUI" in msg and "카탈로그에 없어서" in msg
 
 
 def test_순회_못하는_카탈로그를_없는_패키지로_단정하지_않는다():
@@ -3793,46 +3794,5 @@ def test_재요청_실패사유도_값_경계를_지킨다():
                                 [("Pkg", dirty)])
     assert json.dumps(dirty, ensure_ascii=False) in msg, "이름이 이스케이프되지 않았다"
     assert '따옴표"와' not in msg, "따옴표가 경계를 뚫고 그대로 실렸다"
-
-
-def test_update가_package만_바꾸면_물려받았다고_말해준다():
-    """실측(2026-08-02): "엑셀 패키지를 Microsoft로 바꿔줘"가 두 번 연속 실패했다.
-
-    모델은 `update`로 package만 바꿨고(자연스러운 판단), 코드가 action 이름을 현재값에서
-    물려받아 `Microsoft 365 Excel` + `Close action in Excel advanced package`가 됐다.
-    두 패키지의 닫기 액션 이름이 다른 것이 원인이다 — `Open`·`Write from data table`은
-    이름이 같아 통과했고 닫기만 걸렸다(적용 2, 실패 1).
-
-    그런데 사유가 "카탈로그 표기 그대로 적으세요"뿐이라 **모델은 그 이름을 적은 적이 없어**
-    어디를 고치라는 건지 알 수 없었다. 물려받았다는 사실을 사유에 담아야 연결이 된다.
-    """
-    from app.agent.v3.orchestrator.edit_ops import EditOp, _unknown_action_error
-
-    bad = [("Microsoft 365 Excel", "Close action in Excel advanced package")]
-
-    # package만 바꾼 update — 물려받았다고 알려 준다
-    op = EditOp(op="update", target="n3", package="Microsoft 365 Excel")
-    msg = _unknown_action_error(2, op, bad)
-    assert "물려받았다" in msg
-    assert "action_name을 새 패키지의 표기로 함께 지정" in msg
-
-    # 이름을 직접 적은 경우는 기존 문구 그대로 — 물려받은 게 아니다
-    op2 = EditOp(op="update", target="n3", package="Microsoft 365 Excel", action_name="없는이름")
-    assert "물려받았다" not in _unknown_action_error(2, op2, bad)
-    # insert처럼 물려받을 현재값이 없는 연산도 마찬가지
-    op3 = EditOp(op="insert", anchor="n1", position="after",
-                 action={"package": "X", "action": "Y"})
-    assert "물려받았다" not in _unknown_action_error(0, op3, [("X", "Y")])
-
-
-def test_edit_프롬프트가_패키지_교체시_액션명도_바꾸라고_한다():
-    """규칙이 없으면 모델은 package만 바꾼다 — 그게 자연스러운 해석이라서다."""
-    from pathlib import Path
-
-    import app.agent.v3 as v3
-
-    src = (Path(v3.__file__).parent / "prompts" / "edit.md").read_text(encoding="utf-8")
-    assert "package를 바꾸면 action_name도 함께 적는다" in src
-    assert "action_name" in src, "필드 이름이 action이 아님을 알려야 한다"
 
 
