@@ -345,12 +345,19 @@ def r1_package_hints(violations: list[dict], catalog: CatalogLookup, vocabulary=
     packages = {v.get("package") for v in violations if v.get("rule") == "R1" and v.get("package")}
     if not packages:
         return ""
-    by_pkg = _package_action_names(catalog, packages, _R1_PACKAGE_NAME_CAP)
+    by_pkg, all_packages = _package_action_names(catalog, packages, _R1_PACKAGE_NAME_CAP)
     blocks: list[str] = []
+    missing: list[str] = []
     for pkg in sorted(packages):
         shown, total = by_pkg[pkg]
         if not shown:
-            continue  # 패키지 자체가 카탈로그에 없다 — 나열할 것이 없다
+            # 패키지 자체가 카탈로그에 없다 — 나열할 액션이 없다. 그렇다고 **빈손으로 두면
+            # 안 된다**: 그러면 재요청이 "표기를 바로잡아라"라고만 하고 바로잡을 대상조차
+            # 없는 상태가 된다(실측: 사용자가 "microsoft 패키지로 바꿔줘"라고 했는데
+            # 카탈로그에는 `Microsoft 365 Excel` 등 6종이 있고 `microsoft`는 없다).
+            # 이름이 겹치는 후보를 주고, 없으면 **없다는 사실 자체**를 알린다.
+            missing.append(_missing_package_line(pkg, all_packages))
+            continue
         if vocabulary is not None:
             # **실제로 프롬프트에 실은 것만** 어휘에 넣는다 (Qodo #473). 전량을 넣으면 대형
             # 카탈로그에서 어휘가 표시 상한과 무관하게 부풀고, 모델이 본 적 없는 이름이
@@ -364,23 +371,62 @@ def r1_package_hints(violations: list[dict], catalog: CatalogLookup, vocabulary=
             + ", ".join(menu_quote(a) for a in shown)
             + more
         )
-    if not blocks:
-        return ""
+    out = ""
+    if blocks:
+        out += (
+            "\n\n[표기가 틀린 패키지의 실제 액션 이름]\n"
+            "아래 이름 중에서 **의도에 맞는 것을 골라** update 하라. 이름이 비슷하다고 고르지 말고 "
+            "무엇을 하는 액션인지로 고른다(예: 셀 '값'을 읽는 것과 '서식'을 읽는 것은 다른 액션이다).\n"
+            "정말 대응이 없으면 그 액션을 지우지 말고 notes에 남긴다.\n" + "\n".join(blocks)
+        )
+    if missing:
+        out += (
+            "\n\n[카탈로그에 **없는** 패키지]\n"
+            "아래 패키지는 카탈로그에 존재하지 않는다. 표기를 고쳐도 통과하지 않는다 — "
+            "후보가 있으면 그중에서 고르고, **없으면 지어내지 말고** operations를 비운 뒤 "
+            "answer에 '카탈로그에 없다'고 답하라.\n" + "\n".join(missing)
+        )
+    return out
+
+
+# 없는 패키지에 제시할 후보 수 상한. 이름이 겹치는 것만 고르므로 보통 몇 개다
+# (실측: "microsoft" → Microsoft 365 Excel/Outlook/OneDrive/Calendar/Teams 등 6종).
+_MISSING_PACKAGE_CANDIDATES = 8
+
+
+def _missing_package_line(pkg: str, names: list[str]) -> str:
+    """카탈로그에 없는 패키지 한 줄 — 이름이 겹치는 실재 패키지를 후보로 붙인다.
+
+    부분 문자열(대소문자 무시) 양방향으로 본다: 사용자가 짧게 말한 경우("microsoft")와
+    길게 말한 경우("Microsoft 365 Excel 고급") 둘 다 걸리게 하기 위해서다. 의미 검색이
+    아니라 **표기 매칭**이라 결정론이고, 아무것도 안 걸리면 후보 없이 사실만 남긴다.
+
+    ⚠ `names`를 **받는다** — 여기서 카탈로그를 훑으면 없는 패키지 수만큼 전량 스캔이
+    반복된다(Qodo #485). `_package_action_names`가 같은 이유로 이미 1회 순회로 고쳐졌는데
+    새로 만든 이 함수가 그 실수를 되풀이했다.
+    """
+    key = (pkg or "").strip().lower()
+    hits = [p for p in names if key and (key in p.lower() or p.lower() in key)]
+    shown = hits[:_MISSING_PACKAGE_CANDIDATES]
+    if not shown:
+        return f"- package={menu_quote(pkg)} — 카탈로그에 없음 (이름이 겹치는 패키지도 없음)"
+    more = f" … 외 {len(hits) - len(shown)}종" if len(hits) > len(shown) else ""
     return (
-        "\n\n[표기가 틀린 패키지의 실제 액션 이름]\n"
-        "아래 이름 중에서 **의도에 맞는 것을 골라** update 하라. 이름이 비슷하다고 고르지 말고 "
-        "무엇을 하는 액션인지로 고른다(예: 셀 '값'을 읽는 것과 '서식'을 읽는 것은 다른 액션이다).\n"
-        "정말 대응이 없으면 그 액션을 지우지 말고 notes에 남긴다.\n" + "\n".join(blocks)
+        f"- package={menu_quote(pkg)} — 카탈로그에 없음. 이름이 겹치는 패키지: "
+        + ", ".join(menu_quote(p) for p in shown) + more
     )
 
 
 def _package_action_names(
     catalog: CatalogLookup, packages: set[str], cap: int
-) -> dict[str, tuple[list[str], int]]:
-    """대상 패키지들의 액션 이름을 **카탈로그 1회 순회**로 모은다 → {패키지: (이름 상한개, 총 개수)}.
+) -> tuple[dict[str, tuple[list[str], int]], list[str]]:
+    """카탈로그 **1회 순회**로 두 가지를 모은다 → ({패키지: (이름 상한개, 총 개수)}, 전체 패키지명).
 
     패키지마다 `_iter_catalog`를 다시 부르면 전량 스캔이 패키지 수만큼 반복된다. 이 함수는
     수리 라운드마다 불리므로(한 턴 최대 5라운드) 그 곱이 그대로 쌓인다 (Qodo #473).
+
+    전체 패키지명도 여기서 함께 낸다 — 없는 패키지의 후보를 고를 때 필요한데, 따로 훑으면
+    순회가 두 번이 된다(Qodo #485). 필요한 것이 둘이어도 순회는 하나면 된다.
 
     이름은 **상한까지만** 들고 나머지는 세기만 한다 — 뒤쪽은 "… 외 N개" 한 조각으로만 쓰이니
     전량을 리스트로 만들 이유가 없다. 카탈로그가 1,375종인 지금도, 더 커져도 상한이 재료비를
@@ -388,13 +434,15 @@ def _package_action_names(
     """
     kept: dict[str, list[str]] = {p: [] for p in packages}
     total: dict[str, int] = dict.fromkeys(packages, 0)
+    all_names: set[str] = set()
     for pkg, act in _iter_catalog(catalog):
+        all_names.add(pkg)
         if pkg not in kept:
             continue
         total[pkg] += 1
         if len(kept[pkg]) < cap:
             kept[pkg].append(act)
-    return {p: (kept[p], total[p]) for p in packages}
+    return {p: (kept[p], total[p]) for p in packages}, sorted(all_names)
 
 
 def _iter_catalog(catalog: CatalogLookup):
