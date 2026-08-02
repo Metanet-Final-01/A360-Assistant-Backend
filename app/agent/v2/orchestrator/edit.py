@@ -67,7 +67,7 @@ def _make_llm() -> ChatOpenAI:
         stream_usage=True,
         # 이 노드는 function tool을 바인딩한다 — chat.completions는 도구+추론을 함께 못 쓴다.
         # 'none'을 **명시**해야 한다: luna는 인자를 빼면 공급자 기본이 none이 아니라 400이다.
-        **core_config.tool_llm_kwargs(core_config.tool_reasoning()),
+        **core_config.tool_llm_kwargs(core_config.edit_reasoning()),
     )
 
 

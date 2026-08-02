@@ -351,13 +351,29 @@ def tool_reasoning() -> str:
     **그 노드는 도구를 쓰는 순간 죽는다.** 그래도 노브로 둔 이유는 모델 계약이 바뀔 수
     있어서이고, 바꿀 때는 반드시 도구 경로를 함께 재봐야 한다.
 
-    미지정·오타는 "none"으로 떨어진다 — 인자를 **빼는** 폴백이 아니라는 점이 중요하다.
+    미설정·오타는 "none"으로 떨어진다 — 인자를 **빼는** 폴백이 아니라는 점이 중요하다.
     luna는 인자를 안 보내면 공급자 기본이 none이 아니라 그것만으로 400이 난다(그게 이
     함수가 생긴 이유다). 네 모델 모두 "none"은 받으므로 명시가 항상 더 안전하다.
     """
-    raw = (os.getenv("TOOL_REASONING") or REGISTRY["TOOL_REASONING"].default or "none").strip().lower()
+    return _reasoning_level("TOOL_REASONING")
+
+
+def _reasoning_level(key: str) -> str:
+    """추론 강도 키 하나를 읽는다 — **`get()`과 같은 미설정 판정**을 쓴다 (Qodo #484).
+
+    `os.getenv(k) or 기본값`으로 짜면 공백만인 값(`KEY=" "`)이 truthy라 기본값으로 안 가고
+    "알 수 없는 값"이 되어 none으로 강등된다. 그러면 배포 템플릿이나 쉘 설정에 공백 한 칸이
+    섞이는 것만으로 **EDIT_REASONING=medium이 조용히 꺼진다.** 이 레포는 `get()`이 공백만인
+    값을 미설정으로 보기로 이미 정했으므로(그 자체가 Qodo 지적으로 굳은 정책이다) 여기도
+    같은 판정을 쓴다 — 한 레포에 두 정책이 있으면 어느 쪽이 맞는지 아무도 모른다.
+
+    오타는 여전히 "none"이다. 강도 오타로 도구 노드를 죽이는 것보다 추론을 끄는 쪽이 낫다.
+    """
+    raw = (get(key) or "").strip().lower()
+    if not raw:
+        return "none"
     if raw not in REASONING_LEVELS:
-        logger.warning("TOOL_REASONING이 알 수 없는 값(%r) — none으로 처리한다", raw)
+        logger.warning("%s가 알 수 없는 값(%r) — none으로 처리한다", key, raw)
         return "none"
     return raw
 
@@ -369,11 +385,7 @@ def edit_reasoning() -> str:
     어떻게 고칠지' 판단이 본업이다. 강도를 올리면 전송 방식이 바뀌므로(아래 참고) 노브를
     함께 두면 한쪽 사정으로 다른 쪽이 끌려다닌다.
     """
-    raw = (os.getenv("EDIT_REASONING") or REGISTRY["EDIT_REASONING"].default or "none").strip().lower()
-    if raw not in REASONING_LEVELS:
-        logger.warning("EDIT_REASONING이 알 수 없는 값(%r) — none으로 처리한다", raw)
-        return "none"
-    return raw
+    return _reasoning_level("EDIT_REASONING")
 
 
 def tool_llm_kwargs(effort: str) -> dict:
