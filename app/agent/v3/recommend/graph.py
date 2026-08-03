@@ -70,8 +70,6 @@ _STANCE_FILE = "design_stance.md"
 _CANDIDATE_ID = "A"
 _CANDIDATE_LABEL = "표준 설계"   # 진행 카드 표시용 — 검증 보고는 이 이름을 들고 다니지 않는다
 
-# 초안 흐름도를 단계별로 '드러내는' 프레임 사이 지연(초) — v2와 동일한 인지적 페이싱.
-_REVEAL_DELAY = 0.18
 # 단계(구조·값) 하나의 왕복 상한 — 첫 출력 + 파싱 재출력 1회 + JSON mode 강등 1회.
 # 툴 왕복은 없앴다(escape hatch → needs 능력 요청).
 _STAGE_MAX_TURNS = 3
@@ -450,23 +448,6 @@ def _attach_sources(flow: dict, sink: list[dict]) -> dict:
     return flow
 
 
-def _iter_pkg_actions(flow: dict):
-    def walk(actions: list[dict]):
-        for a in actions:
-            if a.get("package") and a.get("action"):
-                yield (a["package"], a["action"])
-            yield from walk(a.get("children") or [])
-
-    for step in flow.get("steps", []):
-        yield from walk(step.get("actions") or [])
-
-
-def _flow_counts(flow: dict) -> tuple[int, int]:
-    steps = flow.get("steps") or []
-    actions = sum(1 for _ in _iter_pkg_actions(flow))
-    return len(steps), actions
-
-
 def _render_spec_block(spec: dict) -> str:
     lines = [f"목표: {spec.get('goal', '')}"]
     for r in spec.get("requirements") or []:
@@ -818,6 +799,40 @@ def _emit_gate(cid: str, issues: list[str], outline: dict) -> None:
         "data": {"candidate": cid, "actions": _count_actions(outline),
                  "steps": len(outline.get("steps") or []), "issues": issues[:12]},
     })
+
+
+def _caption_list(items, head: int = 2) -> str:
+    """캡션에 붙일 항목 요약 — 앞 몇 개만 쓰고 나머지는 "외 N건"으로 접는다.
+
+    상한이 없는 목록(능력 요청·커버리지 미달)이 그대로 들어오면 캡션 한 줄이 화면을
+    밀어낸다. 개수는 어차피 캡션 앞머리에 숫자로 나가므로 여기서는 **무엇인지**만 보인다.
+    """
+    vals = [str(x).strip() for x in items if str(x or "").strip()]
+    if not vals:
+        return "…"
+    more = f" 외 {len(vals) - head}건" if len(vals) > head else ""
+    return " · ".join(vals[:head]) + more
+
+
+def _draft_frame(flow: dict, caption: str) -> None:
+    """제작 중인 구조를 트리 프레임으로 흘린다 (RPA-370) — 검수 전이라 위반은 아직 없다.
+
+    ## 왜 검수를 기다리지 않나
+
+    앞서는 트리를 **검증 스택을 다 통과한 뒤에만** 냈다. 근거는 `emit_candidates_frame`
+    독스트링에 남아 있다 — "탈락 후보에 시각적 애착이 생기면 심판 결과가 배신처럼 보인다".
+    후보가 여럿이던 시절의 판단이고, RPA-357에서 후보는 하나가 되고 심판은 삭제됐다.
+    **탈락할 후보도, 배신할 심판도 없다.** 지연시킬 이유가 사라졌는데 지연만 남아 있었다.
+
+    실측(224초 턴 `cc18379679a2`, 2026-08-03): 초안 트리는 **103초 지점에 이미 완성돼**
+    있는데 첫 프레임은 209초에 나갔다. 100초 넘게 만들어 둔 것을 안 보여준 셈이다.
+
+    `plan`·`needs`는 **내부 통신용**이라 뺀다. 화면에 그릴 것이 없고, 특히 `needs`는 다음
+    회차에 사라질 요청 목록이라 남겨두면 사용자에겐 '못 찾은 것'처럼 읽힌다.
+    값이 안 채워진 뼈대라도 노드의 package·action·label은 이미 정해져 있어 그대로 그려진다.
+    """
+    emit_flow_frame({k: v for k, v in flow.items() if k not in ("plan", "needs")},
+                    None, caption)
 
 
 def _count_top_tries(flow: dict) -> int:
@@ -1216,11 +1231,22 @@ async def _compose_candidate(
                          outline_user, "구조", reasoning=reasoning)
     if outline is None:
         return None
+    # 여기서 트리를 처음 낸다 (RPA-370). 값도 검수도 아직이지만 **무엇을 하는 봇인지**는
+    # 이미 정해졌고, 남은 단계는 전부 이 구조를 고치거나 채우는 일이다. 완성될 때까지
+    # 숨기면 사용자는 그 100초를 빈 화면으로 받는다. `_draft_frame` 독스트링 참고.
+    _draft_frame(outline, "흐름도 초안 구조 완성 — 이어서 보완·검수합니다")
 
     # ── 2단: 능력 요청이 있으면 검색해 한 번 더 ────────────────────────────
     needs = [n for n in (outline.get("needs") or []) if isinstance(n, dict)]
     if needs:
         queries = _need_queries(needs)   # 검색이 쓰는 것과 같은 함수 — 숫자가 어긋나지 않게
+        # 캡션은 **검색 앞에서** 건다 — 요청 하나가 검색 한 번이고 순차로 도는 구간이라
+        # 여기가 길다. 아래 stage 이벤트는 결과(`found`)를 실어야 해서 뒤에 남는다:
+        # 프레임이 '지금 무엇을 하는 중인지'를, 이벤트가 '무엇을 했는지'를 맡는다.
+        # 개수는 `queries`(실제 검색할 것)에서, 문구는 `what`(한국어)에서 가져온다 —
+        # `_need_queries`는 검색어라 영어다. 화면에는 사람이 읽는 쪽을 보인다.
+        _draft_frame(outline, f"메뉴에 없는 액션 {len(queries)}건 추가 조사 중 — "
+                              f"{_caption_list(n.get('what') or n.get('query') for n in needs)}")
         extra = await asyncio.to_thread(_capability_menu, needs, sink, ctx)
         emit({"event": "stage", "stage": "searching",
               "message": f"흐름도가 요청한 액션 {len(queries)}건 추가 조사",
@@ -1234,6 +1260,7 @@ async def _compose_candidate(
         if extra:
             # 보강은 같은 '구조' 작업의 재생성이라 추론도 같이 건다 — 여기서만 끄면 첫 초안보다
             # 못한 구조가 나와 회귀 가드에 걸리고, 능력 요청으로 찾아온 액션이 버려진다.
+            _draft_frame(outline, "찾은 액션으로 구조를 다시 짜는 중")
             retry = await _ask(
                 compose_system_prompt(persona, analysis, spec, dossier, extra_menu=extra),
                 outline_user, "구조(보강)", reasoning=reasoning)
@@ -1241,6 +1268,7 @@ async def _compose_candidate(
             # 정보가 늘었는데 포기한 것이므로 첫 구조를 지킨다.
             if retry is not None and not (lost := _repair_regression(outline, retry)):
                 outline = retry
+                _draft_frame(outline, "추가 조사 결과를 구조에 반영했습니다")
             elif retry is not None:
                 logger.warning("후보 %s 구조 보강 반려 — %s. 첫 구조로 진행", cid, lost)
 
@@ -1270,6 +1298,8 @@ async def _compose_candidate(
               "message": f"메뉴에 없는 액션 표기 {len(unknown)}건 — 표기 교정 요청",
               "data": {"candidate": cid,
                        "unknown": [f"{p}/{a}" for _l, p, a in unknown[:8]]}})
+        _draft_frame(flow, f"카탈로그에 없는 액션 이름 {len(unknown)}건 교정 중 — "
+                           f"{_caption_list(f'{p}/{a}' for _l, p, a in unknown)}")
         fixed = await _ask(
             compose_system_prompt(persona, analysis, spec, dossier),
             _vocab_retry_user(flow, unknown, ctx.catalog) + doc_block,
@@ -1284,6 +1314,7 @@ async def _compose_candidate(
         emit({"event": "stage", "stage": "verifying",
               "message": f"액션 표기를 교정했습니다 ({len(unknown)}건 → {len(left)}건)",
               "data": {"candidate": cid, "before": len(unknown), "after": len(left)}})
+        _draft_frame(fixed, f"액션 이름을 교정했습니다 ({len(unknown)}건 → {len(left)}건)")
         return fixed
 
     outline = await _fix_vocab(outline)
@@ -1296,6 +1327,8 @@ async def _compose_candidate(
     # 한 번만 돈다 — 못 찾았으면 두 번째도 못 찾고, 찾았는데 모델이 안 넣었으면 세 번째도 안 넣는다.
     gaps = _coverage_gaps(coverage_findings, spec) if config.COMPOSE_COVERAGE_RETRY else []
     if gaps:
+        _draft_frame(outline, f"빠뜨린 필수 요구 {len(gaps)}건을 조사 중 — "
+                              f"{_caption_list(g.get('what') for g in gaps)}")
         extra = await asyncio.to_thread(_capability_menu, gaps, sink, ctx)
         emit({"event": "stage", "stage": "searching",
               "message": f"빠뜨린 필수 요구 {len(gaps)}건을 조사로 보완",
@@ -1303,6 +1336,7 @@ async def _compose_candidate(
                        "req_ids_head": [g["req_id"] for g in gaps][:12],
                        "found": bool(extra)}})
         if extra:
+            _draft_frame(outline, "찾은 액션으로 빠진 요구를 채우는 중")
             retry = await _ask(
                 compose_system_prompt(persona, analysis, spec, dossier, extra_menu=extra),
                 _coverage_retry_user(outline_user, gaps), "구조(커버리지)", reasoning=reasoning)
@@ -1329,6 +1363,7 @@ async def _compose_candidate(
                 logger.warning("후보 %s 커버리지 보완 반려 — %s. 직전 구조로 진행", cid, lost)
 
     if issues:
+        _draft_frame(outline, f"구조 결함 {len(issues)}건 수리 중 — {_caption_list(issues)}")
         outline = await asyncio.to_thread(_gate_repair, outline, coverage_findings, cid, ctx)
 
     # ── 4단: 값 — 노드별 값 패치 ────────────────────────────────────────────
@@ -1341,6 +1376,8 @@ async def _compose_candidate(
         f"[요구사항 스펙]\n{_render_spec_block(spec)}\n\n"
         f"[액션별 파라미터 스펙]\n{_action_spec_block(outline, getattr(ctx, 'catalog', None))}"
     )
+    # 프레임은 `annotate_ids` **앞에서** 낸다 — 뒤에 두면 전이 id가 붙은 트리가 나간다.
+    _draft_frame(outline, "구조 확정 — 액션마다 필요한 값을 채우는 중")
     # annotate_ids도 try 안이다 — 순회 중간에 터지면 일부 노드에 id가 붙은 채로 남고,
     # finally의 strip_ids가 그걸 걷어내야 스키마로 새 나가지 않는다.
     try:
@@ -1550,6 +1587,11 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
     dossier = await build_dossier(spec, sink, ctx)
 
     # [3] compose — 구조 → (능력 요청) → 구조 게이트 → 값
+    #
+    # 진행 카드(kind="candidates")는 **트리가 뜨기 전 구간에만** 쓴다. 구조 1단이 끝나는
+    # 순간부터 `_compose_candidate`가 트리 프레임을 흘리고, 프론트는 트리 프레임을 받으면
+    # 카드를 지운다(`applyLiveFrame`: `liveCandidates = null`). 그 뒤로도 카드를 계속 내면
+    # 카드가 사라졌다 다시 나타나기만 한다 — 트리 캡션이 같은 말을 이미 하고 있다.
     cand_status = [{"id": _CANDIDATE_ID, "persona": _CANDIDATE_LABEL,
                     "status": "composing", "steps": 0, "actions": 0}]
     emit_candidates_frame(cand_status, "흐름도 설계 중")
@@ -1559,22 +1601,13 @@ async def generate_flow(analysis: Any, document: str | None, spec: dict, ctx=Non
         cand_status[0]["status"] = "failed"
         emit_candidates_frame(cand_status, "흐름도 생성 실패")
         raise RuntimeError("흐름도를 생성하지 못했습니다")
-    cand_status[0]["status"] = "verifying"
-    cand_status[0]["steps"], cand_status[0]["actions"] = _flow_counts(flow)
-    emit_candidates_frame(cand_status, "흐름도 초안 완성 — 검증 스택 통과 중")
+    emit_flow_frame(flow, None, "초안 완성 — 검수 중")
 
     # [4] verify 스택 — L0/L1 정적 → L2 커버리지 → L3 시뮬레이션
     report = await _verify_candidate(_CANDIDATE_ID, flow, spec, sem, ctx)
-    cand_status[0]["status"] = "done"
-    emit_candidates_frame(cand_status, "검증 완료")
-
-    # 초안 점진 노출 — '자라나는 흐름도' 경험.
-    steps = report.flow.get("steps") or []
-    for i in range(len(steps)):
-        emit_flow_frame({**report.flow, "steps": steps[: i + 1]}, None,
-                        f"흐름도 구성 {i + 1}/{len(steps)}")
-        await asyncio.sleep(_REVEAL_DELAY)
-    emit_flow_frame(report.flow, report.violations, "초안 완성 · 다듬기 시작")
+    # 점진 노출('자라나는 흐름도')은 없앴다 — 트리가 이미 100초 넘게 떠 있는데 1단계부터
+    # 다시 그리면 화면을 되감는 셈이다. 여기서는 **검수 결과**가 새 정보다(위반 강조).
+    emit_flow_frame(report.flow, report.violations, "검수 완료 · 다듬기 시작")
 
     # [5] refine — 정적 위반 + L2/L3 발견을 surgeon 패치로
     #
