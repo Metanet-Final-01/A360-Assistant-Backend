@@ -75,9 +75,27 @@ _REVEAL_DELAY = 0.18
 # 단계(구조·값) 하나의 왕복 상한 — 첫 출력 + 파싱 재출력 1회 + JSON mode 강등 1회.
 # 툴 왕복은 없앴다(escape hatch → needs 능력 요청).
 _STAGE_MAX_TURNS = 3
-_MAX_NEEDS = 4            # 구조 단계가 요청할 수 있는 능력 수
-_MAX_NEED_ACTIONS = 12    # 능력 요청 검색으로 메뉴에 덧붙일 액션 수
-_NEED_SEARCH_LIMIT = 5    # 능력 요청 1건이 받아올 액션 수
+# 능력 요청(needs) 상한 — 둘 다 None(상한 없음)이다. `[:None]`이 전체 슬라이스라
+# 절단 지점의 코드는 그대로 둔다.
+#
+# ## 왜 풀었나
+#
+# 4로 자르는 동안 **잘린 요청이 조용히 사라졌다** — 경고 로그도, 사용자 고지도 없고,
+# 관측 이벤트마저 `needs[:_MAX_NEEDS]`를 **자른 뒤에** 실어 "원래 몇 개를 원했는지"가
+# 어디에도 남지 않았다. 그래서 상한이 병목인지 여유인지 판단할 근거 자체가 없었다.
+#
+# 실측(2026-08-02, 실서비스 42턴): 요청 수 분포가 1건 7 · 2건 5 · 3건 11 · **4건 19**로,
+# 45%가 경계에 붙어 있었다. 자연스러운 분포가 아니라 잘린 분포의 모양이다.
+#
+# 상한을 없애면 그 수가 곧 실제 요청 수가 되므로, 같은 이벤트가 이제 진짜 값을 싣는다.
+#
+# ⚠ 대가: 요청 하나가 검색 한 번이고 `_capability_menu`가 **순차**로 돈다. 요청이 많은
+# 턴은 그만큼 2단이 길어진다. 그리고 찾은 액션이 전부 메뉴에 실리므로 다음 회차 구조
+# 프롬프트가 커진다 — 요청당 `_NEED_SEARCH_LIMIT`개가 상한이고 (package, action) 중복은
+# 접히지만, 그 둘만 남은 방어다.
+_MAX_NEEDS = None         # 구조 단계가 요청할 수 있는 능력 수 — 상한 없음
+_MAX_NEED_ACTIONS = None  # 능력 요청 검색으로 메뉴에 덧붙일 액션 수 — 상한 없음
+_NEED_SEARCH_LIMIT = 5    # 능력 요청 1건이 받아올 액션 수 (유지 — 요청당 폭 제한)
 
 # 구조 게이트에서 판정하는 규칙 — 파라미터·변수 연결 없이도 결론이 나는 것만.
 # 빠진 것(R2~R5 파라미터, R9~R11 변수 흐름)은 값 단계 이후 전체 검수가 본다.
@@ -464,6 +482,20 @@ def _render_spec_block(spec: dict) -> str:
 # compose — 페르소나 후보 생성 (Dossier 주입 + escape hatch ≤2회)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _need_queries(needs: list[dict]) -> list[str]:
+    """능력 요청·커버리지 미달 목록 → **실제로 검색에 쓸 질의**. 빈 문구는 버린다.
+
+    검색과 관측이 **같은 함수를 써야 한다.** 앞서는 이벤트 쪽이 따로 계산했는데
+    `str(n.get("query") or n.get("what"))`라 둘 다 없으면 문자열 `"None"`이 들어갔고,
+    공백만 있는 문구도 그대로 셌다 — 검색은 그것들을 버리므로 이벤트의 개수가 실제
+    검색 횟수보다 컸다. 지연·커버리지를 이 숫자로 추적하는 순간 거짓말이 된다(Qodo 리뷰).
+
+    절단 지점(`[:_MAX_NEEDS]`)도 여기 하나로 모은다 — 상한을 되살릴 때 두 곳이 갈리지 않게.
+    """
+    vals = [q for q in (str(n.get("query") or n.get("what") or "").strip() for n in needs) if q]
+    return vals[:_MAX_NEEDS]
+
+
 def _capability_menu(needs: list[dict], sink: list[dict], ctx) -> str:
     """능력 요청(needs)을 검색해 추가 액션 메뉴 블록을 만든다.
 
@@ -478,8 +510,7 @@ def _capability_menu(needs: list[dict], sink: list[dict], ctx) -> str:
     """
     if not needs or ctx is None or not getattr(ctx, "searchable", False):
         return ""
-    queries = [str(n.get("query") or n.get("what") or "").strip() for n in needs]
-    queries = [q for q in queries if q][:_MAX_NEEDS]
+    queries = _need_queries(needs)
     if not queries:
         return ""
 
@@ -1189,11 +1220,17 @@ async def _compose_candidate(
     # ── 2단: 능력 요청이 있으면 검색해 한 번 더 ────────────────────────────
     needs = [n for n in (outline.get("needs") or []) if isinstance(n, dict)]
     if needs:
-        queries = [str(n.get("query") or n.get("what")) for n in needs[:_MAX_NEEDS]]
+        queries = _need_queries(needs)   # 검색이 쓰는 것과 같은 함수 — 숫자가 어긋나지 않게
         extra = await asyncio.to_thread(_capability_menu, needs, sink, ctx)
         emit({"event": "stage", "stage": "searching",
               "message": f"흐름도가 요청한 액션 {len(queries)}건 추가 조사",
-              "data": {"candidate": cid, "queries": queries, "found": bool(extra)}})
+              # 질의 목록은 앞 12건만 싣는다 — 상한을 없앤 건 **검색을 다 돌리기 위해서**지
+              # 이벤트에 다 적기 위해서가 아니다. 다만 **`queries`라는 이름으로 자른 목록을
+              # 실으면 안 된다**: RPA-369가 닫은 구멍이 바로 "잘린 것을 온전한 것처럼 실은
+              # 것"이었다. 칸 이름에 `_head`를 박아 잘렸다는 사실이 값과 함께 다니게 하고,
+              # 실제 개수는 `asked`로 따로 남긴다 (Qodo 리뷰).
+              "data": {"candidate": cid, "asked": len(queries),
+                       "queries_head": queries[:12], "found": bool(extra)}})
         if extra:
             # 보강은 같은 '구조' 작업의 재생성이라 추론도 같이 건다 — 여기서만 끄면 첫 초안보다
             # 못한 구조가 나와 회귀 가드에 걸리고, 능력 요청으로 찾아온 액션이 버려진다.
@@ -1262,7 +1299,8 @@ async def _compose_candidate(
         extra = await asyncio.to_thread(_capability_menu, gaps, sink, ctx)
         emit({"event": "stage", "stage": "searching",
               "message": f"빠뜨린 필수 요구 {len(gaps)}건을 조사로 보완",
-              "data": {"candidate": cid, "req_ids": [g["req_id"] for g in gaps],
+              "data": {"candidate": cid, "asked": len(gaps),
+                       "req_ids_head": [g["req_id"] for g in gaps][:12],
                        "found": bool(extra)}})
         if extra:
             retry = await _ask(

@@ -11,9 +11,9 @@
 [연산 종류] — 각 연산은 op 필드로 종류를 정하고, 필요한 필드만 채운다. id는 [현재 흐름도 구조]의
 대괄호 안 값(n1, n2 …)을 그대로 쓴다.
 - wrap: 연속한 형제 액션들을 새 컨테이너로 감싼다.
-    { "op":"wrap", "targets":["n5"], "container":{"package":"Error handler","action":"errorHandlerTry","label":"Try"},
-      "siblings_after":[ {"package":"Error handler","action":"errorHandlerCatch","label":"Catch"},
-                          {"package":"Error handler","action":"errorHandlerFinally","label":"Finally"} ] }
+    { "op":"wrap", "targets":["n5"], "container":{"package":"Error handler","action":"Try","label":"Try"},
+      "siblings_after":[ {"package":"Error handler","action":"Catch","label":"Catch"},
+                          {"package":"Error handler","action":"Finally","label":"Finally"} ] }
     → targets 액션들이 컨테이너의 children이 되고, siblings_after가 그 뒤에 형제로 붙는다.
       Try/Catch/Finally·If/Else·Loop 감싸기가 모두 이 연산 하나로 된다. targets는 반드시 같은
       부모의 '연속된 형제'여야 한다.
@@ -68,10 +68,10 @@
 {
   "operations": [
     { "op":"wrap", "targets":["n5"],
-      "container":{"package":"Error handler","action":"errorHandlerTry","label":"엑셀 열기 시도"},
+      "container":{"package":"Error handler","action":"Try","label":"엑셀 열기 시도"},
       "siblings_after":[
-        {"package":"Error handler","action":"errorHandlerCatch","label":"오류 처리"},
-        {"package":"Error handler","action":"errorHandlerFinally","label":"마무리 정리"}
+        {"package":"Error handler","action":"Catch","label":"오류 처리"},
+        {"package":"Error handler","action":"Finally","label":"마무리 정리"}
       ] }
   ],
   "change_summary": "엑셀 파일 열기를 Try로 감싸고 Catch·Finally를 추가",

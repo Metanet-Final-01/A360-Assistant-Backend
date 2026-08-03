@@ -18,7 +18,7 @@
 엄격 채점 원칙:
 - 액션 라벨의 '주장'이 아니라 package/action과 파라미터의 '실체'로 판정하세요. 라벨이 "메일 발송"이어도 액션이 메일과 무관하면 covered가 아닙니다.
 - **반복·분기·예외 처리 같은 구조 요구는 컨테이너 중첩으로만 판정하세요.** 아웃라인의 들여쓰기가 곧 부모-자식 관계입니다:
-  - 반복 요구: Loop 컨테이너(Loop/cloudUsingLoopAction 등) **아래에 자식으로** 반복 대상 액션들이 들어가 있어야 covered. Continue/Break 액션이 평평하게 놓여 있거나 라벨에 "반복"이라고 적혀 있기만 한 것은 missing(반복 없음) 또는 violated(1회만 실행됨)입니다.
+  - 반복 요구: Loop 패키지의 반복 컨테이너 액션 **아래에 자식으로** 반복 대상 액션들이 들어가 있어야 covered. Continue/Break 액션이 평평하게 놓여 있거나 라벨에 "반복"이라고 적혀 있기만 한 것은 missing(반복 없음) 또는 violated(1회만 실행됨)입니다.
   - 예외 처리 요구: Try 아래에 보호 대상 로직이 자식으로 있고 바로 뒤 형제로 Catch(·Finally)가 있어야 covered. Try와 Catch 사이에 다른 액션이 끼어 있거나 로직이 Try 밖에 있으면 partial 이하입니다.
   - 분기 요구: If(·Else If·Else) 컨테이너의 자식으로 분기별 처리가 나뉘어 있어야 covered입니다.
 - 확신이 없으면 covered가 아니라 partial입니다.
