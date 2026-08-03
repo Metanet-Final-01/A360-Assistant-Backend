@@ -32,6 +32,10 @@
   ⚠ `action`·`container`·`siblings_after` 항목은 반드시 **객체**다 — `{"package": "…", "action": "…",
   "label": "…", "parameters": […]}`. `"Excel advanced/Open"` 같은 문자열 축약 금지.
 - `remove`: target 노드를 지운다.
+  ⚠ **컨테이너를 지우면 그 안의 액션이 전부 같이 사라진다.** 껍데기만 걷어내려는 것이면
+  안의 액션을 먼저 move로 빼낸 뒤 지워라.
+  ⚠ **액션 총수가 줄어든 출력은 통째로 버려진다** — 같이 낸 멀쩡한 연산까지 함께 버려진다.
+  지우려면 그 자리를 대신할 액션을 같은 출력에 insert 하거나, 지우는 대신 update로 바꿔라.
 - `move`: target 노드를 anchor 기준 position으로 옮긴다.
 - `set_params`: target 노드의 파라미터를 name 기준 병합한다 (parameters: [{name, value, value_source}]).
 - `update`: target 노드의 package/action_name/label을 바꾼다.
@@ -52,9 +56,10 @@
 - Try·Catch·Finally가 **다른 단계로 갈림**(R13 "Try와 다른 단계에 있습니다") → 그 Catch/Finally가
   속한 단계를 앞 단계와 merge_step으로 합친다 (step_id=뒤쪽 단계). 실행 순서는 이미 맞으니
   액션을 move하지 말고 **단계만** 합쳐라.
-- children 없는 Step(R17) → 그 작업을 실제로 수행하는 액션으로 update 하거나, [수리용 액션
-  스펙]에 대응이 없으면 remove 하고 set_flow로 notes에 자동화 불가 사유를 남긴다.
-  **라벨만 그럴듯한 빈 노드를 남겨두지 마라.**
+- children 없는 Step(R17) → 그 작업을 실제로 수행하는 액션으로 **update**한다 — 라벨만
+  그럴듯한 빈 노드를 남겨두지 마라. [수리용 액션 스펙]에 대응이 없으면 그대로 두고
+  change_summary에 이유를 적어라. **remove로 답하지 마라** — 빈 Step 하나를 지워도 액션
+  총수가 줄어 그 라운드가 통째로 버려지고, 같이 낸 다른 수리까지 못 들어간다.
 - 조건 없는 Throw(R18) → 오류 전파가 목적이면 Catch children으로 move(position=into_end).
   조건부 중단이 목적이면 판정 If로 wrap 하고 Throw를 그 children에 둔다. 정상 완료 표시로
   쓰인 Throw는 remove 한다(정반대 의미라 고칠 게 아니라 지울 것).

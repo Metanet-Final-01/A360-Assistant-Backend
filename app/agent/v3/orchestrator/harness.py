@@ -577,6 +577,56 @@ def _emit_round(
     })
 
 
+def _round_feedback(verdict: str, errors: list[str], *, kept: bool, hint: str = "") -> str:
+    """직전 라운드가 왜 버려졌는지를 다음 라운드 입력에 싣는다 (RPA-371).
+
+    앞서는 라운드마다 프롬프트를 `current`에서 새로 만들 뿐이었다. 그런데 **반려된 라운드는
+    흐름도를 되돌리므로** 아웃라인·위반·스펙 발췌가 전부 그대로고, 결국 입력이 직전 라운드와
+    글자까지 같아진다 — 모델은 자기가 방금 무엇에 실패했는지 못 본 채 같은 답을 낸다.
+
+    실측(358초 턴 `44326af94fdb`, 2026-08-03): 게이트 수리 1·2라운드의 연산 5건이 완전히
+    동일했다(`Browser/browserClose` insert ×3 + move + remove). 세션 닫기 insert가 전부
+    카탈로그에 없는 이름이라 탈락하고 move·remove만 남아 순액션 −1이 되면서 반려됐는데,
+    2라운드가 똑같은 답을 내 31.3초를 더 태웠다. refine 루프의 2라운드도 같은 모양이었다.
+
+    ⚠ **반려된 라운드에는 "지금 보는 것이 적용 전 상태"라고 못 박아야 한다.** 안 그러면
+    모델이 자기 수리가 이미 들어간 줄 알고 다음 문제로 넘어가, 정작 반려된 결함을 방치한다.
+    `r1_package_hints`는 이 구멍을 못 메운다 — 그쪽은 **흐름도에 이미 있는** R1 위반만
+    대상이라, *삽입하려다* 실패한 이름은 힌트를 못 받는다.
+
+    ## 판정만으로는 부족하다 — `hint`가 필요한 이유
+
+    이름 오류는 `errors`가 처방까지 대신해 준다("카탈로그 표기 그대로 나눠 적으세요").
+    그런데 **축소 반려는 `errors`가 비어 있을 수 있다** — 연산이 전부 적용됐는데 결과가
+    줄어든 경우다. 그때 판정 한 줄만 주면 모델은 답을 바꾸긴 해도 방향을 모른다.
+    실측(355초 턴 `6d4c3da18c93`, 2026-08-03): 1라운드가 액션 5개를 잃고 반려되자
+    2라운드는 remove를 하나 더 늘려 7개를 잃었다. 그래서 그 판정에는 **무엇을 지켜야
+    하는지**를 같이 준다.
+    """
+    # 에러 문구에는 **모델이 쓴 값이 그대로 박혀 있다** — `카탈로그에 없는 액션
+    # "Browser"/"browserClose"`의 인용부호 안이 모델 출력이다. 손대지 않고 프롬프트에
+    # 붙이면 (1) 그 안의 개행이 bullet 구조를 깨고 (2) 모델이 쓴 문장이 우리 지시문처럼
+    # 읽힌다. 한 줄로 접고 길이를 묶는다 (Qodo 리뷰).
+    errs = [" ".join(str(e).split())[:300] for e in (errors or []) if str(e or "").strip()][:6]
+    if kept and not errs:
+        return ""
+    if kept:
+        lines = ["\n\n[직전 라운드는 채택됐지만 아래 연산은 적용되지 않았다]"]
+    else:
+        lines = [
+            "\n\n[직전 라운드는 통째로 버려졌다 — 같은 답을 다시 내지 마라]",
+            f"판정: {verdict}",
+            "위 [흐름도 아웃라인]은 그 수리가 **적용되지 않은** 상태다. 같은 연산을 그대로 "
+            "다시 내면 같은 이유로 또 버려진다.",
+        ]
+    if hint:
+        lines.append(hint)
+    if errs:
+        lines.append("적용되지 않은 연산:")
+        lines.extend(f"- {e}" for e in errs)
+    return "\n".join(lines)
+
+
 def refine_flow(
     flow: dict,
     catalog: CatalogLookup,
@@ -634,6 +684,8 @@ def refine_flow(
     extras_pending = bool(_error_findings(list(extra_findings or [])))
     repaired = False
     no_improve = 0
+    # 직전 라운드의 판정·미적용 연산 — 다음 라운드 입력에 실어 같은 답이 또 나오지 않게 한다.
+    feedback = ""
 
     for round_no in range(1, max_rounds + 1):
         work = annotate_ids(copy.deepcopy(current))
@@ -649,6 +701,7 @@ def refine_flow(
             + (f"\n\n[수리용 액션 스펙 — 세션 여닫기·반복·분기·예외 처리를 삽입(insert/wrap)할 때 이 표기 사용]\n{repair_menu}"
                if repair_menu else "")
             + r1_hints
+            + feedback
             + (f"\n\n{note}" if note else "")
         )
         try:
@@ -670,6 +723,7 @@ def refine_flow(
         renumber(work)
         if applied == 0:
             _emit_round(round_no, ops.operations, 0, errors, "적용 실패", current_weight, None)
+            feedback = _round_feedback("연산이 하나도 적용되지 않음", errors, kept=False)
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
@@ -704,6 +758,17 @@ def refine_flow(
         if shrank:
             _emit_round(round_no, ops.operations, applied, errors,
                         f"흐름이 줄어 반려 ({shrank})", current_weight, new_weight)
+            # 이 판정은 대개 **절반짜리 수리**의 그림자다 — 짝이 되는 insert가 탈락하고
+            # move·remove만 남으면 순액션이 준다. 그래서 errors를 같이 보여줘야 모델이
+            # "지우지 마라"가 아니라 "닫기 액션 이름을 바로 써라"로 읽는다.
+            # errors가 비었으면(연산은 다 적용됐는데 결과가 줄었으면) 처방이 없으므로 hint를 준다.
+            feedback = _round_feedback(
+                f"흐름이 줄어 반려 ({shrank})", errors, kept=False,
+                hint="액션 총수가 줄면 그 라운드는 **무조건** 버려진다 — 같이 낸 멀쩡한 연산까지 "
+                     "함께 버려진다. 지운 액션이 하던 일을 대신할 액션을 같은 출력에 insert 하거나, "
+                     "지우는 대신 update로 바꿔라. ⚠ 컨테이너(Try·Catch·Finally·Loop·If·Step)를 "
+                     "remove 하면 그 안의 액션이 전부 같이 사라진다 — 껍데기만 걷어내려면 안의 "
+                     "액션을 먼저 move로 빼낸 뒤 지워라.")
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
@@ -711,6 +776,8 @@ def refine_flow(
         if new_weight < current_weight or (lenient and new_weight <= current_weight):
             _emit_round(round_no, ops.operations, applied, errors, "채택",
                         current_weight, new_weight)
+            # 채택돼도 탈락한 연산은 남는다 — 다음 라운드가 같은 이름으로 또 시도하지 않게.
+            feedback = _round_feedback("채택", errors, kept=True)
             current, current_violations = work, new_violations
             current_weight = new_weight
             repaired = True
@@ -723,6 +790,9 @@ def refine_flow(
         else:
             _emit_round(round_no, ops.operations, applied, errors, "개선 없어 폐기",
                         current_weight, new_weight)
+            feedback = _round_feedback(
+                f"결함 가중합이 줄지 않아 폐기 ({current_weight}→{new_weight})",
+                errors, kept=False)
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
