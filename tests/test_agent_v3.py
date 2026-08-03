@@ -2894,10 +2894,14 @@ def test_초안_트리를_검수_전에_먼저_보여준다(monkeypatch):
     for f in frames:
         assert "plan" not in f and "needs" not in f, "내부 통신용 키가 화면으로 샜다"
 
-    # 캡션은 항목 수가 몇이든 한 줄에 머문다 — 상한을 없앤 뒤 요청이 길어질 수 있다.
+    # 캡션은 **한 줄**에 머문다 — 항목 수·줄바꿈·길이 셋 다 캡션을 깰 수 있고 문구는
+    # 전부 모델이 쓴다(능력 요청 `what`, 커버리지는 요구 문장 그대로).
     assert g._caption_list(["가", "나", "다", "라"]) == "가 · 나 외 2건"
     assert g._caption_list(["가", "", None]) == "가"
     assert g._caption_list([]) == "…"
+    assert g._caption_list(["표에\n테두리\t적용"]) == "표에 테두리 적용", "안쪽 개행이 남았다"
+    long_one = g._caption_list(["가" * 100])
+    assert len(long_one) == 40 and long_one.endswith("…"), "긴 항목이 안 잘렸다"
 
 
 def test_설계_관점은_하나이고_파일이_실재한다():

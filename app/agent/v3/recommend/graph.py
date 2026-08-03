@@ -801,17 +801,24 @@ def _emit_gate(cid: str, issues: list[str], outline: dict) -> None:
     })
 
 
-def _caption_list(items, head: int = 2) -> str:
+def _caption_list(items, head: int = 2, width: int = 40) -> str:
     """캡션에 붙일 항목 요약 — 앞 몇 개만 쓰고 나머지는 "외 N건"으로 접는다.
 
-    상한이 없는 목록(능력 요청·커버리지 미달)이 그대로 들어오면 캡션 한 줄이 화면을
-    밀어낸다. 개수는 어차피 캡션 앞머리에 숫자로 나가므로 여기서는 **무엇인지**만 보인다.
+    캡션은 **한 줄**이라, 한 줄을 깨는 세 가지를 다 막는다:
+      ① 개수 — 앞 `head`개만 보이고 나머지는 "외 N건"으로 접는다.
+      ② 줄바꿈 — 항목 문구는 모델이 쓴다. `strip()`만 하면 **안쪽** 개행·탭이 그대로
+         남아 캡션이 여러 줄이 된다 (Qodo 리뷰).
+      ③ 길이 — 커버리지 미달은 `what`이 **요구 문구 그대로**라(`_coverage_gaps`) 한
+         항목이 문장 하나다. 둘만 붙여도 캡션이 화면을 밀어낸다.
+
+    개수는 어차피 캡션 앞머리에 숫자로 나가므로 여기서는 **무엇인지**만 보인다.
     """
-    vals = [str(x).strip() for x in items if str(x or "").strip()]
+    vals = [s for s in (" ".join(str(x or "").split()) for x in items) if s]
     if not vals:
         return "…"
+    shown = [v if len(v) <= width else v[:width - 1] + "…" for v in vals[:head]]
     more = f" 외 {len(vals) - head}건" if len(vals) > head else ""
-    return " · ".join(vals[:head]) + more
+    return " · ".join(shown) + more
 
 
 def _draft_frame(flow: dict, caption: str) -> None:
