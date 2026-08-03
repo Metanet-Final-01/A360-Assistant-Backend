@@ -1073,6 +1073,55 @@ def test_refine_루프도_줄어든_라운드를_반려한다(monkeypatch):
     assert len(out["flow"]["steps"][0]["actions"]) == 3
 
 
+def test_수리_라운드가_직전_실패를_다음_입력에_싣는다(monkeypatch):
+    """반려된 라운드는 흐름도를 되돌린다 — 그러면 다음 라운드 입력이 **글자까지 같아진다.**
+
+    실측(358초 턴 `44326af94fdb`, 2026-08-03): 게이트 수리 1·2라운드의 연산 5건이 완전히
+    동일했다. 세션 닫기 insert가 카탈로그에 없는 이름(`Browser/browserClose`)이라 탈락하고
+    move·remove만 남아 순액션이 줄면서 반려됐는데, 모델은 자기가 무엇에 실패했는지 못 본 채
+    같은 답을 내 31.3초를 더 태웠다.
+
+    그래서 재는 것은 산출물이 아니라 **입력**이다: 2라운드 프롬프트에 1라운드의 탈락 이유가
+    실려 있는가, 그리고 "지금 보는 것은 적용 전 상태"라는 말이 있는가. 뒤가 없으면 모델이
+    자기 수리가 이미 들어간 줄 알고 다음 문제로 넘어간다.
+    """
+    from app.agent.v3.orchestrator import harness
+    from app.agent.v3.orchestrator.edit_ops import EditOp, EditOps
+
+    seen: list[str] = []   # 라운드마다 surgeon이 실제로 받은 user_content
+
+    def _chat(msgs, **k):
+        seen.append(msgs[-1]["content"])
+        return EditOps(operations=[
+            # 실재하지 않는 표기 — 탈락하고 remove만 남아 순액션이 준다(= 절반짜리 수리)
+            EditOp(op="insert", anchor="n1", position="after",
+                   action={"package": "Browser", "action": "browserClose"}),
+            EditOp(op="remove", target="n2"),
+        ])
+
+    monkeypatch.setattr(harness, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "emit_flow_frame", lambda *a, **k: None)
+    monkeypatch.setattr(harness, "chat_json", _chat)
+
+    flow = {"steps": [{"step_id": "s1", "actions": [
+        _act("Excel advanced", "excelAdvancedPackageCloseAction"),   # Open 없이 Close → R7
+        _act("String", "assign"),                                    # remove 대상
+    ]}]}
+    out = harness.refine_flow(flow, FakeCatalog(), max_rounds=2)
+
+    assert not out["repaired"], "절반짜리 수리가 채택됐다"
+    assert len(seen) == 2, f"2라운드가 안 돌았다 ({len(seen)}회)"
+    assert "browserClose" not in seen[0], "1라운드가 아직 없는 실패를 알고 있다"
+    assert "browserClose" in seen[1], "탈락한 연산의 이유가 다음 입력에 없다"
+    assert "적용되지 않은" in seen[1]
+    assert "버려졌다" in seen[1] and "적용되지 않은** 상태" in seen[1], (
+        "수리가 반영되지 않았다는 사실을 안 알려주면 모델이 다음 문제로 넘어간다")
+
+    # 채택된 라운드는 판정을 싣지 않는다 — 탈락한 연산이 있을 때만 그것만 알린다.
+    assert harness._round_feedback("채택", [], kept=True) == ""
+    assert "버려졌다" not in harness._round_feedback("채택", ["op[0] …"], kept=True)
+
+
 def test_크기_판정은_한_함수를_공유한다():
     """게이트 수리와 refine이 다른 함수를 쓰면 한쪽만 고쳐질 때 다른 쪽으로 같은 일이 성립한다."""
     from app.agent.v3.orchestrator import edit_ops, harness
