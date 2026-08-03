@@ -482,6 +482,20 @@ def _render_spec_block(spec: dict) -> str:
 # compose — 페르소나 후보 생성 (Dossier 주입 + escape hatch ≤2회)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _need_queries(needs: list[dict]) -> list[str]:
+    """능력 요청·커버리지 미달 목록 → **실제로 검색에 쓸 질의**. 빈 문구는 버린다.
+
+    검색과 관측이 **같은 함수를 써야 한다.** 앞서는 이벤트 쪽이 따로 계산했는데
+    `str(n.get("query") or n.get("what"))`라 둘 다 없으면 문자열 `"None"`이 들어갔고,
+    공백만 있는 문구도 그대로 셌다 — 검색은 그것들을 버리므로 이벤트의 개수가 실제
+    검색 횟수보다 컸다. 지연·커버리지를 이 숫자로 추적하는 순간 거짓말이 된다(Qodo 리뷰).
+
+    절단 지점(`[:_MAX_NEEDS]`)도 여기 하나로 모은다 — 상한을 되살릴 때 두 곳이 갈리지 않게.
+    """
+    vals = [q for q in (str(n.get("query") or n.get("what") or "").strip() for n in needs) if q]
+    return vals[:_MAX_NEEDS]
+
+
 def _capability_menu(needs: list[dict], sink: list[dict], ctx) -> str:
     """능력 요청(needs)을 검색해 추가 액션 메뉴 블록을 만든다.
 
@@ -496,8 +510,7 @@ def _capability_menu(needs: list[dict], sink: list[dict], ctx) -> str:
     """
     if not needs or ctx is None or not getattr(ctx, "searchable", False):
         return ""
-    queries = [str(n.get("query") or n.get("what") or "").strip() for n in needs]
-    queries = [q for q in queries if q][:_MAX_NEEDS]
+    queries = _need_queries(needs)
     if not queries:
         return ""
 
@@ -1207,7 +1220,7 @@ async def _compose_candidate(
     # ── 2단: 능력 요청이 있으면 검색해 한 번 더 ────────────────────────────
     needs = [n for n in (outline.get("needs") or []) if isinstance(n, dict)]
     if needs:
-        queries = [str(n.get("query") or n.get("what")) for n in needs[:_MAX_NEEDS]]
+        queries = _need_queries(needs)   # 검색이 쓰는 것과 같은 함수 — 숫자가 어긋나지 않게
         extra = await asyncio.to_thread(_capability_menu, needs, sink, ctx)
         emit({"event": "stage", "stage": "searching",
               "message": f"흐름도가 요청한 액션 {len(queries)}건 추가 조사",
