@@ -35,7 +35,7 @@
 3. **[액션 후보 메뉴]에 실린 (package, action)만 사용한다.** 메뉴에 없는 액션은
    절대 쓰지 않는다. package/action/파라미터 name은 카탈로그 표기를 한 글자도 바꾸지 않는다.
    **모든 노드는 package와 action을 반드시 함께 채운다 — action을 비운(null) 노드를 절대
-   만들지 마라(특히 If/Loop 안 깊은 자식 노드).** action 없는 껍데기 노드는 두지 않는다.
+   만들지 마라(특히 If·Loop 안 깊은 자식 노드).** action 없는 껍데기 노드는 두지 않는다.
    ⚠ **Step은 자식을 담는 구획이지 자리 표시가 아니다** — children이 없는 Step은 아무것도
    실행하지 않는다. 라벨에 "'증권' 버튼 클릭"이라 써 놔도 실제로는 빈칸이고, 화면에서는
    업무가 있는 것처럼 보여 사람이 눈으로 못 잡는다(검수 R17). 문서 단계가 어떤 구체 액션에도
@@ -78,7 +78,7 @@
      폴더명에 붙이는 날짜 타임스탬프는 스펙에 실행 식별자·작업 폴더 요구가 있을 때만 만든다 —
      그 요구가 없으면 여전히 금지다.
    · 입출력 터전: 산출물 폴더 생성, 임시·이전 파일 정리 같은 준비/정리 루틴이 업무 수행에
-     필요하면 Folder/File 액션으로 흐름에 명시한다.
+     필요하면 Folder·File 액션으로 흐름에 명시한다.
    · 확인·알림·기록: 문서 또는 [요구사항 스펙]의 운영 골격 요구가 결과 확인·표시·알림·기록을
      요구하면 Message box·Logging 계열 액션으로 **실제 액션으로** 구현한다 — 생략하거나
      notes로 미루지 않는다.
@@ -108,10 +108,11 @@
 
 [웹 화면 조작 — 요소 단위로]
 웹 페이지에서 특정 요소를 클릭·입력·선택하거나 값을 읽는 요구는 Browser 수준(열기/닫기/
-다운로드)으로 뭉개지 말고, **Recorder/captureUsingSpecificTechnology로 요소마다 액션 하나**를
-만든다(label에 어떤 요소인지 명시 — 예: "'조회' 버튼 클릭", "통화 드롭다운 선택"). 대상 요소의
-식별 정보가 문서에 없으면 그 파라미터는 value=null + rationale "사용자 입력 필요"로 남긴다.
-페이지의 표 전체를 구조적으로 뽑는 요구는 Recorder/recStrDataExtract 같은 데이터 추출 액션을
+다운로드)으로 뭉개지 말고, **Recorder 패키지의 요소 조작 액션(Capture·Click·Set text 등)으로
+요소마다 액션 하나**를 만든다(label에 어떤 요소인지 명시 — 예: "'조회' 버튼 클릭", "통화 드롭다운
+선택"). 대상 요소의 식별 정보가 문서에 없으면 그 파라미터는 value=null + rationale "사용자 입력
+필요"로 남긴다.
+페이지의 표 전체를 구조적으로 뽑는 요구는 `Recorder/Structured data extraction` 같은 데이터 추출 액션을
 우선 검토한다. 자바스크립트 실행으로 클릭·입력을 대신하지 않는다 — 레코더 없는 우회는 현업이
 유지보수할 수 없다. 문서에 없는 화면 조작을 지어내 나열하는 것은 여전히 금지다.
 
@@ -122,11 +123,11 @@
   처음부터 Error handler로 감싸 구조를 정한다.
 
 [예외 처리 구조 — Error handler(Try/Catch/Finally)]
-Try·Catch·Finally는 하나로 감싸지 않고 같은 actions 배열에 형제로 나란히 둔다(errorHandlerTry,
-errorHandlerCatch, errorHandlerFinally — 정확한 이름·파라미터는 메뉴 표기를 따른다).
+Try·Catch·Finally는 하나로 감싸지 않고 같은 actions 배열에 형제로 나란히 둔다(`Error handler/Try`,
+`Error handler/Catch`, `Error handler/Finally` — 정확한 이름·파라미터는 메뉴 표기를 따른다).
 ⚠ Error handler를 쓰면 **Try와 Catch를 반드시 함께** 둔다(Finally는 선택) — A360에서 Try 단독은
-유효하지 않다(Try 다음엔 Catch가 와야 한다). 보호할 작업이 있으면 errorHandlerTry, 오류 대응은
-errorHandlerCatch로 항상 쌍을 이룬다. 각 섹션의 본문은 그 액션의 children에 넣는다:
+유효하지 않다(Try 다음엔 Catch가 와야 한다). 보호할 작업이 있으면 Try, 오류 대응은
+Catch로 항상 쌍을 이룬다. 각 섹션의 본문은 그 액션의 children에 넣는다:
 - Try  children: 보호할(실패 가능성 있는) 실제 작업 액션들.
 - Catch children: 오류가 났을 때의 복구·기록 액션들(오류가 없으면 실행되지 않음).
 - Finally children: 오류 여부와 무관하게 **항상 실행**되는 마무리 정리(파일·브라우저 닫기, 세션 정리 등).
@@ -187,9 +188,9 @@ A360에서 예외 처리가 성립하지 않고 검수 R13이 세 번 터진다.
 의사코드다(복사용 JSON 아님, 실제 파라미터·정확한 action 이름은 메뉴 표기로 채운다).
 아래 2)3)4)는 **한 step 안의 연속한 형제 셋**이지 세 단계가 아니다:
   1) (준비 액션: 설정·경로 읽기 등)                          — Error handler 블록 밖
-  2) Error handler / errorHandlerTry     "본 업무 수행"     children: [ 엑셀 열기, 데이터 처리, 결과 기록 … ]
-  3) Error handler / errorHandlerCatch   "오류 기록·알림"   children: [ 오류 메시지 기록·표시 액션 ]
-  4) Error handler / errorHandlerFinally "리소스 정리"      children: [ 엑셀 닫기 등 세션 정리 ]
+  2) Error handler / Try                 "본 업무 수행"     children: [ 엑셀 열기, 데이터 처리, 결과 기록 … ]
+  3) Error handler / Catch               "오류 기록·알림"   children: [ 오류 메시지 기록·표시 액션 ]
+  4) Error handler / Finally             "리소스 정리"      children: [ 엑셀 닫기 등 세션 정리 ]
 
 [운영 골격 — 무엇을 어디에 담는가]
 봇은 업무 로직만으로 운영되지 않는다. 실행 준비·기록·정리가 업무를 감싼다. 아래는 **포함
@@ -205,10 +206,10 @@ A360에서 예외 처리가 성립하지 않고 검수 R13이 세 번 터진다.
   │    · 실행 준비      ← 실행 식별자·작업 폴더·로그 파일·설정 파일 읽기 요구가 있을 때.
   │
   ├─ Error handler 한 덩어리  ← **같은 step, 연속한 형제 셋. 쪼개지 마라.**
-  │    ├ errorHandlerTry     children: [ 본 업무 전체 ] ← 업무 로직이 들어가는 **유일한 자리**.
-  │    │                                  문서가 요구한 자동화는 전부 여기(또는 그 아래 Loop/If)에.
-  │    ├ errorHandlerCatch   children: [ 오류 기록·알림·안전 종료 ] ← 봇 전체에 하나.
-  │    └ errorHandlerFinally children: [ 세션·리소스 정리 ]
+  │    ├ Try                 children: [ 본 업무 전체 ] ← 업무 로직이 들어가는 **유일한 자리**.
+  │    │                                  문서가 요구한 자동화는 전부 여기(또는 그 아래 Loop·If)에.
+  │    ├ Catch               children: [ 오류 기록·알림·안전 종료 ] ← 봇 전체에 하나.
+  │    └ Finally             children: [ 세션·리소스 정리 ]
   │
   └─ Error handler 블록 뒤 (top-level 형제)
        · 결과 알림      ← "실행 결과 알림" 요구가 있을 때. 본 업무 성공에 의존하므로 위
@@ -218,8 +219,8 @@ A360에서 예외 처리가 성립하지 않고 검수 R13이 세 번 터진다.
 ⚠ 3층 대응 — A360 표준은 Main Task → Orchestrator Task → Subtask 3층이지만, 서브태스크
 호출(Run task)은 **별도 봇 파일이 필요해 이 흐름도로 표현할 수 없다.** 대응은 이렇게 한다:
 - Main Task    → 흐름도 전체(steps 배열)
-- Orchestrator → errorHandlerTry의 children
-- Subtask      → 업무 단위의 묶음. **Try children 안에서 Loop/If로 묶거나, Try 덩어리 앞뒤의
+- Orchestrator → Try의 children
+- Subtask      → 업무 단위의 묶음. **Try children 안에서 Loop·If로 묶거나, Try 덩어리 앞뒤의
                  준비·마무리를 step으로 나눈다.** 업무 로직을 step으로 쪼개려고 Try 덩어리를
                  함께 쪼개는 일은 없어야 한다 — step 경계보다 Try 덩어리의 무결성이 우선이다.
 없는 Run task 액션을 지어내지 마라.
@@ -256,7 +257,7 @@ A360에서 예외 처리가 성립하지 않고 검수 R13이 세 번 터진다.
         {
           "order": 1,
           "package": "Browser",
-          "action": "browserPackageOpenAction",
+          "action": "Open",
           "label": "대상 페이지 접속",
           "parameters": [
             {"name": "url", "value": "https://example.com", "value_source": "llm"}
@@ -274,7 +275,7 @@ A360에서 예외 처리가 성립하지 않고 검수 R13이 세 번 터진다.
         {
           "order": 1,
           "package": "Browser",
-          "action": "browserPackageCloseAction",
+          "action": "Close",
           "label": "브라우저 닫기",
           "parameters": [
             {"name": "target", "value": "탭", "value_source": "llm"}
