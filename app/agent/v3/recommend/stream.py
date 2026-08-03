@@ -51,11 +51,16 @@ def emit_flow_frame(
 
 
 def emit_candidates_frame(candidates: list[dict], caption: str) -> None:
-    """후보 진행 요약 카드를 partial(kind="candidates")로 흘린다 (v3).
+    """설계 착수·실패를 알리는 요약 카드를 partial(kind="candidates")로 흘린다 (v3).
 
-    후보별 **전체 트리는 싣지 않는다** — 두 트리가 동시에 자라는 화면은 소음이고, 탈락
-    후보에 시각적 애착이 생기면 심판 결과가 배신처럼 보인다. 전략 이름·상태·단계/액션
-    수 카운터만 싣고, 트리 라이브 렌더(kind="flow")는 승자 확정 이후부터 시작한다.
+    **트리가 아직 없는 구간 전용이다** (RPA-370). 구조 1단이 끝나는 순간부터는 흐름도
+    프레임(kind="flow")이 나가고, 프론트는 그걸 받으면 이 카드를 지운다 — 그 뒤에 카드를
+    또 내면 지워졌다 다시 나타나기만 하고, 같은 말은 트리 캡션이 이미 하고 있다.
+
+    앞서는 트리를 검증 스택 통과 뒤로 미뤘다. 근거는 "탈락 후보에 시각적 애착이 생기면
+    심판 결과가 배신처럼 보인다"였는데, RPA-357에서 후보가 하나가 되고 심판이 사라져
+    **탈락할 후보도 배신할 심판도 없다.** 미룰 이유가 없어져 미루기만 남아 있었다.
+
     candidates 원소: {id, persona, status: composing|verifying|done|failed, steps, actions}.
     """
     emit({

@@ -2820,6 +2820,90 @@ def test_generate_flow_배선이_끝까지_돈다(monkeypatch):
     assert isinstance(out["violations"], list)
 
 
+def test_초안_트리를_검수_전에_먼저_보여준다(monkeypatch):
+    """트리 프레임은 **구조 1단이 끝나는 즉시** 나가야 한다 (RPA-370).
+
+    앞서는 검증 스택을 다 통과한 뒤에야 첫 프레임이 나갔다. 실측(224초 턴 `cc18379679a2`,
+    2026-08-03)에서 초안 트리는 103초 지점에 이미 완성돼 있었는데 화면에는 209초에 처음
+    떴다 — 사용자가 턴의 93%를 로딩 화면으로 받았다.
+
+    그래서 여기서 재는 것은 산출물이 아니라 **순서**다: 구조 LLM 호출 → 트리 프레임 →
+    능력 요청 재조회. 프레임이 재조회 뒤로 밀리면 가장 긴 침묵이 되살아난다.
+    함께 재는 것 하나 — 프레임에 `plan`·`needs`가 실리면 안 된다. 둘 다 내부 통신용이고,
+    특히 `needs`는 다음 회차에 사라질 요청 목록이라 화면에선 '못 찾은 것'으로 읽힌다.
+    """
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from app.agent.v3.recommend import graph as g
+
+    outline = {
+        "schema_version": "1.0",
+        "steps": [{"step_id": "step-1", "label": "본 업무",
+                   "actions": [_act("Email", "sendMail")]}],
+        "variables": [], "notes": "",
+        "plan": {"try_blocks": 0, "step_count": 1},
+        "needs": [{"what": "표에 테두리 서식", "query": "format cell border"},
+                  {"what": "PDF 병합", "query": "merge pdf"},
+                  {"what": "폴더 압축", "query": "zip folder"}],
+    }
+
+    log: list[str] = []        # 사건을 한 줄에 섞어 담는다 — 순서가 이 테스트의 대상이다
+    frames: list[dict] = []
+
+    def _frame(flow, violations, caption, active_step_id=None):
+        log.append(f"frame:{caption}")
+        frames.append(flow)
+
+    def _search(needs, sink, ctx):
+        log.append("search")
+        return ""              # 못 찾음 → 보강 회차 없음
+
+    class _AI:
+        content = json.dumps(outline)
+        response_metadata = {"finish_reason": "stop"}
+
+    class _LLM:
+        async def ainvoke(self, msgs, config=None):
+            log.append("llm")
+            return _AI()
+
+    monkeypatch.setattr(g, "emit_flow_frame", _frame)
+    monkeypatch.setattr(g, "emit", lambda payload: None)
+    monkeypatch.setattr(g, "_capability_menu", _search)
+    monkeypatch.setattr(g, "_gate_repair", lambda flow, *a, **k: flow)
+    monkeypatch.setattr(g, "_make_llm", lambda **k: _LLM())
+
+    ctx = SimpleNamespace(catalog=FakeCatalog(), retriever=None,
+                          searchable=False, solution="A360", vocabulary=None)
+
+    async def _run():
+        return await g._compose_candidate(
+            {"goal": "g", "requirements": []},
+            {"menu": _STUB_MENU, "actions": [], "background": ""},
+            {"steps": []}, None, [], asyncio.Semaphore(2), ctx)
+
+    assert asyncio.run(_run()) is not None
+
+    first_frame = next(i for i, e in enumerate(log) if e.startswith("frame:"))
+    assert log.index("llm") < first_frame < log.index("search"), (
+        f"초안 트리가 재조회보다 늦게 나갔다 — 그 구간이 통째로 침묵이 된다: {log}")
+    assert "초안 구조 완성" in log[first_frame]
+
+    for f in frames:
+        assert "plan" not in f and "needs" not in f, "내부 통신용 키가 화면으로 샜다"
+
+    # 캡션은 **한 줄**에 머문다 — 항목 수·줄바꿈·길이 셋 다 캡션을 깰 수 있고 문구는
+    # 전부 모델이 쓴다(능력 요청 `what`, 커버리지는 요구 문장 그대로).
+    assert g._caption_list(["가", "나", "다", "라"]) == "가 · 나 외 2건"
+    assert g._caption_list(["가", "", None]) == "가"
+    assert g._caption_list([]) == "…"
+    assert g._caption_list(["표에\n테두리\t적용"]) == "표에 테두리 적용", "안쪽 개행이 남았다"
+    long_one = g._caption_list(["가" * 100])
+    assert len(long_one) == 40 and long_one.endswith("…"), "긴 항목이 안 잘렸다"
+
+
 def test_설계_관점은_하나이고_파일이_실재한다():
     """페르소나 3개로 넓게 뽑는 대신 단계를 나눠 깊게 간다.
 
