@@ -1161,7 +1161,14 @@ def test_커버리지_미달은_수리가_아니라_조사로_간다():
     assert [x["req_id"] for x in gaps] == ["req-1", "req-2"]
     # 검색어는 요구 문구 그대로 — 조사 단계도 한국어 질의를 보낸다
     assert gaps[0]["query"] == "엑셀 표에 테두리 서식을 적용한다"
-    assert len(gaps) <= g._MAX_NEEDS
+
+    # 빠진 요구를 **개수로 자르지 않는다**. 앞서 상한 4가 걸려 있었는데, 잘린 요구는
+    # 경고도 관측도 없이 사라졌다 — 그 요구는 다음 회차 조사에서 아예 빠져 흐름도에
+    # 들어갈 길이 없어진다. 실측(실서비스 42턴)에서 45%가 그 경계에 붙어 있었다.
+    many_spec = {"requirements": [{"req_id": f"req-{i}", "text": f"요구 {i}"} for i in range(1, 8)]}
+    many = [Finding(layer="L2", severity="major", req_id=f"req-{i}", message="missing")
+            for i in range(1, 8)]
+    assert len(g._coverage_gaps(many, many_spec)) == 7, "빠진 요구가 잘렸다"
 
     user = g._coverage_retry_user("기본 지시", gaps)
     assert "엑셀 표에 테두리 서식을 적용한다" in user
