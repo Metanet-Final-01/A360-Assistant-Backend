@@ -2233,24 +2233,25 @@ def test_도구를_바인딩하는_노드는_reasoning_effort를_명시한다():
     이건 모델을 바꿀 때마다 되돌아오는 종류의 결함이라, 새 도구 노드가 생기면 자동으로
     걸리게 잰다. (추론이 필요하면 값을 올리지 말고 그 노드를 Responses API로 옮긴다.)
     """
-    import importlib
     import inspect
 
+    from app.agent.v1.orchestrator import edit as v1_edit
+    from app.agent.v1.orchestrator import qa as v1_qa
+    from app.agent.v2.orchestrator import edit as v2_edit
+    from app.agent.v2.orchestrator import qa as v2_qa
+    from app.agent.v2.recommend import graph as v2_graph
+    from app.agent.v3.orchestrator import edit as v3_edit
+    from app.agent.v3.orchestrator import qa as v3_qa
     from app.core import config as core_config
 
     # 도구를 바인딩하는 모듈 = bind_tools를 호출하는 모듈
-    modules = [
-        "app.agent.v1.orchestrator.qa", "app.agent.v1.orchestrator.edit",
-        "app.agent.v2.orchestrator.qa", "app.agent.v2.orchestrator.edit",
-        "app.agent.v2.recommend.graph",
-        "app.agent.v3.orchestrator.qa", "app.agent.v3.orchestrator.edit",
-    ]
-    for name in modules:
-        src = inspect.getsource(importlib.import_module(name))
-        assert ".bind_tools(" in src, f"{name}이 더는 도구를 안 쓴다 — 이 목록을 갱신하라"
+    modules = [v1_qa, v1_edit, v2_qa, v2_edit, v2_graph, v3_qa, v3_edit]
+    for mod in modules:
+        src = inspect.getsource(mod)
+        assert ".bind_tools(" in src, f"{mod.__name__}이 더는 도구를 안 쓴다 — 이 목록을 갱신하라"
         assert "tool_llm_kwargs(" in src, (
-            f"{name}이 도구를 바인딩하면서 tool_llm_kwargs를 안 쓴다 — 추론 강도와 전송 방식을 "
-            "따로 정하면 강도를 올린 사람이 400을 만난다"
+            f"{mod.__name__}이 도구를 바인딩하면서 tool_llm_kwargs를 안 쓴다 — 추론 강도와 "
+            "전송 방식을 따로 정하면 강도를 올린 사람이 400을 만난다"
         )
 
     # 강도와 전송은 **함께** 정해져야 한다 — 이 결합이 깨지면 400이 돌아온다
@@ -3816,17 +3817,21 @@ def test_edit_노드는_버전과_무관하게_EDIT_REASONING을_쓴다():
     AGENT_VERSION 한 줄로 되돌릴 수 있는 구성이라 "설정을 켰는데 왜 안 먹지"가 된다.
     같은 역할의 노드는 버전이 달라도 같은 노브를 봐야 한다.
     """
-    import importlib
     import inspect
 
-    for name in ("app.agent.v1.orchestrator.edit", "app.agent.v2.orchestrator.edit",
-                 "app.agent.v3.orchestrator.edit"):
-        src = inspect.getsource(importlib.import_module(name))
-        assert "edit_reasoning()" in src, f"{name}이 EDIT_REASONING을 안 본다"
-    for name in ("app.agent.v1.orchestrator.qa", "app.agent.v2.orchestrator.qa",
-                 "app.agent.v3.orchestrator.qa"):
-        src = inspect.getsource(importlib.import_module(name))
-        assert "tool_reasoning()" in src, f"{name}은 TOOL_REASONING을 봐야 한다"
+    from app.agent.v1.orchestrator import edit as v1_edit
+    from app.agent.v1.orchestrator import qa as v1_qa
+    from app.agent.v2.orchestrator import edit as v2_edit
+    from app.agent.v2.orchestrator import qa as v2_qa
+    from app.agent.v3.orchestrator import edit as v3_edit
+    from app.agent.v3.orchestrator import qa as v3_qa
+
+    for mod in (v1_edit, v2_edit, v3_edit):
+        src = inspect.getsource(mod)
+        assert "edit_reasoning()" in src, f"{mod.__name__}이 EDIT_REASONING을 안 본다"
+    for mod in (v1_qa, v2_qa, v3_qa):
+        src = inspect.getsource(mod)
+        assert "tool_reasoning()" in src, f"{mod.__name__}은 TOOL_REASONING을 봐야 한다"
 
 
 
