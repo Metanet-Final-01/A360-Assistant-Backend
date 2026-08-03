@@ -1211,7 +1211,11 @@ async def _compose_candidate(
         extra = await asyncio.to_thread(_capability_menu, needs, sink, ctx)
         emit({"event": "stage", "stage": "searching",
               "message": f"흐름도가 요청한 액션 {len(queries)}건 추가 조사",
-              "data": {"candidate": cid, "queries": queries, "found": bool(extra)}})
+              # 질의 목록은 앞 12건만 싣는다 — 상한을 없앤 건 **검색을 다 돌리기 위해서**지
+              # 이벤트에 다 적기 위해서가 아니다. 개수는 message가 이미 말하므로 관측 구멍은
+              # 생기지 않는다(RPA-369가 닫은 구멍은 '자른 뒤의 수를 실은 것'이었다. Qodo 리뷰).
+              "data": {"candidate": cid, "asked": len(queries),
+                       "queries": queries[:12], "found": bool(extra)}})
         if extra:
             # 보강은 같은 '구조' 작업의 재생성이라 추론도 같이 건다 — 여기서만 끄면 첫 초안보다
             # 못한 구조가 나와 회귀 가드에 걸리고, 능력 요청으로 찾아온 액션이 버려진다.
@@ -1280,8 +1284,8 @@ async def _compose_candidate(
         extra = await asyncio.to_thread(_capability_menu, gaps, sink, ctx)
         emit({"event": "stage", "stage": "searching",
               "message": f"빠뜨린 필수 요구 {len(gaps)}건을 조사로 보완",
-              "data": {"candidate": cid, "req_ids": [g["req_id"] for g in gaps],
-                       "found": bool(extra)}})
+              "data": {"candidate": cid, "asked": len(gaps),
+                       "req_ids": [g["req_id"] for g in gaps][:12], "found": bool(extra)}})
         if extra:
             retry = await _ask(
                 compose_system_prompt(persona, analysis, spec, dossier, extra_menu=extra),

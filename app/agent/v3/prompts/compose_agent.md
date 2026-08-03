@@ -102,7 +102,7 @@
 6. 구조는 컨테이너(children에 본문을 담는 액션)로 표현한다 — children은 컨테이너 액션에만 넣는다:
    · Loop: 반복 본문을 children에.
    · If / Else If / Else: 각 분기 본문을 각 If-패키지 액션의 children에 넣고, 같은 actions 배열에 형제로 나란히 둔다.
-   · Error handler(Try/Catch/Finally): 오류 처리가 필요하면 나중에 덧붙이지 말고 **생성 시점에** 아래 [예외 처리 구조]대로 감싼다.
+   · Error handler(Try·Catch·Finally): 오류 처리가 필요하면 나중에 덧붙이지 말고 **생성 시점에** 아래 [예외 처리 구조]대로 감싼다.
 7. order는 각 step의 actions 안에서 1부터. label은 흐름도 박스에 그대로 표시되니 "무엇을
    하는지"를 사람 말로 짧게(예: "결재 버튼 클릭").
 
@@ -112,8 +112,8 @@
 요소마다 액션 하나**를 만든다(label에 어떤 요소인지 명시 — 예: "'조회' 버튼 클릭", "통화 드롭다운
 선택"). 대상 요소의 식별 정보가 문서에 없으면 그 파라미터는 value=null + rationale "사용자 입력
 필요"로 남긴다.
-페이지의 표 전체를 구조적으로 뽑는 요구는 `Recorder/Structured data extraction` 같은 데이터 추출 액션을
-우선 검토한다. 자바스크립트 실행으로 클릭·입력을 대신하지 않는다 — 레코더 없는 우회는 현업이
+페이지의 표 전체를 구조적으로 뽑는 요구는 `package="Recorder" action="Structured data extraction"`
+같은 데이터 추출 액션을 우선 검토한다. 자바스크립트 실행으로 클릭·입력을 대신하지 않는다 — 레코더 없는 우회는 현업이
 유지보수할 수 없다. 문서에 없는 화면 조작을 지어내 나열하는 것은 여전히 금지다.
 
 [A360는 Java 기반 — 타입·예외 처리가 엄격하다]
@@ -122,9 +122,10 @@
 - 실패 가능성이 있는 작업(파일 열기, 웹 이동·추출, 외부 호출, 메일 발송 등)에 오류 처리가 필요하면
   처음부터 Error handler로 감싸 구조를 정한다.
 
-[예외 처리 구조 — Error handler(Try/Catch/Finally)]
-Try·Catch·Finally는 하나로 감싸지 않고 같은 actions 배열에 형제로 나란히 둔다(`Error handler/Try`,
-`Error handler/Catch`, `Error handler/Finally` — 정확한 이름·파라미터는 메뉴 표기를 따른다).
+[예외 처리 구조 — Error handler(Try·Catch·Finally)]
+Try·Catch·Finally는 하나로 감싸지 않고 같은 actions 배열에 형제로 나란히 둔다
+(`package="Error handler"`에 `action="Try"`·`"Catch"`·`"Finally"` — 정확한 이름·파라미터는
+메뉴 표기를 따른다).
 ⚠ Error handler를 쓰면 **Try와 Catch를 반드시 함께** 둔다(Finally는 선택) — A360에서 Try 단독은
 유효하지 않다(Try 다음엔 Catch가 와야 한다). 보호할 작업이 있으면 Try, 오류 대응은
 Catch로 항상 쌍을 이룬다. 각 섹션의 본문은 그 액션의 children에 넣는다:
