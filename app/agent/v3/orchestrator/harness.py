@@ -577,7 +577,7 @@ def _emit_round(
     })
 
 
-def _round_feedback(verdict: str, errors: list[str], *, kept: bool) -> str:
+def _round_feedback(verdict: str, errors: list[str], *, kept: bool, hint: str = "") -> str:
     """직전 라운드가 왜 버려졌는지를 다음 라운드 입력에 싣는다 (RPA-371).
 
     앞서는 라운드마다 프롬프트를 `current`에서 새로 만들 뿐이었다. 그런데 **반려된 라운드는
@@ -593,6 +593,15 @@ def _round_feedback(verdict: str, errors: list[str], *, kept: bool) -> str:
     모델이 자기 수리가 이미 들어간 줄 알고 다음 문제로 넘어가, 정작 반려된 결함을 방치한다.
     `r1_package_hints`는 이 구멍을 못 메운다 — 그쪽은 **흐름도에 이미 있는** R1 위반만
     대상이라, *삽입하려다* 실패한 이름은 힌트를 못 받는다.
+
+    ## 판정만으로는 부족하다 — `hint`가 필요한 이유
+
+    이름 오류는 `errors`가 처방까지 대신해 준다("카탈로그 표기 그대로 나눠 적으세요").
+    그런데 **축소 반려는 `errors`가 비어 있을 수 있다** — 연산이 전부 적용됐는데 결과가
+    줄어든 경우다. 그때 판정 한 줄만 주면 모델은 답을 바꾸긴 해도 방향을 모른다.
+    실측(355초 턴 `6d4c3da18c93`, 2026-08-03): 1라운드가 액션 5개를 잃고 반려되자
+    2라운드는 remove를 하나 더 늘려 7개를 잃었다. 그래서 그 판정에는 **무엇을 지켜야
+    하는지**를 같이 준다.
     """
     errs = [e for e in (errors or []) if e][:6]
     if kept and not errs:
@@ -606,6 +615,8 @@ def _round_feedback(verdict: str, errors: list[str], *, kept: bool) -> str:
             "위 [흐름도 아웃라인]은 그 수리가 **적용되지 않은** 상태다. 같은 연산을 그대로 "
             "다시 내면 같은 이유로 또 버려진다.",
         ]
+    if hint:
+        lines.append(hint)
     if errs:
         lines.append("적용되지 않은 연산:")
         lines.extend(f"- {e}" for e in errs)
@@ -746,7 +757,14 @@ def refine_flow(
             # 이 판정은 대개 **절반짜리 수리**의 그림자다 — 짝이 되는 insert가 탈락하고
             # move·remove만 남으면 순액션이 준다. 그래서 errors를 같이 보여줘야 모델이
             # "지우지 마라"가 아니라 "닫기 액션 이름을 바로 써라"로 읽는다.
-            feedback = _round_feedback(f"흐름이 줄어 반려 ({shrank})", errors, kept=False)
+            # errors가 비었으면(연산은 다 적용됐는데 결과가 줄었으면) 처방이 없으므로 hint를 준다.
+            feedback = _round_feedback(
+                f"흐름이 줄어 반려 ({shrank})", errors, kept=False,
+                hint="액션 총수가 줄면 그 라운드는 **무조건** 버려진다 — 같이 낸 멀쩡한 연산까지 "
+                     "함께 버려진다. 지운 액션이 하던 일을 대신할 액션을 같은 출력에 insert 하거나, "
+                     "지우는 대신 update로 바꿔라. ⚠ 컨테이너(Try·Catch·Finally·Loop·If·Step)를 "
+                     "remove 하면 그 안의 액션이 전부 같이 사라진다 — 껍데기만 걷어내려면 안의 "
+                     "액션을 먼저 move로 빼낸 뒤 지워라.")
             no_improve += 1
             if no_improve >= _STOP_AFTER_NO_IMPROVE:
                 break
