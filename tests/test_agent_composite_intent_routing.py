@@ -29,7 +29,10 @@ import os
 import pytest
 
 from app.agent.v1.orchestrator import graph as v1_graph
+from app.agent.v1.orchestrator import intake as v1_intake
 from app.agent.v2.orchestrator import graph as v2_graph
+from app.agent.v2.orchestrator import intake as v2_intake
+from app.agent.v3.orchestrator import intake as v3_intake
 from app.agent.v3.orchestrator.graph import respond_node, supervisor_node
 from app.agent.v3.orchestrator.intake import _guard_plan
 from app.agent.v3.orchestrator.state import (
@@ -42,6 +45,11 @@ from app.agent.v3.orchestrator.state import (
     TYPE_ANSWER,
     TYPE_RECOMMENDATION,
 )
+
+# 버전 파라미터 → intake 모듈 (RPA-372). `import_module(f"app.agent.{version}...")`를
+# 쓰면 의존성 검사기가 대상을 확정하지 못해 매 PR마다 "검증 불가"로 남는다. 정적으로
+# 묶어 두면 검사기도 읽고, 모듈이 사라졌을 때 수집 시점에 바로 드러난다.
+_INTAKE = {"v1": v1_intake, "v2": v2_intake, "v3": v3_intake}
 
 # 재현 문구 그대로 — 프론트가 실제로 보내는 합성 의도다.
 COMPOSITE = "이 업무정의서를 분석해서 자동화 흐름도까지 만들어줘"
@@ -240,10 +248,7 @@ def test_intake_프롬프트가_네_라우트를_모두_설명한다(version):
 
     RPA-218의 증상(모든 요청이 answer)이 정확히 그런 모양이라, 어휘 자체를 고정해 둔다.
     """
-    import importlib
-
-    mod = importlib.import_module(f"app.agent.{version}.orchestrator.intake")
-    prompt = mod._PROMPT
+    prompt = _INTAKE[version]._PROMPT
     for route in ROUTES:
         assert f'"{route}"' in prompt, f"{version} intake 프롬프트에 {route} 설명이 없다"
 
@@ -293,8 +298,6 @@ def test_실제_분류(monkeypatch, version, message, required, forbidden):
     "있어야 할 것"과 "있으면 안 될 것"을 둘 다 본다. `required in plan`만 보면 분석 요청에
     generate가 덤으로 붙어도 통과해, 과잉 산출 회귀가 그대로 새어 나간다.
     """
-    import importlib
-
     if os.getenv("RUN_LLM_TESTS") != "1":
         pytest.skip("실 LLM 테스트는 RUN_LLM_TESTS=1 일 때만 실행")
     if not os.getenv("OPENAI_API_KEY"):
@@ -302,7 +305,7 @@ def test_실제_분류(monkeypatch, version, message, required, forbidden):
     # 사용량 기록은 DB를 탄다 — 분류만 보는 테스트가 인프라를 요구하지 않게 끊는다.
     monkeypatch.setattr("app.core.llm.record_usage", lambda **kwargs: None)
 
-    mod = importlib.import_module(f"app.agent.{version}.orchestrator.intake")
+    mod = _INTAKE[version]
     state = {
         "message": message, "solution": "a360", "operation": "chat", "history": [],
         "compact": None, "analysis": None, "recommendation": None,
