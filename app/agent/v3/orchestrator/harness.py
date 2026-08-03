@@ -603,7 +603,11 @@ def _round_feedback(verdict: str, errors: list[str], *, kept: bool, hint: str = 
     2라운드는 remove를 하나 더 늘려 7개를 잃었다. 그래서 그 판정에는 **무엇을 지켜야
     하는지**를 같이 준다.
     """
-    errs = [e for e in (errors or []) if e][:6]
+    # 에러 문구에는 **모델이 쓴 값이 그대로 박혀 있다** — `카탈로그에 없는 액션
+    # "Browser"/"browserClose"`의 인용부호 안이 모델 출력이다. 손대지 않고 프롬프트에
+    # 붙이면 (1) 그 안의 개행이 bullet 구조를 깨고 (2) 모델이 쓴 문장이 우리 지시문처럼
+    # 읽힌다. 한 줄로 접고 길이를 묶는다 (Qodo 리뷰).
+    errs = [" ".join(str(e).split())[:300] for e in (errors or []) if str(e or "").strip()][:6]
     if kept and not errs:
         return ""
     if kept:
