@@ -43,6 +43,40 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
+  OpenAiModel:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional OpenAI model name override (e.g. gpt-5.4-mini). Empty leaves
+      the app's own hardcoded default in place.
+  LlmInputCostPer1M:
+    Type: String
+    Default: "0.20"
+    Description: USD cost per 1M input tokens. App skips cost calc if unset.
+  LlmOutputCostPer1M:
+    Type: String
+    Default: "1.20"
+    Description: USD cost per 1M output tokens. App skips cost calc if unset.
+  LlmCachedInputCostPer1M:
+    Type: String
+    Default: "0.02"
+    Description: USD cost per 1M cached input tokens. App skips cost calc if unset.
+  VisionMinTextChars:
+    Type: String
+    Default: "200"
+  VisionMaxPages:
+    Type: String
+    Default: "15"
+  VisionConcurrency:
+    Type: String
+    Default: "4"
+  VisionForceEmptyChars:
+    Type: String
+    Default: "50"
+  ComposeReasoning:
+    Type: String
+    Default: "medium"
+    AllowedValues: ["none", "low", "medium", "high", "xhigh"]
   VoyageApiKey:
     Type: String
     Default: ""
@@ -429,6 +463,19 @@ Resources:
               RAG_CACHE_TTL_SECONDS=${RagCacheTtlSeconds}
               EOF_RAG_CACHE
               jq -r 'to_entries[] | select((.key == "OPS_API_KEY" or .key == "ASSURANCE_WRITER_TOKEN" or .key == "ASSURANCE_WRITER_REPOSITORY") | not) | "\(.key)=\(.value)"' /opt/a360/secrets/app.json >> /opt/a360/.env
+              if [ -n "${OpenAiModel}" ]; then
+                echo "OPENAI_MODEL=${OpenAiModel}" >> /opt/a360/.env
+              fi
+              cat >> /opt/a360/.env <<'EOF_COST_VISION'
+              LLM_INPUT_COST_PER_1M=${LlmInputCostPer1M}
+              LLM_OUTPUT_COST_PER_1M=${LlmOutputCostPer1M}
+              LLM_CACHED_INPUT_COST_PER_1M=${LlmCachedInputCostPer1M}
+              VISION_MIN_TEXT_CHARS=${VisionMinTextChars}
+              VISION_MAX_PAGES=${VisionMaxPages}
+              VISION_CONCURRENCY=${VisionConcurrency}
+              VISION_FORCE_EMPTY_CHARS=${VisionForceEmptyChars}
+              COMPOSE_REASONING=${ComposeReasoning}
+              EOF_COST_VISION
 
               docker rm -f a360-backend || true
               docker run -d --restart unless-stopped --name a360-backend \
