@@ -203,6 +203,7 @@ jobs:
         env:
           FRONTEND_ORIGINS: ${{ secrets.FRONTEND_ORIGINS }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           OPENSEARCH_HOST: ${{ secrets.OPENSEARCH_HOST }}
@@ -228,6 +229,7 @@ jobs:
               ContainerImage="${{ needs.build.outputs.image_uri }}" \
               FrontendOrigins="$FRONTEND_ORIGINS" \
               OpenAiApiKey="$OPENAI_API_KEY" \
+              OpenAiModel="$OPENAI_MODEL" \
               VoyageApiKey="$VOYAGE_API_KEY" \
               JwtSecret="$JWT_SECRET" \
               ExternalOpenSearchHost="$OPENSEARCH_HOST" \
