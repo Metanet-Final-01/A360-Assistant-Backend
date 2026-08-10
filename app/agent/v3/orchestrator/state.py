@@ -43,6 +43,9 @@ class TurnState(TypedDict, total=False):
     route: str  # 첫 task (관측·하위호환용)
     route_reason: str  # 분류 근거 (로깅·디버그용)
     plan: list[str]  # 순서 있는 task 목록 (ROUTES 원소들) — supervisor가 결정론 순회
+    # 타 솔루션 카탈로그 판정 (CatalogSignal.model_dump()) — 검증 전 원시 신호.
+    # generate가 foreign_catalog.verify로 검증해 소비한다. 판정 없으면 부재.
+    catalog_signal: dict | None
     current_task: str  # supervisor가 방금 디스패치한 task (artifact 스냅샷 키)
     next_node: str  # supervisor 조건부 엣지 키 (내부용)
     artifacts: list[dict]  # task별 산출 스냅샷 [{task, type, answer, ...}] — done에 동봉

@@ -930,8 +930,28 @@ def _get_agent_versions():
         return None
 
 
+# 입력 토큰 예산 — 모델 입력 상한 1,000,000의 80%.
+#
+# **실질 상한은 이쪽이다.** 아래 `max_length`(문자)는 토크나이저를 돌리기 전에 병적 본문을
+# 쳐내는 싼 바깥 경계일 뿐이고, "얼마나 무거운 입력인가"는 문자로 잴 수 없다 — 같은 800,000자가
+# 영문 177,778 / 한글 861,539 / 이모지 2,400,000 토큰으로 **13배** 벌어진다(실측).
+# 문자 수를 토큰 상한으로 오해해 가드가 뚫린 이력이 있다(RPA-172, _estimate_message_tokens 주석).
+_MESSAGE_MAX_TOKENS = 800_000
+
+# 문자 상한 = 토큰 예산 ÷ (UTF-8 최대 4바이트/문자). cl100k_base는 byte-level BPE라
+# `tokens ≤ bytes ≤ 4 × chars`가 **증명된다**. 그래서 이 길이 아래면 토큰 상한을 넘을 수
+# 없고(검증 생략 가능), 이 길이를 넘으면 토크나이즈 없이 바로 거절할 수 있다.
+_MESSAGE_MAX_CHARS = _MESSAGE_MAX_TOKENS  # 4,000,000까지 열면 4MB 본문을 버퍼링하게 된다
+
+
 class AgentTurnRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=4000, description="사용자 메시지 (버튼이면 프론트가 합성)")
+    # 상한 4,000자 → 800,000자/토큰. 대화 한 마디 기준으로는 4,000자가 넉넉했지만, 이 입구로
+    # **타 솔루션 액션 카탈로그**가 들어온다(RPA-285). 448개짜리 카탈로그가 75,000자·18,241토큰이라
+    # 4,000자에서는 붙여넣기 자체가 422로 막혀 기능을 쓸 수가 없었다.
+    # ⚠️ 상한이지 권장치가 아니다 — 큰 입력은 컨텍스트·비용·자동 compact를 함께 건드린다.
+    #    특히 자동 compact 한도(_GAUGE_LIMIT_DEFAULT)는 **여기와 자릿수가 다르다** — 그쪽 주석 참고.
+    message: str = Field(min_length=1, max_length=_MESSAGE_MAX_CHARS,
+                         description="사용자 메시지 (버튼이면 프론트가 합성)")
     # compact/fill_cards 버튼발 결정론 요청 — LLM 라우터를 우회하는 명시 신호 (기본 "chat")
     operation: str = Field(
         "chat", pattern="^(chat|compact|fill_cards)$", description="chat | compact | fill_cards"
@@ -944,6 +964,43 @@ class AgentTurnRequest(BaseModel):
     agent_version: str | None = Field(
         None, description="에이전트 버전 (없으면 서버 기본). 유효값은 GET /api/agent/versions"
     )
+
+    @field_validator("message")
+    @classmethod
+    def _within_token_budget(cls, v: str) -> str:
+        """입력을 **토큰**으로 제한한다 — 문자 상한은 이 상한을 주지 못한다.
+
+        ## 왜 문자로는 안 되는가
+
+        같은 800,000자가 영문 177,778 / 한글 861,539 / 이모지 2,400,000 토큰이다(실측, 13배).
+        문자 상한만 두면 어떤 값을 잡아도 어떤 언어에서는 헐겁고 어떤 언어에서는 빡빡하다.
+        같은 착각으로 선행 compact 가드가 뚫린 적이 있다(RPA-172).
+
+        ## 짧은 입력은 세지 않는다
+
+        `tokens ≤ bytes ≤ 4 × chars`가 증명되므로(cl100k_base는 byte-level BPE, UTF-8은 최대
+        4바이트/문자), 그 곱이 예산 아래면 **넘을 수 없다**. 평범한 대화는 여기서 끝나 토크나이즈
+        비용이 0이다 — 실측으로 800,000자 이모지를 세는 데 131ms가 든다.
+
+        ## 인코더가 없으면 강제하지 않는다
+
+        `_estimate_message_tokens`의 폴백은 UTF-8 바이트 수인데, 이건 **자동 compact 가드용**으로
+        고른 과대추정이다(놓치면 컨텍스트가 터지므로 안전한 방향). 입력 거부에 그대로 쓰면 방향이
+        뒤집힌다 — 한글은 실제 861,539토큰을 1,907,694로 세므로(2.2배) **멀쩡한 입력이 거부된다.**
+        인코더는 lifespan 워밍업에서만 채워지니, 워밍업이 실패한 저하 모드에서 "한글만 거부되는"
+        상태를 만들지 않도록 문자 상한만 적용하고 넘어간다.
+        """
+        if len(v) * 4 <= _MESSAGE_MAX_TOKENS:  # 증명 가능한 상계 — 셀 필요 없음
+            return v
+        if _token_encoder() is None:  # 저하 모드 — 문자 상한(max_length)이 이미 받았다
+            return v
+        n = _estimate_message_tokens(v)
+        if n > _MESSAGE_MAX_TOKENS:
+            raise ValueError(
+                f"입력이 약 {n:,}토큰으로 상한 {_MESSAGE_MAX_TOKENS:,}토큰을 넘습니다 "
+                f"(문자 {len(v):,}자). 내용을 나눠 보내주세요."
+            )
+        return v
 
     @field_validator("agent_version")
     @classmethod
@@ -1268,14 +1325,18 @@ def _save_turn_events(session_id: uuid.UUID, request_id: str | None, rows: list[
 # 6000을 고른 이유 — 두 제약이 아래에서 위로, 위에서 아래로 조인다:
 #   ① 아래 경계(~5,100 이상이어야): 히스토리가 거의 없는 초반 턴에 큰 입력 하나가 들어와도
 #      오발동하지 않아야 한다 — 압축할 history가 없는데 compact 비용($0.00843/콜)만 나간다.
-#      ⚠️ 이 경계를 **문자 수로 잡으면 안 된다**. `AgentTurnRequest.message`의 max_length=4000은
+#      ⚠️ 이 경계를 **문자 수로 잡으면 안 된다**. `AgentTurnRequest.message`의 max_length는
 #      **문자** 상한이고, 게이지가 세는 건 **토큰**이다. cl100k_base 실측 tok/char:
 #        영문 0.12 / 한글 산문 1.08 / 태국어 1.0 / 희귀 CJK 2.0 / 이모지 3.0
-#      즉 4,000자짜리 스키마 유효 입력의 토큰 수는 **500 ~ 12,000**으로 24배 벌어진다.
-#      현실 입력(한국어 산문)의 최악은 4,000자 × 1.08 ≈ **4,309토큰**이고, base(582)를 더하면
-#      **4,891**이다. 6000은 이 위라 여유 1,109를 남긴다 — 현실 입력으로는 초반 오발동이 없다.
-#      (이모지 도배 같은 병리적 입력은 12,582까지 가능해 이 경계를 넘지만, 그건 **선행 가드가
-#       잡는 게 맞는** 진짜 초대형 입력이다 — _needs_auto_compact 참고.)
+#      ⚠️⚠️ **이 경계의 근거는 max_length=4000 시절에 만들어졌다.** 당시 계산은 "현실 입력
+#      최악 = 4,000자 × 1.08 ≈ 4,309토큰, base(582)를 더해 4,891 → 6000이면 여유 1,109"였다.
+#      상한이 800,000자로 열리면서 **그 상계는 사라졌다** — 단일 입력 하나가 게이지 한도를
+#      수십 배 넘을 수 있다. 지금 초반 오발동을 막는 건 이 값이 아니라 "1턴째엔 gauge=None이라
+#      _needs_auto_compact 호출 자체가 안 된다"는 사실뿐이다.
+#      ⚠️ 그래서 **2턴째 이후의 대형 붙여넣기는 자동 compact를 부른다**. compact는 카탈로그
+#      원문을 보존하지 못한다(실측: 75,222자 카탈로그 → verbatim 131자 요약, 영구 유실).
+#      타 솔루션 카탈로그는 **첫 턴에** 주는 것이 지금으로선 유일하게 안전한 경로다.
+#      근본 해결은 카탈로그를 대화가 아니라 별도 자산으로 받는 것(등록 경로 + 1회 파싱).
 #      ⚠️ base는 리포트가 계산하는 **첫 턴 intake 중앙값(582)**이다. 한때 여기 '~772'라고 적었는데
 #         출처 없는 숫자였다(리포트·테스트 어디에도 없음). 근거 있는 값만 쓸 것.
 #   ② 위 경계(작을수록 발동): 6000이면 짧은 메시지 기준 하드가 29턴째(경고 25턴째). 100000의

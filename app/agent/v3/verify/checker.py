@@ -74,6 +74,16 @@ NON_CONTAINER_ACTIONS: frozenset[tuple[str, str]] = frozenset(
 )
 
 
+def container_vocabulary_known(catalog=None) -> bool:
+    """사전이 이 카탈로그의 제어 흐름 어휘를 아는가 — R6을 판정할 근거가 있는지 (RPA-285).
+
+    카탈로그를 안 주면 True(하위호환) — 순회를 못 하는 스텁도 기존대로 판정한다.
+    """
+    if catalog is None:
+        return True
+    return knowledge_derive.derive_container_vocabulary_known(catalog)
+
+
 def container_exceptions(catalog=None) -> frozenset[tuple[str, str]]:
     """카탈로그에서 유도한 '본문 없는 컨테이너 액션'. 유도가 비면 수기 상수 폴백."""
     if catalog is None:
@@ -265,8 +275,14 @@ def _check_action(
     catalog: CatalogLookup,
     location: str,
     non_container: frozenset[tuple[str, str]] | None = None,
+    *,
+    judge_containers: bool = True,
 ) -> list[Violation]:
-    """액션 하나를 R1(카탈로그 존재)·R2~R5(파라미터)·R6(children 컨테이너)로 검사하고 children을 재귀한다."""
+    """액션 하나를 R1(카탈로그 존재)·R2~R5(파라미터)·R6(children 컨테이너)로 검사하고 children을 재귀한다.
+
+    judge_containers=False면 R6을 건너뛴다 — 사전이 이 카탈로그의 제어 흐름 어휘를 모를 때다
+    (container_vocabulary_known 참조). 근거 없이 구조를 틀렸다고 단정하지 않는다.
+    """
     violations: list[Violation] = []
     pkg, act = action.get("package"), action.get("action")
     children = action.get("children") or []
@@ -287,7 +303,7 @@ def _check_action(
         violations.extend(_check_parameters(action, spec, location))
 
     # R6: children은 컨테이너 액션에만
-    if children and not is_container(pkg, act, non_container=non_container):
+    if children and judge_containers and not is_container(pkg, act, non_container=non_container):
         violations.append(
             Violation(
                 "R6", location,
@@ -298,7 +314,8 @@ def _check_action(
 
     for i, child in enumerate(children):
         violations.extend(
-            _check_action(child, catalog, f"{location}.children[{i}]", non_container)
+            _check_action(child, catalog, f"{location}.children[{i}]", non_container,
+                          judge_containers=judge_containers)
         )
     return violations
 
@@ -312,8 +329,14 @@ def run_checks(actions: list[dict], catalog: CatalogLookup) -> list[Violation]:
     # 컨테이너 예외는 카탈로그에서 한 번만 유도해 트리 전체에 내려보낸다 — 수기 3쌍은
     # 현행 표기와 어긋나 Loop/Break를 컨테이너로 오판했다(container_exceptions 참조).
     non_container = container_exceptions(catalog)
+    # 사전이 이 카탈로그의 제어 흐름 어휘를 모르면 R6을 판정하지 않는다 — 타 솔루션
+    # 카탈로그에서 `Loops/Loop`·`Conditionals/If`가 통째로 오탐되는 것을 막는다.
+    judge_containers = container_vocabulary_known(catalog)
     for i, action in enumerate(actions):
-        violations.extend(_check_action(action, catalog, f"actions[{i}]", non_container))
+        violations.extend(
+            _check_action(action, catalog, f"actions[{i}]", non_container,
+                          judge_containers=judge_containers)
+        )
     return violations
 
 

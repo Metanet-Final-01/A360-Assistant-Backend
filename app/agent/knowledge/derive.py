@@ -280,6 +280,29 @@ def derive_container_exceptions(catalog) -> frozenset[tuple[str, str]]:
     return _cached(catalog, "container_exceptions", build)
 
 
+def derive_container_vocabulary_known(catalog) -> bool:
+    """이 카탈로그의 **제어 흐름 어휘를 사전이 아는가** (RPA-285).
+
+    `is_container`는 `CONTAINER_PACKAGES`(Loop·If·Step·Error handler·Trigger loop)라는 A360
+    패키지 이름으로 컨테이너를 판정한다. 다른 솔루션 카탈로그에는 그 이름이 하나도 없다 —
+    Power Automate는 `Loops`·`Conditionals`·`Flow control`이다. 그러면 `Loops/Loop`에 본문이
+    있다는 이유로 R6("컨테이너가 아닌데 children이 있다")이 터진다. 실측: PAD 448개 카탈로그로
+    만든 흐름도에서 R6 4건이 전부 이 오탐이었다(`Loops/Loop` 1건, `Conditionals/If` 3건).
+
+    규칙이 틀린 게 아니라 **어휘가 A360 것**이다. 그래서 사전이 이 카탈로그를 하나도 모르면
+    컨테이너 여부를 '모름'으로 두고 R6을 침묵시킨다 — 카탈로그가 params_unknown이면 R2~R5를,
+    produces 명시가 없으면 R9/R10을 침묵시키는 것과 같은 '근거 없으면 판정하지 않는다' 원칙이다.
+
+    솔루션 이름으로 가르지 않는 것이 요점이다. A360 표기를 쓰는 카탈로그면 무엇이든 판정하고,
+    안 쓰면 판정하지 않는다.
+    """
+
+    def build() -> bool:
+        return any(spec.get("package") in CONTAINER_PACKAGES for spec in _iter_specs(catalog))
+
+    return _cached(catalog, "container_vocabulary_known", build)
+
+
 def derive_structural_actions(catalog) -> tuple[tuple[str, str], ...]:
     """제어 흐름 액션 전량 — 후보 메뉴 결정론 보완용.
 

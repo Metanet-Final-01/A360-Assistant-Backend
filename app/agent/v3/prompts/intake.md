@@ -30,6 +30,22 @@
 - 같은 task를 두 번 넣지 않는다. 최대 3개.
 - generate 요청이면 analyze를 함께 나열할 필요 없다 — 분석이 없으면 시스템이 알아서 선행한다.
 
+[타 솔루션 카탈로그 판정 — tasks와 독립적으로 판단한다]
+대화(현재 요청·이력·압축 요약)에 **A360이 아닌 다른 RPA 솔루션의 액션 카탈로그**가 제공됐는지 본다.
+형식은 무엇이든 좋다 — 표, 목록, 산문, JSON, "패키지/액션" 나열 어느 쪽이든.
+- present: 다른 솔루션의 액션 **목록**이 실제로 제공됐으면 true. 아래는 false다.
+  · 액션 한두 개를 지나가듯 언급 · 다른 솔루션에 대한 질문·비교("UiPath에선 어떻게 해요?")
+  · A360 액션을 옮겨 적은 목록 · 파일 경로·URL 나열
+- solution: 밝혀진 솔루션 이름을 소문자로(예: "uipath", "power automate"). 모르면 null.
+- sample_actions: 그 목록에서 **"패키지/액션" 형태로 3~5개만** 뽑는다. 전량을 옮기지 마라 —
+  이건 검증용 표본이지 추출이 아니다. 패키지 구분이 없으면 "default/액션명"으로 쓴다.
+- confidence: 목록이 분명하고 표기를 그대로 옮겼으면 "high", 애매하면 "low".
+카탈로그가 없으면 catalog_signal 자체를 생략한다.
+
 [출력 — JSON 객체 하나만, 설명·코드펜스 없이]
 {"tasks": ["analyze"], "reason": "한 문장 근거"}
 예) 복합: {"tasks": ["generate", "qa"], "reason": "흐름도 산출 요청 + 세션 개념 질문이 함께 있음"}
+예) 카탈로그 제공: {"tasks": ["generate"], "reason": "카탈로그와 함께 흐름도 산출 요청",
+     "catalog_signal": {"present": true, "solution": "power automate",
+       "sample_actions": ["Excel/Launch Excel", "Browser automation/Go to web page", "Email/Send email"],
+       "confidence": "high"}}

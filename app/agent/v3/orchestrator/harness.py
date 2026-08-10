@@ -94,6 +94,20 @@ def attach_confidence(
         if pkg and act:
             best[(pkg, act)] = max(best.get((pkg, act), 0.0), h.get("score") or 0.0)
 
+    # 검색 근거가 **하나도** 없으면 신뢰도를 만들지 않는다.
+    #
+    # `_conf`의 기본값 0.4는 "이 액션 하나만 근거가 없다"는 뜻이다. 그런데 근거가 전부 없는
+    # 경로(사용자 제공 카탈로그 — 검색기가 없어 sink가 빈다)에서는 전 액션이 0.4를 받아
+    # 흐름도 신뢰도가 **항상 40%로 고정**된다. 실측: 액션 12개 전부 0.4, flow_confidence 0.4.
+    # 측정하지 않은 값을 측정한 것처럼 보이는 게 낮은 점수보다 나쁘다.
+    #
+    # 붙이지 않으면 화면이 알아서 감춘다 — ActionBox는 `confidence == null`이면 배지를 만들지
+    # 않고, AnalysisPanel은 `flowConfidence != null`로 가린다. R1(카탈로그 부재) 신호도 잃지
+    # 않는다: violations로 따로 나가 "해소하지 못한 위반 N건"으로 이미 표시된다.
+    if not best:
+        _clear_confidence(flow)  # 수정 경로 재계산 — 이전 턴 값이 남으면 그게 곧 거짓말이다
+        return
+
     viol: dict[tuple, str | None] = {}
     for v in violations:
         rule = v.get("rule")
@@ -131,6 +145,18 @@ def attach_confidence(
         sid = step.get("step_id")
         status = (coverage_by_step or {}).get(sid)
         _walk(step.get("actions") or [], sid, status, "")
+
+
+def _clear_confidence(flow: dict) -> None:
+    """액션의 confidence를 걷어낸다 — 근거 없이 남은 이전 값이 새 값처럼 읽히지 않도록."""
+
+    def walk(actions: list[dict] | None) -> None:
+        for a in actions or []:
+            a.pop("confidence", None)
+            walk(a.get("children"))
+
+    for step in flow.get("steps") or []:
+        walk(step.get("actions"))
 
 
 def _action_confidences(flow: dict) -> list[float]:
@@ -280,7 +306,9 @@ def confidence_breakdown(
         # 리랭커 폴백 — score가 순위 융합값이라 유사도로 읽으면 안 된다
         return {**obs, "confidence": None, "unmeasurable": "리랭커 폴백(검색 점수가 유사도가 아님)"}
     if not confs:
-        return {**obs, "confidence": None, "unmeasurable": "액션 신뢰도 없음"}
+        # 사유를 갈라 적는다 — "근거가 없어 못 쟀다"와 "흐름도가 비어 잴 게 없다"는 다른 사실이다.
+        reason = "검색 근거 없음 — 제공된 카탈로그로만 구성" if not sink else "액션 신뢰도 없음"
+        return {**obs, "confidence": None, "unmeasurable": reason}
     return {**obs, "confidence": round(sum(confs) / len(confs), 2), "unmeasurable": None}
 
 

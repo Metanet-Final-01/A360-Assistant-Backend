@@ -482,6 +482,38 @@ def _sink():
     return [{"package_name": "Email", "action_name": "sendMail", "score": 0.8}]
 
 
+def test_confidence_not_attached_without_retrieval_evidence():
+    """검색 근거가 하나도 없으면 신뢰도를 만들지 않는다 (사용자 제공 카탈로그 경로).
+
+    기본값 0.4는 "이 액션만 근거가 없다"는 뜻이라, 전부 근거가 없는 경로에서는 흐름도
+    신뢰도가 늘 40%로 고정돼 **측정하지 않은 값이 측정값처럼** 보인다.
+    """
+    flow = _conf_flow()
+    attach_confidence(flow, [], [])
+    assert "confidence" not in flow["steps"][0]["actions"][0]
+    assert compute_flow_confidence(flow, sink=[]) is None
+
+
+def test_stale_confidence_is_cleared_when_evidence_disappears():
+    """수정 경로 재계산 — 이전 턴 값이 남으면 근거 없는 숫자가 새 값처럼 읽힌다."""
+    flow = _conf_flow()
+    attach_confidence(flow, _sink(), [])
+    assert flow["steps"][0]["actions"][0]["confidence"] == 0.8
+    attach_confidence(flow, [], [])
+    assert "confidence" not in flow["steps"][0]["actions"][0]
+
+
+def test_unmeasurable_reason_distinguishes_no_evidence_from_no_actions():
+    """'근거가 없어 못 쟀다'와 '잴 액션이 없다'는 다른 사실이라 사유를 갈라 적는다."""
+    no_evidence = confidence_breakdown({"steps": [{"step_id": "s1", "actions": [_act("Email", "sendMail")]}]}, sink=[])
+    assert no_evidence["confidence"] is None
+    assert "검색 근거 없음" in no_evidence["unmeasurable"]
+
+    empty_flow = confidence_breakdown({"steps": []}, sink=_sink())
+    assert empty_flow["confidence"] is None
+    assert empty_flow["unmeasurable"] == "액션 신뢰도 없음"
+
+
 def test_confidence_r3_not_penalized():
     flow = _conf_flow()
     attach_confidence(flow, _sink(), [dict(_r3_violation(), location="actions[0]")])

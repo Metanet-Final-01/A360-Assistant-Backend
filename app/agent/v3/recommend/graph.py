@@ -1252,17 +1252,29 @@ async def _compose_candidate(
         # 프레임이 '지금 무엇을 하는 중인지'를, 이벤트가 '무엇을 했는지'를 맡는다.
         # 개수는 `queries`(실제 검색할 것)에서, 문구는 `what`(한국어)에서 가져온다 —
         # `_need_queries`는 검색어라 영어다. 화면에는 사람이 읽는 쪽을 보인다.
-        _draft_frame(outline, f"메뉴에 없는 액션 {len(queries)}건 추가 조사 중 — "
-                              f"{_caption_list(n.get('what') or n.get('query') for n in needs)}")
+        # 검색기가 없는 경로(사용자 제공 카탈로그)에서는 `_capability_menu`가 곧바로 빈 값을
+        # 낸다 — 조사할 KB가 없다. 그런데 문구는 "N건 추가 조사"로 나가, 찾아보고 못 찾은 것과
+        # 애초에 찾지 않은 것이 구분되지 않았다(실측: asked 3 / found false). 없는 일을 한 것처럼
+        # 적지 않는다 — 사용자에게는 "그 액션이 준 카탈로그에 없다"가 필요한 사실이다.
+        searchable = bool(getattr(ctx, "searchable", False))
+        caption = (
+            f"메뉴에 없는 액션 {len(queries)}건 추가 조사 중 — "
+            f"{_caption_list(n.get('what') or n.get('query') for n in needs)}"
+            if searchable
+            else f"제공하신 카탈로그에 없는 액션 {len(queries)}건 — "
+                 f"{_caption_list(n.get('what') or n.get('query') for n in needs)}"
+        )
+        _draft_frame(outline, caption)
         extra = await asyncio.to_thread(_capability_menu, needs, sink, ctx)
         emit({"event": "stage", "stage": "searching",
-              "message": f"흐름도가 요청한 액션 {len(queries)}건 추가 조사",
+              "message": (f"흐름도가 요청한 액션 {len(queries)}건 추가 조사" if searchable
+                          else f"제공하신 카탈로그에 없는 액션 {len(queries)}건 — 추가 조사 불가"),
               # 질의 목록은 앞 12건만 싣는다 — 상한을 없앤 건 **검색을 다 돌리기 위해서**지
               # 이벤트에 다 적기 위해서가 아니다. 다만 **`queries`라는 이름으로 자른 목록을
               # 실으면 안 된다**: RPA-369가 닫은 구멍이 바로 "잘린 것을 온전한 것처럼 실은
               # 것"이었다. 칸 이름에 `_head`를 박아 잘렸다는 사실이 값과 함께 다니게 하고,
               # 실제 개수는 `asked`로 따로 남긴다 (Qodo 리뷰).
-              "data": {"candidate": cid, "asked": len(queries),
+              "data": {"candidate": cid, "asked": len(queries), "searchable": searchable,
                        "queries_head": queries[:12], "found": bool(extra)}})
         if extra:
             # 보강은 같은 '구조' 작업의 재생성이라 추론도 같이 건다 — 여기서만 끄면 첫 초안보다

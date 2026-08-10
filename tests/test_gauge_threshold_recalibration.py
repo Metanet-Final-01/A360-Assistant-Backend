@@ -9,7 +9,7 @@ compact 경로가 한 번도 실행된 적이 없었다 — 값만 바꾸고 발
   - 대화 누적 Δ ≈ 188 토큰/턴, 첫 턴 base ≈ 582 토큰
   - 최대 단일 사용자 메시지 ≈ 3,400 토큰
 
-⚠️ 문자 ≠ 토큰. `AgentTurnRequest.message`의 max_length=4000은 **문자** 상한이라 토큰 상한을
+⚠️ 문자 ≠ 토큰. `AgentTurnRequest.message`의 max_length는 **문자** 상한이라 토큰 상한을
    주지 않는다 (cl100k_base 실측 tok/char: 영문 0.12 / 한글 1.08 / 희귀 CJK 2.0 / 이모지 3.0
    → 같은 4,000자가 500~12,000토큰). 이 파일에서 입력 크기는 반드시 `_estimate_message_tokens`로
    재고, 문자 수를 토큰처럼 쓰지 말 것 — 한때 그렇게 적어 결론이 뒤집혔다.
@@ -22,12 +22,18 @@ from types import SimpleNamespace
 import pytest
 
 import app.api.sessions as sessions_api
+from app.api.sessions import _MESSAGE_MAX_TOKENS
 
 SID = uuid.uuid4()
 
 BASE_TOKENS = 582      # 실측 첫 턴 intake
 DELTA_PER_TURN = 188   # 실측 턴당 누적
 MAX_MESSAGE_TOKENS = 3400  # 실측 최대 단일 메시지
+# 사람이 대화 한 마디로 칠 수 있는 현실적 최대 문자 수. 예전 `max_length`(4,000)와 같은 값인데,
+# 그 상한이 카탈로그 붙여넣기를 받으려고 800,000자로 열리면서 **둘의 의미가 갈라졌다** —
+# 스키마 최대는 이제 "붙여넣을 수 있는 자료의 크기"고, 이 상수는 "한 마디의 길이"다.
+# LIMIT 아래 경계는 후자로 재야 뜻이 있다.
+CONVERSATIONAL_MAX_CHARS = 4000
 
 
 @pytest.fixture
@@ -89,12 +95,28 @@ def _message_of_tokens(target: int, unit: str = "가") -> str:
     return unit * max(1, int(target / max(per_unit, 1e-9)))
 
 
+def _repeat_to_chars(unit: str, chars: int) -> str:
+    """`unit`을 반복해 정확히 `chars`자짜리 메시지를 만든다."""
+    return (unit * (chars // max(len(unit), 1) + 1))[:chars]
+
+
 def _schema_valid_message(unit: str) -> str:
-    """`unit`을 반복해 만든 **스키마 유효**(max_length 이하) 최대 길이 메시지."""
-    max_chars = _schema_max_message_len()
-    msg = (unit * max_chars)[:max_chars]
-    sessions_api.AgentTurnRequest(message=msg)  # 스키마가 실제로 받아주는지 확인
-    return msg
+    """`unit`을 반복해 만든 **스키마 유효** 최대 길이 메시지.
+
+    스키마 상한이 둘이다 — 문자(`max_length`)와 토큰(`_within_token_budget`). 문자만 보고
+    만들면 이모지·희귀 CJK처럼 tok/char가 큰 입력에서 토큰 상한에 걸린다. 길이를 반으로
+    줄여가며 **실제로 통과하는** 최대치를 찾는다(정확한 경계가 아니라 '스키마가 받아주는
+    큰 입력'이 필요한 것이므로 이분 탐색까지 갈 필요는 없다).
+    """
+    chars = _schema_max_message_len()
+    while chars >= 1:
+        msg = (unit * (chars // max(len(unit), 1) + 1))[:chars]
+        try:
+            sessions_api.AgentTurnRequest(message=msg)
+            return msg
+        except Exception:  # noqa: BLE001 — 토큰 상한 초과. 줄여서 다시 시도한다
+            chars //= 2
+    raise AssertionError(f"스키마가 받아주는 길이를 못 찾음: unit={unit!r}")
 
 
 # --- 재보정의 목적: 실제로 발동한다 ---
@@ -140,15 +162,20 @@ def test_largest_observed_single_message_does_not_trigger_compact(monkeypatch, r
 
 
 def test_realistic_longest_korean_input_does_not_trigger_compact(monkeypatch, real_encoder):
-    """**현실 입력의 최악**(스키마 최대 길이의 한국어 산문)으로는 초반 오발동이 없어야 한다.
+    """**대화 한 마디의 최악**(한국어 산문 4,000자)으로는 초반 오발동이 없어야 한다.
 
     LIMIT 아래 경계의 근거. 한글 산문은 cl100k_base에서 ≈1.08 tok/char라 4,000자 ≈ 4,309토큰,
     base(582)를 더해 **≈4,891 < LIMIT(6000)**. 이 테스트가 깨지면 LIMIT을 낮춘 것이고, 평범한 긴
     한국어 입력만으로 압축할 history도 없이 compact 비용이 나간다.
 
+    ⚠️ 기준을 **스키마 최대 길이에서 CONVERSATIONAL_MAX_CHARS로 옮겼다.** 예전엔 둘이 같았지만
+       (max_length=4000), 타 솔루션 카탈로그를 받으려고 상한이 800,000자로 열리면서 스키마 최대는
+       더 이상 "사람이 한 마디로 칠 수 있는 길이"가 아니다. 그걸로 재면 이 경계는 어떤 LIMIT으로도
+       만족할 수 없다(862,121토큰). 카탈로그 크기 입력의 실제 거동은 아래 테스트가 못박는다.
+
     경계를 **관계로** 단언한다(숫자를 하드코딩하면 상수가 바뀌어도 조용히 통과한다).
     """
-    prose = _schema_valid_message("업무 정의서 분석 요청 ")
+    prose = _repeat_to_chars("업무 정의서 분석 요청 ", CONVERSATIONAL_MAX_CHARS)
     worst_realistic = BASE_TOKENS + sessions_api._estimate_message_tokens(prose)
 
     assert sessions_api._GAUGE_LIMIT_DEFAULT > worst_realistic, (
@@ -159,12 +186,37 @@ def test_realistic_longest_korean_input_does_not_trigger_compact(monkeypatch, re
     assert sessions_api._needs_auto_compact(g, prose) is False
 
 
+def test_catalog_sized_paste_is_safe_on_first_turn_but_compacts_later(monkeypatch, real_encoder):
+    """카탈로그 크기 입력의 거동을 못박는다 — 알고 감수하는 위험이지 잊힌 구멍이 아니다.
+
+    max_length가 800,000자로 열리면서 **단일 입력 하나가 게이지 한도를 수십 배 넘을 수 있다.**
+    지금 초반 오발동을 막는 건 LIMIT이 아니라 "1턴째엔 gauge가 없어 `_needs_auto_compact` 호출
+    자체가 안 된다"는 사실뿐이다(호출부 `if gauge and ...`).
+
+    그래서 **2턴째 이후의 대형 붙여넣기는 자동 compact를 부르고**, compact는 카탈로그 원문을
+    보존하지 못한다(실측: 75,222자 → verbatim 131자 요약, 영구 유실). 타 솔루션 카탈로그는
+    **첫 턴에** 주는 것이 지금으로선 유일하게 안전한 경로다.
+
+    이 테스트가 깨지면 둘 중 하나다: 카탈로그를 대화가 아닌 별도 경로로 받게 됐거나(그러면
+    이 테스트는 지워도 된다), 누군가 상한을 되돌린 것이다.
+    """
+    catalog = _repeat_to_chars("- Browser automation/Go to web page (Web browser instance, URL)\n", 75_000)
+    sessions_api.AgentTurnRequest(message=catalog)  # 전제: 스키마가 받아준다
+
+    assert sessions_api._estimate_message_tokens(catalog) > sessions_api._GAUGE_LIMIT_DEFAULT, (
+        "전제가 깨졌다 — 카탈로그 크기 입력이 게이지 한도 안에 들어온다")
+
+    # 2턴째(게이지 있음): look-ahead가 이번 입력을 보고 미리 압축한다
+    assert sessions_api._needs_auto_compact(_gauge_with(monkeypatch, BASE_TOKENS), catalog) is True
+
+
 def test_schema_length_cap_does_not_cap_tokens(monkeypatch, real_encoder):
-    """⚠️ `max_length=4000`은 **문자** 상한이지 **토큰** 상한이 아니다 (RPA-172 오진 정정).
+    """⚠️ `max_length`는 **문자** 상한이지 **토큰** 상한이 아니다 (RPA-172 오진 정정).
 
     한때 "단일 입력만으론 임계를 넘길 수 없다 — 스키마상 불가능"이라고 문서에 적었다. 거짓이다:
     이모지는 3 tok/char라 **스키마를 통과하는** 4,000자가 12,000토큰(LIMIT의 2배)이 된다. 즉
     RPA-86의 원래 문구("초대형 단일 입력이 당턴을 넘치게 하는 갭")가 옳았고 내 '정정'이 틀렸다.
+    (상한이 800,000자로 열린 지금은 그 갭이 훨씬 넓다 — 이 단언은 더 여유롭게 성립한다.)
 
     이 테스트는 그 착각이 되살아나는 걸 막는다 — 깨지면 누군가 문자 상한을 토큰 상한으로
     되돌려 놓은 것이다.
@@ -257,3 +309,46 @@ def test_gauge_ratio_is_visible_not_pinned_at_zero(monkeypatch, turn):
     """게이지가 눈에 보이게 움직여야 한다 — 100000에선 ratio가 늘 0.0x라 UI가 죽어 있었다."""
     g = _gauge_with(monkeypatch, _tokens_at_turn(turn))
     assert g["ratio"] > 0.05, f"{turn}턴째 ratio={g['ratio']} — 게이지가 사실상 0으로 붙어 있다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 입력 토큰 예산 — 문자 상한이 못 주는 것을 준다 (RPA-376)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_token_budget_rejects_input_that_passes_char_cap(real_encoder):
+    """문자 상한을 통과하는 입력도 토큰 예산을 넘으면 거절한다.
+
+    이모지는 3 tok/char라 300,000자(문자 상한 이하)가 900,000토큰이다 — 문자 수는 토큰
+    상한을 주지 않는다는 이 파일의 전제가 입력 검증에도 그대로 적용된다.
+    """
+    emoji = "🙃" * 300_000
+    assert len(emoji) <= _schema_max_message_len(), "전제: 문자 상한은 통과하는 입력"
+    with pytest.raises(Exception) as exc:
+        sessions_api.AgentTurnRequest(message=emoji)
+    assert "토큰" in str(exc.value)
+
+
+def test_token_budget_does_not_tokenize_short_input(monkeypatch):
+    """짧은 입력은 세지 않는다 — `tokens ≤ 4 × chars`가 증명되므로 넘을 수 없다.
+
+    평범한 대화가 매 턴 토크나이저를 타면 요청 경로에 불필요한 비용이 붙는다(실측: 800,000자
+    이모지 131ms). 이 단축이 깨지면 그 비용이 조용히 돌아온다.
+    """
+    def _boom(text):
+        raise AssertionError("짧은 입력은 토크나이즈하지 않아야 한다")
+
+    monkeypatch.setattr(sessions_api, "_estimate_message_tokens", _boom)
+    sessions_api.AgentTurnRequest(message="업무 정의서 분석 요청 " * 100)
+
+
+def test_token_budget_is_not_enforced_without_encoder(monkeypatch):
+    """인코더가 없으면 강제하지 않는다 — 폴백(바이트)은 과대추정이라 멀쩡한 입력을 거절한다.
+
+    한글 700,000자는 실제 ~756,000토큰인데 바이트 폴백은 1,900,000으로 센다(2.2배). 그 값으로
+    거절하면 워밍업이 실패한 저하 모드에서 **한글만 거부되는** 상태가 된다. 폴백의 과대추정은
+    자동 compact 가드용으로 고른 방향이지 입력 거절용이 아니다.
+    """
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
+    long_korean = "업무 정의서 분석 요청 " * 70_000
+    assert len(long_korean) > _MESSAGE_MAX_TOKENS // 4, "전제: 단축 경계를 넘는 길이여야 한다"
+    sessions_api.AgentTurnRequest(message=long_korean[:_schema_max_message_len()])
