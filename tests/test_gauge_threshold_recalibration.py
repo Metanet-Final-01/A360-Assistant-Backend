@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.api.sessions as sessions_api
+from app.api.sessions import _MESSAGE_MAX_TOKENS
 
 SID = uuid.uuid4()
 
@@ -100,11 +101,22 @@ def _repeat_to_chars(unit: str, chars: int) -> str:
 
 
 def _schema_valid_message(unit: str) -> str:
-    """`unit`을 반복해 만든 **스키마 유효**(max_length 이하) 최대 길이 메시지."""
-    max_chars = _schema_max_message_len()
-    msg = (unit * max_chars)[:max_chars]
-    sessions_api.AgentTurnRequest(message=msg)  # 스키마가 실제로 받아주는지 확인
-    return msg
+    """`unit`을 반복해 만든 **스키마 유효** 최대 길이 메시지.
+
+    스키마 상한이 둘이다 — 문자(`max_length`)와 토큰(`_within_token_budget`). 문자만 보고
+    만들면 이모지·희귀 CJK처럼 tok/char가 큰 입력에서 토큰 상한에 걸린다. 길이를 반으로
+    줄여가며 **실제로 통과하는** 최대치를 찾는다(정확한 경계가 아니라 '스키마가 받아주는
+    큰 입력'이 필요한 것이므로 이분 탐색까지 갈 필요는 없다).
+    """
+    chars = _schema_max_message_len()
+    while chars >= 1:
+        msg = (unit * (chars // max(len(unit), 1) + 1))[:chars]
+        try:
+            sessions_api.AgentTurnRequest(message=msg)
+            return msg
+        except Exception:  # noqa: BLE001 — 토큰 상한 초과. 줄여서 다시 시도한다
+            chars //= 2
+    raise AssertionError(f"스키마가 받아주는 길이를 못 찾음: unit={unit!r}")
 
 
 # --- 재보정의 목적: 실제로 발동한다 ---
@@ -297,3 +309,46 @@ def test_gauge_ratio_is_visible_not_pinned_at_zero(monkeypatch, turn):
     """게이지가 눈에 보이게 움직여야 한다 — 100000에선 ratio가 늘 0.0x라 UI가 죽어 있었다."""
     g = _gauge_with(monkeypatch, _tokens_at_turn(turn))
     assert g["ratio"] > 0.05, f"{turn}턴째 ratio={g['ratio']} — 게이지가 사실상 0으로 붙어 있다"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 입력 토큰 예산 — 문자 상한이 못 주는 것을 준다 (RPA-376)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_token_budget_rejects_input_that_passes_char_cap(real_encoder):
+    """문자 상한을 통과하는 입력도 토큰 예산을 넘으면 거절한다.
+
+    이모지는 3 tok/char라 300,000자(문자 상한 이하)가 900,000토큰이다 — 문자 수는 토큰
+    상한을 주지 않는다는 이 파일의 전제가 입력 검증에도 그대로 적용된다.
+    """
+    emoji = "🙃" * 300_000
+    assert len(emoji) <= _schema_max_message_len(), "전제: 문자 상한은 통과하는 입력"
+    with pytest.raises(Exception) as exc:
+        sessions_api.AgentTurnRequest(message=emoji)
+    assert "토큰" in str(exc.value)
+
+
+def test_token_budget_does_not_tokenize_short_input(monkeypatch):
+    """짧은 입력은 세지 않는다 — `tokens ≤ 4 × chars`가 증명되므로 넘을 수 없다.
+
+    평범한 대화가 매 턴 토크나이저를 타면 요청 경로에 불필요한 비용이 붙는다(실측: 800,000자
+    이모지 131ms). 이 단축이 깨지면 그 비용이 조용히 돌아온다.
+    """
+    def _boom(text):
+        raise AssertionError("짧은 입력은 토크나이즈하지 않아야 한다")
+
+    monkeypatch.setattr(sessions_api, "_estimate_message_tokens", _boom)
+    sessions_api.AgentTurnRequest(message="업무 정의서 분석 요청 " * 100)
+
+
+def test_token_budget_is_not_enforced_without_encoder(monkeypatch):
+    """인코더가 없으면 강제하지 않는다 — 폴백(바이트)은 과대추정이라 멀쩡한 입력을 거절한다.
+
+    한글 700,000자는 실제 ~756,000토큰인데 바이트 폴백은 1,900,000으로 센다(2.2배). 그 값으로
+    거절하면 워밍업이 실패한 저하 모드에서 **한글만 거부되는** 상태가 된다. 폴백의 과대추정은
+    자동 compact 가드용으로 고른 방향이지 입력 거절용이 아니다.
+    """
+    monkeypatch.setattr(sessions_api, "_TOKEN_ENCODER", None)
+    long_korean = "업무 정의서 분석 요청 " * 70_000
+    assert len(long_korean) > _MESSAGE_MAX_TOKENS // 4, "전제: 단축 경계를 넘는 길이여야 한다"
+    sessions_api.AgentTurnRequest(message=long_korean[:_schema_max_message_len()])

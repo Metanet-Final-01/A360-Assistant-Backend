@@ -930,13 +930,28 @@ def _get_agent_versions():
         return None
 
 
+# 입력 토큰 예산 — 모델 입력 상한 1,000,000의 80%.
+#
+# **실질 상한은 이쪽이다.** 아래 `max_length`(문자)는 토크나이저를 돌리기 전에 병적 본문을
+# 쳐내는 싼 바깥 경계일 뿐이고, "얼마나 무거운 입력인가"는 문자로 잴 수 없다 — 같은 800,000자가
+# 영문 177,778 / 한글 861,539 / 이모지 2,400,000 토큰으로 **13배** 벌어진다(실측).
+# 문자 수를 토큰 상한으로 오해해 가드가 뚫린 이력이 있다(RPA-172, _estimate_message_tokens 주석).
+_MESSAGE_MAX_TOKENS = 800_000
+
+# 문자 상한 = 토큰 예산 ÷ (UTF-8 최대 4바이트/문자). cl100k_base는 byte-level BPE라
+# `tokens ≤ bytes ≤ 4 × chars`가 **증명된다**. 그래서 이 길이 아래면 토큰 상한을 넘을 수
+# 없고(검증 생략 가능), 이 길이를 넘으면 토크나이즈 없이 바로 거절할 수 있다.
+_MESSAGE_MAX_CHARS = _MESSAGE_MAX_TOKENS  # 4,000,000까지 열면 4MB 본문을 버퍼링하게 된다
+
+
 class AgentTurnRequest(BaseModel):
-    # 상한 4,000자 → 800,000자. 대화 한 마디 기준으로는 4,000자가 넉넉했지만, 이 입구로
-    # **타 솔루션 액션 카탈로그**가 들어온다(RPA-285). 448개짜리 카탈로그가 75,000자라
+    # 상한 4,000자 → 800,000자/토큰. 대화 한 마디 기준으로는 4,000자가 넉넉했지만, 이 입구로
+    # **타 솔루션 액션 카탈로그**가 들어온다(RPA-285). 448개짜리 카탈로그가 75,000자·18,241토큰이라
     # 4,000자에서는 붙여넣기 자체가 422로 막혀 기능을 쓸 수가 없었다.
     # ⚠️ 상한이지 권장치가 아니다 — 큰 입력은 컨텍스트·비용·자동 compact를 함께 건드린다.
-    #    _needs_auto_compact 주석 참고.
-    message: str = Field(min_length=1, max_length=800_000, description="사용자 메시지 (버튼이면 프론트가 합성)")
+    #    특히 자동 compact 한도(_GAUGE_LIMIT_DEFAULT)는 **여기와 자릿수가 다르다** — 그쪽 주석 참고.
+    message: str = Field(min_length=1, max_length=_MESSAGE_MAX_CHARS,
+                         description="사용자 메시지 (버튼이면 프론트가 합성)")
     # compact/fill_cards 버튼발 결정론 요청 — LLM 라우터를 우회하는 명시 신호 (기본 "chat")
     operation: str = Field(
         "chat", pattern="^(chat|compact|fill_cards)$", description="chat | compact | fill_cards"
@@ -949,6 +964,43 @@ class AgentTurnRequest(BaseModel):
     agent_version: str | None = Field(
         None, description="에이전트 버전 (없으면 서버 기본). 유효값은 GET /api/agent/versions"
     )
+
+    @field_validator("message")
+    @classmethod
+    def _within_token_budget(cls, v: str) -> str:
+        """입력을 **토큰**으로 제한한다 — 문자 상한은 이 상한을 주지 못한다.
+
+        ## 왜 문자로는 안 되는가
+
+        같은 800,000자가 영문 177,778 / 한글 861,539 / 이모지 2,400,000 토큰이다(실측, 13배).
+        문자 상한만 두면 어떤 값을 잡아도 어떤 언어에서는 헐겁고 어떤 언어에서는 빡빡하다.
+        같은 착각으로 선행 compact 가드가 뚫린 적이 있다(RPA-172).
+
+        ## 짧은 입력은 세지 않는다
+
+        `tokens ≤ bytes ≤ 4 × chars`가 증명되므로(cl100k_base는 byte-level BPE, UTF-8은 최대
+        4바이트/문자), 그 곱이 예산 아래면 **넘을 수 없다**. 평범한 대화는 여기서 끝나 토크나이즈
+        비용이 0이다 — 실측으로 800,000자 이모지를 세는 데 131ms가 든다.
+
+        ## 인코더가 없으면 강제하지 않는다
+
+        `_estimate_message_tokens`의 폴백은 UTF-8 바이트 수인데, 이건 **자동 compact 가드용**으로
+        고른 과대추정이다(놓치면 컨텍스트가 터지므로 안전한 방향). 입력 거부에 그대로 쓰면 방향이
+        뒤집힌다 — 한글은 실제 861,539토큰을 1,907,694로 세므로(2.2배) **멀쩡한 입력이 거부된다.**
+        인코더는 lifespan 워밍업에서만 채워지니, 워밍업이 실패한 저하 모드에서 "한글만 거부되는"
+        상태를 만들지 않도록 문자 상한만 적용하고 넘어간다.
+        """
+        if len(v) * 4 <= _MESSAGE_MAX_TOKENS:  # 증명 가능한 상계 — 셀 필요 없음
+            return v
+        if _token_encoder() is None:  # 저하 모드 — 문자 상한(max_length)이 이미 받았다
+            return v
+        n = _estimate_message_tokens(v)
+        if n > _MESSAGE_MAX_TOKENS:
+            raise ValueError(
+                f"입력이 약 {n:,}토큰으로 상한 {_MESSAGE_MAX_TOKENS:,}토큰을 넘습니다 "
+                f"(문자 {len(v):,}자). 내용을 나눠 보내주세요."
+            )
+        return v
 
     @field_validator("agent_version")
     @classmethod
