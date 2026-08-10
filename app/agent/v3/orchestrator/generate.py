@@ -15,6 +15,7 @@ generate_node는 solution(세션 확정 키)으로 **카탈로그만** 가르고
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -26,8 +27,10 @@ from ..analysis import _format_document, _has_text, analyze, analyze_text
 from ..catalog_context import A360, a360_context, user_catalog_context
 from ..recommend.graph import generate_flow
 from ..recommend.stream import emit, emit_analysis_frame
+from ..verify.catalog import get_catalog
 from ..verify.checker import run_environment_checks
-from .foreign_catalog import detect as detect_foreign_catalog
+from .catalog_parse import parse_catalog
+from .foreign_catalog import CatalogSignal, detect_solution_name, verify as verify_catalog_signal
 from .jsonio import chat_json
 from .render import chat_task_brief, render_compact, render_history
 from .spec import build_flow_spec
@@ -125,7 +128,56 @@ def _flow_answer(flow: dict, violations: list[dict]) -> str:
     return answer
 
 
-async def _generate_with(state: TurnState, ctx) -> dict:
+@dataclass(frozen=True)
+class SignalOutcome:
+    """타 솔루션 카탈로그 신호를 소비한 결과.
+
+    셋을 분리하는 이유: "판정됐다"와 "세션을 바꾼다"와 "사용자에게 알린다"가 각각 다른
+    조건에서 참이다. 확신이 낮으면 바꾸지 않고 알리기만 하고, 바꿨으면 알릴 필요가 없다.
+    """
+
+    notice: str | None = None    # 답변에 덧붙일 고지 (어휘를 못 바꿨을 때만)
+    detected: str | None = None  # 백엔드가 세션 solution 확정에 쓸 이름
+    switched: bool = False       # 이번 턴 어휘를 사용자 카탈로그로 바꿨는가
+
+
+def apply_catalog_signal(state: TurnState) -> SignalOutcome:
+    """intake 판정을 검증해 이번 턴 어휘와 세션 확정 신호를 정한다 (RPA-285).
+
+    **어휘를 정하기 전에** 부른다. 예전에는 흐름도를 다 만든 뒤 감지해서, 판정이 맞아도
+    이번 턴은 이미 A360으로 나가고 다음 턴부터 반영되는 2턴 지연이 있었다. 판정이 intake로
+    올라온 지금은 같은 턴에 올바른 카탈로그를 집을 수 있다.
+
+    이미 a360이 아닌 세션은 건드리지 않는다 — 사용자가 PATCH로 정했거나 이전 턴에 확정된
+    값이 판정보다 우선한다(오탐이 사용자 선택을 덮어쓰면 되돌려도 다시 뒤집힌다).
+    """
+    if (state.get("solution") or A360) != A360:
+        return SignalOutcome()
+
+    raw = state.get("catalog_signal")
+    if not raw:
+        return SignalOutcome()
+
+    sig = verify_catalog_signal(CatalogSignal(**raw), get_catalog())
+    if not sig.found:
+        return SignalOutcome()
+
+    # 이름을 LLM이 못 밝혔으면 사용자 발화에서 한 번 더 찾고, 그래도 없으면 "other" —
+    # 어느 솔루션인지 몰라도 "A360은 아니다"는 확정할 수 있다.
+    name = sig.solution or detect_solution_name(state.get("message") or "") or "other"
+    logger.info(
+        "타 솔루션 카탈로그 신호 — solution=%s 표본 %d개 중 A360 실재 %d개 confirm=%s",
+        name, sig.samples, sig.known, sig.confirm,
+    )
+    if not sig.confirm:
+        # 확신이 낮거나 검증할 표본이 없다 — 어휘는 A360으로 두되 사실은 알린다.
+        return SignalOutcome(notice=sig.notice())
+
+    state["solution"] = name  # 이 턴의 resolve_catalog_context가 이 값을 본다
+    return SignalOutcome(detected=name, switched=True)
+
+
+async def _generate_with(state: TurnState, ctx, outcome: "SignalOutcome") -> dict:
     """v3 품질 루프 실행: spec 정형화 → recommend 파이프라인(generate_flow).
 
     진행 이벤트(spec/candidates/flow/scorecard)는 파이프라인이 직접 부모 그래프
@@ -171,16 +223,13 @@ async def _generate_with(state: TurnState, ctx) -> dict:
         # 사용자 제공 카탈로그 경로는 KB 검색을 안 하므로 sources가 자연히 빈다.
         "sources": _collect_sources(flow),
     }
-    if ctx.is_a360:
-        # 사용자가 타 솔루션 카탈로그를 줬는데 A360으로 만든 경우, 그 사실을 알린다 (RPA-285).
-        # 조용히 넘어가면 사용자는 자기 카탈로그가 반영된 줄 안다 — 가장 나쁜 실패다.
-        signal = detect_foreign_catalog(dict(state), ctx.catalog)
-        if signal.found:
-            logger.info("타 솔루션 카탈로그 정황 — 쌍 %d개 중 A360 실재 %d개", signal.pairs, signal.known)
-            answer += "\n\n" + signal.notice()
-            # 백엔드가 세션 solution을 확정하게 신호를 올린다 (2단계). 이름을 못 밝혔으면
-            # "other" — 어느 솔루션인지 몰라도 "A360은 아니다"는 확정할 수 있다.
-            out["detected_solution"] = signal.solution or "other"
+    # 사용자가 타 솔루션 카탈로그를 줬는데 A360으로 만든 경우, 그 사실을 알린다 (RPA-285).
+    # 조용히 넘어가면 사용자는 자기 카탈로그가 반영된 줄 안다 — 가장 나쁜 실패다.
+    # (어휘를 실제로 바꾼 경우엔 outcome.notice가 None이라 고지가 붙지 않는다.)
+    if outcome.notice:
+        answer += "\n\n" + outcome.notice
+    if outcome.detected:
+        out["detected_solution"] = outcome.detected
     out["answer"] = answer
     return out
 
@@ -211,15 +260,23 @@ class UserCatalogAction(BaseModel):
     package: str
     action: str
     label: str | None = None
-    parameters: list[UserCatalogParam] = Field(default_factory=list)
+    # 기본값이 `[]`가 아니라 `None`인 이유: 체커는 둘을 다르게 읽는다 — `[]`는 "파라미터
+    # 없음 **확정**"이라 R2가 "스펙에 없는 파라미터"를 잡고, `None`은 "모름"이라 R2~R5를
+    # 침묵한다(_check_parameters 주석). 카탈로그가 필수 인자만 적어 주는 경우가 흔한데
+    # 그걸 '없음'으로 단정하면 멀쩡한 흐름도가 위반투성이가 된다.
+    parameters: list[UserCatalogParam] | None = None
 
     def as_spec(self) -> dict:
-        return {
+        spec: dict = {
             "package": self.package,
             "action": self.action,
             "label": self.label or self.action,
-            "parameters": [p.as_spec() for p in self.parameters],
         }
+        # 모름이면 **키 자체를 빼야** 한다 — `_menu_block`의 `spec.get("parameters", [])`는
+        # 키가 있고 값이 None이면 None을 그대로 돌려줘 순회에서 터진다.
+        if self.parameters is not None:
+            spec["parameters"] = [p.as_spec() for p in self.parameters]
+        return spec
 
 
 class CatalogExtraction(BaseModel):
@@ -247,11 +304,83 @@ class UserCatalog:
         yield from self._index.values()
 
 
+def _catalog_source_text(state: TurnState) -> str:
+    """카탈로그가 있을 수 있는 **사용자 발화**만 모은다 (규칙 파서 입력).
+
+    어시스턴트 발화를 빼는 이유: 우리가 답변에 나열한 액션 목록이 사용자 카탈로그와 섞이면
+    엉뚱한 액션이 어휘로 들어온다. 압축본의 verbatim은 카탈로그 원문 보존용이라 포함한다.
+    """
+    parts: list[str] = []
+    for block in ((state.get("compact") or {}).get("verbatim") or []):
+        if isinstance(block, dict) and block.get("content"):
+            parts.append(str(block["content"]))
+    for turn in (state.get("history") or []):
+        if turn.get("role") == "user" and turn.get("content"):
+            parts.append(str(turn["content"]))
+    parts.append(state.get("message") or "")
+    return "\n".join(parts)
+
+
+# 규칙 파싱을 채택하려면 intake 표본 중 이 비율 이상이 결과에 있어야 한다. 전부를 요구하면
+# LLM이 표본 하나를 살짝 다르게 적기만 해도 빠른 길이 막히고, 하나만 요구하면 우연한 일치를
+# 걸러내지 못한다.
+_SIGNAL_AGREE_RATIO = 0.5
+
+
+def _agrees_with_signal(parsed: list[dict], state: TurnState) -> bool:
+    """규칙 파싱 결과가 intake의 판정 표본과 일치하는가 (RPA-285).
+
+    ## 왜 필요한가
+
+    규칙 파서의 위험은 "못 읽는 것"이 아니라 **"엉뚱한 걸 읽는 것"**이다. 못 읽으면 None을 내고
+    LLM이 받지만, 카탈로그가 아닌 불릿 목록(할 일 메모·단계 나열)에서 그럴듯한 항목을 3개
+    이상 긁어내면 **LLM을 부르지도 않고** 엉터리 어휘로 확정된다. 그 어휘로 만든 흐름도는
+    R1이 전부 잡아내지만, 사용자는 왜 자기 카탈로그가 통째로 무시됐는지 알 수 없다.
+
+    intake는 이미 "이게 카탈로그다"라고 판정하면서 `sample_actions` 표본을 함께 준다. 그
+    표본이 규칙 결과에 없다면 **둘이 다른 것을 보고 있다**는 뜻이므로 규칙을 버린다.
+    추가 비용은 0이다 — 이미 받아 둔 신호를 대조만 한다.
+
+    표본이 없으면(구형 신호·LLM 생략) 대조할 근거가 없어 규칙을 그대로 채택한다 — 없는
+    근거로 막으면 빠른 길이 영원히 닫힌다.
+    """
+    raw = state.get("catalog_signal") or {}
+    samples = [s for s in (raw.get("sample_actions") or []) if isinstance(s, str) and s.strip()]
+    if not samples:
+        return True
+
+    def _key(pkg: str, act: str) -> str:
+        return f"{pkg}/{act}".strip().casefold()
+
+    have = {_key(a.get("package", ""), a.get("action", "")) for a in parsed}
+    have |= {(a.get("action") or "").strip().casefold() for a in parsed}  # 패키지 표기가 갈릴 수 있다
+    hit = sum(1 for s in samples if s.strip().casefold() in have
+              or s.rpartition("/")[2].strip().casefold() in have)
+    ok = hit >= max(1, int(len(samples) * _SIGNAL_AGREE_RATIO))
+    if not ok:
+        logger.info("규칙 파싱을 버린다 — intake 표본 %d개 중 %d개만 일치(액션 %d개 파싱)",
+                    len(samples), hit, len(parsed))
+    return ok
+
+
 def extract_user_catalog(state: TurnState) -> CatalogExtraction:
     """message + 이력 + 압축본(보존 원문 포함)에서 사용자 제공 카탈로그를 추출한다.
 
     카탈로그가 이전 턴이나 compact의 verbatim에 있었을 수 있어 셋을 모두 본다.
+
+    **규칙 파서를 먼저 태운다.** LLM 재출력은 액션당 약 90토큰이 들어 규모가 곧 벽이다
+    (실측: 448개 = 출력 4만 토큰 필요 → 796토큰에서 포기, 0개 반환). 형식이 규칙적인
+    카탈로그는 `parse_catalog`가 LLM 없이 전량을 읽으므로 그 벽이 아예 없다. 규칙이
+    형식을 못 알아보면 None을 내고, 그때만 LLM이 돈다.
     """
+    parsed = parse_catalog(_catalog_source_text(state))
+    if parsed and _agrees_with_signal(parsed, state):
+        return CatalogExtraction(
+            # 이름은 이미 intake 판정으로 세션에 확정돼 있다 — 규칙 파서는 표기만 읽는다.
+            solution=(state.get("solution") if state.get("solution") != A360 else None),
+            actions=[UserCatalogAction.model_validate(a) for a in parsed],
+        )
+
     user_content = (
         f"[이전 대화 압축 요약]\n{render_compact(state.get('compact'))}\n\n"
         f"[대화 이력]\n{render_history(state.get('history'))}\n\n"
@@ -300,7 +429,12 @@ async def generate_node(state: TurnState) -> dict:
     (RPA-285) 예전에는 solution으로 파이프라인 자체를 갈랐다 — a360은 품질 루프,
     나머지는 LLM 단발 호출. 이제 갈리는 건 카탈로그뿐이고 루프는 하나다.
     """
+    outcome = apply_catalog_signal(state)
     ctx = await resolve_catalog_context(state)
     if ctx is None:  # 타 솔루션인데 쓸 어휘가 없다 — 만들지 않고 되묻는다(type 정확성)
-        return {"turn_type": TYPE_ANSWER, "answer": _NEED_CATALOG_ANSWER, "sources": []}
-    return await _generate_with(state, ctx)
+        out: dict = {"turn_type": TYPE_ANSWER, "answer": _NEED_CATALOG_ANSWER, "sources": []}
+        # 어휘 추출에 실패해도 판정 자체는 유효하다 — 세션을 확정해 다음 턴이 되묻지 않게 한다.
+        if outcome.detected:
+            out["detected_solution"] = outcome.detected
+        return out
+    return await _generate_with(state, ctx, outcome)

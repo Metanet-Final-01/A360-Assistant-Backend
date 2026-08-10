@@ -16,6 +16,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from ..recommend.stream import emit
+from .foreign_catalog import CatalogSignal
 from .jsonio import chat_json
 from .render import context_signals, render_compact, render_history
 from .state import ROUTE_EDIT, ROUTE_GENERATE, ROUTE_QA, ROUTES, TurnState
@@ -41,6 +42,10 @@ class IntakeOutput(BaseModel):
     tasks: list[str] = []
     route: str | None = None  # 구형 출력 호환 — tasks가 비면 이걸 단일 task로 쓴다
     reason: str = ""
+    # 타 솔루션 카탈로그 판정 (RPA-285). 여기에 얹는 이유는 intake가 이미 message·history·
+    # compact 전문을 절삭 없이 싣고 있어 **추가 LLM 호출 없이** 판정 재료가 갖춰지기
+    # 때문이다. 검증은 foreign_catalog.verify가 결정론으로 한다. 없으면 부재(하위호환).
+    catalog_signal: CatalogSignal | None = None
 
 
 def _build_messages(state: TurnState) -> list[dict]:
@@ -119,10 +124,12 @@ def intake_node(state: TurnState) -> dict:
     인프라 오류(RuntimeError)만 위로 올리고 나머지는 qa 폴백 — 턴이 항상 답을 낸다.
     """
     emit({"event": "stage", "stage": "routing", "message": "요청 분석 중"})
+    signal: CatalogSignal | None = None
     try:
         out = chat_json(_build_messages(state), purpose="intake", model_cls=IntakeOutput)
         tasks = out.tasks or ([out.route] if out.route else [])
         reason = out.reason
+        signal = out.catalog_signal
     except ValueError as e:  # 교정 후에도 파싱 실패 — 답변 브랜치로 폴백
         logger.warning("intake 분류 실패, qa 폴백: %s", e)
         tasks, reason = [ROUTE_QA], "라우팅 실패 — 일반 답변으로 폴백"
@@ -138,4 +145,11 @@ def intake_node(state: TurnState) -> dict:
     # 표시 불변, 백엔드 turn_events가 data(plan/reason)를 적재한다.
     emit({"event": "stage", "stage": "routing", "message": "요청 분석 중",
           "data": {"route": plan[0], "plan": plan, "reason": reason[:200]}})
-    return {"plan": plan, "route": plan[0], "route_reason": reason}
+    out_state: dict = {"plan": plan, "route": plan[0], "route_reason": reason}
+    # 판정은 여기서 검증하지 않는다 — 검증에 필요한 A360 카탈로그 조회는 generate 쪽
+    # 관심사라, 원시 신호만 실어 보내고 소비 지점에서 verify한다.
+    if signal is not None and signal.present:
+        logger.info("타 솔루션 카탈로그 판정: solution=%s conf=%s 표본=%d",
+                    signal.solution, signal.confidence, len(signal.sample_actions))
+        out_state["catalog_signal"] = signal.model_dump()
+    return out_state

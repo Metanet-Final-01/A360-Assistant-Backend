@@ -206,8 +206,31 @@ def test_both_paths_reach_the_same_entry_point(monkeypatch, solution):
 # Qodo 리뷰 반영 (RPA-285)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def test_user_catalog_is_never_narrowed_by_search():
+    """타 솔루션은 **무조건 전량**이 메뉴다 — 크기와 무관하게 검색으로 좁히지 않는다.
+
+    한때 큰 카탈로그를 인메모리 검색기로 좁혔다가 걷어냈다. 실측(PAD 448개, 같은 문서)이
+    좁히는 쪽에 불리했다 — 전량은 액션 23개에 환각(R1) 0건, 검색은 액션 8개였다. 위반 수는
+    검색이 적었지만 대부분 R3(필수값 미입력)이라 질문 카드로 흡수되는 항목이고, 굴러가는
+    흐름도를 내는 것은 전량 쪽이었다. 사용자가 카탈로그를 준다는 건 "이 어휘로 만들어라"는
+    뜻이고, 그중 무엇을 쓸지는 우리가 미리 좁힐 게 아니라 모델이 업무를 보고 고를 일이다.
+    """
+    from app.agent.v3.recommend import research as research_mod
+
+    many = [
+        UserCatalogAction(package="Big", action=f"Act{i}")
+        for i in range(research_mod._MAX_USER_MENU_ACTIONS + 25)
+    ]
+    ctx = user_catalog_context(UserCatalog([a.as_spec() for a in many]), "uipath")
+    assert not ctx.searchable, "사용자 카탈로그에는 검색기를 붙이지 않는다"
+
+
 def test_user_menu_is_capped_and_says_so():
-    """상한은 두되 조용히 자르지 않는다 — 잘린 액션은 composer가 영영 못 쓴다."""
+    """유일한 규모 방어는 메뉴 상한이다 — 두되 **조용히** 자르지는 않는다.
+
+    잘린 액션은 composer가 영영 못 쓴다. 그래서 잘렸다는 사실을 프롬프트·로그·진행 메시지
+    셋 다에 남긴다.
+    """
     from app.agent.v3.recommend import research as research_mod
 
     many = [
@@ -219,7 +242,7 @@ def test_user_menu_is_capped_and_says_so():
 
     assert len(dossier["actions"]) == research_mod._MAX_USER_MENU_ACTIONS
     assert dossier["dropped"] == 25
-    assert "주의" in dossier["menu"] and "25" in dossier["menu"]  # 프롬프트에도 잘림을 알린다
+    assert "주의" in dossier["menu"] and "25" in dossier["menu"]
 
 
 def test_small_user_catalog_is_not_capped():
@@ -227,3 +250,45 @@ def test_small_user_catalog_is_not_capped():
     dossier = asyncio.run(build_dossier({"goal": "g"}, [], _user_ctx()))
     assert dossier["dropped"] == 0
     assert "주의" not in dossier["menu"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R6 어휘 의존 — 사전이 모르는 카탈로그에서는 컨테이너를 판정하지 않는다 (RPA-285)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _with_children(package, action):
+    return [{
+        "package": package, "action": action, "parameters": [],
+        "children": [{"package": "X", "action": "Y", "parameters": [], "children": []}],
+    }]
+
+
+def test_r6_is_silent_when_container_vocabulary_is_unknown():
+    """타 솔루션 카탈로그의 제어 흐름 액션이 R6으로 오탐되면 안 된다.
+
+    `CONTAINER_PACKAGES`는 A360 패키지 이름(Loop·If·Step·Error handler)이라, PAD의
+    `Loops`·`Conditionals`에는 하나도 안 맞는다. 실측: PAD 448개로 만든 흐름도의 R6 4건이
+    전부 이 오탐이었다(`Loops/Loop` 1건, `Conditionals/If` 3건).
+    """
+    from app.agent.v3.verify.checker import container_vocabulary_known, run_checks
+
+    catalog = UserCatalog([
+        UserCatalogAction(package="Loops", action="Loop").as_spec(),
+        UserCatalogAction(package="Conditionals", action="If").as_spec(),
+        UserCatalogAction(package="X", action="Y").as_spec(),
+    ])
+    assert not container_vocabulary_known(catalog)
+    assert [v for v in run_checks(_with_children("Loops", "Loop"), catalog) if v.rule == "R6"] == []
+
+
+def test_r6_still_fires_when_vocabulary_is_known():
+    """A360 표기를 쓰는 카탈로그면 그대로 판정한다 — 솔루션 이름이 아니라 어휘로 가른다."""
+    from app.agent.v3.verify.checker import container_vocabulary_known, run_checks
+
+    catalog = UserCatalog([
+        UserCatalogAction(package="Loop", action="cloudUsingLoopAction").as_spec(),
+        UserCatalogAction(package="Email", action="sendMail").as_spec(),
+    ])
+    assert container_vocabulary_known(catalog)
+    got = run_checks(_with_children("Email", "sendMail"), catalog)
+    assert any(v.rule == "R6" for v in got), "컨테이너가 아닌 액션의 children은 여전히 잡혀야 한다"
