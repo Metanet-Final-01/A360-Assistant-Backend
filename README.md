@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/images/a360-assistant-logo.svg" width="720" alt="1조 MetaFlow A360 Assistant 로고">
+
 # A360 Assistant
 
 ### 업무정의서에서 실행 가능한 Automation 360 흐름도까지
@@ -15,6 +17,12 @@
 ![Redis](https://img.shields.io/badge/Redis%2FValkey-Cache-DC382D?style=flat-square&logo=redis&logoColor=white)
 ![AWS](https://img.shields.io/badge/AWS-ALB%20%7C%20EC2%20ASG-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white)
 ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-CI%2FCD-2088FF?style=flat-square&logo=githubactions&logoColor=white)
+
+[![Tests](https://github.com/Metanet-Final-01/A360-Assistant-Backend/actions/workflows/tests.yml/badge.svg?branch=dev)](https://github.com/Metanet-Final-01/A360-Assistant-Backend/actions/workflows/tests.yml)
+[![Secret Scan](https://github.com/Metanet-Final-01/A360-Assistant-Backend/actions/workflows/secret-scan.yml/badge.svg?branch=dev)](https://github.com/Metanet-Final-01/A360-Assistant-Backend/actions/workflows/secret-scan.yml)
+[![Change Assurance](https://github.com/Metanet-Final-01/A360-Assistant-Backend/actions/workflows/change-assurance-warn.yml/badge.svg?branch=dev)](https://github.com/Metanet-Final-01/A360-Assistant-Backend/actions/workflows/change-assurance-warn.yml)
+
+[프로젝트 개요](#프로젝트-개요) · [핵심 기능](#핵심-기능) · [기술 스택](#기술-스택) · [시스템 아키텍처](#시스템-아키텍처) · [개발 성과](#주요-개발-성과) · [API](#api-개요) · [문서](#문서)
 
 </div>
 
