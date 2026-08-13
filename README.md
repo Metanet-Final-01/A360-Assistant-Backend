@@ -67,21 +67,21 @@ flowchart LR
 
 ## 기술 스택
 
-| 영역 | 기술 | 적용 내용 |
-|---|---|---|
-| **Backend API** | Python 3.11, FastAPI, Uvicorn, Pydantic | REST API, 요청 검증, 예외 응답 표준화, SSE 진행 상황 스트리밍 |
-| **Authentication** | PyJWT, bcrypt, HttpOnly Cookie | Access·Refresh JWT, 토큰 회전과 재사용 탐지, 세션 소유권·관리자 권한 검사 |
-| **Agent / LLM** | LangGraph, LangChain Core, OpenAI, tiktoken | 멀티턴 오케스트레이션, 문서 분석·추천·수정, 비전 보강, 토큰 임계치 기반 컨텍스트 압축 |
-| **RAG / Search** | pgvector, OpenSearch, Voyage AI, RRF | 벡터 검색과 BM25 병렬 검색, RRF 융합, Voyage 리랭킹, 단계별 검색 기여도 기록 |
-| **Document Processing** | pypdf, pdfplumber, python-pptx, python-docx, olefile | PDF·PPTX·PPT·DOCX 문단·표 추출, 파일 위조·매크로 검사, 이미지 페이지 보강 |
-| **Database / ORM** | PostgreSQL 16, SQLAlchemy 2, Alembic, psycopg 3 | 서비스·RAG·관측 데이터 분리, 트랜잭션, 커넥션 풀, 스키마 버전 관리 |
-| **Cache / Streaming** | Redis·Valkey, cachetools, Redis Stream | RAG 결과 캐시, 다중 인스턴스 설정 무효화, SSE 처리 결과 재개 |
-| **Storage** | Amazon S3, 로컬 파일 저장소 | 업무정의서 원본과 파싱 대상 파일 저장, 환경별 저장소 전환 |
-| **Infrastructure** | Docker, AWS ALB, EC2 Auto Scaling Group, CloudFormation, Secrets Manager, CloudWatch Logs | 컨테이너 실행, 부하 분산, 확장, 인프라 코드화, 시크릿 주입과 로그 수집 |
-| **CI/CD & Quality** | GitHub Actions, pytest, pytest-cov, pytest-xdist, Gitleaks | 테스트·커버리지, 병렬 회귀검사, 시크릿 스캔, PR 제목·라벨 검사, Docker 이미지 배포 |
-| **Observability** | request_id, APScheduler, Slack Webhook, 관리 API | 감사 로그·성능·비용·RAG 기여도 연결, 일별 집계, 예산·상태 경보 |
-| **AI Assurance** | Change Assurance, Output Boundary, SHA-256 Evidence | PR 변경과 Agent 공개 결과 독립 검사, 판정 근거와 무결성 영수증 저장 |
-| **Collaboration** | GitHub, Jira, Slack, Notion | 이슈·브랜치·PR 추적, 협업 규칙, 운영 알림과 산출물 공유 |
+| 구분 | 기술 |
+|---|---|
+| **Backend** | ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688?style=flat-square&logo=fastapi&logoColor=white) ![Uvicorn](https://img.shields.io/badge/Uvicorn-ASGI-499848?style=flat-square) ![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063?style=flat-square&logo=pydantic&logoColor=white) |
+| **Authentication** | ![JWT](https://img.shields.io/badge/JWT-Access%20%2F%20Refresh-000000?style=flat-square&logo=jsonwebtokens&logoColor=white) ![bcrypt](https://img.shields.io/badge/bcrypt-Password%20Hashing-4A5568?style=flat-square) ![HttpOnly](https://img.shields.io/badge/HttpOnly-Secure%20Cookie-1F6FEB?style=flat-square) |
+| **Agent / LLM** | ![LangGraph](https://img.shields.io/badge/LangGraph-Agent-1C3C3C?style=flat-square) ![LangChain](https://img.shields.io/badge/LangChain-Core-1C3C3C?style=flat-square&logo=langchain&logoColor=white) ![OpenAI](https://img.shields.io/badge/OpenAI-GPT-412991?style=flat-square&logo=openai&logoColor=white) ![tiktoken](https://img.shields.io/badge/tiktoken-Context-7C3AED?style=flat-square) |
+| **RAG / Search** | ![pgvector](https://img.shields.io/badge/pgvector-Vector%20Search-336791?style=flat-square&logo=postgresql&logoColor=white) ![OpenSearch](https://img.shields.io/badge/OpenSearch-BM25-005EB8?style=flat-square&logo=opensearch&logoColor=white) ![Voyage AI](https://img.shields.io/badge/Voyage%20AI-Rerank-6D28D9?style=flat-square) ![RRF](https://img.shields.io/badge/RRF-Hybrid%20Fusion-0F766E?style=flat-square) |
+| **Document** | ![pypdf](https://img.shields.io/badge/pypdf-PDF-E34F26?style=flat-square) ![pdfplumber](https://img.shields.io/badge/pdfplumber-Table-E34F26?style=flat-square) ![python-pptx](https://img.shields.io/badge/python--pptx-PPTX-D24726?style=flat-square&logo=microsoftpowerpoint&logoColor=white) ![python-docx](https://img.shields.io/badge/python--docx-DOCX-2B579A?style=flat-square&logo=microsoftword&logoColor=white) |
+| **Database / ORM** | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white) ![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2-D71F00?style=flat-square&logo=sqlalchemy&logoColor=white) ![Alembic](https://img.shields.io/badge/Alembic-Migration-6BA81E?style=flat-square) ![psycopg](https://img.shields.io/badge/psycopg-3-336791?style=flat-square) |
+| **Cache / Streaming** | ![Redis](https://img.shields.io/badge/Redis%20%2F%20Valkey-Cache-DC382D?style=flat-square&logo=redis&logoColor=white) ![Redis Stream](https://img.shields.io/badge/Redis%20Stream-SSE%20Resume-A41E11?style=flat-square&logo=redis&logoColor=white) ![cachetools](https://img.shields.io/badge/cachetools-TTL-64748B?style=flat-square) |
+| **Storage** | ![Amazon S3](https://img.shields.io/badge/Amazon%20S3-Documents-569A31?style=flat-square&logo=amazons3&logoColor=white) ![Local Storage](https://img.shields.io/badge/Local%20Storage-Development-64748B?style=flat-square) |
+| **Infrastructure** | ![Docker](https://img.shields.io/badge/Docker-Container-2496ED?style=flat-square&logo=docker&logoColor=white) ![AWS ALB](https://img.shields.io/badge/AWS-ALB-FF9900?style=flat-square&logo=amazonwebservices&logoColor=white) ![EC2 ASG](https://img.shields.io/badge/EC2-Auto%20Scaling-FF9900?style=flat-square&logo=amazonec2&logoColor=white) ![CloudFormation](https://img.shields.io/badge/CloudFormation-IaC-759C3E?style=flat-square&logo=amazonwebservices&logoColor=white) |
+| **CI/CD & Quality** | ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-CI%20%2F%20CD-2088FF?style=flat-square&logo=githubactions&logoColor=white) ![pytest](https://img.shields.io/badge/pytest-Test-0A9EDC?style=flat-square&logo=pytest&logoColor=white) ![Coverage](https://img.shields.io/badge/Coverage-Gate-31C754?style=flat-square) ![Gitleaks](https://img.shields.io/badge/Gitleaks-Secret%20Scan-E11D48?style=flat-square) |
+| **Monitoring** | ![Request ID](https://img.shields.io/badge/request__id-Trace-2563EB?style=flat-square) ![APScheduler](https://img.shields.io/badge/APScheduler-Rollup-F59E0B?style=flat-square) ![Slack](https://img.shields.io/badge/Slack-Alert-4A154B?style=flat-square&logo=slack&logoColor=white) ![Admin API](https://img.shields.io/badge/Admin%20API-Metrics-0F766E?style=flat-square) |
+| **AI Assurance** | ![Change Assurance](https://img.shields.io/badge/Change%20Assurance-Warn-B45309?style=flat-square) ![Output Boundary](https://img.shields.io/badge/Output%20Boundary-Observe-2563EB?style=flat-square) ![SHA-256 Evidence](https://img.shields.io/badge/SHA--256-Evidence-059669?style=flat-square) |
+| **Collaboration** | ![GitHub](https://img.shields.io/badge/GitHub-Repository-181717?style=flat-square&logo=github&logoColor=white) ![Jira](https://img.shields.io/badge/Jira-Issue%20Tracking-0052CC?style=flat-square&logo=jira&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-Communication-4A154B?style=flat-square&logo=slack&logoColor=white) ![Notion](https://img.shields.io/badge/Notion-Documentation-000000?style=flat-square&logo=notion&logoColor=white) |
 
 ## 시스템 아키텍처
 
