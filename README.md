@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="docs/images/a360-assistant-logo.svg" width="720" alt="1조 MetaFlow A360 Assistant 로고">
-
-# A360 Assistant
+<img src="docs/images/a360-assistant-logo.png" width="720" alt="A360 Assistant 로고">
 
 ### 업무정의서에서 실행 가능한 Automation 360 흐름도까지
 
