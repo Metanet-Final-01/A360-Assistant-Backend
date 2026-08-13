@@ -151,6 +151,30 @@ AI가 코드와 테스트, 리뷰까지 모두 생성하면 생성 주체와 판
 
 토큰이 임계치에 도달하면 오래된 대화를 단순 삭제하지 않고 진행 작업, 확정된 결정, 흐름 변경, 미결 사항과 필요한 원문을 구조화해 압축합니다. 압축 결과는 `session_compacts`에 저장해 다음 턴에서도 작업 맥락을 이어갑니다.
 
+### 6. 하이브리드 RAG 검색과 배포 기반 구축 — 김동환
+
+벡터 검색과 키워드 검색 중 하나에 의존하지 않도록 검색 경로를 재구성하고, 동일한 구성이 실제 AWS 환경에서도 동작하도록 배포 기반까지 연결했습니다.
+
+- pgvector 벡터 검색과 OpenSearch BM25를 병렬 실행하고 RRF로 결과 통합
+- Voyage AI 리랭킹을 적용해 1차 검색 후보의 최종 순서 재조정
+- 사이트 메뉴 기반 문서 크롤링과 액션 참조 데이터 구조화
+- RAG 수집 스케줄러와 외부 RAG·관측·검색 DB를 배포 구성에 연결
+- CloudFormation 기반 백엔드 배포 분리와 Redis·OpenSearch 설정 주입
+
+관련 작업: [RPA-9 — 하이브리드 검색·리랭킹](https://metanetfinal.atlassian.net/browse/RPA-9), [RPA-94 — 문서 크롤러 구조화](https://metanetfinal.atlassian.net/browse/RPA-94), [RPA-274 — RAG 캐시 배포 설정](https://metanetfinal.atlassian.net/browse/RPA-274)
+
+### 7. 단계형 Agent 생성·검수 파이프라인 고도화 — 정준환
+
+한 번의 LLM 응답에 흐름도 전체를 맡기지 않고 생성·검수·수리를 단계로 나눠, 잘못된 결과를 다음 단계에서 보완할 수 있는 Agent 파이프라인을 만들었습니다.
+
+- 흐름도 생성을 구조·능력 요청·게이트·값의 4단계로 분리
+- 수리 라운드의 실패 원인을 다음 라운드 입력에 전달해 반복 오류 감소
+- 검수 전 구조 초안을 SSE로 먼저 전달해 긴 생성 구간의 진행 상태 표시
+- 검색 근거를 기준으로 신뢰도를 계산하고 근거 없는 0점·기본 점수 승격 방지
+- 타 솔루션 카탈로그 448개를 규칙 기반으로 전량 인식하고 추출 LLM 호출 없이 후보로 사용
+
+관련 작업: [RPA-298 — 흐름도 품질 루프](https://metanetfinal.atlassian.net/browse/RPA-298), [RPA-370 — 초안 스트리밍](https://metanetfinal.atlassian.net/browse/RPA-370), [RPA-371 — 수리 오류 피드백](https://metanetfinal.atlassian.net/browse/RPA-371), [RPA-376 — 타 솔루션 카탈로그 지원](https://metanetfinal.atlassian.net/browse/RPA-376)
+
 ## 팀원 및 역할
 
 | 이름 | 역할 | 담당 |
@@ -159,6 +183,28 @@ AI가 코드와 테스트, 리뷰까지 모두 생성하면 생성 주체와 판
 | 홍승민 | Backend | API·DB, 인증, 문서 처리, SSE, 로그·관측 체계, AI 코드 검증 하네스 |
 | 정준환 | Agent | RAG 적재 파이프라인, LangGraph Agent 구현 |
 | 김민석 | Frontend | Vue 3 SPA와 사용자 화면 구현 |
+
+## Jira ↔ GitHub 협업 연동
+
+Jira를 이슈 원본으로 사용하고, GitHub의 브랜치·커밋·PR 상태를 Jira 개발 패널과 자동으로 연결했습니다.
+
+```mermaid
+flowchart LR
+    JIRA[Jira 이슈 생성 RPA-N] --> MIRROR[GitHub 미러 이슈 생성]
+    JIRA --> BRANCH[RPA-N 브랜치 생성]
+    BRANCH --> PROGRESS[Jira 진행 중 전환]
+    BRANCH --> PR[커밋 및 PR 연결]
+    PR --> MERGE[dev 병합]
+    MERGE --> DONE[Jira 완료 전환]
+    DONE --> CLOSE[GitHub 미러 이슈 종료]
+```
+
+- 브랜치명·커밋·PR 제목의 `RPA-N` 키를 Jira 개발 패널에 자동 연결
+- Jira 이슈 생성 시 GitHub 미러 이슈 생성, Jira 완료 시 미러 이슈 종료
+- 브랜치 생성 시 `진행 중`, PR 병합 시 `완료`로 상태 자동 전환
+- PR 제목 검사·Secret Scan·테스트를 통과한 변경만 `dev` 병합 대상으로 관리
+
+상세 규칙: [Jira ↔ GitHub 연동 가이드](docs/JIRA_GITHUB.md)
 
 ## 빠른 시작
 
@@ -205,6 +251,12 @@ uvicorn app.main:app --reload
 | **관측** | `OBSERVABILITY_DATABASE_URL` | LLM 사용량·감사 로그·요청 지표·RAG 이벤트 |
 
 > 관측 DB는 **미설정 시 비활성**입니다(쓰기 실패가 요청을 막지 않음). 다만 조용히 유실되지 않도록 `/api/health`에 상태가 드러납니다.
+
+### ERD
+
+서비스·RAG·관측 데이터의 전체 테이블과 주요 관계입니다.
+
+![A360 Assistant ERD](docs/images/a360-erd.png)
 
 ### 마이그레이션 (Alembic)
 
