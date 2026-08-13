@@ -44,12 +44,13 @@ A360 Assistant는 이 과정을 다음과 같이 바꿉니다.
 
 ```mermaid
 flowchart LR
-    A["업무정의서 업로드"] --> B["문서 파싱 및 비전 보강"]
-    B --> C["업무 흐름과 제약조건 분석"]
-    C --> D["RAG 하이브리드 검색"]
-    D --> E["A360 액션과 흐름도 추천"]
-    E --> F["대화형 수정 및 버전 저장"]
-    F --> G["추천 결과 내보내기"]
+    A[업무정의서 업로드] --> B[문서 파싱]
+    B --> C[비전 보강]
+    C --> D[업무 흐름 분석]
+    D --> E[RAG 검색]
+    E --> F[A360 액션 추천]
+    F --> G[대화형 수정]
+    G --> H[버전 저장 및 내보내기]
 ```
 
 ## 핵심 기능
@@ -66,40 +67,41 @@ flowchart LR
 
 ## 기술 스택
 
-| 구분 | 기술 | 적용 내용 |
+| 영역 | 기술 | 적용 내용 |
 |---|---|---|
-| Backend | FastAPI, Uvicorn, SQLAlchemy, Alembic | REST API, SSE 스트리밍, 트랜잭션, DB 마이그레이션 |
-| Agent / LLM | LangGraph, OpenAI | 멀티턴 오케스트레이션, 문서 분석, 추천, 비전 보강 |
-| Search / RAG | pgvector, OpenSearch, Voyage AI, RRF | 벡터+BM25 하이브리드 검색과 리랭킹 |
-| Data | PostgreSQL 16, Redis/Valkey, Amazon S3 | 서비스·RAG·관측 데이터 분리, 캐시, 문서 원본 저장 |
-| Infra / DevOps | Docker, AWS ALB·EC2 ASG, GitHub Actions | 컨테이너 배포, 확장, 테스트와 변경 검증 자동화 |
-| Collaboration | GitHub, Jira, Slack | 이슈 추적, PR 규칙, 운영 경보 |
+| **Backend API** | Python 3.11, FastAPI, Uvicorn, Pydantic | REST API, 요청 검증, 예외 응답 표준화, SSE 진행 상황 스트리밍 |
+| **Authentication** | PyJWT, bcrypt, HttpOnly Cookie | Access·Refresh JWT, 토큰 회전과 재사용 탐지, 세션 소유권·관리자 권한 검사 |
+| **Agent / LLM** | LangGraph, LangChain Core, OpenAI, tiktoken | 멀티턴 오케스트레이션, 문서 분석·추천·수정, 비전 보강, 토큰 임계치 기반 컨텍스트 압축 |
+| **RAG / Search** | pgvector, OpenSearch, Voyage AI, RRF | 벡터 검색과 BM25 병렬 검색, RRF 융합, Voyage 리랭킹, 단계별 검색 기여도 기록 |
+| **Document Processing** | pypdf, pdfplumber, python-pptx, python-docx, olefile | PDF·PPTX·PPT·DOCX 문단·표 추출, 파일 위조·매크로 검사, 이미지 페이지 보강 |
+| **Database / ORM** | PostgreSQL 16, SQLAlchemy 2, Alembic, psycopg 3 | 서비스·RAG·관측 데이터 분리, 트랜잭션, 커넥션 풀, 스키마 버전 관리 |
+| **Cache / Streaming** | Redis·Valkey, cachetools, Redis Stream | RAG 결과 캐시, 다중 인스턴스 설정 무효화, SSE 처리 결과 재개 |
+| **Storage** | Amazon S3, 로컬 파일 저장소 | 업무정의서 원본과 파싱 대상 파일 저장, 환경별 저장소 전환 |
+| **Infrastructure** | Docker, AWS ALB, EC2 Auto Scaling Group, CloudFormation, Secrets Manager, CloudWatch Logs | 컨테이너 실행, 부하 분산, 확장, 인프라 코드화, 시크릿 주입과 로그 수집 |
+| **CI/CD & Quality** | GitHub Actions, pytest, pytest-cov, pytest-xdist, Gitleaks | 테스트·커버리지, 병렬 회귀검사, 시크릿 스캔, PR 제목·라벨 검사, Docker 이미지 배포 |
+| **Observability** | request_id, APScheduler, Slack Webhook, 관리 API | 감사 로그·성능·비용·RAG 기여도 연결, 일별 집계, 예산·상태 경보 |
+| **AI Assurance** | Change Assurance, Output Boundary, SHA-256 Evidence | PR 변경과 Agent 공개 결과 독립 검사, 판정 근거와 무결성 영수증 저장 |
+| **Collaboration** | GitHub, Jira, Slack, Notion | 이슈·브랜치·PR 추적, 협업 규칙, 운영 알림과 산출물 공유 |
 
 ## 시스템 아키텍처
 
 ```mermaid
 flowchart LR
-    U["사용자"] --> FE["Vue 3 · Vercel"]
-    FE --> ALB["AWS ALB"]
-    ALB --> API["FastAPI · EC2 ASG"]
-
-    subgraph APP["FastAPI Application"]
-        API --> ROUTES["Auth · Documents · Turn/SSE · RAG · Admin"]
-        ROUTES --> AGENT["LangGraph Agent"]
-        ROUTES --> SERVICE["Service Layer"]
-        AGENT --> SEARCH["Hybrid RAG<br/>pgvector + BM25 + RRF + Rerank"]
-    end
-
-    SERVICE --> SDB[("Service DB<br/>PostgreSQL")]
-    SERVICE --> ODB[("Observability DB<br/>PostgreSQL")]
-    SEARCH --> RDB[("RAG DB<br/>pgvector")]
-    SEARCH --> OS[("OpenSearch<br/>BM25")]
-    SEARCH --> CACHE[("Redis / Valkey")]
-    SERVICE --> S3[("Amazon S3")]
-
-    AGENT --> OPENAI["OpenAI"]
-    SEARCH --> VOYAGE["Voyage AI"]
-    SERVICE --> SLACK["Slack Alert"]
+    U[사용자] --> FE[Vue3 Vercel]
+    FE --> ALB[AWS ALB]
+    ALB --> API[FastAPI EC2 ASG]
+    API --> AGENT[LangGraph Agent]
+    API --> SERVICE[Service Layer]
+    AGENT --> SEARCH[Hybrid RAG]
+    SERVICE --> SDB[Service PostgreSQL]
+    SERVICE --> ODB[Observability PostgreSQL]
+    SERVICE --> S3[Amazon S3]
+    SEARCH --> RDB[pgvector]
+    SEARCH --> OS[OpenSearch BM25]
+    SEARCH --> CACHE[Redis Valkey]
+    AGENT --> OPENAI[OpenAI]
+    SEARCH --> VOYAGE[Voyage AI]
+    SERVICE --> SLACK[Slack Alert]
 ```
 
 서비스 데이터, 검색 지식베이스, 관측 데이터는 논리적으로 분리했습니다. 관측 저장이나 캐시에 문제가 생겨도 사용자 요청이 함께 실패하지 않도록 주요 부가 경로를 본 요청에서 격리했습니다.
