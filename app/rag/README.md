@@ -85,9 +85,9 @@ vector/hybrid/hybrid_rerank 3단 비교, 서비스 상태(DB/OpenSearch/임베�
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `EMBEDDING_PROVIDER` | `voyage` | `voyage` 또는 `openai` (Anthropic은 임베딩 API가 없어 Voyage 공식 권장) |
-| `EMBEDDING_MODEL` | `voyage-3.5` / `text-embedding-3-small` | 다국어(한국어) 지원 모델 |
-| `EMBEDDING_DIM` | `1024` / `1536` | rag_documents.embedding 차원 — 변경 시 테이블 재생성 필요 |
+| `EMBEDDING_PROVIDER` | `openai` | `openai` 또는 `voyage` (Anthropic은 임베딩 API가 없어 Voyage 공식 권장) |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` / `voyage-3.5` | 다국어(한국어) 지원 모델 |
+| `EMBEDDING_DIM` | `1536` / `1024` | rag_documents.embedding 차원 — 변경 시 테이블 재생성 필요 |
 | `VOYAGE_API_KEY` / `OPENAI_API_KEY` | — | 임베딩 API 키 |
 | `DATABASE_HOST/PORT/NAME/USERNAME/PASSWORD` | docker-compose 기본값 | pgvector Postgres 접속 정보 |
 | `CR_URL` | — | Control Room URL (예: https://xxx.cloud.automationanywhere.digital) |

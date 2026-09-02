@@ -69,8 +69,8 @@ RRF_VECTOR_WEIGHT = float(os.getenv("RRF_VECTOR_WEIGHT", "1.0"))
 RRF_BM25_WEIGHT = float(os.getenv("RRF_BM25_WEIGHT", "1.0"))
 RERANK_MODEL = os.getenv("RERANK_MODEL", "rerank-2.5-lite")
 
-# voyage(기본) 또는 openai. Anthropic은 임베딩 API가 없어 Voyage AI를 공식 권장함.
-EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "voyage")
+# openai(기본) 또는 voyage. Anthropic은 임베딩 API가 없어 Voyage AI를 공식 권장함.
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openai")
 EMBEDDING_MODEL = os.getenv(
     "EMBEDDING_MODEL",
     "voyage-3.5" if EMBEDDING_PROVIDER == "voyage" else "text-embedding-3-small",

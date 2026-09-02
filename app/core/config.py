@@ -178,7 +178,7 @@ REGISTRY: dict[str, EnvSpec] = {
     "RRF_VECTOR_WEIGHT": EnvSpec("1.0", cast=float, group="rag", doc="RRF dense 가중치"),
     "RRF_BM25_WEIGHT": EnvSpec("1.0", cast=float, group="rag", doc="RRF BM25 가중치"),
     "RERANK_MODEL": EnvSpec("rerank-2.5-lite", group="rag", doc="Voyage 리랭커 모델"),
-    "EMBEDDING_PROVIDER": EnvSpec("voyage", group="rag", doc="임베딩 공급자 (voyage/openai)"),
+    "EMBEDDING_PROVIDER": EnvSpec("openai", group="rag", doc="임베딩 공급자 (voyage/openai)"),
     "EMBEDDING_DIM": EnvSpec(None, group="rag", cast=int,
         doc="임베딩 차원. 미설정 시 공급자별 기본(voyage=1024, openai=1536) — rag/config.py가 결정"),
     "EMBEDDING_MODEL": EnvSpec(None, group="rag", doc="임베딩 모델 오버라이드"),
